@@ -1,0 +1,14 @@
+[package]
+name         = "xtask"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+publish  = false
+license.workspace = true
+
+[dependencies]
+anyhow.workspace   = true
+refx-io.workspace  = true
+refx-core.workspace = true
+refx-asset.workspace = true   # ใช้ image crate ผ่าน re-export สำหรับ gen-testdata
+image.workspace     = true

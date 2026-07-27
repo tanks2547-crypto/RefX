@@ -1,0 +1,111 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/refx-core",
+    "crates/refx-asset",
+    "crates/refx-render",
+    "crates/refx-ui",
+    "crates/refx-io",
+    "crates/refx-platform",
+    "crates/refx-app",
+    "xtask",
+]
+exclude = ["fuzz"]
+
+[workspace.package]
+version      = "0.1.0"
+edition      = "2024"
+rust-version = "1.92"
+license      = "MIT OR Apache-2.0"
+publish      = false
+
+[workspace.lints.rust]
+unsafe_code = "forbid"          # override เป็น "allow" ได้เฉพาะ refx-platform (I-5)
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+all                = { level = "warn", priority = -1 }
+unwrap_used        = "warn"     # เส้นทางที่รับข้อมูลจากผู้ใช้/ไฟล์ ห้ามมีเลย
+expect_used        = "warn"
+panic              = "warn"
+disallowed_methods = "warn"     # ดู clippy.toml
+float_cmp          = "warn"
+large_stack_arrays = "warn"
+
+[workspace.dependencies]
+# --- internal ---
+refx-core     = { path = "crates/refx-core" }
+refx-asset    = { path = "crates/refx-asset" }
+refx-render   = { path = "crates/refx-render" }
+refx-ui       = { path = "crates/refx-ui" }
+refx-io       = { path = "crates/refx-io" }
+refx-platform = { path = "crates/refx-platform" }
+
+# --- GPU / window / UI --------------------------------------------------
+# !! ล็อกทั้งชุด อัปพร้อมกันเท่านั้น. wgpu 30 ยังใช้กับ egui-wgpu ไม่ได้
+#    ดู docs/09-crate-versions.md ก่อนแตะบรรทัดพวกนี้
+wgpu       = "29.0.4"
+winit      = "0.30"
+egui       = "0.34.3"
+egui-wgpu  = "0.34.3"
+egui-winit = "0.34.3"
+
+# --- image decode: pure Rust เท่านั้น (docs/06-security.md) ---------------
+image = { version = "0.25", default-features = false, features = [
+    "png", "jpeg", "webp", "gif", "bmp", "tga", "tiff",
+] }
+zune-jpeg         = "0.4"
+fast_image_resize = "5"
+kamadak-exif      = "0.6"
+
+# --- data ---------------------------------------------------------------
+blake3    = "1"
+rusqlite  = { version = "0.32", features = ["bundled"] }
+postcard  = { version = "1", features = ["use-std"] }
+zstd      = "0.13"
+serde     = { version = "1", features = ["derive"] }
+crc32fast = "1"
+
+# --- concurrency (ไม่มี tokio - ADR-004) --------------------------------
+crossbeam-channel = "0.5"
+parking_lot       = "0.12"
+
+# --- utility ------------------------------------------------------------
+glam        = { version = "0.29", features = ["bytemuck"] }
+bytemuck    = { version = "1", features = ["derive"] }
+smallvec    = { version = "1", features = ["union"] }
+indexmap    = "2"
+slotmap     = "1"
+memmap2     = "0.9"
+thiserror   = "2"
+anyhow      = "1"
+tracing     = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender   = "0.2"
+rfd         = "0.15"
+arboard     = "3"
+notify      = "7"
+directories = "5"
+
+# --- dev ----------------------------------------------------------------
+criterion = "0.5"
+proptest  = "1"
+
+[profile.dev]
+opt-level = 1              # dev ที่ opt-level 0 ทำให้ decode/resize ช้าจนใช้งานไม่ได้
+
+[profile.dev.package."*"]
+opt-level = 3              # dependency คอมไพล์ครั้งเดียว - เอาแบบเร็วไปเลย
+
+[profile.release]
+opt-level     = 3
+lto           = "fat"
+codegen-units = 1
+panic         = "unwind"   # !! จำเป็นสำหรับ catch_unwind (I-7) ห้ามเปลี่ยนเป็น abort
+strip         = "symbols"
+debug         = false
+
+[profile.release-debug]
+inherits = "release"
+debug    = 1
+strip    = "none"

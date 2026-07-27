@@ -1,0 +1,34 @@
+[package]
+name         = "refx-platform"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+publish.workspace      = true
+
+# crate เดียวที่อนุญาต unsafe (ADR-007 / I-5) — ทุกบล็อกต้องมี // SAFETY:
+#
+# ห้ามใช้ `[lints] workspace = true` ที่นี่: workspace ตั้ง unsafe_code = "forbid"
+# ซึ่ง cargo ไม่ยอมให้ override เป็น "allow" (forbid ลดระดับไม่ได้ตามนิยาม)
+# จึงต้องคัดลอกชุด lint จาก [workspace.lints] มาไว้เองทั้งหมด
+# ★ ถ้าแก้ [workspace.lints] ใน Cargo.toml ราก ต้องแก้ที่นี่ตามด้วย
+[lints.rust]
+unsafe_code  = "allow"
+missing_docs = "warn"
+
+[lints.clippy]
+all                = { level = "warn", priority = -1 }
+unwrap_used        = "warn"
+expect_used        = "warn"
+panic              = "warn"
+disallowed_methods = "warn"
+float_cmp          = "warn"
+large_stack_arrays = "warn"
+
+[dependencies]
+winit.workspace   = true
+rfd.workspace     = true
+arboard.workspace = true
+directories.workspace = true
+thiserror.workspace   = true
+tracing.workspace     = true

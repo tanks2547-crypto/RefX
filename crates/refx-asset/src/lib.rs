@@ -1,0 +1,12 @@
+//! refx-asset — decode, thumbnail, hash, cache, memory budget
+//!
+//! crate นี้ตัดสินว่าโปรแกรมจะกิน RAM 200 MB หรือ 2 GB
+//! spec: docs/05-memory-and-assets.md, docs/06-security.md
+// lint ทั้งหมดสืบทอดจาก [workspace.lints] ใน Cargo.toml ราก
+
+pub mod budget; // MemoryBudget + TextureAllocator — ทางเดียวที่จองหน่วยความจำได้ (I-6)
+pub mod cache; // cache.sqlite (IO thread เดียว)
+pub mod decode; // decode_guarded: limit + catch_unwind (I-7)
+pub mod hash; // blake3 content hash
+pub mod pool; // decode worker pool + priority queue + cancellation
+pub mod thumb; // EXIF orientation + resize Lanczos3 (RGBA8 เท่านั้น — ตัด BC7 แล้ว)

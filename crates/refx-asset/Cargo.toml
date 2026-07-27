@@ -1,0 +1,29 @@
+[package]
+name         = "refx-asset"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+publish.workspace      = true
+
+[lints]
+workspace = true
+
+[dependencies]
+refx-core.workspace     = true
+refx-platform.workspace = true   # ธง panic_guard (leaf — ARCHITECTURE §2 อนุญาต)
+image.workspace     = true
+zune-jpeg.workspace = true
+fast_image_resize.workspace = true
+kamadak-exif.workspace = true
+blake3.workspace    = true
+rusqlite.workspace  = true
+# !! ห้ามใส่ memmap2 กลับมาสำหรับไฟล์ของผู้ใช้ (ตัดสิน 27 ก.ค. 2026, docs/06 §3)
+#    ไฟล์ที่ map ไว้ถูก Dropbox/OneDrive ตัดกลางคัน = SIGBUS ซึ่งเป็น signal ไม่ใช่ panic
+#    catch_unwind จับไม่ได้ → เกราะ I-7 ไร้ผลทั้งชั้น โปรเซสตายทันที
+crossbeam-channel.workspace = true
+parking_lot.workspace = true
+smallvec.workspace  = true
+thiserror.workspace = true
+tracing.workspace   = true
+directories.workspace = true

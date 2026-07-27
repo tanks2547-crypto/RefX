@@ -1,0 +1,31 @@
+[package]
+name         = "refx-app"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+publish.workspace      = true
+
+[[bin]]
+name = "refx"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+refx-ui.workspace       = true
+refx-core.workspace     = true
+refx-platform.workspace = true
+winit.workspace         = true
+anyhow.workspace        = true
+thiserror.workspace     = true
+tracing.workspace       = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace   = true
+
+[features]
+default = []
+# จำลอง device lost เพื่อทดสอบเส้นทางกู้คืน (P0-5) — forward ไป refx-render
+force-device-lost = ["refx-ui/force-device-lost"]
+profiling = ["refx-ui/profiling"]

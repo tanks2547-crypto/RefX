@@ -1,0 +1,24 @@
+[package]
+name         = "refx-render"
+version.workspace      = true
+edition.workspace      = true
+rust-version.workspace = true
+license.workspace      = true
+publish.workspace      = true
+
+[lints]
+workspace = true
+
+[dependencies]
+refx-core.workspace = true
+wgpu.workspace     = true
+glam.workspace     = true
+bytemuck.workspace = true
+smallvec.workspace = true
+thiserror.workspace = true
+tracing.workspace  = true
+
+[features]
+default = []
+# จำลอง device lost เพื่อทดสอบเส้นทางกู้คืน (P0-5) — ใช้กับ --force-device-lost-after=N
+force-device-lost = []

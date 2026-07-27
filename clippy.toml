@@ -1,0 +1,7 @@
+# กัน .unwrap()/.expect() หลุดเข้าเส้นทางที่มีข้อมูลจากผู้ใช้
+disallowed-methods = [
+    # แก้ 27 ก.ค. 2026: memmap ถูกแบนแล้ว (SIGBUS — docs/06 §3)
+    # ทางที่ถูกคือ read_file_guarded() ซึ่งเช็คขนาดก่อนเปิด แล้วใช้ File::take()
+    { path = "std::fs::read",       reason = "ใช้ refx_asset::read_file_guarded() และต้องอยู่บน worker thread (I-2)" },
+    { path = "std::fs::read_to_string", reason = "ต้องอยู่บน worker thread (I-2)" },
+]

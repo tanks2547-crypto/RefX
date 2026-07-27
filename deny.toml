@@ -1,0 +1,53 @@
+# cargo-deny — บังคับกฎความปลอดภัยจาก docs/06-security.md
+# รัน: cargo deny check
+
+[advisories]
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked  = "deny"
+# unmaintained ที่มาจาก dependency ของ egui/epaint (ttf-parser, instant, atomic-polyfill)
+# เราแก้ upstream ไม่ได้ และ "unmaintained" != "vulnerable"
+# -> ตรวจเฉพาะ crate ที่ workspace เรา depend โดยตรง
+# ทบทวนใหม่ทุกครั้งที่อัป egui
+unmaintained = "workspace"
+
+[licenses]
+allow = [
+    "MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib",
+    "Unicode-3.0", "MPL-2.0", "CC0-1.0",
+    # Boost Software License — permissive แบบเดียวกับ MIT (มาจาก arboard -> clipboard-win, error-code)
+    "BSL-1.0",
+    # license ของ "ฟอนต์" ไม่ใช่ของโค้ด — อนุญาตให้ฝังและแจกจ่ายได้
+    # (epaint_default_fonts และฟอนต์ไทยที่จะเพิ่มใน P5 ก็ใช้ OFL เหมือนกัน)
+    "OFL-1.1", "Ubuntu-font-1.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards         = "deny"
+# path dependency ภายใน workspace (refx-core.workspace = true) ไม่มี version -> ไม่ใช่ wildcard จริง
+allow-wildcard-paths = true
+
+# --- C/C++ image codec: แหล่ง CVE อันดับหนึ่งของโปรแกรมประเภทนี้ (T1) ---
+deny = [
+    { name = "libwebp-sys" },  { name = "libwebp-sys2" },
+    { name = "mozjpeg-sys" },  { name = "jpeg-sys" },
+    { name = "libpng-sys" },   { name = "png-sys" },
+    { name = "libtiff-sys" },  { name = "openjpeg-sys" },
+    { name = "libavif-sys" },  { name = "dav1d-sys" },
+    { name = "libheif-sys" },
+
+    # --- network: ไม่มีใน v1 (I-8) ---
+    { name = "reqwest" }, { name = "hyper" }, { name = "curl" },
+    { name = "ureq" },    { name = "openssl" }, { name = "openssl-sys" },
+    { name = "native-tls" },
+
+    # --- async runtime: ไม่ใช้ (ADR-004) ---
+    { name = "tokio" }, { name = "async-std" }, { name = "smol" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git      = "deny"
+allow-registry   = ["https://github.com/rust-lang/crates.io-index"]

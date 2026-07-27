@@ -1,0 +1,59 @@
+name: CI
+on: [push, pull_request]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: rustfmt, clippy }
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo test --all
+      - run: cargo build --release
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  # I-8: พิสูจน์ว่า binary ไม่มี network stack อยู่จริง
+  no-network:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: ห้ามมี network/async dependency ใน tree
+        run: |
+          if cargo tree --all-features 2>/dev/null | grep -iE '\b(reqwest|hyper|tokio|curl|ureq|openssl|native-tls)\b'; then
+            echo "::error::พบ network/async dependency — ละเมิด I-8 (ARCHITECTURE.md)"
+            exit 1
+          fi
+
+  # ห้ามมี wgpu สองเวอร์ชัน (docs/09-crate-versions.md)
+  single-wgpu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: |
+          dup=$(cargo tree -d 2>/dev/null | grep -c '^wgpu' || true)
+          if [ "$dup" -gt 0 ]; then
+            echo "::error::มี wgpu หลายเวอร์ชัน — ดู docs/09-crate-versions.md"
+            cargo tree -d | grep -A3 '^wgpu'
+            exit 1
+          fi

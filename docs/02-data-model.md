@@ -1,0 +1,199 @@
+# 02 — Data Model
+
+crate: `refx-core` — **ห้าม** depend wgpu / egui / winit / rusqlite / std::fs
+ทุก type ในไฟล์นี้ต้อง unit-test ได้โดยไม่มี GPU และไม่แตะดิสก์
+
+---
+
+## 1. Identity: generational arena
+
+ห้ามใช้ `Vec<Item>` + index ดิบ (index ค้างหลังลบ = บั๊กเงียบ) และห้ามใช้ `Rc<RefCell<Item>>` (cache-hostile + runtime panic)
+
+```rust
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+pub struct ItemId { index: u32, generation: u32 }
+
+pub struct Arena<T> {
+    slots: Vec<Slot<T>>,
+    free: Vec<u32>,
+    generation: u32,
+}
+enum Slot<T> { Occupied { gen: u32, value: T }, Vacant { gen: u32 } }
+```
+
+`get(id)` คืน `None` ถ้า generation ไม่ตรง → id เก่าใช้ไม่ได้โดยอัตโนมัติ ไม่ใช่ไปอ่านของคนอื่น
+ทำแบบเดียวกันสำหรับ `GroupId`, `BoardId`, `AssetId`
+
+> ใช้ crate `slotmap` ได้ (audited, no unsafe ใน API ที่เราใช้) — เขียนเองก็ได้ ~120 บรรทัด เลือกอย่างใดอย่างหนึ่งแล้วอย่าปนกัน
+
+---
+
+## 2. โครงหลัก
+
+```rust
+pub struct Workspace {
+    pub boards: Arena<Board>,
+    pub active: BoardId,
+    pub order: Vec<BoardId>,          // ลำดับแท็บ
+}
+
+pub struct Board {
+    pub id: BoardId,
+    pub name: String,
+    pub items: Arena<Item>,
+    pub z_order: Vec<ItemId>,         // ล่างสุด → บนสุด. source of truth ของ z
+    pub groups: Arena<Group>,
+    pub selection: Selection,
+    pub view: ViewState,              // camera ของแต่ละ mode
+    pub arrange: ArrangeState,
+    pub settings: BoardSettings,
+    pub dirty: bool,
+}
+
+pub struct Item {
+    pub id: ItemId,
+    pub kind: ItemKind,
+    pub canvas: ItemCanvas,           // ★ สถานะฝั่ง Canvas mode
+    pub meta: ItemMeta,               // ★ สถานะฝั่ง Arrange mode
+}
+
+pub enum ItemKind {
+    Image(AssetRef),
+    Text(TextNote),
+    /// ภาพที่โหลดไม่สำเร็จ — ยังอยู่ใน board ไม่หายไปไหน ผู้ใช้ relink ได้
+    Missing { original_path: PathBuf, reason: LoadError },
+}
+```
+
+### 2.1 ItemCanvas — เจ้าของโดย Canvas mode
+
+```rust
+pub struct ItemCanvas {
+    pub pos: Vec2,          // world space, f32 (ดู §6 เรื่องความแม่นยำ)
+    pub size: Vec2,         // ขนาดที่แสดง (world units) — ไม่ใช่ขนาด pixel ต้นฉบับ
+    pub rotation: f32,      // เรเดียน
+    pub flip: Flip,         // none | horizontal | vertical | both
+    pub opacity: f32,       // 0.0..=1.0
+    pub crop: CropRect,     // normalized 0..1 ของภาพต้นฉบับ
+    pub locked: bool,
+    pub visible: bool,
+    pub filter: ItemFilter, // grayscale, invert, brightness/contrast (คำนวณใน shader)
+}
+```
+
+**z-order ไม่เก็บใน `ItemCanvas`** — เก็บเป็น `Vec<ItemId>` ระดับ board เพราะ:
+การ "ส่งไปหลังสุด" ด้วยตัวเลข z จะทำให้เลขชนกันแล้วต้อง renumber ทั้งหมด ส่วน `Vec` แค่ย้ายตำแหน่ง O(n) และ **ลำดับ render = ลำดับใน Vec** ตรงไปตรงมา ไม่ต้อง sort ทุกเฟรม
+
+### 2.2 ItemMeta — เจ้าของโดย Arrange mode
+
+```rust
+pub struct ItemMeta {
+    pub tags: SmallVec<[TagId; 4]>,
+    pub rating: u8,               // 0..=5
+    pub color_label: Option<ColorLabel>,
+    pub group: Option<GroupId>,
+    pub note: String,
+    pub added_at: i64,            // unix millis
+    pub pinned: bool,             // arrange จะไม่ย้ายภาพที่ pin
+}
+```
+
+**สองอันนี้ต้องอยู่คู่กันตลอดชีวิตของ item** สลับ mode ไปมาแล้วข้อมูลอีกฝั่งไม่หาย — นี่คือข้อกำหนดหลักของดีไซน์สองโหมด
+
+### 2.3 AssetRef — แยกภาพออกจาก item
+
+```rust
+pub struct AssetRef {
+    pub hash: ContentHash,        // blake3-256 ของไฟล์ต้นฉบับ = คีย์หลัก
+    pub path: PathBuf,            // เส้นทางล่าสุดที่เจอ (เป็นแค่ hint)
+    pub px_size: UVec2,           // ขนาดจริงหลังแก้ EXIF orientation แล้ว
+    pub format: ImageFormat,
+    pub embedded: bool,           // true = ตัวไฟล์ฝังอยู่ใน .refx (packed mode)
+}
+```
+
+ภาพเดียวกันวางซ้ำ 10 ครั้ง = 10 `Item` แต่ **1 `AssetRef` เดียว 1 texture เดียว** ประหยัด RAM/VRAM ทันที
+`hash` เป็นคีย์หลัก ไม่ใช่ `path` → ย้ายไฟล์แล้ว thumbnail ไม่หาย, relink หาไฟล์เจอด้วย hash, ไฟล์ซ้ำถูกยุบอัตโนมัติ
+
+---
+
+## 3. Command / Undo
+
+**mutation ทุกอย่างต้องผ่าน `Command`** ไม่มีข้อยกเว้น ถ้ามีโค้ดแก้ `Board` ตรง ๆ คือบั๊ก
+
+```rust
+pub trait Command: Send + std::fmt::Debug {
+    fn apply(&mut self, board: &mut Board) -> Result<(), CmdError>;
+    fn undo(&mut self, board: &mut Board);
+    /// รวมกับ command ก่อนหน้าได้ไหม (เช่น ลากเมาส์ต่อเนื่อง = 1 undo)
+    fn merge(&mut self, next: &dyn Command) -> bool { false }
+    fn label(&self) -> &'static str;
+}
+
+pub struct History {
+    undo: VecDeque<Box<dyn Command>>,
+    redo: Vec<Box<dyn Command>>,
+    max_entries: usize,   // default 200
+    max_bytes: usize,     // default 64 MB — I-6: cache ทุกตัวมีเพดาน
+}
+```
+
+Command ที่ต้องมี:
+
+| Command | merge ได้ | หมายเหตุ |
+|---|---|---|
+| `AddItems` / `RemoveItems` | ✗ | เก็บ item ที่ลบไว้ใน command เพื่อ undo |
+| `TransformItems` | ✓ | ลาก/สเกล/หมุน — merge ระหว่างลากค้าง, ปิด merge เมื่อปล่อยเมาส์ |
+| `ReorderZ` | ✗ | เก็บ `Vec<ItemId>` เดิมทั้งชุด (ถูกกว่า diff และไม่มีบั๊ก) |
+| `SetCrop` | ✓ | |
+| `EditMeta` | ✓ ต่อ field | tag/rating/label |
+| `ApplyLayout` | ✗ | **สะพาน Arrange→Canvas** เก็บ `Vec<(ItemId, ItemCanvas)>` เดิมทั้งชุด → undo ครั้งเดียวคืนหมด |
+| `GroupItems` / `Ungroup` | ✗ | |
+
+**เรื่อง `merge` ที่พลาดกันบ่อย:** ระหว่างลากเมาส์ต้อง merge เพื่อไม่ให้ undo stack ท่วม แต่ต้อง **ปิด merge ทันทีที่ปล่อยปุ่ม** (`history.seal()`) ไม่งั้นการลากสองครั้งติดกันจะกลายเป็น undo เดียว ผู้ใช้จะงง
+
+---
+
+## 4. Selection
+
+```rust
+pub struct Selection {
+    items: IndexSet<ItemId>,   // รักษาลำดับที่คลิก — "ตัวสุดท้ายที่เลือก" คือ anchor ของ align
+    anchor: Option<ItemId>,
+}
+```
+
+ใช้ `IndexSet` (indexmap) ไม่ใช่ `HashSet` เพราะคำสั่งจัดเรียง/align ต้องรู้ลำดับและตัวอ้างอิง
+
+---
+
+## 5. ViewState — camera แยกต่อ mode
+
+```rust
+pub struct ViewState {
+    pub canvas: Camera,     // pan/zoom ของ canvas mode
+    pub arrange: Camera,    // scroll/zoom ของ arrange mode
+    pub mode: Mode,
+}
+
+pub struct Camera { pub center: Vec2, pub zoom: f32 }  // zoom: 0.02..=32.0
+```
+
+แยก camera ต่อ mode เพราะสลับ mode แล้วกลับมา ผู้ใช้คาดหวังว่ายังอยู่ตำแหน่งเดิม — ถ้าใช้ camera ร่วมกันจะเด้งไปมาและน่ารำคาญมาก
+
+---
+
+## 6. ความแม่นยำของพิกัด
+
+ใช้ `f32` สำหรับ world space **ได้** ถ้าจำกัดขนาด canvas ที่ ±1e6 world units (f32 ให้ความละเอียด ~0.06 unit ที่ 1e6 — ตากับหน้าจอไม่มีทางเห็น)
+
+**ต้องบังคับ clamp ตำแหน่งไว้ที่ ±1,000,000 เสมอ** ถ้าปล่อยให้ผู้ใช้ลากภาพไปไกลไม่จำกัด จะเกิดอาการ "ภาพสั่น/กระตุกตอนซูม" ที่ตามแก้ยากมาก — clamp ตั้งแต่แรก ถูกกว่าเปลี่ยนไป f64 ทีหลังหลายเท่า
+
+---
+
+## 7. Serialization
+
+- โครงสร้างใน memory (`Arena`, `IndexSet`) **ห้าม** serialize ตรง ๆ
+- ต้องแปลงเป็น DTO ที่แบนและมีเวอร์ชัน (`refx-io::v1::BoardDto`) ก่อนเขียนไฟล์
+- เหตุผล: refactor ภายในต้องไม่ทำให้ไฟล์ของผู้ใช้เปิดไม่ได้ นี่คือ I-3
+- รายละเอียด: [`07-file-format.md`](07-file-format.md)

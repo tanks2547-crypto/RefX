@@ -1,0 +1,5 @@
+[toolchain]
+channel    = "1.92"
+components = ["rustfmt", "clippy"]
+# ไม่ระบุ targets — build บน OS ไหนใช้ target ของ OS นั้น
+# CI ใช้ matrix runner จริง (windows-latest / ubuntu-latest) ไม่ใช่ cross-compile

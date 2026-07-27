@@ -1,0 +1,150 @@
+# RefX — Roadmap
+
+แผนงานสำหรับ coder agent แต่ละ task ควรจบใน 1 session และมี "เสร็จเมื่อ" ที่ตรวจสอบได้จริง
+**ห้ามข้าม phase** โดยเฉพาะ P0 — งานพวกนั้นแก้ทีหลังแพงกว่าหลายเท่า
+
+---
+
+## P0 — Foundations (สัปดาห์ 1–2)
+
+เป้า: หน้าต่างเปิดได้ มีสี่เหลี่ยมสีวาดบน GPU pan/zoom ได้ CPU idle = 0% และ **กู้จาก device lost ได้แล้ว**
+
+| # | Task | เสร็จเมื่อ |
+|---|---|---|
+| P0-1 | Cargo workspace ตาม ARCHITECTURE §2 + lint + `deny.toml` + CI | `cargo build/clippy/fmt/deny` ผ่านทั้งหมดบน Win + Linux |
+| P0-2 | `refx-platform`: window (winit 0.30 `ApplicationHandler`), single-instance, dirs | หน้าต่างเปิด/ปิด/resize ได้ ไม่มี warning |
+| P0-3 | `refx-render`: wgpu init, surface config, clear color | เห็นหน้าต่างสีพื้น |
+| P0-4 | **Event-driven loop** (`ControlFlow::Wait`) + เทสต์ idle-no-redraw | เทสต์ `idle_produces_no_redraw` ผ่าน; Task Manager แสดง 0.0% |
+| P0-5 | **Device lost / surface error recovery** + flag จำลอง **สองแบบ** (นับเฟรม และ นับเวลา) | กู้ได้ทั้งตอนวาดอยู่และตอน idle ไม่ crash ไม่กู้วนซ้ำ — ดูหมายเหตุท้าย phase |
+| P0-6 | Instanced quad pipeline + `QuadInstance` + `quad.wgsl` | วาด 10,000 สี่เหลี่ยมสีสุ่มที่ 60 fps |
+| P0-7 | Camera + pan/zoom (ซูมเข้าหาเคอร์เซอร์) | ลื่น ไม่มี jitter ที่ zoom สุดทั้งสองทาง |
+| P0-8 | egui + egui-wgpu บน device เดียวกัน + shell เปล่า | เห็น panel ทั้ง 5 ฝั่ง ปุ่มกดได้ |
+| P0-9 | `tracing` + panic hook + crash log | panic แล้วได้ log ไฟล์ + dialog |
+
+> **P0-5 คืองานที่คนข้ามบ่อยที่สุดและเจ็บที่สุด** ถ้าไม่ทำตอนนี้ พอ P4 มีอะไรให้เสียหายแล้วค่อยมาแก้ จะต้องรื้อ resource management ทั้งหมด
+
+### หมายเหตุ P0-5: flag จำลองต้องมีสองแบบ (แก้ 26 ก.ค. 2026)
+
+flag เดิม `--force-device-lost-after=<เฟรม>` **ใช้ไม่ได้ถ้า I-1 ถูกต้อง** — แอปวาดแค่ ~6 เฟรมตอนเปิด
+แล้วหลับ ตัวนับเฟรมไม่มีวันถึงเป้า ข้อกำหนดสองข้อขัดกันเองโดยธรรมชาติ
+
+| flag | จำลองสถานการณ์ | I-1 |
+|---|---|---|
+| `--force-device-lost-after=<เฟรม>` | device ตายระหว่างผู้ใช้ pan/zoom | ฝืน (build ที่เปิด feature วาดต่อเนื่องจนถึงเฟรมเป้าหมาย) |
+| `--force-device-lost-after-ms=<ms>` ★ | **device ตายตอนแอปหลับอยู่** — driver update, sleep/resume | ไม่ฝืน (`ControlFlow::WaitUntil` ตื่นครั้งเดียว) |
+
+**ตัวที่สำคัญกว่าคือ `-ms`** เพราะเป็นสถานการณ์จริงของผู้ใช้: เปิดโปรแกรมทิ้งไว้ข้าง Photoshop
+ทั้งวันแล้ว driver อัปเดต ไม่ใช่ตอนกำลังลากภาพ ต้องพิสูจน์ว่ากู้จาก**สถานะหลับ**ได้ด้วย
+
+```bash
+cargo run --features force-device-lost -p refx-app -- --force-device-lost-after=120
+cargo run --features force-device-lost -p refx-app -- --force-device-lost-after-ms=8000
+```
+
+ทั้งคู่ต้อง: กระพริบครั้งเดียว → วาดต่อได้ → **กลับไป idle สนิท (redraw count = 0)** ไม่กู้วนซ้ำ
+
+---
+
+## P1 — Asset pipeline (สัปดาห์ 3–4)
+
+เป้า: ลากภาพ 1000 ไฟล์เข้าโปรแกรมแล้วเห็น thumbnail ครบภายใน 5 วินาที RAM ไม่เกินเพดาน
+
+| # | Task | เสร็จเมื่อ |
+|---|---|---|
+| P1-1 | `decode_guarded` ครบเกราะทุกชั้น (06-security §3) | เทสต์ยิงภาพเสีย/bomb 50 แบบ → คืน `Err` ทุกอัน ไม่ crash |
+| P1-2 | blake3 hashing + fast path ไฟล์ใหญ่ | เทสต์ hash คงที่, ไฟล์ 100 MB < 200 ms |
+| P1-3 | cache.sqlite + schema + IO thread | เปิด/ปิด/เสียหายแล้วสร้างใหม่ ทำงานถูกทุกกรณี |
+| P1-4 | Decode worker pool + priority queue + cancellation | pan เร็วผ่าน 500 ภาพ → job ถูก cancel จริง (วัดจาก counter) |
+| P1-5 | Thumbnail atlas (array texture) + free-list + BC7 fallback | 1000 thumbnail ใน 1 draw call, VRAM ตรงกับที่คำนวณ |
+| P1-6 | `MemoryBudget` + `TextureAllocator` + LRU eviction | ตั้ง limit ต่ำ ๆ แล้วยังทำงานถูก ไม่ crash, สถานะโชว์บน status bar |
+| P1-7 | T1 working texture + mipmap + เลือกขนาดตามระยะซูม | ซูมเข้าแล้วภาพชัดขึ้นภายใน ~200 ms |
+| P1-8 | Drag & drop + clipboard paste | ลากจาก Explorer / เบราว์เซอร์ / Ctrl+V ได้ครบ |
+
+---
+
+## P2 — Canvas mode (สัปดาห์ 5–7)
+
+| # | Task | เสร็จเมื่อ |
+|---|---|---|
+| P2-1 | `Arena` + `ItemId` + `Board` + `Item` ครบตาม 02-data-model | unit test ครบ ไม่ต้องมี GPU |
+| P2-2 | `Command` trait + `History` + merge/seal | property test `undo_restores_exactly` ผ่าน |
+| P2-3 | `SpatialIndex` (loose grid) + hit-test | คลิกโดนภาพบนสุดเสมอแม้ทับกัน 50 ชั้น |
+| P2-4 | Select / rubber-band / multi-select | |
+| P2-5 | Move / scale (handle) / rotate + snap | ลากค้าง = 1 undo, ปล่อยแล้ว seal |
+| P2-6 | Z-order (`[` `]` + ส่งหน้า/หลังสุด) | |
+| P2-7 | Crop แบบ non-destructive | ไฟล์ต้นฉบับไม่ถูกแตะ, ดับเบิลคลิกรีเซ็ต |
+| P2-8 | Grayscale / flip / opacity / filter ผ่าน shader flags | สลับ grayscale ทั้ง board ที่ 1000 ภาพ = 0 texture upload |
+| P2-9 | Align / distribute | |
+| P2-10 | Color picker + measure tool | picker อ่านจาก pixel ต้นฉบับ ไม่ใช่จากจอ |
+| P2-11 | Text note | |
+
+---
+
+## P3 — Arrange mode (สัปดาห์ 8–9)
+
+| # | Task | เสร็จเมื่อ |
+|---|---|---|
+| P3-1 | `ItemMeta` + tag/rating/color label + inspector ฝั่ง arrange | |
+| P3-2 | Layout engines ทั้ง 5 ตัว (pure function) | property test finite + deterministic ผ่าน |
+| P3-3 | Virtual scrolling | 10,000 item scroll ลื่น, วาดจริง < 60 ตัว |
+| P3-4 | Sort + filter + cache ผลตาม `board.revision` | ไม่คำนวณซ้ำเมื่อไม่มีอะไรเปลี่ยน (วัดด้วย counter) |
+| P3-5 | **`ApplyLayoutCommand`** (Arrange → Canvas) | undo ครั้งเดียวคืนสภาพเดิมครบ |
+| P3-6 | **Sort by canvas order** (Canvas → Arrange) | |
+| P3-7 | Group / ungroup | |
+| P3-8 | เทสต์: สลับ mode 100 ครั้ง แล้วข้อมูลไม่เปลี่ยน | `dirty` ยัง false, snapshot เท่าเดิมเป๊ะ |
+
+---
+
+## P4 — Persistence & Recovery (สัปดาห์ 10–11)
+
+| # | Task | เสร็จเมื่อ |
+|---|---|---|
+| P4-1 | `.refx` format v1 (linked) + DTO แยกจาก core | round-trip property test ผ่าน |
+| P4-2 | Atomic save (tmp → fsync → rename → fsync dir) | ฆ่าโปรเซสกลาง save 100 ครั้ง → ไฟล์เดิมไม่เสียสักครั้ง |
+| P4-3 | Command journal + fsync policy | |
+| P4-4 | Crash recovery + dialog 3 ตัวเลือก | End Task ระหว่างแก้งาน → กู้ได้ครบ |
+| P4-5 | Packed mode + asset table | |
+| P4-6 | Relink flow 5 ขั้น | ย้ายโฟลเดอร์ภาพแล้วยังหาเจอ |
+| P4-7 | Multi-board tabs | |
+| P4-8 | `xtask dump-refx` (binary → JSON) | debug ไฟล์ผู้ใช้ได้จริง |
+| P4-9 | Fuzz targets ทั้ง 4 ตัว + รันใน CI | รัน 15 นาที/target ไม่เจอ crash |
+
+---
+
+## P5 — Hardening & Polish (สัปดาห์ 12–13)
+
+| # | Task |
+|---|---|
+| P5-1 | Benchmark suite ครบ + บังคับใน CI |
+| P5-2 | Manual checklist ครบทุกข้อ (08-testing §3) |
+| P5-3 | Settings (memory budget, theme, present mode, keymap.toml) |
+| P5-4 | Export PNG/JPEG แบบ tile |
+| P5-5 | Sidecar `.refx-meta` (opt-in) |
+| P5-6 | Binary hardening + packaging (MSI/portable zip, AppImage/deb) |
+| P5-7 | เอกสารผู้ใช้ + คู่มือคีย์ลัด |
+
+---
+
+## P6 — macOS (หลัง v1.0 นิ่งแล้ว)
+
+| # | Task |
+|---|---|
+| P6-1 | Build + ทดสอบบน Metal |
+| P6-2 | Native menu bar |
+| P6-3 | keymap Cmd แทน Ctrl (แค่เปลี่ยน data ถ้า ADR-007 ถูกทำตาม) |
+| P6-4 | Code signing + notarization |
+| P6-5 | `.app` bundle + dmg |
+
+---
+
+## สิ่งที่ **ไม่ทำ** ใน v1 (จงใจ)
+
+ตัดออกเพื่อรักษาข้อกำหนดข้อ 1–3 — ถ้าจะเพิ่มต้องเขียน ADR ใหม่ก่อน
+
+- ❌ Plugin / scripting — ผิวสัมผัสความเสี่ยงมหาศาล
+- ❌ Cloud sync / collaboration — ต้องมี network stack (ขัด I-8)
+- ❌ Auto-update — ช่องทางส่งโค้ดเข้าเครื่องผู้ใช้
+- ❌ วาด/ระบายบน canvas — นี่เป็นเครื่องมือ reference ไม่ใช่โปรแกรมวาด
+- ❌ วิดีโอ / GIF animation — memory model คนละแบบทั้งหมด
+- ❌ AI tagging — ลาก ML runtime หลายร้อย MB เข้ามา
+- ❌ PSD / AVIF — ความเสี่ยง decoder สูง, ทำใน v2 พร้อม fuzz หนัก ๆ

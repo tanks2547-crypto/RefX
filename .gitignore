@@ -1,0 +1,8 @@
+/target
+**/*.rs.bk
+*.pdb
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+*.refx.journal
+*.refx.tmp

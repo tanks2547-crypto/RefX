@@ -1,0 +1,38 @@
+[package]
+name    = "refx-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+refx-asset = { path = "../crates/refx-asset" }
+refx-core  = { path = "../crates/refx-core" }
+refx-io    = { path = "../crates/refx-io" }
+
+[[bin]]
+name = "fuzz_decode"
+path = "fuzz_targets/fuzz_decode.rs"
+test = false
+doc  = false
+
+[[bin]]
+name = "fuzz_document"
+path = "fuzz_targets/fuzz_document.rs"
+test = false
+doc  = false
+
+[[bin]]
+name = "fuzz_journal"
+path = "fuzz_targets/fuzz_journal.rs"
+test = false
+doc  = false
+
+[[bin]]
+name = "fuzz_layout"
+path = "fuzz_targets/fuzz_layout.rs"
+test = false
+doc  = false
