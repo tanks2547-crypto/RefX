@@ -386,7 +386,10 @@ impl RefxApp {
             && let Some(gfx) = self.gfx.as_mut()
         {
             for thumb in done {
-                match gfx.atlas.upload(gfx.render.queue(), &thumb.pixels) {
+                match gfx
+                    .atlas
+                    .upload(gfx.render.device(), gfx.render.queue(), &thumb.pixels)
+                {
                     Ok(slot) => {
                         // จัดเป็นตารางง่าย ๆ ไปก่อน — layout จริงมาใน P2/P3
                         let n = gfx.quads.len() as u32;
@@ -414,7 +417,7 @@ impl RefxApp {
                         self.drop_shown += 1;
                     }
                     Err(err) => {
-                        tracing::warn!(%err, "atlas เต็ม");
+                        tracing::warn!(%err, "เก็บภาพย่อลง atlas ไม่ได้");
                         self.shell.status = err.to_string();
                     }
                 }
@@ -523,8 +526,8 @@ impl RefxApp {
         // ★ สร้าง allocator ใหม่ด้วย — ของเก่านับโควตาของ device ที่ตายไปแล้ว
         gfx.textures = TextureAllocator::new(gfx.render.capabilities());
         let atlas_budget = (gfx.textures.budget().limit() / 2) as u64;
-        let layers = layers_for_budget(gfx.render.capabilities(), atlas_budget);
-        match ThumbnailAtlas::new(gfx.render.device(), &gfx.textures, layers) {
+        let max_layers = layers_for_budget(gfx.render.capabilities(), atlas_budget);
+        match ThumbnailAtlas::new(gfx.render.device(), &gfx.textures, max_layers) {
             Ok(atlas) => gfx.atlas = atlas,
             Err(err) => {
                 tracing::error!(%err, "สร้าง atlas ใหม่หลังกู้ device ไม่ได้");
@@ -561,7 +564,10 @@ impl RefxApp {
             let Some(quad) = gfx.quads.get_mut(index) else {
                 break;
             };
-            match gfx.atlas.upload(gfx.render.queue(), &thumb.pixels) {
+            match gfx
+                .atlas
+                .upload(gfx.render.device(), gfx.render.queue(), &thumb.pixels)
+            {
                 Ok(slot) => {
                     quad.uv_rect = slot.uv_rect();
                     quad.layer = slot.layer;
@@ -624,9 +630,11 @@ impl AppDelegate for RefxApp {
         // ★ ทางเดียวที่สร้าง texture ได้ (I-6) — atlas ต้องขอผ่านตัวนี้
         let textures = TextureAllocator::new(render.capabilities());
         // atlas ขอได้ไม่เกินครึ่งงบ VRAM — อีกครึ่งเผื่อ working texture (P1-7)
+        // ★ ตัวเลขนี้เป็น **เพดาน** ไม่ใช่การจองจริง — atlas จองทีละ layer
+        //   ตอนมีภาพเข้ามาจริง เปิดโปรแกรมเปล่าจึงกิน VRAM ≈ 0 (docs/05 §2)
         let atlas_budget = textures.budget().limit() as u64 / 2;
-        let layers = layers_for_budget(render.capabilities(), atlas_budget);
-        let atlas = ThumbnailAtlas::new(render.device(), &textures, layers).map_err(|err| {
+        let max_layers = layers_for_budget(render.capabilities(), atlas_budget);
+        let atlas = ThumbnailAtlas::new(render.device(), &textures, max_layers).map_err(|err| {
             tracing::error!(%err, "สร้าง atlas ไม่ได้");
             DeviceError::NoSupportedFormat
         })?;
