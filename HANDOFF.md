@@ -19,6 +19,23 @@
 
 crate ที่มี: `refx-app` `refx-asset` `refx-core` `refx-io` `refx-platform` `refx-render` `refx-ui`
 
+### สถานะ git
+
+repo **อยู่ใต้ git แล้ว** (branch `master`) — `git fsck` สะอาด working tree สะอาด
+
+- **identity ตั้งไว้แบบ repo-local** คือ `RefX <00ifrit00@gmail.com>`
+  (global ยังว่าง จงใจ — repo อื่นในเครื่องไม่ถูกกระทบ)
+  ถ้า `git commit` ฟ้อง `unable to auto-detect email address` แปลว่าอยู่คนละ repo หรือ config หาย
+- **`.gitattributes` ตรึง line ending เป็น LF ทั้งโปรเจกต์** และ renormalize ไปแล้ว
+  ตรวจได้ด้วย `git ls-files --eol | grep -c 'w/crlf'` → ต้องเป็น **0** เสมอ
+  > ★ ระวัง: `core.autocrlf = true` ถูกตั้งไว้ที่ **system level** ของ Git for Windows
+  > `eol=lf` ใน `.gitattributes` ชนะอยู่ จึงไม่ต้องแก้ system config
+  > แต่ถ้าแก้ไฟล์ด้วยเครื่องมือที่แปลง `\n` → `\r\n` เอง (เช่น Python `open(f,'w')` บน Windows)
+  > ไฟล์บนดิสก์จะกลายเป็น CRLF อีก — index ยังเป็น LF เพราะ git normalize ให้ตอน add
+  > แต่ควรเช็คตัวเลขข้างบนก่อน commit
+- **`.claude/settings.local.json` ไม่ถูก track แล้ว** (อยู่ใน `.gitignore`)
+  เป็นตั้งค่าต่อเครื่อง ไม่ใช่ของโปรเจกต์ — ไฟล์ยังอยู่บนดิสก์ตามปกติ
+
 ---
 
 ## 2. ★ งานถัดไป (เรียงตามลำดับ ห้ามสลับ)
@@ -147,6 +164,21 @@ JPEG ย่อได้ตั้งแต่ตอน decode (ข้าม DCT c
 - **เจอ spec ที่ขัดกันเองหรือผิด → หยุด ถาม ห้ามแก้ไฟล์ใน `docs/` เอง** (รายงานให้ผู้ใช้แก้)
 - ห้ามเพิ่ม dependency ที่ไม่มีใน `docs/09` · ห้าม refactor นอกขอบเขต task
 
+### ★ commit ทุกครั้งที่จบ task — ไม่ใช่รอจบ session
+
+**จบ task ไหนแล้วเทสต์ผ่าน ให้ commit ทันที** อย่าสะสมงานหลาย task ไว้ commit ทีเดียวตอนจบ
+
+เหตุผล:
+
+- commit ก้อนใหญ่ที่มีหลาย task ปนกัน **รีวิวไม่ได้จริง** — แยกไม่ออกว่าการเปลี่ยนแปลงไหน
+  เป็นของงานไหน และถ้าต้องย้อนก็ย้อนเฉพาะส่วนที่ผิดไม่ได้
+- session อาจจบกลางคัน (context เต็ม, เครื่องดับ) งานที่ยังไม่ commit **หายทั้งหมด**
+  ซึ่งเป็นความเสี่ยงแบบเดียวกับที่ I-3 ห้ามไว้กับงานของผู้ใช้
+- ตัวเลข benchmark ที่วัดได้จะผูกกับ commit ที่เจาะจงได้ ทำให้ย้อนหาสาเหตุ regression ได้
+
+หนึ่ง commit = หนึ่ง task ที่จบและเทสต์ผ่านแล้ว
+ข้อความ commit บอก **"ทำไม"** ไม่ใช่แค่ "ทำอะไร" (diff บอกอยู่แล้วว่าทำอะไร)
+
 **ก่อน commit ทุกครั้ง**
 
 ```bash
@@ -156,6 +188,7 @@ cargo nextest run --all-features
 cargo deny check
 cargo tree -d | grep '^wgpu'     # ต้องว่าง
 cargo tree | grep -iE 'reqwest|hyper|tokio|curl|ureq|openssl'   # ต้องว่าง (I-8)
+git ls-files --eol | grep -c 'w/crlf'                          # ต้องเป็น 0
 ```
 
 **จบทุก session ด้วยการรายงาน:** อะไรเสร็จ/ไม่เสร็จ · ผล 4 คำสั่ง · ตัวเลขที่วัดได้จริง ·
