@@ -13,7 +13,6 @@ workspace = true
 refx-core.workspace     = true
 refx-platform.workspace = true   # ธง panic_guard (leaf — ARCHITECTURE §2 อนุญาต)
 image.workspace     = true
-zune-jpeg.workspace = true
 fast_image_resize.workspace = true
 kamadak-exif.workspace = true
 blake3.workspace    = true

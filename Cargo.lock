@@ -2845,7 +2845,6 @@ dependencies = [
  "smallvec",
  "thiserror 2.0.19",
  "tracing",
- "zune-jpeg 0.4.21",
 ]
 
 [[package]]

@@ -51,10 +51,20 @@ egui-wgpu  = "0.34.3"
 egui-winit = "0.34.3"
 
 # --- image decode: pure Rust เท่านั้น (docs/06-security.md) ---------------
+#
+# ★ เคยมี `zune-jpeg` อยู่ตรงนี้ "เผื่อทำ JPEG scaled decode" แต่ไม่มีโค้ดไหนเรียกเลย
+#   ตรวจ source จริงแล้วพบว่า **ทั้ง 0.4 และ 0.5 ไม่มี API scaled decode** ตั้งแต่แรก
+#   (docs/05 §6) โครงเปล่าแบบนี้หลอกให้เข้าใจผิดอยู่หลาย session ว่าความสามารถนี้
+#   "มีรออยู่แล้ว" — รูปแบบเดียวกับ fuzz_decode ที่เป็น stub เงียบ ๆ
+#   `image` ดึง zune-jpeg มาใช้เป็น decoder ภายในอยู่แล้ว จึงไม่เสียอะไรที่ตัดออก
+#
+# ★ ไม่มี `memmap2` โดยตั้งใจ — ห้ามใส่กลับมาสำหรับไฟล์ของผู้ใช้
+#   (ตัดสิน 27 ก.ค. 2026, docs/06 §3) ไฟล์ที่ map ไว้ถูก Dropbox/OneDrive ตัดกลางคัน
+#   = SIGBUS ซึ่งเป็น signal ไม่ใช่ panic → catch_unwind จับไม่ได้ → เกราะ I-7
+#   ไร้ผลทั้งชั้น โปรเซสตายทันที
 image = { version = "0.25", default-features = false, features = [
     "png", "jpeg", "webp", "gif", "bmp", "tga", "tiff",
 ] }
-zune-jpeg         = "0.4"
 fast_image_resize = "5"
 kamadak-exif      = "0.6"
 
@@ -76,7 +86,6 @@ bytemuck    = { version = "1", features = ["derive"] }
 smallvec    = { version = "1", features = ["union"] }
 indexmap    = "2"
 slotmap     = "1"
-memmap2     = "0.9"
 thiserror   = "2"
 anyhow      = "1"
 tracing     = "0.1"
