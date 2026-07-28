@@ -15,7 +15,7 @@ use crate::shell::LoadProgress;
 use crate::text::{self, Key, Lang, Template};
 use refx_platform::redraw::RedrawReason;
 use refx_platform::window::{AppDelegate, WindowConfig};
-use refx_render::atlas::{ThumbnailAtlas, layers_for_budget};
+use refx_render::atlas::{AtlasError, AtlasSlot, ThumbnailAtlas, layers_for_budget};
 use refx_render::device::{DeviceError, FrameStatus, RenderContext, RenderOptions};
 use refx_render::instance::QuadInstance;
 use refx_render::pipeline::{CameraUniform, QuadPipeline};
@@ -508,10 +508,7 @@ impl RefxApp {
             && let Some(gfx) = self.gfx.as_mut()
         {
             for thumb in done {
-                match gfx
-                    .atlas
-                    .upload(gfx.render.device(), gfx.render.queue(), &thumb.pixels)
-                {
+                match Self::upload_thumb(gfx, &thumb.pixels) {
                     Ok(slot) => {
                         // จัดเป็นตารางง่าย ๆ ไปก่อน — layout จริงมาใน P2/P3
                         let n = gfx.quads.len() as u32;
@@ -678,7 +675,29 @@ impl RefxApp {
         Some(RedrawReason::SurfaceRecovery)
     }
 
-    /// อัด thumbnail ของทุก item กลับขึ้น atlas ใหม่หลังกู้ device
+    /// อัดภาพย่อขึ้น atlas — ขยาย atlas แล้วเติมของเดิมกลับให้เองถ้าที่ไม่พอ
+    ///
+    /// `ThumbnailAtlas::upload` **ไม่ขยายเอง** โดยตั้งใจ เพราะการขยายแบบคัดลอก
+    /// บน GPU บังคับให้ถือ texture สองใบพร้อมกัน = 368 MB จากเพดาน 384 MB
+    /// ตอนขยาย 11→12 layer (docs/05 §2) การสร้างใหม่แล้วเติมกลับจาก RAM
+    /// ทำให้ peak เหลือเท่าใบใหม่ใบเดียว และเราเก็บภาพย่อไว้ใน RAM อยู่แล้ว
+    /// เพื่อเส้นทางกู้ device — โค้ดเติมกลับจึงเป็นตัวเดียวกันเป๊ะ
+    fn upload_thumb(gfx: &mut Gfx, pixels: &[u8]) -> Result<AtlasSlot, AtlasError> {
+        match gfx.atlas.upload(gfx.render.queue(), pixels) {
+            Err(AtlasError::NeedsResize { layers }) => {
+                gfx.atlas.resize(gfx.render.device(), layers)?;
+                // texture ใหม่ว่างเปล่า — ต้องเติมภาพเดิมกลับก่อนใส่ภาพใหม่
+                Self::refill_atlas(gfx);
+                gfx.atlas.upload(gfx.render.queue(), pixels)
+            }
+            other => other,
+        }
+    }
+
+    /// อัด thumbnail ของทุก item กลับขึ้น atlas ที่เพิ่งสร้างใหม่
+    ///
+    /// เรียกจากสองที่ที่ทำให้ texture เดิมหายไป: กู้ device (P0-5) และขยาย atlas
+    /// (`upload_thumb`) — ทั้งสองกรณีภาพเดิมหายพร้อม texture เก่า ต้องเติมกลับจาก RAM
     ///
     /// ระหว่างที่ยังเติมไม่ครบ item ที่เหลือถูกทำเป็น **placeholder สีเด่น**
     /// ไม่ใช่ช่องว่าง (docs/04 §4, §8) — ผู้ใช้ต้องเห็นว่า layout ยังอยู่ครบ
@@ -693,10 +712,8 @@ impl RefxApp {
             let Some(quad) = gfx.quads.get_mut(index) else {
                 break;
             };
-            match gfx
-                .atlas
-                .upload(gfx.render.device(), gfx.render.queue(), &thumb.pixels)
-            {
+            // ★ ใช้ upload ตรง ๆ ห้ามผ่าน upload_thumb — ไม่งั้นจะเรียก refill ซ้อนตัวเอง
+            match gfx.atlas.upload(gfx.render.queue(), &thumb.pixels) {
                 Ok(slot) => {
                     quad.uv_rect = slot.uv_rect();
                     quad.layer = slot.layer;
@@ -723,7 +740,7 @@ impl RefxApp {
             restored,
             total = gfx.board_thumbs.len(),
             ms = started.elapsed().as_secs_f64() * 1000.0,
-            "เติม atlas กลับหลังกู้ device"
+            "เติมภาพย่อกลับขึ้น atlas ที่สร้างใหม่"
         );
     }
 }

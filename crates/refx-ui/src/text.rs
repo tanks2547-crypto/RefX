@@ -448,7 +448,11 @@ pub fn job_failure(lang: Lang, err: &JobFailure) -> String {
 #[must_use]
 pub fn atlas_error(lang: Lang, err: &AtlasError) -> String {
     match err {
-        AtlasError::Full { layers } => fill(
+        // ★ `NeedsResize` เป็นสัญญาณควบคุมภายใน — ชั้น UI จัดการเองหมดแล้ว
+        //   (`RefxApp::upload_thumb` ขยาย atlas แล้วเติมของเดิมกลับให้)
+        //   ถ้ามาถึงตรงนี้ได้แปลว่ามีเส้นทางที่ลืมจัดการ จึงบอกผู้ใช้แบบเดียวกับ
+        //   "เต็ม" เพราะสิ่งที่เขาเห็นเหมือนกัน คือภาพนี้ขึ้นเป็นสี่เหลี่ยมสีเด่นแทน
+        AtlasError::Full { layers } | AtlasError::NeedsResize { layers } => fill(
             lang,
             Template::ErrAtlasFull,
             &[("layers", &layers.to_string())],

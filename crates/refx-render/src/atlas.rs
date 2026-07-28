@@ -66,6 +66,19 @@ pub enum AtlasError {
         layers: u32,
     },
 
+    /// ยังมีที่เหลือตามเพดาน แต่ texture ปัจจุบันเล็กเกินไป
+    ///
+    /// ★ เป็น **สัญญาณควบคุมภายใน** ไม่ใช่ความล้มเหลว — ผู้เรียกต้องเรียก
+    /// [`ThumbnailAtlas::resize`] แล้วอัปโหลดภาพเดิมกลับทั้งหมดก่อนลองใหม่
+    /// (ดูเหตุผลที่ไม่ขยายให้เองใน `resize`)
+    ///
+    /// ถ้าข้อความนี้ไปโผล่ให้ผู้ใช้เห็น แปลว่าชั้น UI ลืมจัดการ
+    #[error("atlas needs {layers} layers but only has room for fewer")]
+    NeedsResize {
+        /// จำนวน layer ที่ต้องมีเพื่อรับภาพถัดไป
+        layers: u32,
+    },
+
     /// ยังไม่ถึงเพดาน layer แต่จอง layer ใหม่ไม่ได้เพราะ VRAM ไม่พอ
     ///
     /// แยกจาก [`AtlasError::Full`] เพราะสาเหตุและสิ่งที่ผู้ใช้ทำได้ต่างกัน —
@@ -147,6 +160,17 @@ impl SlotAllocator {
         self.next += 1;
         self.layers = self.layers.max(layer + 1);
         Ok(slot)
+    }
+
+    /// ล้างการจองทั้งหมด กลับไปเหมือนเพิ่งสร้าง
+    ///
+    /// ใช้ตอน atlas ถูกสร้าง texture ใหม่ทั้งใบ (ขยายขนาด หรือกู้ device)
+    /// — ภาพเดิมหายไปกับ texture เก่าแล้ว ช่องที่เคยจองไว้จึงไม่มีความหมายอีก
+    /// ผู้เรียกต้องอัปโหลดภาพเดิมกลับเข้ามาใหม่ทั้งหมด
+    pub fn reset(&mut self) {
+        self.layers = 0;
+        self.free.clear();
+        self.next = 0;
     }
 
     /// คืนช่องให้ใช้ซ้ำ
@@ -339,56 +363,77 @@ impl ThumbnailAtlas {
         })
     }
 
-    /// ขยาย atlas ให้มี `want` layer แล้วย้ายภาพเดิมตามไป
+    /// สร้าง texture ใหม่ให้มี `layers` ชั้น — **ภาพเดิมหายทั้งหมด**
     ///
-    /// ★ ต้องคัดลอกของเดิมเสมอ ถ้าปล่อยให้หาย board จะว่างเปล่าทันทีที่ภาพที่ 257
-    /// ถูกเพิ่มเข้ามา ซึ่งผู้ใช้แยกไม่ออกจาก "งานหาย" (เหตุผลเดียวกับ §4 ข้อ 5)
-    /// การคัดลอกเป็น GPU→GPU 16 MB ต่อชั้น และเกิดอย่างมาก `max_layers - 1` ครั้ง
-    /// ตลอดอายุ board — ถูกกว่าการยึด VRAM ไว้ล่วงหน้าทั้งวันมาก
+    /// ผู้เรียกต้องอัปโหลดภาพเดิมกลับเข้ามาใหม่ทันทีหลังเรียก (ดู `refill_atlas`
+    /// ใน `refx-ui` ซึ่งทำงานนี้อยู่แล้วสำหรับเส้นทางกู้ device)
     ///
-    /// ระหว่างคัดลอกต้องถือ texture สองใบพร้อมกัน (เดิม + ใหม่) ซึ่งเป็นจุดที่กิน
-    /// VRAM สูงสุด — ถ้าเพดานไม่พอช่วงนั้น จะได้ [`VramError`] กลับไปตามปกติ
-    /// แล้วภาพนั้นขึ้นเป็น placeholder สีเด่นแทน ไม่ใช่ crash
-    fn grow(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        want: u32,
-    ) -> Result<(), VramError> {
-        debug_assert!(want > self.layers, "grow() ต้องถูกเรียกเมื่อต้องโตขึ้นเท่านั้น");
-        let want = want.min(self.allocator.max_layers());
-        let next = self.textures.allocate(device, &atlas_descriptor(want))?;
+    /// ★ ทำไมไม่คัดลอกของเดิมด้วย GPU แล้วขยายให้เองเงียบ ๆ (แบบเดิม):
+    ///
+    /// การคัดลอกบังคับให้ **ถือ texture สองใบพร้อมกัน** ตอนขยายจาก 11 → 12 layer
+    /// นั่นคือ 176 + 192 = **368 MB จากเพดาน 384 MB** ซึ่งพอ P1-7 มาใช้อีกครึ่ง
+    /// จะจองไม่ผ่านแล้วภาพหลังจากนั้นกลายเป็น placeholder ทั้งหมด
+    ///
+    /// วิธีนี้ปล่อยใบเก่า **ก่อน** จองใบใหม่ → peak = ขนาดใบใหม่ใบเดียว (192 MB)
+    /// ต้นทุนที่แลกมาคืออัปโหลดภาพเดิมกลับจาก RAM ซึ่งวัดแล้วเร็วมาก
+    /// (100 ภาพใน 0.99 ms) และเกิดอย่างมาก `max_layers - 1` ครั้งตลอดอายุ board
+    /// ภาพย่อทุกใบถูกเก็บใน RAM อยู่แล้วเพื่อเส้นทางกู้ device จึงไม่ต้องอ่านดิสก์ซ้ำ
+    ///
+    /// # Errors
+    /// คืน [`VramError`] เมื่อจอง texture ขนาดใหม่ไม่ได้ — ในกรณีนั้นจะพยายาม
+    /// ถอยกลับไปขนาดเดิมให้ เพื่อให้ผู้เรียกเติมภาพเดิมกลับได้เท่าที่เคยมี
+    pub fn resize(&mut self, device: &wgpu::Device, layers: u32) -> Result<(), VramError> {
+        let want = layers.clamp(1, self.allocator.max_layers());
+        let previous = self.layers;
+        let before = self.textures.budget().used();
 
-        if self.layers > 0 {
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("refx-atlas-grow"),
-            });
-            encoder.copy_texture_to_texture(
-                self.texture.texture().as_image_copy(),
-                next.texture().as_image_copy(),
-                wgpu::Extent3d {
-                    width: LAYER_SIZE,
-                    height: LAYER_SIZE,
-                    depth_or_array_layers: self.layers,
-                },
-            );
-            queue.submit(std::iter::once(encoder.finish()));
-        }
+        // ★ หัวใจของการแก้อยู่ที่ลำดับสองบรรทัดนี้
+        //   จอง placeholder 1×1 (4 ไบต์) แล้วเขียนทับ `self.texture`
+        //   → ใบเก่าถูก drop ทันที คืนโควตาก่อนที่เราจะขอใบใหม่
+        let placeholder = self.textures.allocate(device, &atlas_descriptor(0))?;
+        self.texture = placeholder;
+        self.layers = 0;
+        self.allocator.reset();
+        let after_release = self.textures.budget().used();
 
-        // ใบเก่าถูก drop ตรงนี้ → โควตา VRAM คืนเอง (RAII)
-        // wgpu ถือ texture ไว้จนคำสั่งคัดลอกทำงานจบ จึงปล่อยได้เลยไม่ต้องรอ
-        self.texture = next;
+        let fresh = match self.textures.allocate(device, &atlas_descriptor(want)) {
+            Ok(texture) => texture,
+            Err(err) => {
+                // ถอยกลับไปขนาดเดิม — เพิ่งคืนโควตาขนาดนั้นไป จึงควรจองคืนได้
+                // ผู้เรียกจะได้เติมภาพเดิมกลับได้ครบเท่าที่เคยมี ไม่ใช่ board ว่างเปล่า
+                if previous > 0
+                    && let Ok(same) = self.textures.allocate(device, &atlas_descriptor(previous))
+                {
+                    self.texture = same;
+                    self.layers = previous;
+                    self.rebuild_bindings(device);
+                }
+                tracing::warn!(%err, want, previous, "ขยาย atlas ไม่สำเร็จ — ถอยกลับขนาดเดิม");
+                return Err(err);
+            }
+        };
+
+        self.texture = fresh;
         self.layers = want;
-        self.view = Self::make_view(&self.texture);
-        self.bind_group =
-            Self::make_bind_group(device, &self.bind_group_layout, &self.view, &self.sampler);
+        self.rebuild_bindings(device);
 
         tracing::debug!(
             layers = self.layers,
-            vram_bytes = self.texture.bytes(),
-            "ขยาย thumbnail atlas"
+            vram_before = before,
+            vram_after_release = after_release,
+            vram_after = self.textures.budget().used(),
+            "สร้าง atlas ใหม่ (ปล่อยใบเก่าก่อนจองใบใหม่ — ไม่มีช่วงที่ถือสองใบ)"
         );
         Ok(())
+    }
+
+    /// สร้าง view + bind group ใหม่หลังเปลี่ยน texture
+    ///
+    /// layout ไม่เปลี่ยน จึงไม่ต้องสร้าง pipeline ใหม่ตาม
+    fn rebuild_bindings(&mut self, device: &wgpu::Device) {
+        self.view = Self::make_view(&self.texture);
+        self.bind_group =
+            Self::make_bind_group(device, &self.bind_group_layout, &self.view, &self.sampler);
     }
 
     /// จำนวน layer ที่จอง VRAM จริงแล้ว — `0` ตอนเปิดโปรแกรมเปล่า
@@ -407,17 +452,14 @@ impl ThumbnailAtlas {
     ///
     /// `pixels` ต้องมีความยาว `SLOT_SIZE * SLOT_SIZE * 4` พอดี
     ///
-    /// จอง layer เพิ่มให้เองเมื่อภาพล้นชั้นเดิม — ผู้เรียกไม่ต้องรู้เรื่องนี้
+    /// **ไม่ขยาย texture ให้เอง** — ถ้าที่ไม่พอจะคืน [`AtlasError::NeedsResize`]
+    /// ผู้เรียกต้องเรียก [`ThumbnailAtlas::resize`] แล้วอัปโหลดภาพเดิมกลับก่อนลองใหม่
+    /// (เหตุผลอยู่ใน `resize` — การขยายเองบังคับให้ถือ texture สองใบพร้อมกัน)
     ///
     /// # Errors
-    /// คืน [`AtlasError::Full`] เมื่อใช้ครบเพดาน layer แล้ว หรือ
-    /// [`AtlasError::OutOfVram`] เมื่อยังไม่ถึงเพดานแต่จอง layer ใหม่ไม่ได้
-    pub fn upload(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        pixels: &[u8],
-    ) -> Result<AtlasSlot, AtlasError> {
+    /// [`AtlasError::Full`] เมื่อใช้ครบเพดาน layer แล้ว ·
+    /// [`AtlasError::NeedsResize`] เมื่อยังมีที่ตามเพดานแต่ texture เล็กเกินไป
+    pub fn upload(&mut self, queue: &wgpu::Queue, pixels: &[u8]) -> Result<AtlasSlot, AtlasError> {
         let expected = (SLOT_SIZE * SLOT_SIZE * 4) as usize;
         debug_assert_eq!(pixels.len(), expected, "ขนาด thumbnail ต้องเป็น 128×128 RGBA");
         if pixels.len() != expected {
@@ -435,7 +477,9 @@ impl ThumbnailAtlas {
             layers: self.allocator.max_layers(),
         })?;
         if next_layer >= self.layers {
-            self.grow(device, queue, next_layer + 1)?;
+            return Err(AtlasError::NeedsResize {
+                layers: next_layer + 1,
+            });
         }
 
         let slot = self.allocator.allocate()?;
@@ -709,6 +753,47 @@ mod tests {
         assert_eq!(alloc.vram_bytes(), 0, "เพดาน 12 ชั้นต้องยังไม่กิน VRAM");
         alloc.allocate().unwrap();
         assert_eq!(alloc.vram_bytes(), 16 << 20, "ภาพแรกจอง 1 ชั้น = 16 MB");
+    }
+
+    /// ★ หลัง `reset` ต้องเริ่มนับใหม่จากศูนย์ทั้งหมด
+    ///
+    /// `resize` สร้าง texture ใหม่ที่ว่างเปล่า ภาพเดิมหายไปกับใบเก่า
+    /// ถ้าตัวจัดสรรช่องไม่ถูกล้างด้วย ช่องที่ "จองแล้ว" จะชี้ไปยังพื้นที่ที่ไม่มีภาพ
+    /// แล้ว board จะขึ้นเป็นช่องดำ ๆ แทนภาพ โดยที่ทุกอย่างดู "สำเร็จ" หมด
+    #[test]
+    fn reset_makes_the_allocator_start_over() {
+        let mut alloc = SlotAllocator::new(12);
+        for _ in 0..(SLOTS_PER_LAYER + 5) {
+            alloc.allocate().unwrap();
+        }
+        alloc.free(AtlasSlot { layer: 0, index: 3 });
+        assert_eq!(alloc.layers_used(), 2);
+
+        alloc.reset();
+
+        assert_eq!(alloc.layers_used(), 0);
+        assert_eq!(alloc.slots_in_use(), 0);
+        assert_eq!(alloc.vram_bytes(), 0);
+        assert_eq!(alloc.next_layer(), Some(0));
+        // ช่องแรกหลัง reset ต้องเป็นช่องแรกจริง ๆ ไม่ใช่ช่องที่ค้างอยู่ใน free list
+        assert_eq!(alloc.allocate().unwrap(), AtlasSlot { layer: 0, index: 0 });
+        // เพดานต้องไม่หายไปกับการ reset
+        assert_eq!(alloc.max_layers(), 12);
+    }
+
+    /// เติมภาพกลับหลัง reset ต้องได้ลำดับช่องเหมือนเดิมเป๊ะ
+    ///
+    /// `refill_atlas` เดินตาม `board_thumbs` ตามลำดับแล้วเขียนทับ `quads[i]`
+    /// ถ้าลำดับช่องไม่ตรงกับรอบแรก ภาพจะสลับที่กันทั้ง board
+    #[test]
+    fn refilling_after_reset_reproduces_the_same_slots() {
+        let mut alloc = SlotAllocator::new(12);
+        let first: Vec<AtlasSlot> = (0..600).map(|_| alloc.allocate().unwrap()).collect();
+
+        alloc.reset();
+        let second: Vec<AtlasSlot> = (0..600).map(|_| alloc.allocate().unwrap()).collect();
+
+        assert_eq!(first, second);
     }
 
     #[test]
