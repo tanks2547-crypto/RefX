@@ -5,3 +5,24 @@
 *.wgsl text eol=lf
 *.png binary
 *.jpg binary
+# ★ ฟอนต์และ asset ไบนารีอื่น ๆ ต้องประกาศชัดเจน
+# `text=auto` เดาจาก NUL byte ในช่วงต้นไฟล์ ซึ่งถูกเกือบทุกครั้งแต่ไม่รับประกัน
+# ถ้าเดาผิดแล้ว normalize line ending ฟอนต์จะเสียแบบเงียบ ๆ (ขึ้นเป็น □ เหมือนไม่มีฟอนต์)
+*.ttf binary
+*.otf binary
+*.ttc binary
+*.woff binary
+*.woff2 binary
+*.ico binary
+*.refx binary
+
+# ★ corpus ของ fuzzer — เหตุผลเดียวกับฟอนต์เป๊ะ ๆ
+#
+# seed หลายไฟล์เป็นไบต์สุ่มหรือ header ที่ถูกตัด ซึ่ง **อาจไม่มี NUL byte เลย**
+# ในช่วงที่ git ใช้เดา ถ้าเดาว่าเป็น text แล้ว normalize line ending
+# ไบต์ `0d 0a` ในไฟล์จะกลายเป็น `0a` → seed เปลี่ยนความหมายแบบเงียบ ๆ
+# ผลคือเคสที่เคยจับบั๊กได้กลายเป็นไฟล์ที่ไม่ยิงอะไรเลย และไม่มีอะไรเตือน
+#
+# ตรวจได้ด้วย: git ls-files --eol fuzz/seeds/  → ทุกบรรทัดต้องเป็น attr/-text
+fuzz/seeds/** binary
+*.bin binary
