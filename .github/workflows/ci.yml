@@ -40,6 +40,25 @@ jobs:
       - run: cargo nextest run --workspace --all-features
       - run: cargo build --release --all-features
 
+      # ★ เพดาน binary ต้องบังคับอัตโนมัติ ไม่ใช่ความหวัง (docs/08 §6)
+      #   งบที่ไม่มีใครตรวจคืองบที่จะถูกละเมิดเงียบ ๆ — เอกสารเคยเขียน 12 MB
+      #   ขณะที่ของจริง 15.35 MB ต่างกัน 3.3 MB โดยไม่มีใครรู้ จนมีคนไปวัดด้วยมือ
+      #   สคริปต์พิมพ์ขนาดทุกครั้งไม่ว่าผ่านหรือไม่ เพื่อให้ย้อนดูแนวโน้มใน log ได้
+      - name: ขนาด binary ต้องไม่เกินเพดาน
+        shell: bash
+        run: scripts/check-binary-size.sh
+
+      # negative control (docs/08 §3.9 ข้อ 1) — พิสูจน์ทุกครั้งว่าตัวตรวจ "ล้มเป็น"
+      # ถ้าขั้นนี้ผ่าน แปลว่าเพดานข้างบนเป็นสัญญาณเขียวปลอมอีกอันหนึ่ง
+      - name: negative control ของตัวตรวจขนาด
+        shell: bash
+        run: |
+          if REFX_MAX_BINARY_BYTES=1 scripts/check-binary-size.sh > /dev/null 2>&1; then
+            echo "::error::ตัวตรวจขนาด binary ไม่ล้มแม้ตั้งเพดานเป็น 1 ไบต์ — ตัวตรวจเองพัง"
+            exit 1
+          fi
+          echo "::notice::negative control ผ่าน — ตัวตรวจขนาด binary ล้มได้จริง"
+
   deny:
     runs-on: ubuntu-latest
     steps:
