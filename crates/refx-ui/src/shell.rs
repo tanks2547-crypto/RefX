@@ -50,6 +50,40 @@ pub struct ShellState {
     pub decode_queued: usize,
     /// งาน decode ที่ถูกยกเลิกไปแล้ว — หลักฐานว่า cancellation ทำงาน
     pub decode_cancelled: u64,
+
+    /// ★ ความคืบหน้าการโหลด — `None` เมื่อไม่มีงานค้าง
+    ///
+    /// docs/05 §6: การรอ 80 วินาทีบน cache เย็นยอมรับได้ **ก็ต่อเมื่อ** ผู้ใช้
+    /// เห็นว่ามันคืบหน้าอยู่ ไม่ใช่ค้าง — ถ้าไม่มีตัวนี้ เขาจะคิดว่าโปรแกรมแฮงก์
+    /// แล้วปิดทิ้งกลางคัน ซึ่งแย่กว่ารอนาน
+    pub loading: Option<LoadProgress>,
+}
+
+/// ความคืบหน้าของงาน decode งวดปัจจุบัน
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoadProgress {
+    /// จำนวนที่จบแล้ว (รวมที่ล้มเหลวและถูกยกเลิก — ไม่ค้างคิวแล้วทั้งคู่)
+    pub done: u64,
+    /// จำนวนทั้งหมดในงวดนี้
+    pub total: u64,
+}
+
+impl LoadProgress {
+    /// ข้อความที่ผู้ใช้เห็น — รูปแบบตาม docs/05 §6
+    #[must_use]
+    pub fn label(self) -> String {
+        format!("กำลังโหลด {} / {}", self.done, self.total)
+    }
+
+    /// สัดส่วนที่เสร็จแล้ว `0.0..=1.0`
+    #[must_use]
+    pub fn fraction(self) -> f32 {
+        if self.total == 0 {
+            return 1.0;
+        }
+        // ตัดที่ 1.0 เสมอ — ตัวเลขที่เกิน 100% ทำให้ผู้ใช้ไม่เชื่อถือทั้งแถบ
+        (self.done as f32 / self.total as f32).clamp(0.0, 1.0)
+    }
 }
 
 /// แปลงไบต์เป็นข้อความสั้น ๆ ที่คนอ่านรู้เรื่อง
@@ -81,6 +115,7 @@ impl Default for ShellState {
             cache_bytes: 0,
             decode_queued: 0,
             decode_cancelled: 0,
+            loading: None,
         }
     }
 }
@@ -141,7 +176,17 @@ pub fn draw_in_ui(
     // ---- ล่างสุด: status bar (ต้องประกาศก่อน panel ซ้าย/ขวาเพื่อให้กินเต็มความกว้าง) ----
     egui::Panel::bottom("refx-status").show_inside(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.label(&state.status);
+            // ★ ความคืบหน้ามาก่อนทุกอย่าง — เป็นสิ่งเดียวที่ผู้ใช้อยากรู้ตอนกำลังโหลด
+            //   (เงื่อนไขข้อ 3 ของ docs/05 §6 ที่ทำให้ cache เย็นยอมรับได้)
+            if let Some(progress) = state.loading {
+                ui.add(
+                    egui::ProgressBar::new(progress.fraction())
+                        .desired_width(120.0)
+                        .text(progress.label()),
+                );
+            } else {
+                ui.label(&state.status);
+            }
             ui.separator();
             ui.label(format!("{} รายการ", state.item_count));
             ui.separator();

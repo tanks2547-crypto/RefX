@@ -10,6 +10,8 @@ use glam::Vec2;
 use refx_asset::cache::{CacheStats, IoRequest, IoThread};
 use refx_asset::pool::DecodePool;
 use refx_core::view::Camera;
+
+use crate::shell::LoadProgress;
 use refx_platform::redraw::RedrawReason;
 use refx_platform::window::{AppDelegate, WindowConfig};
 use refx_render::atlas::{ThumbnailAtlas, layers_for_budget};
@@ -197,6 +199,37 @@ struct Gfx {
     panning: bool,
 }
 
+/// แปลงสถิติสะสมของ decode pool เป็นความคืบหน้าของ **งวดปัจจุบัน**
+///
+/// `PoolStats` นับสะสมตลอดอายุโปรแกรม ถ้าเอาไปแสดงตรง ๆ ผู้ใช้ที่ลากภาพชุดที่สอง
+/// เข้ามาจะเห็น "กำลังโหลด 100 / 150" ทั้งที่ในใจเขาคือ "0 จาก 50"
+/// จึงจำจุดที่คิวว่างครั้งล่าสุดไว้เป็นเส้นเริ่มของงวดถัดไป
+#[derive(Debug, Default)]
+struct LoadTracker {
+    /// จำนวนงานสะสม ณ ตอนที่คิวว่างครั้งล่าสุด
+    base: u64,
+}
+
+impl LoadTracker {
+    /// อัปเดตจากสถิติล่าสุด — คืน `None` เมื่อไม่มีงานค้าง
+    fn update(&mut self, stats: refx_asset::pool::PoolStatsSnapshot) -> Option<LoadProgress> {
+        let (done, total) = (stats.finished(), stats.submitted);
+
+        // คิวว่าง = จบงวดนี้แล้ว ตั้งเส้นเริ่มใหม่ไว้รองานชุดถัดไป
+        // `>=` ไม่ใช่ `==` เพราะ snapshot อ่านตัวนับหลายตัวแบบไม่ atomic
+        // ผลลัพธ์อาจ "จบเกินที่ส่ง" ชั่วขณะได้ ซึ่งไม่ใช่ความผิดปกติ
+        if done >= total {
+            self.base = total;
+            return None;
+        }
+
+        Some(LoadProgress {
+            done: done.saturating_sub(self.base),
+            total: total.saturating_sub(self.base),
+        })
+    }
+}
+
 /// กรอบของช่อง canvas ในหน่วย physical pixel
 #[derive(Debug, Clone, Copy)]
 struct CanvasRect {
@@ -292,6 +325,8 @@ pub struct RefxApp {
     drop_reported: bool,
     /// ไฟล์ที่เพิ่งถูกลากเข้ามา — winit ส่งมาทีละไฟล์ จึงรวบไว้ก่อนแล้วส่งเป็นชุดเดียว
     pending_drops: Vec<std::path::PathBuf>,
+    /// แปลงสถิติสะสมของ pool เป็นความคืบหน้าของงวดปัจจุบัน
+    loading: LoadTracker,
 }
 
 /// ส่วนที่จัดการภาพ — อยู่คนละโลกกับ GPU
@@ -323,6 +358,7 @@ impl RefxApp {
             drop_shown: 0,
             drop_reported: true,
             pending_drops: Vec::new(),
+            loading: LoadTracker::default(),
         }
     }
 
@@ -775,6 +811,7 @@ impl AppDelegate for RefxApp {
             shell,
             assets,
             cache_stats_rx,
+            loading,
             ..
         } = self;
         let gfx = gfx.as_mut()?;
@@ -799,8 +836,12 @@ impl AppDelegate for RefxApp {
             let (used, limit) = assets.pool.ram_usage();
             shell.ram_used = used;
             shell.ram_limit = limit;
+            let stats = assets.pool.stats();
             shell.decode_queued = assets.pool.queued();
-            shell.decode_cancelled = assets.pool.stats().cancelled;
+            shell.decode_cancelled = stats.cancelled;
+            // ★ อ่านจากสถิติของ pool ตอนวาดเท่านั้น — ไม่มี timer ไม่มี polling
+            //   เฟรมเกิดขึ้นอยู่แล้วทุกครั้งที่ worker ทำงานเสร็จแล้วปลุก UI (I-1)
+            shell.loading = loading.update(stats);
         }
         if let Some(rx) = cache_stats_rx.as_ref()
             && let Ok(stats) = rx.try_recv()
@@ -1109,6 +1150,8 @@ pub fn run(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
 
+    use refx_asset::pool::PoolStatsSnapshot;
+
     use super::*;
 
     fn rect(x: f32, y: f32, w: f32, h: f32) -> egui::Rect {
@@ -1172,6 +1215,110 @@ mod tests {
         assert!(!c.contains(Vec2::new(600.0, 30.0)), "อยู่บน toolbar");
         assert!(!c.contains(Vec2::new(600.0, 780.0)), "อยู่บน status bar");
         assert!(!c.contains(Vec2::new(1000.0, 760.0)), "มุมขวาล่างนับเป็นข้างนอก");
+    }
+
+    // ---------- ตัวนับความคืบหน้า (docs/05 §6 เงื่อนไขข้อ 3) ----------
+
+    fn stats(submitted: u64, completed: u64, cancelled: u64, failed: u64) -> PoolStatsSnapshot {
+        PoolStatsSnapshot {
+            submitted,
+            completed,
+            cancelled,
+            failed,
+            timed_out: 0,
+        }
+    }
+
+    #[test]
+    fn no_work_means_no_progress_shown() {
+        let mut tracker = LoadTracker::default();
+        assert_eq!(tracker.update(stats(0, 0, 0, 0)), None);
+        // โหลดจบพอดี — แถบต้องหายไป ไม่ค้างที่ 100%
+        assert_eq!(tracker.update(stats(100, 100, 0, 0)), None);
+    }
+
+    #[test]
+    fn progress_counts_up_during_a_batch() {
+        let mut tracker = LoadTracker::default();
+        assert_eq!(
+            tracker.update(stats(1000, 312, 0, 0)),
+            Some(LoadProgress {
+                done: 312,
+                total: 1000
+            })
+        );
+        assert_eq!(
+            tracker
+                .update(stats(1000, 312, 0, 0))
+                .map(LoadProgress::label),
+            Some("กำลังโหลด 312 / 1000".to_owned()),
+            "รูปแบบต้องตรงกับ docs/05 §6"
+        );
+    }
+
+    /// งานที่ถูกยกเลิก/ล้มเหลวก็ไม่ค้างคิวแล้ว ต้องนับเป็น "จบ" ด้วย
+    ///
+    /// ไม่งั้นโฟลเดอร์ที่มีไฟล์เสียปนอยู่จะค้างที่ "997 / 1000" ตลอดไป
+    /// ซึ่งอ่านได้ว่า "โปรแกรมแฮงก์"
+    #[test]
+    fn cancelled_and_failed_count_as_finished() {
+        let mut tracker = LoadTracker::default();
+        assert_eq!(
+            tracker.update(stats(500, 400, 60, 40)),
+            None,
+            "400+60+40 = 500 = จบครบแล้ว"
+        );
+    }
+
+    /// ★ ลากชุดที่สองเข้ามาต้องเริ่มนับใหม่จาก 0 ไม่ใช่ต่อยอดจากชุดแรก
+    #[test]
+    fn a_second_batch_starts_counting_from_zero() {
+        let mut tracker = LoadTracker::default();
+        tracker.update(stats(100, 40, 0, 0));
+        assert_eq!(tracker.update(stats(100, 100, 0, 0)), None); // ชุดแรกจบ
+
+        assert_eq!(
+            tracker.update(stats(150, 100, 0, 0)),
+            Some(LoadProgress { done: 0, total: 50 }),
+            "ชุดที่สองต้องขึ้น 0 / 50 ไม่ใช่ 100 / 150"
+        );
+        assert_eq!(
+            tracker.update(stats(150, 130, 0, 0)),
+            Some(LoadProgress {
+                done: 30,
+                total: 50
+            })
+        );
+    }
+
+    /// ลากเพิ่มระหว่างที่ชุดเดิมยังโหลดไม่เสร็จ — ยอดรวมต้องโตตาม
+    #[test]
+    fn dropping_more_while_loading_grows_the_total() {
+        let mut tracker = LoadTracker::default();
+        tracker.update(stats(100, 30, 0, 0));
+        assert_eq!(
+            tracker.update(stats(180, 30, 0, 0)),
+            Some(LoadProgress {
+                done: 30,
+                total: 180
+            })
+        );
+    }
+
+    /// snapshot อ่านตัวนับหลายตัวแบบไม่ atomic — "จบเกินที่ส่ง" ชั่วขณะเกิดได้จริง
+    /// ต้องไม่ underflow และต้องไม่โชว์ค่าเพี้ยน
+    #[test]
+    fn inconsistent_snapshot_never_underflows() {
+        let mut tracker = LoadTracker::default();
+        assert_eq!(tracker.update(stats(10, 12, 0, 0)), None);
+
+        // และสัดส่วนต้องไม่ทะลุ 100% ไม่ว่าตัวเลขจะเพี้ยนแค่ไหน
+        let odd = LoadProgress {
+            done: 99,
+            total: 10,
+        };
+        assert!((odd.fraction() - 1.0).abs() < f32::EPSILON);
+        assert!((LoadProgress { done: 0, total: 0 }).fraction() > 0.0);
     }
 
     /// เคอร์เซอร์ที่กลางช่อง canvas ต้องแปลงเป็นกลางกรอบของกล้องพอดี
