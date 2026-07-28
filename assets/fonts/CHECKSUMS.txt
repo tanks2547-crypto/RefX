@@ -1,0 +1,37 @@
+ที่มาและลายเซ็นของฟอนต์ที่ฝังใน binary
+=======================================
+
+ไฟล์ในโฟลเดอร์นี้ถูกฝังเข้า binary ของผู้ใช้ทุกคนด้วย include_bytes!
+ถ้าต้นทางถูกแทรกแซงตอนที่เราดึงมา เราจะแจกต่อให้ทุกคน — จึงต้องปักหมุดและตรวจได้
+(docs/06-security.md §2.5)
+
+★ ใครดึงไฟล์ใหม่ต้องได้ค่า SHA-256 เดิมเป๊ะ  ไม่ตรง = หยุด อย่า commit ทับ
+
+ตรวจ (จากรากโปรเจกต์):
+
+    sha256sum -c assets/fonts/CHECKSUMS.txt
+
+
+NotoSansThai-Regular.ttf
+------------------------
+ดึงเมื่อ   : 2026-07-28
+โปรเจกต์   : Noto Sans Thai (Google Fonts / notofonts)
+release tag: NotoSansThai-v2.002        ← ปักหมุดที่ tag ห้ามดึงจาก branch ที่ขยับได้
+URL เต็ม   : https://github.com/notofonts/thai/releases/download/NotoSansThai-v2.002/NotoSansThai-v2.002.zip
+ไฟล์ใน zip : NotoSansThai/hinted/ttf/NotoSansThai-Regular.ttf
+ขนาด       : 37,780 ไบต์
+license    : SIL Open Font License 1.1 (OFL-1.1) — ดู OFL.txt คู่กัน
+             deny.toml อนุญาต OFL-1.1 ไว้แล้ว
+
+sha256 ของ zip ทั้งก้อน:
+af889cc673fc714060ce5e4e088fbad32aa4c0571a19958efeaff128a22da485
+
+
+OFL.txt
+-------
+ไฟล์เดียวกับที่อยู่ในรากของ zip ข้างบน — ต้องแจกจ่ายคู่กับฟอนต์เสมอตามเงื่อนไข OFL
+
+
+-- SHA-256 (รูปแบบของ sha256sum) --------------------------------------------
+61cf814eec46b294d6ea4401ac295d0cecd5207bd2331dcc5a15e7301d30ee44 *NotoSansThai-Regular.ttf
+2e98fd23a52d253db8612cd5942c8f2ff4111b21d2367050fdca91d8ccc374a0 *OFL.txt

@@ -606,6 +606,10 @@ impl RefxApp {
         render: &RenderContext,
     ) -> (egui::Context, egui_winit::State, egui_wgpu::Renderer) {
         let egui_ctx = egui::Context::default();
+        // ★ ต้องทำก่อนวาดเฟรมแรก และต้องทำ **ทุกครั้งที่สร้าง Context ใหม่**
+        //   ซึ่งรวมถึงตอนกู้ device (docs/04 §7 ข้อ 3) — ไม่งั้นตัวหนังสือไทย
+        //   จะกลับไปเป็นสี่เหลี่ยมหลัง driver อัปเดต
+        crate::fonts::install(&egui_ctx);
         let egui_winit = egui_winit::State::new(
             egui_ctx.clone(),
             egui::ViewportId::ROOT,
