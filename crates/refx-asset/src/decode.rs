@@ -111,11 +111,19 @@ impl Limits {
 
 /// โหลดภาพไม่สำเร็จ
 ///
-/// ทุกข้อความบอก "เกิดอะไร + ทำอะไรต่อได้" — ผู้ใช้คือนักวาด ไม่ใช่โปรแกรมเมอร์
+/// ★ ข้อความใน `#[error(…)]` เป็น **อังกฤษสำหรับ log และนักพัฒนา** (docs/03 §0)
+/// `thiserror` คอมไพล์มันเป็น format string ตั้งแต่ตอน build จึงแปลตอนรันไม่ได้
+///
+/// **ข้อความที่ผู้ใช้เห็นอยู่ที่ `refx-ui::text::load_error`** ซึ่งประกอบขึ้นจาก
+/// **ฟิลด์** ของ error แต่ละตัว แล้วแปลตามภาษาที่เลือก — กฎเดิมใน CLAUDE.md
+/// ที่ว่าข้อความต้องบอก "เกิดอะไร + ทำอะไรต่อได้" ยังอยู่ครบ แค่ย้ายที่อยู่
+///
+/// ทุก variant จึงต้อง**เก็บฟิลด์ให้ครบพอที่จะประกอบข้อความได้** ห้ามยัดข้อมูล
+/// ลงไปในสตริงอย่างเดียว
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
     /// ไฟล์ใหญ่เกินเพดาน
-    #[error("ไฟล์ใหญ่เกินไป ({actual_mb} MB, รับได้ไม่เกิน {limit_mb} MB)\nลองย่อภาพก่อนแล้วค่อยลากเข้ามาใหม่")]
+    #[error("file is too large: {actual_mb} MB, limit is {limit_mb} MB")]
     FileTooLarge {
         /// ขนาดจริง (MB)
         actual_mb: u64,
@@ -124,10 +132,7 @@ pub enum LoadError {
     },
 
     /// ภาพมี pixel มากเกินเพดาน — เคสนี้รวม decompression bomb
-    #[error(
-        "ภาพใหญ่เกินไป ({width}×{height} = {pixels} จุด, รับได้ไม่เกิน {limit} จุด)\n\
-         ถ้าไฟล์นี้ควรจะเล็กกว่านี้ แปลว่าไฟล์อาจเสียหายหรือถูกดัดแปลงมา"
-    )]
+    #[error("image is too large: {width}x{height} = {pixels} pixels, limit is {limit}")]
     ImageTooLarge {
         /// ความกว้างที่ประกาศใน header
         width: u32,
@@ -140,35 +145,32 @@ pub enum LoadError {
     },
 
     /// ไม่รู้จักชนิดไฟล์
-    #[error("ไม่รู้จักชนิดของไฟล์นี้\nRefX เปิดได้เฉพาะ PNG, JPEG, WebP, GIF, BMP, TGA และ TIFF")]
+    #[error("unrecognised file type (magic bytes match no supported format)")]
     UnknownFormat,
 
     /// รู้จัก format แต่ไม่อนุญาต
-    #[error("RefX ยังเปิดไฟล์ชนิด {format:?} ไม่ได้\nลองแปลงเป็น PNG หรือ JPEG ก่อน")]
+    #[error("format {format:?} is not in the allow-list")]
     FormatNotAllowed {
         /// format ที่ตรวจเจอ
         format: ImageFormat,
     },
 
     /// header อ่านไม่ได้
-    #[error("อ่านข้อมูลหัวไฟล์ไม่ได้ — ไฟล์น่าจะเสียหายหรือถูกตัดไม่ครบ")]
+    #[error("cannot read the image header (file damaged or truncated)")]
     BadHeader,
 
     /// decoder panic — จับได้แล้วแปลงเป็น error ธรรมดา
-    #[error("ไฟล์นี้ทำให้ตัวถอดรหัสภาพทำงานผิดพลาด — ข้ามไฟล์นี้ไป ไฟล์อื่นยังใช้ได้ตามปกติ")]
+    #[error("image decoder panicked and was caught (I-7)")]
     DecoderPanic,
 
     /// decode ล้มด้วยสาเหตุปกติ
-    #[error("เปิดภาพไม่ได้: {0}\nไฟล์อาจเสียหายหรือถูกตัดไม่ครบ")]
+    #[error("decode failed: {0}")]
     Decode(#[from] image::ImageError),
 
     /// อ่านไฟล์จากดิสก์ไม่ได้
     ///
     /// เจอบ่อยกับไฟล์บน OneDrive/Dropbox ที่ยังไม่ได้ sync ลงเครื่องจริง
-    #[error(
-        "อ่านไฟล์ {file} ไม่ได้: {source}\n\
-         ถ้าไฟล์อยู่บน OneDrive หรือ Dropbox ลองเปิดโฟลเดอร์นั้นให้ sync เสร็จก่อน"
-    )]
+    #[error("cannot read {file}: {source}")]
     Io {
         /// ชื่อไฟล์ (ไม่ใช่ path เต็ม — docs/08 §5)
         file: String,
@@ -177,7 +179,7 @@ pub enum LoadError {
     },
 
     /// ที่อยู่นี้ไม่ใช่ไฟล์ (เป็นโฟลเดอร์ หรือ device node)
-    #[error("{file} ไม่ใช่ไฟล์ภาพ")]
+    #[error("{file} is not a regular file")]
     NotAFile {
         /// ชื่อที่ระบุมา
         file: String,

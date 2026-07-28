@@ -10,6 +10,7 @@ pub mod canvas; // ViewportBehavior ของ Canvas mode
 pub mod inspector;
 pub mod keymap; // ตาราง data โหลดจาก keymap.toml — ห้าม hard-code (ADR-007)
 pub mod shell; // โครง UI กลาง: tabs, toolbar, library, inspector, status bar
+pub mod text; // ★ ประตูเดียวของข้อความที่ผู้ใช้เห็น (docs/03 §0) — ห้ามเขียนสตริงตรงใน widget
 pub mod theme;
 pub mod tools;
 

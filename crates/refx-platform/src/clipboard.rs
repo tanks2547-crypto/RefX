@@ -10,7 +10,10 @@
 #[derive(Debug, thiserror::Error)]
 pub enum ClipboardError {
     /// ใน clipboard ไม่มีภาพ
-    #[error("ใน clipboard ไม่มีรูปภาพ\nลองคัดลอกภาพจากเบราว์เซอร์หรือโปรแกรมวาดก่อน แล้วกด Ctrl+V ใหม่")]
+    ///
+    /// ข้อความเป็นอังกฤษเพราะเป็นของ log/นักพัฒนา — ข้อความที่ผู้ใช้เห็น
+    /// ประกอบที่ `refx-ui::text` แล้วแปลตามภาษา (docs/03 §0)
+    #[error("clipboard holds no image")]
     NoImage,
 }
 

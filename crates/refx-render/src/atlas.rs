@@ -60,9 +60,7 @@ impl AtlasSlot {
 #[derive(Debug, thiserror::Error)]
 pub enum AtlasError {
     /// ถึงเพดานจำนวน layer แล้ว
-    #[error(
-        "พื้นที่เก็บภาพย่อเต็ม (ใช้ครบ {layers} ชั้นแล้ว)\nลองปิด board ที่ไม่ได้ใช้ หรือเพิ่มเพดานหน่วยความจำในการตั้งค่า"
-    )]
+    #[error("thumbnail atlas is full ({layers} layers all in use)")]
     Full {
         /// จำนวน layer ที่ใช้ไปแล้ว
         layers: u32,

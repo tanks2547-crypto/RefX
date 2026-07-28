@@ -105,11 +105,11 @@ impl CacheKey {
 #[derive(Debug, thiserror::Error)]
 pub enum CacheError {
     /// sqlite มีปัญหา
-    #[error("ฐานข้อมูล cache ของภาพย่อมีปัญหา: {0}\nRefX จะสร้างใหม่ให้เอง งานของคุณไม่ได้รับผลกระทบ")]
+    #[error("thumbnail cache database error: {0}")]
     Sqlite(#[from] rusqlite::Error),
 
     /// สร้างโฟลเดอร์ให้ DB ไม่ได้
-    #[error("สร้างโฟลเดอร์เก็บ cache ที่ {path} ไม่ได้: {source}")]
+    #[error("cannot create cache directory {path}: {source}")]
     CreateDir {
         /// โฟลเดอร์ที่มีปัญหา
         path: PathBuf,

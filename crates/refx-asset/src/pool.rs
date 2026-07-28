@@ -113,10 +113,7 @@ pub enum JobFailure {
     Load(#[from] LoadError),
 
     /// ใช้เวลานานเกินเพดาน
-    #[error(
-        "ใช้เวลาเปิดภาพ {file} นานเกิน {seconds} วินาที — ข้ามไฟล์นี้ไปก่อน\n\
-         ถ้าไฟล์อยู่บนไดรฟ์เครือข่ายหรือ cloud ลองคัดลอกมาไว้ในเครื่องก่อน"
-    )]
+    #[error("decoding {file} took longer than {seconds}s")]
     Timeout {
         /// ชื่อไฟล์
         file: String,

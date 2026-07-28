@@ -21,7 +21,7 @@ use tracing_subscriber::EnvFilter;
 #[derive(Debug, thiserror::Error)]
 pub enum LogError {
     /// เปิดไฟล์ log ไม่ได้
-    #[error("เปิดไฟล์ log ที่ {path} ไม่ได้: {source}\nโปรแกรมยังทำงานต่อได้ แต่จะไม่มี log ไว้ตรวจปัญหา")]
+    #[error("cannot open log file {path}: {source}")]
     Open {
         /// ไฟล์ที่เปิดไม่ได้
         path: PathBuf,

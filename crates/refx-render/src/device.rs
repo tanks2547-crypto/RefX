@@ -16,35 +16,24 @@ use std::task::{Context, Poll, Waker};
 
 /// เตรียมกราฟิกไม่สำเร็จ
 ///
-/// ทุกข้อความบอก "เกิดอะไร + ทำอะไรต่อได้" ตามกฎใน CLAUDE.md
+/// ★ ข้อความเป็นอังกฤษสำหรับ log/นักพัฒนา — ข้อความที่ผู้ใช้เห็นอยู่ที่
+/// `refx-ui::text` ประกอบจากฟิลด์แล้วแปลตามภาษา (docs/03 §0)
 #[derive(Debug, thiserror::Error)]
 pub enum DeviceError {
     /// ผูก surface กับหน้าต่างไม่ได้
-    #[error(
-        "สร้างพื้นที่วาดภาพจากหน้าต่างไม่ได้: {0}\n\
-         มักเกิดจากไดรเวอร์การ์ดจอเก่าเกินไป ลองอัปเดตไดรเวอร์แล้วเปิดโปรแกรมใหม่"
-    )]
+    #[error("cannot create a drawing surface from the window: {0}")]
     CreateSurface(#[from] wgpu::CreateSurfaceError),
 
     /// ไม่พบ GPU ที่ใช้ได้
-    #[error(
-        "ไม่พบการ์ดจอที่ใช้งานได้: {0}\n\
-         RefX ต้องการไดรเวอร์ที่รองรับ Vulkan (Linux/Windows) หรือ DirectX 12 (Windows)"
-    )]
+    #[error("no usable GPU adapter found (needs Vulkan or DirectX 12): {0}")]
     NoAdapter(#[from] wgpu::RequestAdapterError),
 
     /// ขอ device ไม่สำเร็จ
-    #[error(
-        "ขอหน่วยประมวลผลกราฟิกไม่สำเร็จ: {0}\n\
-         ลองปิดโปรแกรมที่ใช้การ์ดจอหนัก ๆ แล้วเปิด RefX ใหม่"
-    )]
+    #[error("cannot acquire a GPU device: {0}")]
     RequestDevice(#[from] wgpu::RequestDeviceError),
 
     /// surface ไม่รองรับรูปแบบใดที่ใช้ได้
-    #[error(
-        "การ์ดจอนี้ไม่รองรับรูปแบบสีที่ RefX ต้องการ\n\
-         ลองอัปเดตไดรเวอร์การ์ดจอ ถ้ายังไม่ได้แปลว่าเครื่องนี้เก่าเกินกว่าจะใช้ RefX"
-    )]
+    #[error("surface supports no colour format that RefX can use")]
     NoSupportedFormat,
 }
 

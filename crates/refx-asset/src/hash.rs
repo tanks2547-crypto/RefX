@@ -60,9 +60,7 @@ impl std::fmt::Display for ContentHash {
 #[derive(Debug, thiserror::Error)]
 pub enum HashError {
     /// อ่านไฟล์ไม่ได้
-    #[error(
-        "อ่านไฟล์ {file} เพื่อคำนวณลายเซ็นไม่ได้: {source}\nถ้าไฟล์อยู่บน OneDrive หรือ Dropbox ลองรอให้ sync เสร็จก่อน"
-    )]
+    #[error("cannot read {file} for hashing: {source}")]
     Io {
         /// ชื่อไฟล์ (ไม่ใช่ path เต็ม — docs/08 §5)
         file: String,

@@ -14,14 +14,13 @@ use directories::ProjectDirs;
 pub enum PathError {
     /// OS ไม่บอกว่า home directory อยู่ไหน
     #[error(
-        "หาโฟลเดอร์ข้อมูลผู้ใช้ไม่เจอ\n\
-         RefX ต้องใช้โฟลเดอร์นี้เก็บ cache ของภาพย่อ\n\
-         ตรวจว่าตัวแปรระบบ HOME (Linux) หรือ LOCALAPPDATA (Windows) ตั้งไว้ถูกต้อง"
+        "cannot locate the per-user data directory \
+         (check HOME on Linux, LOCALAPPDATA on Windows)"
     )]
     NoHomeDir,
 
     /// สร้างโฟลเดอร์ไม่ได้
-    #[error("สร้างโฟลเดอร์ {path} ไม่ได้: {source}\nตรวจสิทธิ์การเขียนหรือพื้นที่ว่างในไดรฟ์")]
+    #[error("cannot create directory {path}: {source}")]
     CreateDir {
         /// โฟลเดอร์ที่สร้างไม่สำเร็จ
         path: PathBuf,

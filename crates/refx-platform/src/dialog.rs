@@ -13,7 +13,7 @@ use std::path::PathBuf;
 #[derive(Debug, thiserror::Error)]
 pub enum DialogError {
     /// ผู้ใช้กดยกเลิก
-    #[error("ผู้ใช้ยกเลิกการเลือกไฟล์")]
+    #[error("file dialog cancelled by user")]
     Cancelled,
 }
 

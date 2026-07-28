@@ -12,6 +12,7 @@ use refx_asset::pool::DecodePool;
 use refx_core::view::Camera;
 
 use crate::shell::LoadProgress;
+use crate::text::{self, Key, Lang, Template};
 use refx_platform::redraw::RedrawReason;
 use refx_platform::window::{AppDelegate, WindowConfig};
 use refx_render::atlas::{ThumbnailAtlas, layers_for_budget};
@@ -349,7 +350,12 @@ impl RefxApp {
             stats: FrameStats::default(),
             bench_start: None,
             bench_done: false,
-            shell: crate::shell::ShellState::default(),
+            shell: crate::shell::ShellState {
+                // ★ อ่าน locale ของ OS ครั้งเดียวตอนเปิดโปรแกรม (docs/03 §0 ข้อ 3)
+                //   ไม่รู้จักภาษา → อังกฤษ · P5-3 จะให้ผู้ใช้เลือกทับได้
+                lang: Lang::from_system(),
+                ..crate::shell::ShellState::default()
+            },
             assets: None,
             cache_stats_rx: None,
             waker: None,
@@ -400,7 +406,11 @@ impl RefxApp {
                 cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             });
         }
-        self.shell.status = format!("กำลังเปิด {} ไฟล์…", self.drop_expected);
+        self.shell.status = text::fill(
+            self.shell.lang,
+            Template::OpeningFiles,
+            &[("n", &self.drop_expected.to_string())],
+        );
     }
 
     /// เปิด decode pool + IO thread
@@ -418,7 +428,7 @@ impl RefxApp {
             Err(err) => {
                 // เปิด cache ไม่ได้ไม่ใช่เหตุให้ล้ม — thumbnail สร้างใหม่ได้เสมอ
                 tracing::error!(%err, "เปิด cache ไม่ได้ — ทำงานต่อโดยไม่มี cache");
-                self.shell.status = "ใช้งานได้ แต่ไม่มี cache ภาพย่อ".to_owned();
+                self.shell.status = text::t(self.shell.lang, Key::RunningWithoutCache).to_owned();
                 (None, None)
             }
         };
@@ -478,7 +488,9 @@ impl RefxApp {
                 refx_asset::pool::JobResult::Failed { hash, reason } => {
                     // I-7: ภาพเสียหนึ่งไฟล์ = item ขึ้นสถานะ "โหลดไม่ได้" ไม่ใช่ crash
                     tracing::warn!(hash = %hash.short(), %reason, "เปิดภาพไม่ได้");
-                    self.shell.status = reason.to_string();
+                    // ★ `reason.to_string()` เป็นอังกฤษสำหรับ log เท่านั้น (docs/03 §0)
+                    //   ข้อความของผู้ใช้ประกอบจากฟิลด์ของ error แล้วแปลตามภาษา
+                    self.shell.status = text::job_failure(self.shell.lang, &reason);
                 }
             }
             finished += 1;
@@ -521,7 +533,7 @@ impl RefxApp {
                     }
                     Err(err) => {
                         tracing::warn!(%err, "เก็บภาพย่อลง atlas ไม่ได้");
-                        self.shell.status = err.to_string();
+                        self.shell.status = text::atlas_error(self.shell.lang, &err);
                     }
                 }
             }
@@ -543,10 +555,13 @@ impl RefxApp {
                     self.drop_expected,
                     elapsed.as_secs_f64() * 1000.0
                 );
-                self.shell.status = format!(
-                    "เปิด {} ไฟล์ใน {:.0} ms",
-                    self.drop_expected,
-                    elapsed.as_secs_f64() * 1000.0
+                self.shell.status = text::fill(
+                    self.shell.lang,
+                    Template::OpenedFiles,
+                    &[
+                        ("n", &self.drop_expected.to_string()),
+                        ("ms", &format!("{:.0}", elapsed.as_secs_f64() * 1000.0)),
+                    ],
                 );
             }
         }
@@ -1247,12 +1262,18 @@ mod tests {
                 total: 1000
             })
         );
+        // รูปแบบต้องตรงกับ docs/05 §6 และต้องเปลี่ยนตามภาษาจริง
         assert_eq!(
             tracker
                 .update(stats(1000, 312, 0, 0))
-                .map(LoadProgress::label),
-            Some("กำลังโหลด 312 / 1000".to_owned()),
-            "รูปแบบต้องตรงกับ docs/05 §6"
+                .map(|progress| progress.label(Lang::Th)),
+            Some("กำลังโหลด 312 / 1000".to_owned())
+        );
+        assert_eq!(
+            tracker
+                .update(stats(1000, 312, 0, 0))
+                .map(|progress| progress.label(Lang::En)),
+            Some("Loading 312 / 1000".to_owned())
         );
     }
 

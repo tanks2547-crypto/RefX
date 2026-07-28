@@ -15,14 +15,11 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, thiserror::Error)]
 pub enum SingleInstanceError {
     /// มี RefX เปิดอยู่แล้ว
-    #[error(
-        "RefX เปิดอยู่แล้ว\n\
-         สลับไปที่หน้าต่างเดิมได้เลย — เปิดสองหน้าต่างพร้อมกันจะทำให้ cache ของภาพย่อเสียหาย"
-    )]
+    #[error("another RefX instance already holds the lock")]
     AlreadyRunning,
 
     /// เปิด/สร้างไฟล์ lock ไม่ได้
-    #[error("สร้างไฟล์ lock ที่ {path} ไม่ได้: {source}\nตรวจสิทธิ์การเขียนของโฟลเดอร์ cache")]
+    #[error("cannot create lock file {path}: {source}")]
     Io {
         /// ไฟล์ lock ที่มีปัญหา
         path: PathBuf,

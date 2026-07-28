@@ -12,6 +12,8 @@
 
 use refx_core::view::Mode;
 
+use crate::text::{self, Key, Lang, Template};
+
 /// สถานะที่ shell ต้องอ่าน/เขียน
 ///
 /// P2+ จะขยายเป็น `App` เต็มที่มี board, selection, history
@@ -20,6 +22,10 @@ use refx_core::view::Mode;
 pub struct ShellState {
     /// mode ปัจจุบัน
     pub mode: Mode,
+    /// ★ ภาษาของ UI — ทุกข้อความที่ผู้ใช้เห็นต้องผ่าน `text::t`/`text::fill` ด้วยค่านี้
+    ///
+    /// อ่านจาก locale ของ OS ครั้งเดียวตอนเปิดโปรแกรม (docs/03 §0 ข้อ 3)
+    pub lang: Lang,
     /// ข้อความสถานะฝั่งซ้ายของ status bar
     pub status: String,
     /// จำนวน item บน board (ตอนนี้คือจำนวนสี่เหลี่ยมทดสอบ)
@@ -71,8 +77,15 @@ pub struct LoadProgress {
 impl LoadProgress {
     /// ข้อความที่ผู้ใช้เห็น — รูปแบบตาม docs/05 §6
     #[must_use]
-    pub fn label(self) -> String {
-        format!("กำลังโหลด {} / {}", self.done, self.total)
+    pub fn label(self, lang: Lang) -> String {
+        text::fill(
+            lang,
+            Template::Loading,
+            &[
+                ("done", &self.done.to_string()),
+                ("total", &self.total.to_string()),
+            ],
+        )
     }
 
     /// สัดส่วนที่เสร็จแล้ว `0.0..=1.0`
@@ -103,7 +116,8 @@ impl Default for ShellState {
     fn default() -> Self {
         Self {
             mode: Mode::default(),
-            status: "พร้อมใช้งาน".to_owned(),
+            lang: Lang::default(),
+            status: text::t(Lang::default(), Key::Ready).to_owned(),
             item_count: 0,
             zoom: 1.0,
             frames_drawn: 0,
@@ -133,19 +147,26 @@ pub fn draw_in_ui(
     state: &mut ShellState,
     viewport: impl FnOnce(&mut egui::Ui),
 ) -> egui::Rect {
+    // ★ อ่านครั้งเดียวต้นเฟรม — ทุก widget ข้างล่างใช้ค่าเดียวกัน
+    let lang = state.lang;
+
     // ---- แถวบน: board tabs ----
     egui::Panel::top("refx-tabs").show_inside(ui, |ui| {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("RefX").strong());
             ui.separator();
             // P4-7: หลาย board พร้อมกัน
-            let _ = ui.selectable_label(true, "board ที่ยังไม่ได้ตั้งชื่อ");
+            let _ = ui.selectable_label(true, text::t(lang, Key::UntitledBoard));
             if ui
                 .button("+")
-                .on_hover_text("เปิด board ใหม่ (P4-7)")
+                .on_hover_text(text::t(lang, Key::NewBoardHint))
                 .clicked()
             {
-                state.status = "ยังทำไม่ได้ — รอ P4-7".to_owned();
+                state.status = text::fill(
+                    lang,
+                    Template::NotImplemented,
+                    &[("what", text::t(lang, Key::NewBoardHint)), ("when", "P4-7")],
+                );
             }
         });
     });
@@ -160,7 +181,8 @@ pub fn draw_in_ui(
                     .clicked()
                 {
                     state.mode = mode;
-                    state.status = format!("สลับไปโหมด {}", mode.label());
+                    state.status =
+                        text::fill(lang, Template::SwitchedMode, &[("mode", mode.label())]);
                 }
             }
             ui.separator();
@@ -182,25 +204,40 @@ pub fn draw_in_ui(
                 ui.add(
                     egui::ProgressBar::new(progress.fraction())
                         .desired_width(120.0)
-                        .text(progress.label()),
+                        .text(progress.label(lang)),
                 );
             } else {
                 ui.label(&state.status);
             }
             ui.separator();
-            ui.label(format!("{} รายการ", state.item_count));
+            ui.label(text::fill(
+                lang,
+                Template::ItemCount,
+                &[("n", &state.item_count.to_string())],
+            ));
             ui.separator();
-            ui.label(format!("ซูม {:.0}%", state.zoom * 100.0));
+            ui.label(text::fill(
+                lang,
+                Template::Zoom,
+                &[("pct", &format!("{:.0}", state.zoom * 100.0))],
+            ));
             ui.separator();
             // I-1 ให้เห็นกับตา: ตัวเลขนี้ต้องหยุดนิ่งเมื่อไม่แตะอะไร
-            ui.label(format!("เฟรมที่วาด {}", state.frames_drawn));
+            ui.label(text::fill(
+                lang,
+                Template::FramesDrawn,
+                &[("n", &state.frames_drawn.to_string())],
+            ));
             ui.separator();
 
             // ★ I-6 ให้เห็นกับตา: RAM ที่ decode pool ใช้ เทียบกับเพดานรวมทุก worker
-            let ram = format!(
-                "RAM {} / {}",
-                human_bytes(state.ram_used as u64),
-                human_bytes(state.ram_limit as u64)
+            let ram = text::fill(
+                lang,
+                Template::Ram,
+                &[
+                    ("used", &human_bytes(state.ram_used as u64)),
+                    ("limit", &human_bytes(state.ram_limit as u64)),
+                ],
             );
             if state.ram_limit > 0 && state.ram_used * 10 > state.ram_limit * 9 {
                 // ใกล้เต็ม — ให้เห็นชัดว่ากำลังตึง
@@ -211,10 +248,13 @@ pub fn draw_in_ui(
 
             ui.separator();
             // ★ I-6: VRAM ต้องเห็นด้วยตาเหมือน RAM
-            let vram = format!(
-                "VRAM {} / {}",
-                human_bytes(state.vram_used as u64),
-                human_bytes(state.vram_limit as u64)
+            let vram = text::fill(
+                lang,
+                Template::Vram,
+                &[
+                    ("used", &human_bytes(state.vram_used as u64)),
+                    ("limit", &human_bytes(state.vram_limit as u64)),
+                ],
             );
             if state.vram_limit > 0 && state.vram_used * 10 > state.vram_limit * 9 {
                 ui.colored_label(egui::Color32::from_rgb(230, 160, 60), vram);
@@ -223,19 +263,30 @@ pub fn draw_in_ui(
             }
 
             ui.separator();
-            ui.label(format!(
-                "cache {} ภาพ ({})",
-                state.cache_thumbs,
-                human_bytes(state.cache_bytes)
+            ui.label(text::fill(
+                lang,
+                Template::CacheSummary,
+                &[
+                    ("n", &state.cache_thumbs.to_string()),
+                    ("size", &human_bytes(state.cache_bytes)),
+                ],
             ));
 
             if state.decode_queued > 0 {
                 ui.separator();
-                ui.label(format!("คิวถอดรหัส {}", state.decode_queued));
+                ui.label(text::fill(
+                    lang,
+                    Template::DecodeQueued,
+                    &[("n", &state.decode_queued.to_string())],
+                ));
             }
             if state.decode_cancelled > 0 {
                 ui.separator();
-                ui.label(format!("ยกเลิกไป {}", state.decode_cancelled));
+                ui.label(text::fill(
+                    lang,
+                    Template::DecodeCancelled,
+                    &[("n", &state.decode_cancelled.to_string())],
+                ));
             }
         });
     });
@@ -244,28 +295,28 @@ pub fn draw_in_ui(
     egui::Panel::left("refx-library")
         .default_size(200.0)
         .show_inside(ui, |ui| {
-            ui.heading("Library");
+            ui.heading(text::t(lang, Key::Library));
             ui.separator();
-            ui.label("โฟลเดอร์ภาพจะมาอยู่ตรงนี้");
-            ui.small("P1-8: ลากไฟล์เข้ามาได้");
+            ui.label(text::t(lang, Key::LibraryPlaceholder));
+            ui.small(text::t(lang, Key::LibraryDropHint));
         });
 
     // ---- ขวา: inspector ----
     egui::Panel::right("refx-inspector")
         .default_size(240.0)
         .show_inside(ui, |ui| {
-            ui.heading("Inspector");
+            ui.heading(text::t(lang, Key::Inspector));
             ui.separator();
             // docs/03 §1: inspector ปรับตัวตาม mode
             match state.mode {
                 Mode::Canvas => {
-                    ui.label("X / Y / W / H");
-                    ui.label("หมุน, ความทึบ, crop");
-                    ui.small("P2-5 ถึง P2-8");
+                    ui.label(text::t(lang, Key::InspectorCanvasGeometry));
+                    ui.label(text::t(lang, Key::InspectorCanvasTransform));
+                    ui.small("P2-5 … P2-8");
                 }
                 Mode::Arrange => {
-                    ui.label("แท็ก, เรตติ้ง, ป้ายสี");
-                    ui.label("กลุ่ม, โน้ต");
+                    ui.label(text::t(lang, Key::InspectorArrangeMeta));
+                    ui.label(text::t(lang, Key::InspectorArrangeGroup));
                     ui.small("P3-1");
                 }
             }
@@ -289,28 +340,40 @@ pub fn draw_in_ui(
 
 /// ปุ่มเครื่องมือของ Canvas mode
 fn canvas_tools(ui: &mut egui::Ui, state: &mut ShellState) {
-    for (label, hint) in [
-        ("เลือก", "P2-4"),
-        ("ย้าย", "P2-5"),
-        ("ครอป", "P2-7"),
-        ("ขาวดำ", "P2-8"),
+    let lang = state.lang;
+    for (key, when) in [
+        (Key::ToolSelect, "P2-4"),
+        (Key::ToolMove, "P2-5"),
+        (Key::ToolCrop, "P2-7"),
+        (Key::ToolGrayscale, "P2-8"),
     ] {
-        if ui.button(label).on_hover_text(hint).clicked() {
-            state.status = format!("เครื่องมือ {label} ยังทำไม่ได้ — รอ {hint}");
+        let label = text::t(lang, key);
+        if ui.button(label).on_hover_text(when).clicked() {
+            state.status = text::fill(
+                lang,
+                Template::NotImplemented,
+                &[("what", label), ("when", when)],
+            );
         }
     }
 }
 
 /// ปุ่มเครื่องมือของ Arrange mode
 fn arrange_tools(ui: &mut egui::Ui, state: &mut ShellState) {
-    for (label, hint) in [
-        ("เรียง", "P3-2"),
-        ("กรอง", "P3-4"),
-        ("ติดแท็ก", "P3-1"),
-        ("ส่งเข้า Canvas", "P3-5"),
+    let lang = state.lang;
+    for (key, when) in [
+        (Key::ToolSort, "P3-2"),
+        (Key::ToolFilter, "P3-4"),
+        (Key::ToolTag, "P3-1"),
+        (Key::ToolSendToCanvas, "P3-5"),
     ] {
-        if ui.button(label).on_hover_text(hint).clicked() {
-            state.status = format!("{label} ยังทำไม่ได้ — รอ {hint}");
+        let label = text::t(lang, key);
+        if ui.button(label).on_hover_text(when).clicked() {
+            state.status = text::fill(
+                lang,
+                Template::NotImplemented,
+                &[("what", label), ("when", when)],
+            );
         }
     }
 }

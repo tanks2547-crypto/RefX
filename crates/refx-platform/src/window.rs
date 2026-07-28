@@ -23,14 +23,11 @@ use crate::redraw::{RedrawReason, RedrawTracker};
 #[derive(Debug, thiserror::Error)]
 pub enum WindowError {
     /// สร้าง event loop ไม่ได้
-    #[error(
-        "เริ่มระบบหน้าต่างไม่ได้: {0}\n\
-         ตรวจว่ากำลังรันในเซสชันที่มีหน้าจอจริง (ไม่ใช่ SSH หรือ service)"
-    )]
+    #[error("cannot start the window event loop: {0}")]
     EventLoop(#[from] winit::error::EventLoopError),
 
     /// สร้างหน้าต่างไม่ได้
-    #[error("เปิดหน้าต่างไม่ได้: {0}\nลองอัปเดตไดรเวอร์การ์ดจอ แล้วเปิดโปรแกรมใหม่")]
+    #[error("cannot create the window: {0}")]
     Create(#[from] winit::error::OsError),
 }
 
@@ -390,7 +387,7 @@ mod tests {
     }
 
     #[derive(Debug, thiserror::Error)]
-    #[error("ไม่เกิดขึ้นในเทสต์")]
+    #[error("unreachable in tests")]
     struct NeverError;
 
     impl AppDelegate for IdleDelegate {

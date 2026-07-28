@@ -18,8 +18,7 @@ use crate::device::GpuCapabilities;
 pub enum VramError {
     /// เกินเพดาน VRAM ที่ตั้งไว้
     #[error(
-        "หน่วยความจำการ์ดจอไม่พอ (ขอ {requested_mb} MB, ใช้อยู่ {used_mb} MB จากเพดาน {limit_mb} MB)\n\
-         ลองปิด board ที่ไม่ได้ใช้ หรือเพิ่มเพดานหน่วยความจำในการตั้งค่า"
+        "VRAM budget exceeded: requested {requested_mb} MB, {used_mb} MB of {limit_mb} MB in use"
     )]
     OverBudget {
         /// ขนาดที่ขอ (MB)
