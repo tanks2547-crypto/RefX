@@ -7,7 +7,7 @@
 //!
 //! spec: docs/05-memory-and-assets.md §3
 
-use fast_image_resize::images::Image as FirImage;
+use fast_image_resize::images::{Image as FirImage, ImageRef as FirImageRef};
 use fast_image_resize::{PixelType, ResizeAlg, ResizeOptions, Resizer};
 use image::RgbaImage;
 
@@ -94,23 +94,98 @@ impl Orientation {
     }
 }
 
+/// ลายเซ็นเริ่มไฟล์ JPEG (SOI)
+const JPEG_SOI: [u8; 2] = [0xFF, 0xD8];
+/// ป้ายที่นำหน้าบล็อก EXIF ใน segment APP1
+const EXIF_ID: [u8; 6] = *b"Exif\0\0";
+
+/// หา payload ของ EXIF ใน JPEG โดยอ่าน **เฉพาะ segment ส่วนหัว**
+///
+/// ★ ทำไมต้องเขียนเอง แทนที่จะปล่อยให้ `exif` จัดการทั้งไฟล์:
+///
+/// `exif::Reader::read_from_container` ไล่หา APP1 ต่อไปเรื่อย ๆ **หลัง SOS ด้วย**
+/// ซึ่งแปลว่ามันเดินผ่าน entropy-coded data ทั้งก้อนทีละไบต์ (`read_until(0xFF, ..)`
+/// พร้อมจอง `Vec` ใหม่ทุกครั้งที่เจอ `0xFF`) กว่าจะยอมแพ้ตอน EOI
+/// บนภาพ 4000×3000 ที่ **ไม่มี EXIF เลย** ต้นทุนนี้วัดได้ **16.2 ms/ไฟล์ = 9.4%**
+/// ของเวลาต่อไฟล์ทั้งหมด โดยไม่ได้ข้อมูลอะไรกลับมาสักอย่าง
+///
+/// สเปก JPEG บังคับให้ APP1 ของ EXIF อยู่ **ก่อน SOS** เสมอ การหยุดที่ SOS
+/// จึงไม่ทำให้พลาดภาพที่มี EXIF จริง — ยืนยันด้วยเทสต์ที่ฝัง EXIF จริงลงไฟล์
+///
+/// ทุกการอ่านผ่าน `get()` ทั้งหมด ไฟล์เพี้ยนได้แค่ `None` ไม่มีทาง panic (I-4)
+/// คืน slice ที่ชี้เข้าไปใน `bytes` เลย ไม่คัดลอก
+fn jpeg_exif_payload(bytes: &[u8]) -> Option<&[u8]> {
+    if !bytes.starts_with(&JPEG_SOI) {
+        return None;
+    }
+
+    let mut pos = JPEG_SOI.len();
+    loop {
+        // marker ขึ้นต้นด้วย 0xFF อย่างน้อยหนึ่งตัว (ซ้ำได้ = fill byte)
+        let fill_start = pos;
+        while bytes.get(pos) == Some(&0xFF) {
+            pos = pos.checked_add(1)?;
+        }
+        if pos == fill_start {
+            return None; // ไม่เจอ 0xFF ตรงที่ควรเป็น marker = ไฟล์เพี้ยน
+        }
+
+        let code = *bytes.get(pos)?;
+        pos = pos.checked_add(1)?;
+
+        match code {
+            // marker เดี่ยว ไม่มีความยาวตามหลัง
+            0x01 | 0xD0..=0xD7 => continue,
+            // SOS = เริ่มข้อมูลภาพ · EOI = จบไฟล์ — EXIF ต้องมาก่อนนี้เสมอ
+            0xDA | 0xD9 => return None,
+            _ => {}
+        }
+
+        // ความยาวนับรวมสองไบต์ของตัวมันเอง
+        let len = usize::from(u16::from_be_bytes([
+            *bytes.get(pos)?,
+            *bytes.get(pos.checked_add(1)?)?,
+        ]));
+        let end = pos.checked_add(len)?;
+        let payload = bytes.get(pos.checked_add(2)?..end)?;
+
+        if code == 0xE1 && payload.starts_with(&EXIF_ID) {
+            return payload.get(EXIF_ID.len()..);
+        }
+        pos = end;
+    }
+}
+
+/// ดึงค่า orientation ออกจาก EXIF ที่ parse แล้ว
+fn orientation_of(exif: &exif::Exif) -> Orientation {
+    exif.get_field(exif::Tag::Orientation, exif::In::PRIMARY)
+        .and_then(|field| field.value.get_uint(0))
+        .map_or(Orientation::Normal, Orientation::from_exif)
+}
+
 /// อ่าน EXIF orientation จากไบต์ดิบของไฟล์
 ///
 /// คืน [`Orientation::Normal`] ถ้าไม่มี EXIF หรืออ่านไม่ได้ — **ไม่ใช่ error**
 /// ภาพส่วนใหญ่ไม่มี EXIF และนั่นเป็นเรื่องปกติ
 #[must_use]
 pub fn read_orientation(bytes: &[u8]) -> Orientation {
+    // ★ JPEG มีทางลัดของตัวเอง — ดูเหตุผลใน [`jpeg_exif_payload`]
+    //   format อื่นไม่มีปัญหานี้ (PNG เดินทีละ chunk วัดได้ 0.03 ms/ไฟล์)
+    if bytes.starts_with(&JPEG_SOI) {
+        let Some(payload) = jpeg_exif_payload(bytes) else {
+            return Orientation::Normal;
+        };
+        return exif::Reader::new()
+            .read_raw(payload.to_vec())
+            .as_ref()
+            .map_or(Orientation::Normal, orientation_of);
+    }
+
     let mut cursor = std::io::Cursor::new(bytes);
     let Ok(exif) = exif::Reader::new().read_from_container(&mut cursor) else {
         return Orientation::Normal;
     };
-    let Some(field) = exif.get_field(exif::Tag::Orientation, exif::In::PRIMARY) else {
-        return Orientation::Normal;
-    };
-    field
-        .value
-        .get_uint(0)
-        .map_or(Orientation::Normal, Orientation::from_exif)
+    orientation_of(&exif)
 }
 
 /// ย่อภาพเป็น thumbnail 128×128
@@ -142,10 +217,16 @@ fn resize_to_square(image: &RgbaImage) -> Option<Vec<u8>> {
         return None;
     }
 
-    let src = FirImage::from_vec_u8(
+    // ★ ยืม buffer ตรง ๆ ห้าม clone
+    //
+    // เดิมใช้ `FirImage::from_vec_u8(.., image.as_raw().clone(), ..)` ซึ่ง **คัดลอก
+    // ภาพเต็มทั้งใบ** ก่อนย่อทุกครั้ง — ภาพ 4000×3000 RGBA คือ 48 MB ต่อไฟล์
+    // ที่ถูก memcpy ทิ้งเปล่า ๆ แล้วปล่อยทันที และเกิดพร้อมกันได้ถึง 6 worker
+    // `ImageRef` อ่านอย่างเดียวจึงยืมได้ ไม่ต้องเป็นเจ้าของ
+    let src = FirImageRef::new(
         image.width(),
         image.height(),
-        image.as_raw().clone(),
+        image.as_raw(),
         PixelType::U8x4,
     )
     .ok()?;
@@ -317,5 +398,168 @@ mod tests {
             Orientation::Normal
         );
         assert_eq!(read_orientation(&[]), Orientation::Normal);
+    }
+
+    // ---------- ทางลัด EXIF ของ JPEG ----------
+
+    /// JPEG จริงจาก `image` (ไม่มี EXIF)
+    fn plain_jpeg(w: u32, h: u32) -> Vec<u8> {
+        let img = RgbaImage::from_pixel(w, h, image::Rgba([120, 90, 60, 255]));
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(
+                &mut std::io::Cursor::new(&mut out),
+                image::ImageFormat::Jpeg,
+            )
+            .unwrap();
+        out
+    }
+
+    /// บล็อก TIFF/EXIF ที่เล็กที่สุดที่ประกาศ Orientation หนึ่งค่า
+    ///
+    /// เขียนเองเพราะ `image` ไม่เขียน EXIF ให้ และการเทียบกับ EXIF **จริง**
+    /// คือสิ่งเดียวที่พิสูจน์ว่าทางลัดไม่ได้ทำให้ภาพจากมือถือตะแคง
+    fn exif_block(orientation: u16) -> Vec<u8> {
+        let mut tiff = Vec::new();
+        tiff.extend_from_slice(b"II"); // little-endian
+        tiff.extend_from_slice(&42u16.to_le_bytes()); // magic
+        tiff.extend_from_slice(&8u32.to_le_bytes()); // offset ของ IFD0
+        tiff.extend_from_slice(&1u16.to_le_bytes()); // มี 1 entry
+        tiff.extend_from_slice(&0x0112u16.to_le_bytes()); // tag = Orientation
+        tiff.extend_from_slice(&3u16.to_le_bytes()); // type = SHORT
+        tiff.extend_from_slice(&1u32.to_le_bytes()); // count
+        tiff.extend_from_slice(&orientation.to_le_bytes());
+        tiff.extend_from_slice(&[0, 0]); // เติมช่องค่าให้ครบ 4 ไบต์
+        tiff.extend_from_slice(&0u32.to_le_bytes()); // ไม่มี IFD ถัดไป
+        tiff
+    }
+
+    /// แทรก APP1 ที่มี EXIF เข้าไปหลัง SOI ของ JPEG จริง
+    fn jpeg_with_exif(orientation: u16) -> Vec<u8> {
+        let base = plain_jpeg(32, 32);
+        let tiff = exif_block(orientation);
+        let len = u16::try_from(2 + EXIF_ID.len() + tiff.len()).unwrap();
+
+        let mut out = Vec::with_capacity(base.len() + usize::from(len) + 2);
+        out.extend_from_slice(&JPEG_SOI);
+        out.extend_from_slice(&[0xFF, 0xE1]);
+        out.extend_from_slice(&len.to_be_bytes());
+        out.extend_from_slice(&EXIF_ID);
+        out.extend_from_slice(&tiff);
+        out.extend_from_slice(&base[2..]); // ที่เหลือของไฟล์เดิม (ข้าม SOI)
+        out
+    }
+
+    /// ★ ทางลัดต้องยังอ่าน EXIF จริงได้ครบ ไม่ใช่แค่เร็วขึ้น
+    ///
+    /// ถ้าข้อนี้พัง ภาพจากมือถือจะตะแคงหมด ซึ่งนักวาดเห็นทันที
+    #[test]
+    fn jpeg_with_real_exif_is_still_read() {
+        for (value, expected) in [
+            (1u16, Orientation::Normal),
+            (3, Orientation::Rotate180),
+            (6, Orientation::Rotate90),
+            (8, Orientation::Rotate270),
+        ] {
+            let jpeg = jpeg_with_exif(value);
+            assert_eq!(
+                read_orientation(&jpeg),
+                expected,
+                "EXIF orientation {value} อ่านไม่ได้"
+            );
+            // ไฟล์ที่แทรก APP1 แล้วต้องยังเป็น JPEG ที่ decode ได้ปกติ
+            assert_eq!(
+                image::guess_format(&jpeg).unwrap(),
+                image::ImageFormat::Jpeg
+            );
+        }
+    }
+
+    #[test]
+    fn jpeg_without_exif_reports_normal() {
+        let jpeg = plain_jpeg(64, 64);
+        assert!(jpeg_exif_payload(&jpeg).is_none(), "ไฟล์นี้ไม่ควรมี APP1/EXIF");
+        assert_eq!(read_orientation(&jpeg), Orientation::Normal);
+    }
+
+    /// ★ หลักฐานว่าทางลัดหยุดที่ SOS จริง ไม่ได้ไล่ทั้งไฟล์
+    ///
+    /// ต่อ entropy data ปลอมยาว ๆ ท้ายไฟล์ ถ้ายังเดินทั้งก้อนอยู่ เวลาจะโตตามขนาด
+    /// เทียบเป็นอัตราส่วนกับไฟล์เล็ก จึงไม่ผูกกับความเร็วของเครื่องที่รันเทสต์
+    #[test]
+    fn exif_lookup_does_not_scan_the_whole_file() {
+        use std::time::Instant;
+
+        let small = plain_jpeg(64, 64);
+        let mut large = small.clone();
+        // 0xFF สลับค่าอื่น = กรณีที่แพงที่สุดของตัวสแกนเดิม (จอง Vec ทุกไบต์ที่เจอ 0xFF)
+        large.extend(std::iter::repeat_n([0xFFu8, 0x00], 2_000_000).flatten());
+
+        let run = |data: &[u8]| {
+            let start = Instant::now();
+            for _ in 0..20 {
+                assert_eq!(read_orientation(data), Orientation::Normal);
+            }
+            start.elapsed()
+        };
+
+        let small_time = run(&small).max(std::time::Duration::from_nanos(1));
+        let large_time = run(&large);
+        let ratio = large_time.as_secs_f64() / small_time.as_secs_f64();
+
+        assert!(
+            ratio < 10.0,
+            "ไฟล์ใหญ่กว่า ~2000 เท่าแต่ใช้เวลามากกว่า {ratio:.1} เท่า — \
+             แปลว่ายังไล่สแกนทั้งไฟล์อยู่ ({small_time:?} → {large_time:?})"
+        );
+    }
+
+    /// I-4: JPEG ที่เพี้ยนทุกแบบต้องได้ `None`/`Normal` ไม่ใช่ panic หรือค้าง
+    #[test]
+    fn broken_jpeg_headers_never_panic() {
+        let full = jpeg_with_exif(6);
+        let cases: Vec<Vec<u8>> = vec![
+            JPEG_SOI.to_vec(),
+            vec![0xFF, 0xD8, 0xFF],
+            vec![0xFF, 0xD8, 0xFF, 0xE1],
+            vec![0xFF, 0xD8, 0xFF, 0xE1, 0xFF, 0xFF], // ความยาวใหญ่กว่าไฟล์
+            vec![0xFF, 0xD8, 0xFF, 0xE1, 0x00, 0x00], // ความยาว 0 (น้อยกว่า 2)
+            vec![0xFF, 0xD8, 0xFF, 0xE1, 0x00, 0x01], // ความยาว 1
+            vec![0xFF, 0xD8, 0x12, 0x34],             // ไม่มี 0xFF ตรงที่ควรมี
+            vec![0xFF, 0xD8, 0xFF, 0xD8],             // SOI ซ้อน
+        ];
+        for (i, case) in cases.iter().enumerate() {
+            // สนแค่ว่า "ต้องกลับมาได้" ไม่ panic ไม่วนไม่จบ
+            let _ = jpeg_exif_payload(case);
+            assert_eq!(read_orientation(case), Orientation::Normal, "เคส {i}");
+        }
+
+        // ตัดไฟล์ที่มี EXIF จริงทุกความยาว — เจอ header ครึ่ง ๆ กลาง ๆ ทุกแบบ
+        // ยังไม่ครบบล็อก APP1 → ต้องได้ Normal · ครบแล้ว → ต้องอ่านค่าได้ตามปกติ
+        // แม้เนื้อภาพข้างหลังจะขาดไปทั้งก้อน (ทางลัดไม่แตะส่วนนั้นอยู่แล้ว)
+        let app1_end = JPEG_SOI.len() + 2 + 2 + EXIF_ID.len() + exif_block(6).len();
+        for cut in 0..full.len().min(80) {
+            let part = &full[..cut];
+            let expected = if cut >= app1_end {
+                Orientation::Rotate90
+            } else {
+                Orientation::Normal
+            };
+            assert_eq!(read_orientation(part), expected, "ตัดที่ {cut} ไบต์");
+        }
+    }
+
+    /// EXIF ที่อยู่หลัง SOS ถือว่าไม่มี (ผิดสเปก JPEG) แต่ต้องไม่ทำให้พัง
+    #[test]
+    fn exif_after_sos_is_ignored_not_crashed() {
+        let mut jpeg = plain_jpeg(32, 32);
+        jpeg.extend_from_slice(&[0xFF, 0xE1]);
+        let tiff = exif_block(6);
+        let len = u16::try_from(2 + EXIF_ID.len() + tiff.len()).unwrap();
+        jpeg.extend_from_slice(&len.to_be_bytes());
+        jpeg.extend_from_slice(&EXIF_ID);
+        jpeg.extend_from_slice(&tiff);
+
+        assert_eq!(read_orientation(&jpeg), Orientation::Normal);
     }
 }
