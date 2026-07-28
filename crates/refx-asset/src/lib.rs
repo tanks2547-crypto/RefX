@@ -9,4 +9,6 @@ pub mod cache; // cache.sqlite (IO thread เดียว)
 pub mod decode; // decode_guarded: limit + catch_unwind (I-7)
 pub mod hash; // blake3 content hash
 pub mod pool; // decode worker pool + priority queue + cancellation
-pub mod thumb; // EXIF orientation + resize Lanczos3 (RGBA8 เท่านั้น — ตัด BC7 แล้ว)
+pub mod resize; // ★ ทางเดียวที่เรียก fast_image_resize (ดูเหตุผลในไฟล์)
+pub mod thumb;
+pub mod working; // working texture ชั้น B — ภาพความละเอียดกลางตอนซูมเข้า (docs/04 §4) // EXIF orientation + resize Lanczos3 (RGBA8 เท่านั้น — ตัด BC7 แล้ว)

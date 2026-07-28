@@ -195,6 +195,8 @@ pub enum Template {
     DecodeQueued,
     /// `{n}` — งาน decode ที่ถูกยกเลิกไปแล้ว
     DecodeCancelled,
+    /// `{used}` `{limit}` `{calls}` `{evicted}` — working texture ชั้น B (docs/04 §4)
+    WorkingTextures,
     /// `{done}` `{total}` — ความคืบหน้าการโหลด (docs/05 §6 เงื่อนไขข้อ 3)
     Loading,
     /// `{n}` — กำลังเปิดไฟล์กี่ไฟล์
@@ -242,6 +244,7 @@ fn template_en(template: Template) -> &'static str {
         Template::CacheSummary => "Cache {n} images ({size})",
         Template::DecodeQueued => "Decode queue {n}",
         Template::DecodeCancelled => "Cancelled {n}",
+        Template::WorkingTextures => "Sharp {used} / {limit} · {calls} draws · {evicted} evicted",
         Template::Loading => "Loading {done} / {total}",
         Template::OpeningFiles => "Opening {n} files…",
         Template::OpenedFiles => "Opened {n} files in {ms} ms",
@@ -307,6 +310,7 @@ fn template_th(template: Template) -> Option<&'static str> {
         Template::CacheSummary => "cache {n} ภาพ ({size})",
         Template::DecodeQueued => "คิวถอดรหัส {n}",
         Template::DecodeCancelled => "ยกเลิกไป {n}",
+        Template::WorkingTextures => "ภาพคม {used} / {limit} · วาด {calls} ครั้ง · ไล่ออก {evicted}",
         Template::Loading => "กำลังโหลด {done} / {total}",
         Template::OpeningFiles => "กำลังเปิด {n} ไฟล์…",
         Template::OpenedFiles => "เปิด {n} ไฟล์ใน {ms} ms",
@@ -512,6 +516,7 @@ mod tests {
         Template::CacheSummary,
         Template::DecodeQueued,
         Template::DecodeCancelled,
+        Template::WorkingTextures,
         Template::Loading,
         Template::OpeningFiles,
         Template::OpenedFiles,

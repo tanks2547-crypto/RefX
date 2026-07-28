@@ -27,6 +27,7 @@ use crate::decode::{
 };
 use crate::hash::{ContentHash, hash_file};
 use crate::thumb::{Thumbnail, make_thumbnail, read_orientation};
+use crate::working::{self, WorkingImage};
 
 /// เวลาสูงสุดต่อ job ก่อนถือว่า timeout (docs/05 §3)
 pub const DECODE_TIMEOUT: Duration = Duration::from_secs(20);
@@ -90,6 +91,23 @@ impl WakeHandle {
     }
 }
 
+/// งานนี้ต้องการผลลัพธ์แบบไหน
+///
+/// ทั้งสองแบบใช้เกราะ decode ชุดเดียวกันหมด ต่างกันแค่ขั้นย่อขนาดตอนท้าย
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobTarget {
+    /// ภาพย่อ 128 px สำหรับ atlas — ผ่าน cache.sqlite
+    Thumbnail,
+    /// working texture ชั้น B พร้อม mip chain (docs/04 §4)
+    ///
+    /// **ไม่ผ่าน cache.sqlite** — schema ของ cache เก็บ thumbnail 128 px เท่านั้น
+    /// และภาพขนาดนี้ decode ใหม่เร็วกว่าการขยาย schema ให้รองรับหลายขนาด
+    Working {
+        /// ความกว้าง/สูงเป้าหมาย (power of two)
+        size: u32,
+    },
+}
+
 /// งาน decode หนึ่งชิ้น
 #[derive(Debug, Clone)]
 pub struct Job {
@@ -103,6 +121,8 @@ pub struct Job {
     pub priority: f32,
     /// ธงยกเลิก — ตั้งเป็น `true` เมื่อภาพหลุดออกนอก viewport
     pub cancel: Arc<AtomicBool>,
+    /// ต้องการผลลัพธ์แบบไหน
+    pub target: JobTarget,
 }
 
 /// เหตุผลที่ decode ไม่สำเร็จ
@@ -136,6 +156,15 @@ pub enum JobResult {
         /// เวลาที่ใช้ตั้งแต่หยิบงานจนเสร็จ
         elapsed: Duration,
     },
+    /// working texture พร้อมใช้ (docs/04 §4 ชั้น B)
+    Working {
+        /// คีย์ของภาพ
+        hash: ContentHash,
+        /// ภาพความละเอียดกลางพร้อม mip chain
+        image: Box<WorkingImage>,
+        /// เวลาที่ใช้ตั้งแต่หยิบงานจนเสร็จ
+        elapsed: Duration,
+    },
     /// ถูกยกเลิกก่อนหรือระหว่างทำ (ผู้ใช้ pan ผ่านไปแล้ว)
     Cancelled {
         /// คีย์ของภาพ
@@ -155,7 +184,10 @@ impl JobResult {
     #[must_use]
     pub fn hash(&self) -> ContentHash {
         match self {
-            Self::Done { hash, .. } | Self::Cancelled { hash } | Self::Failed { hash, .. } => *hash,
+            Self::Done { hash, .. }
+            | Self::Working { hash, .. }
+            | Self::Cancelled { hash }
+            | Self::Failed { hash, .. } => *hash,
         }
     }
 }
@@ -480,7 +512,7 @@ fn worker_loop(
         let result = run_job(&job, budget, limits, stats, io);
 
         match &result {
-            JobResult::Done { .. } => {
+            JobResult::Done { .. } | JobResult::Working { .. } => {
                 stats.completed.fetch_add(1, AtomicOrdering::Relaxed);
             }
             JobResult::Cancelled { .. } => {
@@ -525,7 +557,11 @@ fn run_job(
 
     // ★ ถาม cache ก่อน — เจอแล้วไม่ต้องอ่านไฟล์ ไม่ต้อง decode เลย
     //   นี่คือเส้นทางที่ผู้ใช้เจอทุกวัน (เปิดไฟล์เดิมซ้ำ ๆ)
-    let lookup = cache_lookup(job, io);
+    //   working texture ข้ามขั้นนี้ — cache เก็บแต่ thumbnail 128 px (docs/05 §5)
+    let lookup = match job.target {
+        JobTarget::Thumbnail => cache_lookup(job, io),
+        JobTarget::Working { .. } => CacheLookup::Unavailable,
+    };
     if let CacheLookup::Hit(thumb) = lookup {
         return JobResult::Done {
             hash: job.hash,
@@ -581,6 +617,30 @@ fn run_job(
 
     // ขั้น 5: แก้ EXIF orientation — ภาพจากมือถือจะตะแคงถ้าไม่ทำ
     let image = read_orientation(&bytes).apply(image);
+
+    // ★ working texture แยกทางตรงนี้ — ใช้เกราะทุกชั้นร่วมกันมาจนถึงจุดนี้
+    if let JobTarget::Working { size } = job.target {
+        let built = working::build(&image, size);
+        drop(image);
+        let elapsed = started.elapsed();
+
+        // ยกเลิกกลางทางได้ — ผู้ใช้ซูมออกไปแล้วก็ไม่ต้องส่งของหนักกลับไป
+        if job.cancel.load(AtomicOrdering::Relaxed) {
+            return JobResult::Cancelled { hash: job.hash };
+        }
+        return match built {
+            Some(image) => JobResult::Working {
+                hash: job.hash,
+                image: Box::new(image),
+                elapsed,
+            },
+            None => {
+                tracing::warn!(file, size, "สร้าง working texture ไม่สำเร็จ");
+                JobResult::Cancelled { hash: job.hash }
+            }
+        };
+    }
+
     // ขั้น 6: ย่อเป็น thumbnail (Lanczos3) — ทำบน worker ไม่ใช่ UI thread
     // ขั้น 7 (BC7) ถูกตัดออกจาก P1 แล้ว — docs/04 §4
     let thumb = make_thumbnail(&image);
@@ -759,6 +819,7 @@ mod tests {
             path,
             priority,
             cancel: Arc::new(AtomicBool::new(false)),
+            target: JobTarget::Thumbnail,
         }
     }
 
@@ -822,7 +883,7 @@ mod tests {
             {
                 JobResult::Failed { .. } => failed += 1,
                 JobResult::Done { .. } => done += 1,
-                JobResult::Cancelled { .. } => {}
+                JobResult::Working { .. } | JobResult::Cancelled { .. } => {}
             }
         }
         assert_eq!((failed, done), (1, 1), "ไฟล์เสียต้องไม่ลากไฟล์ดีลงไปด้วย");
@@ -883,6 +944,7 @@ mod tests {
                 path: path.clone(),
                 priority: i as f32,
                 cancel: Arc::clone(flag),
+                target: JobTarget::Thumbnail,
             });
         }
 
@@ -917,6 +979,7 @@ mod tests {
                 path: path.clone(),
                 priority,
                 cancel: Arc::new(AtomicBool::new(false)),
+                target: JobTarget::Thumbnail,
             });
         }
 
@@ -965,6 +1028,7 @@ mod tests {
                 path: path.clone(),
                 priority: i as f32,
                 cancel: Arc::new(AtomicBool::new(false)),
+                target: JobTarget::Thumbnail,
             });
         }
         for _ in 0..40 {
@@ -987,6 +1051,7 @@ mod tests {
                 path: path.clone(),
                 priority: i as f32,
                 cancel: Arc::new(AtomicBool::new(false)),
+                target: JobTarget::Thumbnail,
             });
         }
         // drop ทั้งที่ยังมีงานค้าง — ต้องไม่ค้าง (คิวถูกล้างแล้ว join)

@@ -8,4 +8,5 @@ pub mod atlas; // Texture2DArray สำหรับ thumbnail + free-list
 pub mod device; // สร้าง device/surface + กู้จาก device lost (P0-5 — ทำก่อนอย่างอื่น)
 pub mod instance; // QuadInstance (64 B) + instance buffer แบบ pre-allocated
 pub mod pipeline; // render pipeline + quad.wgsl
-pub mod texture; // working / full-res texture + mipmap
+pub mod texture;
+pub mod working; // working texture ชั้น B — texture แยกต่อภาพตอนซูมเข้า (docs/04 §4) // working / full-res texture + mipmap

@@ -18,8 +18,10 @@ use refx_platform::window::{AppDelegate, WindowConfig};
 use refx_render::atlas::{AtlasError, AtlasSlot, ThumbnailAtlas, layers_for_budget};
 use refx_render::device::{DeviceError, FrameStatus, RenderContext, RenderOptions};
 use refx_render::instance::QuadInstance;
+use refx_render::pipeline::DrawBatch;
 use refx_render::pipeline::{CameraUniform, QuadPipeline};
 use refx_render::texture::TextureAllocator;
+use refx_render::working::{WorkingCache, WorkingKey};
 use winit::event::WindowEvent;
 use winit::window::Window;
 
@@ -190,7 +192,17 @@ struct Gfx {
     ///
     /// เก็บ pixel ไว้ใน RAM เลยเพราะ 128×128×4 = 64 KB ต่อภาพ
     /// (1000 ภาพ = 64 MB ซึ่งยังอยู่ในงบ) และเร็วกว่าอ่านกลับจาก sqlite มาก
-    board_thumbs: Vec<refx_asset::thumb::Thumbnail>,
+    board_items: Vec<BoardItem>,
+    /// ★ working texture ชั้น B — texture แยกต่อภาพตอนซูมเข้า (docs/04 §4)
+    ///
+    /// ครึ่งบนของงบ VRAM · อีกครึ่งเป็นของ atlas
+    working: WorkingCache,
+    /// คีย์ที่สั่ง decode ไปแล้วแต่ยังไม่ได้ผลกลับ
+    ///
+    /// ★ ถ้าไม่มีตัวนี้ ทุกเฟรมระหว่างซูมจะสั่งงานเดิมซ้ำจนคิวท่วมและเผา CPU ทิ้ง
+    working_pending: std::collections::HashSet<WorkingKey>,
+    /// batch ที่จะวาดเฟรมนี้ — เก็บไว้เป็นฟิลด์เพื่อไม่ต้องจองใหม่ทุกเฟรม
+    working_quads: Vec<(WorkingKey, QuadInstance)>,
     /// กล้อง pan/zoom (P0-7)
     camera: Camera,
     /// ★ กรอบของช่อง canvas จริง (physical pixel) — **ไม่ใช่ขนาดหน้าต่างทั้งบาน**
@@ -235,6 +247,18 @@ impl LoadTracker {
             total: total.saturating_sub(self.base),
         })
     }
+}
+
+/// หนึ่งภาพบน board — ทุกอย่างที่ต้องรู้เพื่อวาดและเพื่อขอภาพคมกว่าเดิม
+///
+/// P2 จะแทนที่ด้วย `Board`/`Item` ตัวจริงจาก `refx-core` ตอนนี้เก็บเท่าที่ P1-7 ต้องใช้
+struct BoardItem {
+    /// ไฟล์ต้นทาง — ต้องเก็บไว้เพราะ working texture ต้อง decode ใหม่จากไฟล์จริง
+    path: std::path::PathBuf,
+    /// คีย์ของภาพ (ใช้เป็นคีย์ของ working cache ด้วย)
+    hash: refx_asset::hash::ContentHash,
+    /// ภาพย่อ 128 px — เก็บไว้เติม atlas กลับหลังกู้ device หรือหลังขยาย atlas
+    thumb: refx_asset::thumb::Thumbnail,
 }
 
 /// กรอบของช่อง canvas ในหน่วย physical pixel
@@ -334,6 +358,10 @@ pub struct RefxApp {
     pending_drops: Vec<std::path::PathBuf>,
     /// แปลงสถิติสะสมของ pool เป็นความคืบหน้าของงวดปัจจุบัน
     loading: LoadTracker,
+    /// path ของงานที่ส่งเข้า pool — ผลลัพธ์กลับมาพร้อม hash เท่านั้น
+    ///
+    /// working texture ต้อง decode ใหม่จากไฟล์จริง จึงต้องจำ path ไว้จับคู่
+    job_paths: std::collections::HashMap<refx_asset::hash::ContentHash, std::path::PathBuf>,
 }
 
 /// ส่วนที่จัดการภาพ — อยู่คนละโลกกับ GPU
@@ -372,6 +400,7 @@ impl RefxApp {
             drop_reported: true,
             pending_drops: Vec::new(),
             loading: LoadTracker::default(),
+            job_paths: std::collections::HashMap::new(),
         }
     }
 
@@ -388,9 +417,9 @@ impl RefxApp {
     /// **ไม่แตะดิสก์บน UI thread เลย** (I-2) — แค่ส่ง path เข้าคิว
     /// การอ่านไฟล์/hash/decode เกิดบน worker ทั้งหมด
     fn submit_dropped(&mut self, paths: Vec<std::path::PathBuf>) {
-        let Some(assets) = self.assets.as_ref() else {
+        if self.assets.is_none() {
             return;
-        };
+        }
         if paths.is_empty() {
             return;
         }
@@ -401,17 +430,25 @@ impl RefxApp {
         self.drop_shown = 0;
         self.drop_reported = false;
 
+        let mut submitted = Vec::with_capacity(paths.len());
         for (i, path) in paths.into_iter().enumerate() {
             // hash จาก path ไปก่อน — hash เนื้อไฟล์จริงเกิดบน worker (P1-2)
             // ที่นี่ต้องการแค่คีย์ชั่วคราวไว้จับคู่ผลลัพธ์
             let hash = refx_asset::hash::hash_bytes(path.to_string_lossy().as_bytes());
-            assets.pool.submit(refx_asset::pool::Job {
+            self.job_paths.insert(hash, path.clone());
+            submitted.push(refx_asset::pool::Job {
                 hash,
                 path,
                 // ยังไม่มี layout จริง → เรียงตามลำดับที่ลากเข้ามา
                 priority: i as f32,
                 cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                target: refx_asset::pool::JobTarget::Thumbnail,
             });
+        }
+        if let Some(assets) = self.assets.as_ref() {
+            for job in submitted {
+                assets.pool.submit(job);
+            }
         }
         self.shell.status = text::fill(
             self.shell.lang,
@@ -481,6 +518,10 @@ impl RefxApp {
 
         let mut finished = 0u32;
         let mut done = Vec::new();
+        let mut ready: Vec<(
+            refx_asset::hash::ContentHash,
+            Box<refx_asset::working::WorkingImage>,
+        )> = Vec::new();
         while let Some(result) = assets.pool.try_recv() {
             match result {
                 refx_asset::pool::JobResult::Done {
@@ -489,7 +530,19 @@ impl RefxApp {
                     elapsed,
                 } => {
                     tracing::debug!(hash = %hash.short(), ?elapsed, "ถอดรหัสภาพเสร็จ");
-                    done.push(thumb);
+                    let path = self.job_paths.get(&hash).cloned().unwrap_or_default();
+                    done.push((hash, path, thumb));
+                }
+                refx_asset::pool::JobResult::Working {
+                    hash,
+                    image,
+                    elapsed,
+                } => {
+                    tracing::debug!(
+                        hash = %hash.short(), size = image.size, ?elapsed,
+                        "working texture พร้อมแล้ว"
+                    );
+                    ready.push((hash, image));
                 }
                 refx_asset::pool::JobResult::Cancelled { .. } => {}
                 refx_asset::pool::JobResult::Failed { hash, reason } => {
@@ -503,11 +556,35 @@ impl RefxApp {
             finished += 1;
         }
 
+        // ---- working texture ที่ decode เสร็จ → ขึ้น VRAM ----
+        if !ready.is_empty()
+            && let Some(gfx) = self.gfx.as_mut()
+        {
+            for (hash, image) in ready {
+                let key = WorkingKey {
+                    hash: *hash.as_bytes(),
+                    size: image.size,
+                };
+                gfx.working_pending.remove(&key);
+                let layout = gfx.atlas.bind_group_layout();
+                if let Err(err) = gfx.working.insert(
+                    gfx.render.device(),
+                    gfx.render.queue(),
+                    layout,
+                    key,
+                    &image.levels,
+                ) {
+                    // ไม่พอก็ใช้ thumbnail ต่อไป — ภาพยังขึ้น แค่เบลอกว่า
+                    tracing::warn!(%err, size = key.size, "อัปโหลด working texture ไม่ได้");
+                }
+            }
+        }
+
         // อัดขึ้น atlas แล้ววาง quad ให้เห็นบน canvas
         if !done.is_empty()
             && let Some(gfx) = self.gfx.as_mut()
         {
-            for thumb in done {
+            for (hash, path, thumb) in done {
                 match Self::upload_thumb(gfx, &thumb.pixels) {
                     Ok(slot) => {
                         // จัดเป็นตารางง่าย ๆ ไปก่อน — layout จริงมาใน P2/P3
@@ -532,7 +609,11 @@ impl RefxApp {
                             layer: slot.layer,
                             flags: 0, // มี texture จริงแล้ว ไม่ใช่ placeholder
                         });
-                        gfx.board_thumbs.push(*thumb);
+                        gfx.board_items.push(BoardItem {
+                            path,
+                            hash,
+                            thumb: *thumb,
+                        });
                         self.drop_shown += 1;
                     }
                     Err(err) => {
@@ -694,6 +775,82 @@ impl RefxApp {
         }
     }
 
+    /// เลือกว่าเฟรมนี้ภาพไหนควรใช้ working texture แล้วสั่ง decode ตัวที่ยังไม่มี
+    ///
+    /// เรียกก่อนวาดทุกเฟรม — แต่ **ไม่ขอเฟรมใหม่เอง** (I-1) เฟรมเกิดเพราะผู้ใช้
+    /// ขยับหรือเพราะ worker ปลุกเมื่อมีของใหม่เท่านั้น ซูมนิ่งแล้วจึงกลับไป idle
+    ///
+    /// docs/04 §4 ชั้น B: ภาพที่ขนาดบนจอ > 128 px ขอ texture แยกที่ pow2 พอดีขนาดบนจอ
+    fn plan_working_textures(&mut self) {
+        let Some(gfx) = self.gfx.as_mut() else {
+            return;
+        };
+        gfx.working_quads.clear();
+        if gfx.board_items.is_empty() {
+            return;
+        }
+
+        let zoom = gfx.camera.zoom();
+        let viewport = gfx.canvas.size;
+        let centre = gfx.camera.center();
+        let mut requests: Vec<refx_asset::pool::Job> = Vec::new();
+
+        for (index, item) in gfx.board_items.iter().enumerate() {
+            let Some(quad) = gfx.quads.get(index) else {
+                break;
+            };
+            // ขนาดบนจอ = ขนาดใน world × ซูม (transform[0] และ [3] คือสเกล)
+            let world_side = quad.transform[0].abs().max(quad.transform[3].abs());
+            let on_screen = world_side * zoom;
+
+            let source_side = item.thumb.source_width.max(item.thumb.source_height);
+            let Some(size) = refx_asset::working::working_size_for(on_screen, source_side) else {
+                continue;
+            };
+
+            // ★ นอกจอไม่ต้องขอ — เกณฑ์เดียวกับ culling คือกึ่งกลาง item เทียบ viewport
+            //   ถ้าไม่กรอง การซูมเข้าลึก ๆ จะสั่ง decode ทั้ง board ทั้งที่เห็นไม่กี่ใบ
+            let item_centre = glam::Vec2::new(
+                quad.transform[4] + quad.transform[0] * 0.5,
+                quad.transform[5] + quad.transform[3] * 0.5,
+            );
+            let offset = (item_centre - centre) * zoom;
+            let margin = viewport * 0.5 + glam::Vec2::splat(world_side * zoom);
+            if offset.x.abs() > margin.x || offset.y.abs() > margin.y {
+                continue;
+            }
+
+            let key = WorkingKey {
+                hash: *item.hash.as_bytes(),
+                size,
+            };
+            if gfx.working.contains(key) {
+                gfx.working_quads.push((key, *quad));
+                continue;
+            }
+            if gfx.working_pending.insert(key) {
+                requests.push(refx_asset::pool::Job {
+                    hash: item.hash,
+                    path: item.path.clone(),
+                    // ภาพที่อยู่ใกล้กึ่งกลางจอมาก่อน (docs/05 §3)
+                    priority: offset.length(),
+                    cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    target: refx_asset::pool::JobTarget::Working { size },
+                });
+            }
+        }
+
+        if requests.is_empty() {
+            return;
+        }
+        if let Some(assets) = self.assets.as_ref() {
+            tracing::debug!(count = requests.len(), "สั่ง decode working texture");
+            for job in requests {
+                assets.pool.submit(job);
+            }
+        }
+    }
+
     /// อัด thumbnail ของทุก item กลับขึ้น atlas ที่เพิ่งสร้างใหม่
     ///
     /// เรียกจากสองที่ที่ทำให้ texture เดิมหายไป: กู้ device (P0-5) และขยาย atlas
@@ -702,13 +859,14 @@ impl RefxApp {
     /// ระหว่างที่ยังเติมไม่ครบ item ที่เหลือถูกทำเป็น **placeholder สีเด่น**
     /// ไม่ใช่ช่องว่าง (docs/04 §4, §8) — ผู้ใช้ต้องเห็นว่า layout ยังอยู่ครบ
     fn refill_atlas(gfx: &mut Gfx) {
-        if gfx.board_thumbs.is_empty() {
+        if gfx.board_items.is_empty() {
             return;
         }
         let started = std::time::Instant::now();
         let mut restored = 0usize;
 
-        for (index, thumb) in gfx.board_thumbs.iter().enumerate() {
+        for (index, item) in gfx.board_items.iter().enumerate() {
+            let thumb = &item.thumb;
             let Some(quad) = gfx.quads.get_mut(index) else {
                 break;
             };
@@ -738,7 +896,7 @@ impl RefxApp {
 
         tracing::info!(
             restored,
-            total = gfx.board_thumbs.len(),
+            total = gfx.board_items.len(),
             ms = started.elapsed().as_secs_f64() * 1000.0,
             "เติมภาพย่อกลับขึ้น atlas ที่สร้างใหม่"
         );
@@ -779,6 +937,8 @@ impl AppDelegate for RefxApp {
         // ★ ตัวเลขนี้เป็น **เพดาน** ไม่ใช่การจองจริง — atlas จองทีละ layer
         //   ตอนมีภาพเข้ามาจริง เปิดโปรแกรมเปล่าจึงกิน VRAM ≈ 0 (docs/05 §2)
         let atlas_budget = textures.budget().limit() as u64 / 2;
+        // อีกครึ่งเป็นของ working texture ชั้น B (docs/05 §1)
+        let working_budget = textures.budget().limit() / 2;
         let max_layers = layers_for_budget(render.capabilities(), atlas_budget);
         let atlas = ThumbnailAtlas::new(render.device(), &textures, max_layers).map_err(|err| {
             tracing::error!(%err, "สร้าง atlas ไม่ได้");
@@ -787,6 +947,7 @@ impl AppDelegate for RefxApp {
         let pipeline =
             QuadPipeline::new(render.device(), render.format(), atlas.bind_group_layout());
         let device_generation = render.generation();
+        let working = WorkingCache::new(render.device(), textures.clone(), working_budget);
 
         let quads = self.args.demo_quads.map_or_else(Vec::new, |n| {
             let quads = demo_quads(n, 4000.0);
@@ -806,7 +967,10 @@ impl AppDelegate for RefxApp {
             device_generation,
             egui_wake: None,
             quads,
-            board_thumbs: Vec::new(),
+            board_items: Vec::new(),
+            working,
+            working_pending: std::collections::HashSet::new(),
+            working_quads: Vec::new(),
             // เริ่มที่กลาง world ของ demo เพื่อให้เห็นสี่เหลี่ยมทันทีที่เปิด
             camera: Camera::new(Vec2::splat(2000.0), 0.25),
             canvas: CanvasRect::full(size.width, size.height),
@@ -835,6 +999,8 @@ impl AppDelegate for RefxApp {
 
         // เก็บผล decode ที่เสร็จแล้วก่อนวาด (ไม่บล็อก)
         self.drain_decode_results();
+        // ★ ตัดสินใจเรื่อง working texture ก่อนวาด — ใช้กล้อง/กรอบของเฟรมที่แล้ว
+        self.plan_working_textures();
 
         let status = self.gfx.as_mut()?.render.acquire_frame();
 
@@ -874,6 +1040,9 @@ impl AppDelegate for RefxApp {
         shell.item_count = gfx.quads.len();
         shell.zoom = gfx.camera.zoom();
         shell.vram_used = gfx.textures.budget().used();
+        shell.working_used = gfx.working.used();
+        shell.working_limit = gfx.working.limit();
+        shell.working_evicted = gfx.working.evicted();
         shell.vram_limit = gfx.textures.budget().limit();
         if let Some(assets) = assets.as_ref() {
             let (used, limit) = assets.pool.ram_usage();
@@ -979,12 +1148,43 @@ impl AppDelegate for RefxApp {
                     gfx.render.queue(),
                     CameraUniform::from_affine(gfx.camera.to_clip_affine(viewport)),
                 );
-                gfx.pipeline.draw(
-                    gfx.render.queue(),
-                    &mut pass,
-                    gfx.atlas.bind_group(),
-                    &gfx.quads,
-                );
+                // ★ ภาพที่มี working texture วาดแยกทีละใบ (docs/04 §4 ชั้น B)
+                //   ที่เหลือวาดรวมกันจาก atlas ใน draw call เดียวเหมือนเดิม
+                //
+                //   วาด atlas ก่อนแล้วค่อยทับด้วยตัวคมกว่า — ระหว่างที่ working texture
+                //   ยังมาไม่ถึง ผู้ใช้จะเห็นภาพเบลอ ไม่ใช่ช่องว่าง (docs/04 §8)
+                let mut batches: Vec<DrawBatch<'_>> = vec![DrawBatch {
+                    bind_group: gfx.atlas.bind_group(),
+                    instances: &gfx.quads,
+                }];
+                let sharp: Vec<QuadInstance> = gfx
+                    .working_quads
+                    .iter()
+                    .map(|(_, quad)| {
+                        // working texture มีภาพเดียวเต็มใบ layer 0
+                        QuadInstance {
+                            uv_rect: [0.0, 0.0, 1.0, 1.0],
+                            layer: 0,
+                            ..*quad
+                        }
+                    })
+                    .collect();
+                // อัปเดต LRU ก่อน แล้วค่อยเก็บ reference ไปวาด — ยืมคนละแบบ
+                for (key, _) in &gfx.working_quads {
+                    gfx.working.touch(*key);
+                }
+                for (index, (key, _)) in gfx.working_quads.iter().enumerate() {
+                    if let Some(bind_group) = gfx.working.bind_group(*key) {
+                        batches.push(DrawBatch {
+                            bind_group,
+                            instances: &sharp[index..=index],
+                        });
+                    }
+                }
+                let calls = gfx
+                    .pipeline
+                    .draw_batches(gfx.render.queue(), &mut pass, &batches);
+                shell.draw_calls = calls;
             }
 
             // [2] UI chrome ทับข้างบน

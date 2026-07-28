@@ -60,6 +60,15 @@ impl CameraUniform {
 /// มุมของ unit quad — vertex buffer ก้อนเดียวใช้ร่วมกันทุก instance
 const QUAD_CORNERS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [1.0, 1.0]];
 
+/// instance ชุดหนึ่งที่ใช้ texture เดียวกัน — หน่วยของ [`QuadPipeline::draw_batches`]
+#[derive(Clone, Copy)]
+pub struct DrawBatch<'a> {
+    /// texture ที่ instance ชุดนี้ใช้ (atlas หรือ working texture ใบใดใบหนึ่ง)
+    pub bind_group: &'a wgpu::BindGroup,
+    /// instance ที่ใช้ texture นั้น
+    pub instances: &'a [QuadInstance],
+}
+
 /// pipeline + resource ที่ผูกกับ device หนึ่งตัว
 ///
 /// ★ ผูกกับ device — หลัง device lost ต้องสร้างใหม่ทั้งก้อน (docs/04 §7 ข้อ 3)
@@ -191,6 +200,59 @@ impl QuadPipeline {
     #[must_use]
     pub fn capacity(&self) -> u32 {
         self.instances.capacity()
+    }
+
+    /// หนึ่งก้อนของการวาด — instance ชุดหนึ่งที่ใช้ texture เดียวกัน
+    ///
+    /// ใช้กับ working texture (docs/04 §4 ชั้น B) ซึ่งมี bind group ต่อภาพ
+    /// ปกติมีในจอพร้อมกัน < 30 ตัว → < 30 draw call ซึ่งยอมรับได้ตาม spec
+    pub fn draw_batches(
+        &self,
+        queue: &wgpu::Queue,
+        pass: &mut wgpu::RenderPass<'_>,
+        batches: &[DrawBatch<'_>],
+    ) -> u32 {
+        let total: usize = batches.iter().map(|b| b.instances.len()).sum();
+        if total == 0 {
+            return 0;
+        }
+
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &self.camera_bind_group, &[]);
+        pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        pass.set_vertex_buffer(1, self.instances.buffer().slice(..));
+
+        // ★ ทุกก้อนเขียนลง buffer เดียวกันที่ **offset ต่างกัน** แล้ววาดด้วยช่วง
+        //   instance ของตัวเอง ห้ามเขียนทับที่ offset 0 ทุกก้อน เพราะ GPU ทำงาน
+        //   ตอน submit ไม่ใช่ตอนเรียก — ก้อนก่อนหน้าจะกลายเป็นข้อมูลของก้อนสุดท้ายหมด
+        let stride = size_of::<QuadInstance>() as u64;
+        let mut first: u32 = 0;
+        let mut draw_calls = 0;
+        for batch in batches {
+            if batch.instances.is_empty() {
+                continue;
+            }
+            let room = self.instances.capacity().saturating_sub(first) as usize;
+            let n = batch.instances.len().min(room);
+            if n == 0 {
+                tracing::warn!(
+                    capacity = self.instances.capacity(),
+                    "instance buffer เต็ม — ภาพที่เหลือในเฟรมนี้ไม่ถูกวาด"
+                );
+                break;
+            }
+            queue.write_buffer(
+                self.instances.buffer(),
+                u64::from(first) * stride,
+                bytemuck::cast_slice(&batch.instances[..n]),
+            );
+            pass.set_bind_group(1, batch.bind_group, &[]);
+            let n = u32::try_from(n).unwrap_or(0);
+            pass.draw(0..4, first..first + n);
+            first += n;
+            draw_calls += 1;
+        }
+        draw_calls
     }
 
     /// วาดทุก instance ที่ให้มา

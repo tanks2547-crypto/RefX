@@ -7,9 +7,9 @@
 //!
 //! spec: docs/05-memory-and-assets.md §3
 
-use fast_image_resize::images::{Image as FirImage, ImageRef as FirImageRef};
-use fast_image_resize::{PixelType, ResizeAlg, ResizeOptions, Resizer};
 use image::RgbaImage;
+
+use crate::resize::{self, Quality};
 
 /// ขนาด thumbnail (ต้องตรงกับ `refx_render::atlas::SLOT_SIZE`)
 pub const THUMB_SIZE: u32 = 128;
@@ -212,38 +212,11 @@ pub fn make_thumbnail(image: &RgbaImage) -> Thumbnail {
 }
 
 /// ย่อเป็นสี่เหลี่ยมจัตุรัสขนาด `THUMB_SIZE`
+///
+/// Lanczos3 ตาม docs/05 §3 — คุณภาพดีที่สุดสำหรับการย่อมาก ๆ ซึ่งสำคัญเพราะ
+/// thumbnail คือสิ่งที่ผู้ใช้เห็นเกือบตลอดเวลา
 fn resize_to_square(image: &RgbaImage) -> Option<Vec<u8>> {
-    if image.width() == 0 || image.height() == 0 {
-        return None;
-    }
-
-    // ★ ยืม buffer ตรง ๆ ห้าม clone
-    //
-    // เดิมใช้ `FirImage::from_vec_u8(.., image.as_raw().clone(), ..)` ซึ่ง **คัดลอก
-    // ภาพเต็มทั้งใบ** ก่อนย่อทุกครั้ง — ภาพ 4000×3000 RGBA คือ 48 MB ต่อไฟล์
-    // ที่ถูก memcpy ทิ้งเปล่า ๆ แล้วปล่อยทันที และเกิดพร้อมกันได้ถึง 6 worker
-    // `ImageRef` อ่านอย่างเดียวจึงยืมได้ ไม่ต้องเป็นเจ้าของ
-    let src = FirImageRef::new(
-        image.width(),
-        image.height(),
-        image.as_raw(),
-        PixelType::U8x4,
-    )
-    .ok()?;
-
-    let mut dst = FirImage::new(THUMB_SIZE, THUMB_SIZE, PixelType::U8x4);
-    let mut resizer = Resizer::new();
-    resizer
-        .resize(
-            &src,
-            &mut dst,
-            &ResizeOptions::new().resize_alg(ResizeAlg::Convolution(
-                fast_image_resize::FilterType::Lanczos3,
-            )),
-        )
-        .ok()?;
-
-    Some(dst.into_vec())
+    resize::to_square(image, THUMB_SIZE, Quality::Best)
 }
 
 /// สี่เหลี่ยมทึบสีเดียว (fallback)

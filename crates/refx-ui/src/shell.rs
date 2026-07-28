@@ -57,6 +57,18 @@ pub struct ShellState {
     /// งาน decode ที่ถูกยกเลิกไปแล้ว — หลักฐานว่า cancellation ทำงาน
     pub decode_cancelled: u64,
 
+    /// จำนวน draw call ของภาพในเฟรมล่าสุด
+    ///
+    /// ชั้น B ทำให้มี draw call ต่อ working texture หนึ่งใบ — ตัวเลขนี้คือสิ่งที่
+    /// บอกว่ามันบานออกไปหรือยัง (docs/04 §4 ตั้งเพดานไว้ที่ราว 30)
+    pub draw_calls: u32,
+    /// VRAM ที่ working texture ใช้ / เพดานของชั้นนั้น (ไบต์)
+    pub working_used: usize,
+    /// เพดานของ working texture
+    pub working_limit: usize,
+    /// จำนวน working texture ที่ถูกไล่ออกตาม LRU — หลักฐานว่า LRU ทำงาน
+    pub working_evicted: u64,
+
     /// ★ ความคืบหน้าการโหลด — `None` เมื่อไม่มีงานค้าง
     ///
     /// docs/05 §6: การรอ 80 วินาทีบน cache เย็นยอมรับได้ **ก็ต่อเมื่อ** ผู้ใช้
@@ -129,6 +141,10 @@ impl Default for ShellState {
             cache_bytes: 0,
             decode_queued: 0,
             decode_cancelled: 0,
+            draw_calls: 0,
+            working_used: 0,
+            working_limit: 0,
+            working_evicted: 0,
             loading: None,
         }
     }
@@ -271,6 +287,21 @@ pub fn draw_in_ui(
                     ("size", &human_bytes(state.cache_bytes)),
                 ],
             ));
+
+            // ★ I-6: ชั้น B มีงบของตัวเอง ต้องเห็นด้วยตาเหมือน RAM/VRAM
+            if state.working_limit > 0 && state.working_used > 0 {
+                ui.separator();
+                ui.label(text::fill(
+                    lang,
+                    Template::WorkingTextures,
+                    &[
+                        ("used", &human_bytes(state.working_used as u64)),
+                        ("limit", &human_bytes(state.working_limit as u64)),
+                        ("calls", &state.draw_calls.to_string()),
+                        ("evicted", &state.working_evicted.to_string()),
+                    ],
+                ));
+            }
 
             if state.decode_queued > 0 {
                 ui.separator();
