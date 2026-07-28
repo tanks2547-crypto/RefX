@@ -4,13 +4,80 @@ on:
   workflow_dispatch:
 
 jobs:
+  # ★ ยิงเฉพาะ target ที่ **ต่อกับโค้ดจริงแล้ว**
+  #
+  # เดิม matrix มีครบสี่ตัวและผ่านทุกคืน ทั้งที่ทั้งสี่เป็น `let _ = data;`
+  # → เขียวโดยไม่ได้ตรวจอะไรเลย ซึ่งแย่กว่าไม่มี job นี้ตั้งแต่แรก (docs/06 §2.5)
   fuzz:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        target: [fuzz_decode, fuzz_document, fuzz_journal, fuzz_layout]
+        target: [fuzz_decode]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
-      - run: cargo install cargo-fuzz
-      - run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=900
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-fuzz --locked
+
+      # corpus ตั้งต้นถูก commit ไว้ที่ fuzz/seeds/ ส่วน fuzz/corpus/ อยู่ใน .gitignore
+      # (ของที่ fuzzer งอกเองมีเป็นพันไฟล์ ไม่ควรอยู่ใน repo)
+      # ถ้าไม่คัดลอกเข้ามา ทุกคืนจะเริ่มจากศูนย์แล้วเสียเวลาไปกับการหา header ที่ถูกต้อง
+      - name: วาง corpus ตั้งต้น
+        run: |
+          mkdir -p fuzz/corpus/${{ matrix.target }}
+          cp -n fuzz/seeds/${{ matrix.target }}/* fuzz/corpus/${{ matrix.target }}/ || true
+
+      - name: fuzz ${{ matrix.target }}
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=900
+
+      # input ที่ทำให้ล้มคือหลักฐานชิ้นเดียวที่เราจะได้ — ห้ามปล่อยหายไปกับ runner
+      - name: เก็บ input ที่ทำให้ล้ม
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+
+  # ★ กันไม่ให้เรื่องเดิมเกิดซ้ำ
+  #
+  # target ที่ยังไม่ได้ต่อถูกถอด `[[bin]]` ออกจาก fuzz/Cargo.toml ไปแล้ว
+  # จึงไม่มีทาง "รันแล้วเขียวแบบว่างเปล่า" ได้อีก แต่ยังเหลือกับดักอีกข้อ:
+  # วันที่ใครสัก implement `refx_io::dto` เสร็จแล้ว **ลืม** กลับมาต่อ fuzz target
+  # job นี้จะล้มในคืนนั้นทันที พร้อมบอกว่าต้องแก้ตรงไหนบ้าง
+  unwired-targets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ตรวจว่า target ที่ยังไม่ต่อ ยังไม่มีโค้ดให้ยิงจริง
+        run: |
+          set -uo pipefail
+          status=0
+          check() {
+            target="$1"; module="$2"
+            # ยังเป็นไฟล์ TODO บรรทัดเดียว = ยังไม่มีอะไรให้ยิง ข้ามได้อย่างถูกต้อง
+            lines=$(grep -cve '^[[:space:]]*$' "$module" || true)
+            if [ "${lines:-0}" -le 2 ]; then
+              echo "::notice::ข้าม $target — $module ยังไม่มีโค้ด ($lines บรรทัด)"
+            else
+              echo "::error::$module มีโค้ดแล้ว ($lines บรรทัด) แต่ $target ยังไม่ถูกต่อ"
+              echo "::error::ต้อง (1) ต่อ fuzz/fuzz_targets/$target.rs (2) ลงทะเบียน [[bin]] ใน fuzz/Cargo.toml (3) ใส่ $target ใน matrix ของไฟล์นี้"
+              status=1
+            fi
+          }
+          check fuzz_document crates/refx-io/src/dto.rs
+          check fuzz_journal  crates/refx-io/src/journal.rs
+          check fuzz_layout   crates/refx-core/src/layout.rs
+          exit $status
+
+  # `fuzz/` อยู่ใน `exclude` ของ workspace → `cargo clippy --all-targets` ของ CI หลัก
+  # **มองไม่เห็นโค้ดในนั้นเลย** นี่คือเหตุผลที่ stub รอดมาได้ 5 session โดยไม่มีใครทัก
+  fuzz-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with: { components: clippy }
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings

@@ -1,5 +1,12 @@
 name: CI
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  # ★ CVE ใหม่ถูกประกาศ **หลัง** commit สุดท้ายเสมอ
+  #   repo ที่ไม่มีใครแตะสองสัปดาห์ = สองสัปดาห์ที่ไม่มีใครรู้ว่า dependency
+  #   มีช่องโหว่ใหม่ (docs/06 §2.5) — job `deny` จึงต้องเดินเองตามเวลาด้วย
+  schedule: [{ cron: "0 4 * * 1" }]   # ทุกวันจันทร์ 04:00 UTC
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -7,6 +14,7 @@ env:
 
 jobs:
   check:
+    if: github.event_name != 'schedule'
     strategy:
       fail-fast: false
       matrix:
@@ -31,8 +39,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
 
+  # job อื่นไม่ต้องเดินตามตารางรายสัปดาห์ — โค้ดไม่เปลี่ยนผลก็ไม่เปลี่ยน
+  # มีแต่ advisory database เท่านั้นที่ขยับได้เองโดยที่ repo ไม่ขยับ
+
   # I-8: พิสูจน์ว่า binary ไม่มี network stack อยู่จริง
   no-network:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -46,6 +58,7 @@ jobs:
 
   # ห้ามมี wgpu สองเวอร์ชัน (docs/09-crate-versions.md)
   single-wgpu:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

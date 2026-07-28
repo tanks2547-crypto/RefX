@@ -19,20 +19,11 @@ path = "fuzz_targets/fuzz_decode.rs"
 test = false
 doc  = false
 
-[[bin]]
-name = "fuzz_document"
-path = "fuzz_targets/fuzz_document.rs"
-test = false
-doc  = false
-
-[[bin]]
-name = "fuzz_journal"
-path = "fuzz_targets/fuzz_journal.rs"
-test = false
-doc  = false
-
-[[bin]]
-name = "fuzz_layout"
-path = "fuzz_targets/fuzz_layout.rs"
-test = false
-doc  = false
+# ★ `fuzz_document` / `fuzz_journal` / `fuzz_layout` **จงใจไม่ลงทะเบียนที่นี่**
+#
+# โค้ดที่ควรยิง (`refx_io::dto`, `refx_io::journal`, `refx_core::layout`)
+# ยังเป็นไฟล์ TODO บรรทัดเดียว การ build แล้วรันมันจึงได้แต่ "เขียวแบบว่างเปล่า"
+# ซึ่งคือบั๊กที่ `fuzz_decode` เป็นมา 5 session (docs/06 §2.5)
+#
+# ลงทะเบียนกลับพร้อมกับตอนที่ต่อ target จริงเท่านั้น —
+# job `unwired-targets` ใน `.github/workflows/fuzz.yml` จะล้มถ้าลืม

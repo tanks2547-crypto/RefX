@@ -1,8 +1,18 @@
 #![no_main]
-//! layout ต้องไม่ panic และไม่คืน NaN/inf ไม่ว่า input จะเป็นอะไร
-use libfuzzer_sys::fuzz_target;
+//! ★ ยังไม่ได้ต่อ — โค้ดที่ต้องยิงยังไม่มีตัวตน (refx_core::layout)
+//!
+//! **จงใจไม่ลงทะเบียนเป็น `[[bin]]` ใน `fuzz/Cargo.toml`** และไม่อยู่ใน matrix
+//! ของ `fuzz.yml` เพื่อให้ CI **ข้ามอย่างชัดเจน** แทนที่จะรันแล้วเขียวแบบว่างเปล่า
+//!
+//! > สัญญาณที่โกหกแย่กว่าไม่มีสัญญาณ — `fuzz_decode` เคยเขียวอยู่ 5 session
+//! > ทั้งที่ไม่ได้ยิงอะไรเลย (docs/06 §2.5)
+//!
+//! **เมื่อ `refx_core::layout` มีของจริงแล้ว ต้องทำสามอย่างพร้อมกัน:**
+//!   1. ต่อ `fuzz_target!` ให้เรียกโค้ดนั้นจริง
+//!   2. ลงทะเบียน `[[bin]]` กลับใน `fuzz/Cargo.toml`
+//!   3. ใส่ชื่อ target กลับใน matrix ของ `.github/workflows/fuzz.yml`
+//!
+//! job `unwired-targets` ใน `fuzz.yml` จะ **ล้ม** ถ้าลืมข้อใดข้อหนึ่ง
 
-fuzz_target!(|data: &[u8]| {
-    // TODO(P3-2): แปลง data เป็น Vec<ItemAspect> + LayoutParams แล้วยืนยันว่าผลลัพธ์ finite
-    let _ = data;
-});
+//! สิ่งที่ต้องยิงเมื่อพร้อม: layout ต้องไม่ panic และผลลัพธ์ต้อง finite เสมอ
+//! ไม่ว่า input จะเป็นอะไร (docs/03 §4)
