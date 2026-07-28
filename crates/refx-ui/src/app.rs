@@ -184,10 +184,77 @@ struct Gfx {
     board_thumbs: Vec<refx_asset::thumb::Thumbnail>,
     /// กล้อง pan/zoom (P0-7)
     camera: Camera,
-    /// ตำแหน่งเคอร์เซอร์ล่าสุดบนจอ (physical pixel)
+    /// ★ กรอบของช่อง canvas จริง (physical pixel) — **ไม่ใช่ขนาดหน้าต่างทั้งบาน**
+    ///
+    /// egui เป็นคนบอกว่าช่องกลางอยู่ตรงไหนหลังหัก panel ซ้าย/ขวา/บน/ล่างออกแล้ว
+    /// ค่านี้ถูกใช้สองที่และ **ต้องเป็นค่าเดียวกัน** ไม่งั้นภาพกับเมาส์จะไม่ตรงกัน:
+    ///   1. `set_viewport` ของ render pass + กรอบอ้างอิงของกล้องตอนวาด
+    ///   2. แปลงพิกัดเคอร์เซอร์ตอน zoom เข้าหาเมาส์ (P0-7)
+    canvas: CanvasRect,
+    /// ตำแหน่งเคอร์เซอร์ล่าสุดบนจอ (physical pixel, พิกัดหน้าต่าง)
     cursor: Vec2,
     /// กำลังลากเพื่อ pan อยู่หรือไม่
     panning: bool,
+}
+
+/// กรอบของช่อง canvas ในหน่วย physical pixel
+#[derive(Debug, Clone, Copy)]
+struct CanvasRect {
+    /// มุมซ้ายบนเทียบกับมุมซ้ายบนของ surface
+    min: Vec2,
+    /// กว้าง × สูง — รับประกันว่า ≥ 1 เสมอ (wgpu ปฏิเสธ viewport ขนาด 0)
+    size: Vec2,
+}
+
+impl CanvasRect {
+    /// ค่าเริ่มต้นก่อนที่ egui จะบอกกรอบจริงในเฟรมแรก — ใช้ทั้งหน้าต่างไปก่อน
+    fn full(width: u32, height: u32) -> Self {
+        Self {
+            min: Vec2::ZERO,
+            size: Vec2::new(width.max(1) as f32, height.max(1) as f32),
+        }
+    }
+
+    /// แปลง rect ของ egui (หน่วย point) เป็น physical pixel แล้วตัดให้อยู่ในผิววาด
+    ///
+    /// ต้องตัดกรอบเสมอ: `set_viewport` ที่ล้นขอบ attachment เป็น validation error
+    /// ของ wgpu ซึ่งจะทำให้ทั้งเฟรมหายไป ไม่ใช่แค่ภาพเยื้อง
+    fn from_points(rect: egui::Rect, pixels_per_point: f32, width: u32, height: u32) -> Self {
+        let scale = if pixels_per_point.is_finite() && pixels_per_point > 0.0 {
+            pixels_per_point
+        } else {
+            1.0
+        };
+        let (surface_w, surface_h) = (width.max(1) as f32, height.max(1) as f32);
+
+        // ค่าที่ไม่ใช่ตัวเลขต้องถูกแทนที่ก่อนถึง clamp เสมอ (I-4)
+        // `Rect::NOTHING` (เฟรมแรก ก่อน egui บอกกรอบจริง) ให้ ±inf ออกมาตรง ๆ
+        // และ `f32::clamp` จะ **panic** ถ้าขอบเป็น NaN หรือ min > max
+        let finite = |value: f32, fallback: f32| if value.is_finite() { value } else { fallback };
+
+        // จำกัด x/y ไว้ที่ surface-1 เพื่อให้เหลือที่ให้ viewport อย่างน้อย 1 px เสมอ
+        // ถ้าปล่อยให้ x เท่ากับ surface_w พอดี ขอบบนของ clamp จะกลายเป็น 0 < 1 แล้ว panic
+        let x = finite(rect.min.x * scale, 0.0).clamp(0.0, (surface_w - 1.0).max(0.0));
+        let y = finite(rect.min.y * scale, 0.0).clamp(0.0, (surface_h - 1.0).max(0.0));
+        let w = finite(rect.width() * scale, surface_w).clamp(1.0, surface_w - x);
+        let h = finite(rect.height() * scale, surface_h).clamp(1.0, surface_h - y);
+
+        Self {
+            min: Vec2::new(x, y),
+            size: Vec2::new(w, h),
+        }
+    }
+
+    /// พิกัดเคอร์เซอร์ของหน้าต่าง → พิกัดภายในช่อง canvas
+    fn to_local(self, cursor: Vec2) -> Vec2 {
+        cursor - self.min
+    }
+
+    /// จุดนี้อยู่ในช่อง canvas ไหม (พิกัดหน้าต่าง)
+    fn contains(self, point: Vec2) -> bool {
+        let max = self.min + self.size;
+        point.x >= self.min.x && point.x < max.x && point.y >= self.min.y && point.y < max.y
+    }
 }
 
 /// แอปหลักของ RefX
@@ -663,6 +730,7 @@ impl AppDelegate for RefxApp {
             board_thumbs: Vec::new(),
             // เริ่มที่กลาง world ของ demo เพื่อให้เห็นสี่เหลี่ยมทันทีที่เปิด
             camera: Camera::new(Vec2::splat(2000.0), 0.25),
+            canvas: CanvasRect::full(size.width, size.height),
             cursor: Vec2::ZERO,
             panning: false,
         });
@@ -740,8 +808,9 @@ impl AppDelegate for RefxApp {
             shell.cache_thumbs = stats.thumb_count;
             shell.cache_bytes = stats.size_bytes;
         }
+        let mut canvas_points = egui::Rect::NOTHING;
         let full_output = gfx.egui_ctx.run_ui(raw_input, |ui| {
-            crate::shell::draw_in_ui(ui, shell, |ui| {
+            canvas_points = crate::shell::draw_in_ui(ui, shell, |ui| {
                 // ช่องกลางคือ canvas — ภาพวาดด้วย wgpu ใต้ egui อีกที
                 // ตรงนี้แค่จองพื้นที่ไว้ P2 จะใส่ hit-test/tool overlay
                 ui.allocate_space(ui.available_size());
@@ -754,6 +823,12 @@ impl AppDelegate for RefxApp {
             let config = gfx.render.config();
             (config.width, config.height)
         };
+
+        // ★ กรอบ canvas จริงจาก egui — ใช้ทั้งตอนวาดและตอนแปลงพิกัดเมาส์
+        //   ถ้าใช้ขนาดหน้าต่างทั้งบานแทน จุดกึ่งกลางกล้องจะไปตกกลาง *หน้าต่าง*
+        //   ซึ่งเยื้องจากกลางช่อง canvas ไปทางซ้ายบน แล้วภาพส่วนหนึ่งจะไปอยู่ใต้ panel
+        gfx.canvas =
+            CanvasRect::from_points(canvas_points, full_output.pixels_per_point, width, height);
         let screen = egui_wgpu::ScreenDescriptor {
             size_in_pixels: [width, height],
             pixels_per_point: full_output.pixels_per_point,
@@ -805,7 +880,17 @@ impl AppDelegate for RefxApp {
 
             // [1] ภาพทั้งหมด (instanced quad) — วาดก่อน UI เสมอ
             if !gfx.quads.is_empty() {
-                let viewport = Vec2::new(width as f32, height as f32);
+                // ★ จำกัดการวาดไว้ในช่อง canvas เท่านั้น ไม่ให้ล้นไปใต้ panel
+                //   egui ตั้ง viewport กลับเป็นเต็มจอเองตอนเริ่ม render() จึงไม่ต้องคืนค่า
+                pass.set_viewport(
+                    gfx.canvas.min.x,
+                    gfx.canvas.min.y,
+                    gfx.canvas.size.x,
+                    gfx.canvas.size.y,
+                    0.0,
+                    1.0,
+                );
+                let viewport = gfx.canvas.size;
                 gfx.pipeline.set_camera(
                     gfx.render.queue(),
                     CameraUniform::from_affine(gfx.camera.to_clip_affine(viewport)),
@@ -920,15 +1005,25 @@ impl AppDelegate for RefxApp {
         let response = gfx.egui_winit.on_window_event(&gfx.window, event);
         let mut needs_redraw = response.repaint;
 
-        // ถ้าเมาส์อยู่บน UI chrome ห้ามให้ canvas ขยับตาม
-        if response.consumed {
+        // ★ ห้ามใช้ `response.consumed` เดี่ยว ๆ เป็นตัวตัดสิน — วัดแล้วว่าไม่ได้
+        //
+        //   egui ถือว่า `CentralPanel` เป็นพื้นที่ของตัวเอง และเพราะ panel นั้นกิน
+        //   root rect ที่เหลือจนหมด `is_pointer_over_egui()` จึงเป็น **true ทุกจุด
+        //   บน canvas** → `consumed = true` เสมอ → เดิม pan/zoom ไม่เคยทำงานเลย
+        //   (ยืนยันด้วย log จริง: consumed=true over_egui=true using=false)
+        //
+        //   แยกสองกรณีที่ต่างกันจริง ๆ แทน:
+        //     * egui **กำลังใช้** pointer อยู่ (กดปุ่ม/ลาก slider) → เป็นของ egui
+        //     * แค่ hover อยู่เหนือช่อง canvas → เป็นของเรา
+        //
+        //   TODO(P2): พอมี tool overlay เป็น widget จริงในช่อง canvas ให้เปลี่ยนไป
+        //   ใช้ `ui.allocate_response(.., Sense::click_and_drag())` แล้วขับกล้อง
+        //   จาก response นั้นแทน เพื่อให้ egui เป็นคนตัดสินให้ทั้งหมด
+        let egui_owns_pointer = gfx.egui_ctx.egui_is_using_pointer()
+            || (response.consumed && !gfx.canvas.contains(gfx.cursor));
+        if egui_owns_pointer {
             return needs_redraw;
         }
-
-        let viewport = {
-            let config = gfx.render.config();
-            Vec2::new(config.width as f32, config.height as f32)
-        };
 
         match event {
             // ★ ลากไฟล์เข้ามา — เส้นทางหลักที่ผู้ใช้เอาภาพเข้าโปรแกรม (P1-8)
@@ -968,7 +1063,13 @@ impl AppDelegate for RefxApp {
                     // เลขชี้กำลังทำให้ซูมรู้สึกเท่ากันทุกระดับ
                     // (ถ้าบวก/ลบตรง ๆ ตอนซูมเข้ามาก ๆ จะกระโดดแรงจนเวียนหัว)
                     let factor = 1.1f32.powf(notches);
-                    gfx.camera.zoom_at_screen(gfx.cursor, viewport, factor);
+                    // ★ ต้องใช้กรอบเดียวกับตอนวาด (ช่อง canvas ไม่ใช่ทั้งหน้าต่าง)
+                    //   ไม่งั้นจุดใต้เคอร์เซอร์จะเลื่อนตอนซูม ซึ่งเป็นข้อกำหนดหลักของ P0-7
+                    gfx.camera.zoom_at_screen(
+                        gfx.canvas.to_local(gfx.cursor),
+                        gfx.canvas.size,
+                        factor,
+                    );
                     needs_redraw = true;
                 }
             }
@@ -1002,4 +1103,90 @@ pub fn run(
             ..WindowConfig::default()
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
+
+    use super::*;
+
+    fn rect(x: f32, y: f32, w: f32, h: f32) -> egui::Rect {
+        egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h))
+    }
+
+    /// ★ `set_viewport` ที่ล้นขอบ attachment คือ validation error ของ wgpu
+    /// ซึ่งทำให้ **ทั้งเฟรมหายไป** ไม่ใช่แค่ภาพเยื้อง จึงต้องตัดกรอบเสมอ
+    #[test]
+    fn canvas_rect_never_escapes_the_surface() {
+        let (sw, sh) = (1280u32, 800u32);
+        for r in [
+            rect(200.0, 60.0, 900.0, 700.0),    // ปกติ
+            rect(-50.0, -50.0, 2000.0, 2000.0), // ล้นทุกด้าน
+            rect(1400.0, 900.0, 100.0, 100.0),  // อยู่นอกจอทั้งก้อน
+            egui::Rect::NOTHING,                // ค่าที่ยังไม่ถูกเติมในเฟรมแรก
+        ] {
+            let c = CanvasRect::from_points(r, 1.0, sw, sh);
+            assert!(c.min.x >= 0.0 && c.min.y >= 0.0, "{r:?} → {c:?}");
+            assert!(c.size.x >= 1.0 && c.size.y >= 1.0, "viewport ขนาด 0: {c:?}");
+            assert!(
+                c.min.x + c.size.x <= sw as f32 && c.min.y + c.size.y <= sh as f32,
+                "ล้นขอบ surface: {c:?}"
+            );
+        }
+    }
+
+    /// egui ให้ rect มาเป็น point — ต้องคูณ scale ของจอก่อนใช้เป็น physical pixel
+    #[test]
+    fn points_are_scaled_to_physical_pixels() {
+        let c = CanvasRect::from_points(rect(100.0, 50.0, 400.0, 300.0), 2.0, 2560, 1600);
+        assert_eq!(c.min, Vec2::new(200.0, 100.0));
+        assert_eq!(c.size, Vec2::new(800.0, 600.0));
+    }
+
+    /// ค่า scale ที่พังต้องไม่ทำให้ viewport กลายเป็น NaN แล้วทั้งเฟรมหาย (I-4)
+    #[test]
+    fn broken_scale_falls_back_instead_of_producing_nan() {
+        for scale in [f32::NAN, 0.0, -1.0, f32::INFINITY] {
+            let c = CanvasRect::from_points(rect(10.0, 10.0, 100.0, 100.0), scale, 1280, 800);
+            assert!(
+                c.min.is_finite() && c.size.is_finite(),
+                "scale {scale}: {c:?}"
+            );
+            assert!(c.size.x >= 1.0 && c.size.y >= 1.0);
+        }
+    }
+
+    /// ★ ตัวตัดสินว่า event ของเมาส์เป็นของ canvas หรือของ egui
+    ///
+    /// ถ้าข้อนี้ผิด pan/zoom จะไม่ทำงาน (เคยเป็นมาแล้ว) หรือแย่งปุ่มบน UI ไป
+    #[test]
+    fn contains_marks_only_points_inside_the_canvas() {
+        let c = CanvasRect::from_points(rect(200.0, 60.0, 800.0, 700.0), 1.0, 1280, 800);
+
+        assert!(c.contains(Vec2::new(600.0, 400.0)), "กลาง canvas");
+        assert!(c.contains(Vec2::new(200.0, 60.0)), "มุมซ้ายบนนับเป็นข้างใน");
+
+        assert!(!c.contains(Vec2::new(100.0, 400.0)), "อยู่บน Library");
+        assert!(!c.contains(Vec2::new(1100.0, 400.0)), "อยู่บน Inspector");
+        assert!(!c.contains(Vec2::new(600.0, 30.0)), "อยู่บน toolbar");
+        assert!(!c.contains(Vec2::new(600.0, 780.0)), "อยู่บน status bar");
+        assert!(!c.contains(Vec2::new(1000.0, 760.0)), "มุมขวาล่างนับเป็นข้างนอก");
+    }
+
+    /// เคอร์เซอร์ที่กลางช่อง canvas ต้องแปลงเป็นกลางกรอบของกล้องพอดี
+    ///
+    /// นี่คือสิ่งที่ทำให้ "ซูมแล้วจุดใต้เคอร์เซอร์ไม่ขยับ" ยังจริงอยู่
+    /// แม้ canvas จะไม่ได้อยู่กลางหน้าต่าง
+    #[test]
+    fn cursor_at_canvas_centre_maps_to_camera_centre() {
+        let c = CanvasRect::from_points(rect(200.0, 60.0, 800.0, 700.0), 1.0, 1280, 800);
+        let cursor = c.min + c.size * 0.5;
+        assert_eq!(c.to_local(cursor), c.size * 0.5);
+
+        // จุดกึ่งกลางกล้องต้องตกลงตรงนั้นพอดี
+        let camera = Camera::new(Vec2::new(2000.0, 2000.0), 0.25);
+        let on_screen = camera.world_to_screen(camera.center(), c.size);
+        assert_eq!(on_screen, c.to_local(cursor));
+    }
 }

@@ -89,7 +89,15 @@ impl Default for ShellState {
 ///
 /// เรียกจากข้างใน `egui::Context::run_ui` ซึ่งส่ง `&mut Ui` ของ root มาให้
 /// (egui 0.34 ไม่มี `Panel::show(ctx)` แล้ว มีแต่ `show_inside(ui)`)
-pub fn draw_in_ui(ui: &mut egui::Ui, state: &mut ShellState, viewport: impl FnOnce(&mut egui::Ui)) {
+///
+/// คืน **rect ของช่องกลาง (หน่วย point)** — ผู้เรียกต้องใช้ค่านี้ตั้ง viewport
+/// ของ render pass และเป็นกรอบอ้างอิงของกล้อง ไม่ใช่ขนาดหน้าต่างทั้งบาน
+#[must_use = "ต้องเอา rect ไปตั้ง viewport ของ canvas ไม่งั้นภาพจะเยื้อง"]
+pub fn draw_in_ui(
+    ui: &mut egui::Ui,
+    state: &mut ShellState,
+    viewport: impl FnOnce(&mut egui::Ui),
+) -> egui::Rect {
     // ---- แถวบน: board tabs ----
     egui::Panel::top("refx-tabs").show_inside(ui, |ui| {
         ui.horizontal(|ui| {
@@ -219,7 +227,19 @@ pub fn draw_in_ui(ui: &mut egui::Ui, state: &mut ShellState, viewport: impl FnOn
         });
 
     // ---- กลาง: viewport ของ mode ปัจจุบัน ----
-    egui::CentralPanel::default().show_inside(ui, |ui| viewport(ui));
+    //
+    // ★ `Frame::NONE` สำคัญมาก ห้ามเอาออก
+    //   ภาพของผู้ใช้ถูกวาดด้วย wgpu **ใต้** egui อีกที (docs/04 §2 — pass เดียว)
+    //   ถ้า CentralPanel ทาพื้นหลังทึบตาม theme (`panel_fill` ซึ่งเป็นค่าปริยาย)
+    //   มันจะกลบ quad ทุกอันจนหมด แล้ว canvas จะว่างเปล่าทั้งที่ทุกอย่างทำงานถูก
+    //   — อาการนี้เกิดจริงตั้งแต่ P0-6 และไม่มี log ไหนจับได้เลยเพราะการวาดสำเร็จหมด
+    //
+    //   (egui 0.34: `Frame::none()` ถูก deprecate แล้ว ต้องใช้ `Frame::NONE`)
+    egui::CentralPanel::default()
+        .frame(egui::Frame::NONE)
+        .show_inside(ui, |ui| viewport(ui))
+        .response
+        .rect
 }
 
 /// ปุ่มเครื่องมือของ Canvas mode
@@ -265,5 +285,87 @@ mod tests {
     #[test]
     fn mode_labels_are_distinct() {
         assert_ne!(Mode::Canvas.label(), Mode::Arrange.label());
+    }
+
+    // ---------- ★ canvas ต้องโปร่ง ----------
+    //
+    // egui รันได้โดยไม่มี GPU (มันแค่ผลิตรูปทรงออกมา) จึงทดสอบเรื่องนี้ได้จริง
+    // ไม่ใช่แค่ตรวจว่ามีโค้ด `.frame(...)` อยู่
+
+    const SCREEN: egui::Vec2 = egui::Vec2::new(1280.0, 800.0);
+
+    /// รัน shell แบบไม่มีหน้าต่างจริง คืน (rect ของ canvas, รูปทรงที่วาด)
+    ///
+    /// ต้องรันสองรอบ: egui เป็น immediate mode ที่ใช้ layout ของรอบก่อนหน้า
+    /// รอบแรกจึงยังได้ขนาด panel ที่ยังไม่นิ่ง
+    fn run_shell() -> (egui::Rect, Vec<egui::epaint::ClippedShape>) {
+        let ctx = egui::Context::default();
+        let mut state = ShellState::default();
+        let mut canvas = egui::Rect::NOTHING;
+        let mut shapes = Vec::new();
+
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, SCREEN)),
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                canvas = draw_in_ui(ui, &mut state, |ui| {
+                    ui.allocate_space(ui.available_size());
+                });
+            });
+            shapes = output.shapes;
+        }
+        (canvas, shapes)
+    }
+
+    /// ★ บั๊กที่ทำให้ canvas ว่างเปล่ามาตั้งแต่ P0-6
+    ///
+    /// ภาพของผู้ใช้ถูกวาดด้วย wgpu **ใต้** egui ถ้า `CentralPanel` ทาพื้นหลังทึบ
+    /// (ค่าปริยายของ egui) มันจะกลบภาพทุกใบโดยที่ไม่มี log ไหนจับได้เลย
+    /// เพราะทุกขั้นตอน "สำเร็จ" หมด
+    #[test]
+    fn nothing_opaque_is_painted_over_the_canvas() {
+        let (canvas, shapes) = run_shell();
+        let center = canvas.center();
+
+        for clipped in &shapes {
+            let egui::Shape::Rect(rect) = &clipped.shape else {
+                continue;
+            };
+            assert!(
+                !(rect.rect.contains(center) && rect.fill.a() > 0),
+                "มีสี่เหลี่ยมทึบ (alpha {}) ทับกลาง canvas ที่ {center:?} — \
+                 ภาพของผู้ใช้จะถูกกลบทั้งหมด (ต้องใช้ Frame::NONE)",
+                rect.fill.a()
+            );
+        }
+    }
+
+    /// rect ที่คืนออกไปต้องเป็นช่องกลางจริง ๆ ไม่ใช่ทั้งหน้าต่าง
+    ///
+    /// ผู้เรียกเอาไปตั้ง `set_viewport` และเป็นกรอบอ้างอิงของกล้อง
+    /// ถ้าคืนขนาดหน้าต่างทั้งบาน ภาพจะเยื้องแล้วขอบไปอยู่ใต้ panel
+    #[test]
+    fn canvas_rect_excludes_the_side_panels() {
+        let (canvas, _) = run_shell();
+
+        assert!(
+            canvas.width() > 100.0 && canvas.height() > 100.0,
+            "{canvas:?}"
+        );
+        assert!(canvas.min.x > 0.0, "ต้องเว้นที่ให้ Library ทางซ้าย: {canvas:?}");
+        assert!(
+            canvas.max.x < SCREEN.x,
+            "ต้องเว้นที่ให้ Inspector ทางขวา: {canvas:?}"
+        );
+        assert!(
+            canvas.min.y > 0.0,
+            "ต้องเว้นที่ให้ tabs/toolbar ด้านบน: {canvas:?}"
+        );
+        assert!(
+            canvas.max.y < SCREEN.y,
+            "ต้องเว้นที่ให้ status bar ด้านล่าง: {canvas:?}"
+        );
     }
 }
