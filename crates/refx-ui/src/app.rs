@@ -34,6 +34,12 @@ pub struct AppArgs {
     pub demo_quads: Option<u32>,
     /// วัด frame time ต่อเนื่อง N วินาทีแล้วรายงานผล — โหมด benchmark
     pub bench_seconds: Option<u64>,
+    /// บังคับภาษาของ UI แทนค่าที่อ่านได้จาก OS
+    ///
+    /// `None` = ใช้ locale ของเครื่อง (docs/03 §0 ข้อ 3)
+    /// มีไว้ให้ตรวจงานแปลได้โดยไม่ต้องไปเปลี่ยนภาษาของทั้งเครื่อง
+    /// และเป็นกลไกเดียวกับที่ Settings จะใช้ตอน P5-3
+    pub lang: Option<Lang>,
     /// ไฟล์ที่จะเปิดตั้งแต่เริ่มโปรแกรม (เหมือนลากเข้ามา)
     ///
     /// ใช้ทั้งกับการเปิดจากบรรทัดคำสั่งและวัดเวลา "เปิดไฟล์ → ภาพขึ้นจอ"
@@ -344,6 +350,7 @@ impl RefxApp {
     /// สร้างแอปที่ยังไม่ผูกกับหน้าต่าง
     #[must_use]
     pub fn new(args: AppArgs) -> Self {
+        let lang = args.lang.unwrap_or_else(Lang::from_system);
         Self {
             gfx: None,
             args,
@@ -353,7 +360,7 @@ impl RefxApp {
             shell: crate::shell::ShellState {
                 // ★ อ่าน locale ของ OS ครั้งเดียวตอนเปิดโปรแกรม (docs/03 §0 ข้อ 3)
                 //   ไม่รู้จักภาษา → อังกฤษ · P5-3 จะให้ผู้ใช้เลือกทับได้
-                lang: Lang::from_system(),
+                lang,
                 ..crate::shell::ShellState::default()
             },
             assets: None,

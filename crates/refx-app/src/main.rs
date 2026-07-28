@@ -37,6 +37,17 @@ fn parse_cli() -> Result<Cli, String> {
                 )
             })?;
             cli.args.force_device_lost_after_ms = Some(ms);
+        } else if let Some(value) = arg.strip_prefix("--lang=") {
+            cli.args.lang = Some(match value {
+                "en" => refx_ui::text::Lang::En,
+                "th" => refx_ui::text::Lang::Th,
+                other => {
+                    return Err(format!(
+                        "--lang รู้จักแค่ en กับ th แต่ได้ {other:?}
+                         ไม่ใส่เลย = ใช้ภาษาของระบบ"
+                    ));
+                }
+            });
         } else if let Some(value) = arg.strip_prefix("--open-dir=") {
             // สแกนโฟลเดอร์ตอนเริ่มโปรแกรม (ไม่ใช่ในลูปเฟรม) — ไม่ขัด I-2
             cli.args.open_files = scan_images(std::path::Path::new(value))?;
@@ -87,6 +98,7 @@ RefX — โปรแกรมจัดการภาพ reference สำหร
 
 ตัวเลือก:
   -h, --help                           แสดงข้อความนี้
+      --lang=en|th                     บังคับภาษาของ UI (ไม่ใส่ = ตามภาษาของระบบ)
       --open-dir=PATH                  เปิดไฟล์ภาพทั้งโฟลเดอร์ (เหมือนลากเข้ามา)
       --demo-quads=N                   วาดสี่เหลี่ยมสีสุ่ม N อัน (ทดสอบ pipeline/pan-zoom)
       --bench-seconds=S                วัด frame time ต่อเนื่อง S วินาทีแล้วรายงานผล

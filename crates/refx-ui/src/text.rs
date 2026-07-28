@@ -263,19 +263,24 @@ fn template_en(template: Template) -> &'static str {
             "RefX cannot open {format} files yet\nTry converting the image to PNG or JPEG."
         }
         Template::ErrBadHeader => {
-            "The file header could not be read — the file is damaged or incomplete."
+            "The file header could not be read — the file is damaged or incomplete
+             Try opening it in the program that made it and saving a fresh copy."
         }
         Template::ErrDecoderPanic => {
             "This file broke the image decoder — it was skipped.\nEvery other image still works."
         }
         Template::ErrDecode => {
-            "This image could not be opened — the file may be damaged or incomplete."
+            "This image could not be opened — the file may be damaged or incomplete\n\
+             Try opening it in the program that made it and saving a fresh copy."
         }
         Template::ErrReadFile => {
             "Could not read {file}\n\
              If it lives on OneDrive or Dropbox, wait for that folder to finish syncing."
         }
-        Template::ErrNotAFile => "{file} is not an image file",
+        Template::ErrNotAFile => {
+            "{file} is not an image file
+Drag in a PNG, JPEG, WebP, GIF, BMP, TGA or TIFF instead."
+        }
         Template::ErrTimeout => {
             "Opening {file} took longer than {seconds} seconds — it was skipped for now\n\
              If the file is on a network or cloud drive, copy it to this computer first."
@@ -321,16 +326,25 @@ fn template_th(template: Template) -> Option<&'static str> {
         Template::ErrFormatNotAllowed => {
             "RefX ยังเปิดไฟล์ชนิด {format} ไม่ได้\nลองแปลงเป็น PNG หรือ JPEG ก่อน"
         }
-        Template::ErrBadHeader => "อ่านข้อมูลหัวไฟล์ไม่ได้ — ไฟล์น่าจะเสียหายหรือถูกตัดไม่ครบ",
+        Template::ErrBadHeader => {
+            "อ่านข้อมูลหัวไฟล์ไม่ได้ — ไฟล์น่าจะเสียหายหรือถูกตัดไม่ครบ
+             ลองเปิดด้วยโปรแกรมที่สร้างไฟล์นี้แล้วบันทึกใหม่อีกครั้ง"
+        }
         Template::ErrDecoderPanic => {
             "ไฟล์นี้ทำให้ตัวถอดรหัสภาพทำงานผิดพลาด — ข้ามไฟล์นี้ไป\nไฟล์อื่นยังใช้ได้ตามปกติ"
         }
-        Template::ErrDecode => "เปิดภาพไม่ได้ — ไฟล์อาจเสียหายหรือถูกตัดไม่ครบ",
+        Template::ErrDecode => {
+            "เปิดภาพไม่ได้ — ไฟล์อาจเสียหายหรือถูกตัดไม่ครบ
+             ลองเปิดด้วยโปรแกรมที่สร้างไฟล์นี้แล้วบันทึกใหม่อีกครั้ง"
+        }
         Template::ErrReadFile => {
             "อ่านไฟล์ {file} ไม่ได้\n\
              ถ้าไฟล์อยู่บน OneDrive หรือ Dropbox ลองเปิดโฟลเดอร์นั้นให้ sync เสร็จก่อน"
         }
-        Template::ErrNotAFile => "{file} ไม่ใช่ไฟล์ภาพ",
+        Template::ErrNotAFile => {
+            "{file} ไม่ใช่ไฟล์ภาพ
+ลากไฟล์ PNG, JPEG, WebP, GIF, BMP, TGA หรือ TIFF เข้ามาแทน"
+        }
         Template::ErrTimeout => {
             "ใช้เวลาเปิดภาพ {file} นานเกิน {seconds} วินาที — ข้ามไฟล์นี้ไปก่อน\n\
              ถ้าไฟล์อยู่บนไดรฟ์เครือข่ายหรือ cloud ลองคัดลอกมาไว้ในเครื่องก่อน"
@@ -626,6 +640,26 @@ mod tests {
             assert!(!message.contains('{'), "{lang:?}: ยังมีตัวยึดเหลือ {message}");
             // บรรทัดที่สองคือ "ทำอะไรต่อได้"
             assert!(message.lines().count() >= 2, "{lang:?}: {message}");
+        }
+    }
+
+    /// ★ CLAUDE.md: ข้อความที่ผู้ใช้เห็นต้องบอก **สิ่งที่เกิดขึ้น + สิ่งที่ทำได้ต่อ**
+    ///
+    /// บังคับด้วยเทสต์แทนวินัย — ข้อความ error ทุกตัวต้องมีอย่างน้อยสองบรรทัด
+    /// ทั้งสองภาษา ไม่งั้นผู้ใช้รู้แค่ว่า "พัง" แต่ไม่รู้ว่าจะทำอะไรต่อ
+    #[test]
+    fn every_error_message_tells_the_user_what_to_do_next() {
+        let error_templates = ALL_TEMPLATES
+            .iter()
+            .filter(|tpl| format!("{tpl:?}").starts_with("Err"));
+        for &tpl in error_templates {
+            for lang in [Lang::En, Lang::Th] {
+                let text = template(lang, tpl);
+                assert!(
+                    text.lines().count() >= 2,
+                    "{tpl:?} ({lang:?}) บอกแค่ว่าพัง ไม่ได้บอกว่าทำอะไรต่อได้: {text}"
+                );
+            }
         }
     }
 
