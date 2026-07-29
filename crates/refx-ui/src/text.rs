@@ -22,6 +22,7 @@
 
 use refx_asset::decode::LoadError;
 use refx_asset::pool::JobFailure;
+use refx_platform::clipboard::ClipboardError;
 use refx_render::atlas::AtlasError;
 
 /// ภาษาของ UI
@@ -75,7 +76,7 @@ pub enum Key {
     Library,
     /// คำอธิบายในช่อง library ที่ยังว่าง
     LibraryPlaceholder,
-    /// คำใบ้ว่าลากไฟล์เข้ามาได้
+    /// คำใบ้ว่าเอาภาพเข้ามาได้ยังไง (ลากไฟล์ หรือ Ctrl+V)
     LibraryDropHint,
     /// หัวข้อ panel ขวา
     Inspector,
@@ -103,6 +104,8 @@ pub enum Key {
     ToolTag,
     /// เครื่องมือ: ส่งภาพเข้า canvas
     ToolSendToCanvas,
+    /// กำลังอ่าน clipboard หลังผู้ใช้กด Ctrl+V (P1-8)
+    ReadingClipboard,
 }
 
 /// ข้อความภาษาอังกฤษ — **ต้องมีครบทุก key เสมอ** (เป็นตัวสำรองสุดท้าย)
@@ -114,7 +117,7 @@ fn en(key: Key) -> &'static str {
         Key::NewBoardHint => "New board (P4-7)",
         Key::Library => "Library",
         Key::LibraryPlaceholder => "Image folders appear here",
-        Key::LibraryDropHint => "P1-8: drag images in",
+        Key::LibraryDropHint => "Drag images in, or press Ctrl+V",
         Key::Inspector => "Inspector",
         Key::InspectorCanvasGeometry => "X / Y / W / H",
         Key::InspectorCanvasTransform => "Rotation, opacity, crop",
@@ -128,6 +131,7 @@ fn en(key: Key) -> &'static str {
         Key::ToolFilter => "Filter",
         Key::ToolTag => "Tag",
         Key::ToolSendToCanvas => "Send to Canvas",
+        Key::ReadingClipboard => "Reading the clipboard…",
     }
 }
 
@@ -140,7 +144,7 @@ fn th(key: Key) -> Option<&'static str> {
         Key::NewBoardHint => "เปิด board ใหม่ (P4-7)",
         Key::Library => "คลังภาพ",
         Key::LibraryPlaceholder => "โฟลเดอร์ภาพจะมาอยู่ตรงนี้",
-        Key::LibraryDropHint => "P1-8: ลากไฟล์เข้ามาได้",
+        Key::LibraryDropHint => "ลากไฟล์ภาพเข้ามา หรือกด Ctrl+V",
         Key::Inspector => "รายละเอียด",
         Key::InspectorCanvasGeometry => "X / Y / กว้าง / สูง",
         Key::InspectorCanvasTransform => "หมุน, ความทึบ, ครอป",
@@ -154,6 +158,7 @@ fn th(key: Key) -> Option<&'static str> {
         Key::ToolFilter => "กรอง",
         Key::ToolTag => "ติดแท็ก",
         Key::ToolSendToCanvas => "ส่งเข้า Canvas",
+        Key::ReadingClipboard => "กำลังอ่าน clipboard…",
     })
 }
 
@@ -231,6 +236,18 @@ pub enum Template {
     ErrAtlasFull,
     /// `{requested}` `{used}` `{limit}` — VRAM ไม่พอ
     ErrOutOfVram,
+    /// `{ms}` — วางภาพจาก clipboard สำเร็จ
+    PastedImage,
+    /// ใน clipboard ไม่มีภาพและไม่มีไฟล์
+    ErrClipboardEmpty,
+    /// โปรแกรมอื่นถือ clipboard อยู่
+    ErrClipboardBusy,
+    /// เครื่องนี้ใช้ clipboard ไม่ได้
+    ErrClipboardUnavailable,
+    /// มีภาพอยู่แต่อ่านไม่ออก
+    ErrClipboardUndecodable,
+    /// `{w}` `{h}` — ภาพดิบมีจำนวนไบต์ไม่ตรงกับขนาดที่ประกาศ
+    ErrMalformedPixels,
 }
 
 /// เทมเพลตภาษาอังกฤษ — ต้องมีครบทุกตัว
@@ -296,6 +313,27 @@ Drag in a PNG, JPEG, WebP, GIF, BMP, TGA or TIFF instead."
             "The graphics card is out of memory ({requested} MB requested, {used} MB of {limit} MB in use)\n\
              Close a board you are not using, or raise the memory limit in Settings."
         }
+        Template::PastedImage => "Pasted an image from the clipboard in {ms} ms",
+        Template::ErrClipboardEmpty => {
+            "There is no image in the clipboard\n\
+             Copy an image or an image file first, or drag the file into the window."
+        }
+        Template::ErrClipboardBusy => {
+            "Another program is holding the clipboard right now\n\
+             Wait a moment and press Ctrl+V again."
+        }
+        Template::ErrClipboardUnavailable => {
+            "RefX cannot reach the clipboard on this computer\n\
+             Drag the image into the window instead — that works exactly the same way."
+        }
+        Template::ErrClipboardUndecodable => {
+            "There is something in the clipboard, but it is not an image RefX can read\n\
+             Copy the image again, or save it as a PNG and drag that file in."
+        }
+        Template::ErrMalformedPixels => {
+            "The pasted image is damaged ({w}×{h} with the wrong amount of data)\n\
+             Copy it again from the program it came from."
+        }
     }
 }
 
@@ -360,6 +398,27 @@ fn template_th(template: Template) -> Option<&'static str> {
         Template::ErrOutOfVram => {
             "หน่วยความจำการ์ดจอไม่พอ (ขอ {requested} MB, ใช้อยู่ {used} MB จากเพดาน {limit} MB)\n\
              ลองปิด board ที่ไม่ได้ใช้ หรือเพิ่มเพดานหน่วยความจำในการตั้งค่า"
+        }
+        Template::PastedImage => "วางภาพจาก clipboard ใน {ms} ms",
+        Template::ErrClipboardEmpty => {
+            "ใน clipboard ไม่มีภาพ\n\
+             ลองก๊อปภาพหรือไฟล์ภาพมาก่อน หรือลากไฟล์เข้ามาในหน้าต่างก็ได้เหมือนกัน"
+        }
+        Template::ErrClipboardBusy => {
+            "โปรแกรมอื่นถือ clipboard อยู่ตอนนี้\n\
+             รอสักครู่แล้วกด Ctrl+V ใหม่อีกครั้ง"
+        }
+        Template::ErrClipboardUnavailable => {
+            "RefX เข้าถึง clipboard ของเครื่องนี้ไม่ได้\n\
+             ลากไฟล์ภาพเข้ามาในหน้าต่างแทนได้ ผลเหมือนกันทุกอย่าง"
+        }
+        Template::ErrClipboardUndecodable => {
+            "ใน clipboard มีของอยู่ แต่ไม่ใช่ภาพที่ RefX อ่านได้\n\
+             ลองก๊อปภาพใหม่อีกครั้ง หรือบันทึกเป็นไฟล์ PNG แล้วลากเข้ามา"
+        }
+        Template::ErrMalformedPixels => {
+            "ภาพที่วางเข้ามาเสียหาย ({w}×{h} แต่ข้อมูลไม่ครบตามขนาด)\n\
+             ลองก๊อปใหม่จากโปรแกรมต้นทางอีกครั้ง"
         }
     })
 }
@@ -432,6 +491,11 @@ pub fn load_error(lang: Lang, err: &LoadError) -> String {
         LoadError::Decode(_) => fill(lang, Template::ErrDecode, &[]),
         LoadError::Io { file, .. } => fill(lang, Template::ErrReadFile, &[("file", file)]),
         LoadError::NotAFile { file } => fill(lang, Template::ErrNotAFile, &[("file", file)]),
+        LoadError::MalformedPixels { width, height, .. } => fill(
+            lang,
+            Template::ErrMalformedPixels,
+            &[("w", &width.to_string()), ("h", &height.to_string())],
+        ),
     }
 }
 
@@ -445,7 +509,23 @@ pub fn job_failure(lang: Lang, err: &JobFailure) -> String {
             Template::ErrTimeout,
             &[("file", file), ("seconds", &seconds.to_string())],
         ),
+        JobFailure::Clipboard(inner) => clipboard_error(lang, inner),
     }
+}
+
+/// ข้อความสำหรับผู้ใช้เมื่อวางจาก clipboard ไม่สำเร็จ
+///
+/// ★ ทุกกรณีต้องบอก **ทางออกที่ทำได้จริง** — "วางไม่ได้" เฉย ๆ ทำให้ผู้ใช้
+/// นึกว่าโปรแกรมพัง ทั้งที่ส่วนใหญ่แค่ก๊อปข้อความมาแทนภาพ
+#[must_use]
+pub fn clipboard_error(lang: Lang, err: &ClipboardError) -> String {
+    let template = match err {
+        ClipboardError::NoImage => Template::ErrClipboardEmpty,
+        ClipboardError::Busy => Template::ErrClipboardBusy,
+        ClipboardError::Unavailable { .. } => Template::ErrClipboardUnavailable,
+        ClipboardError::Undecodable => Template::ErrClipboardUndecodable,
+    };
+    fill(lang, template, &[])
 }
 
 /// ข้อความสำหรับผู้ใช้เมื่อเก็บภาพย่อลง atlas ไม่ได้
@@ -505,6 +585,7 @@ mod tests {
         Key::ToolFilter,
         Key::ToolTag,
         Key::ToolSendToCanvas,
+        Key::ReadingClipboard,
     ];
 
     const ALL_TEMPLATES: &[Template] = &[
@@ -534,6 +615,12 @@ mod tests {
         Template::ErrTimeout,
         Template::ErrAtlasFull,
         Template::ErrOutOfVram,
+        Template::PastedImage,
+        Template::ErrClipboardEmpty,
+        Template::ErrClipboardBusy,
+        Template::ErrClipboardUnavailable,
+        Template::ErrClipboardUndecodable,
+        Template::ErrMalformedPixels,
     ];
 
     /// ★ กฎข้อ 2 ของ docs/03 §0: ห้ามมีทางที่ผู้ใช้จะเห็นช่องว่างหรือชื่อ key
@@ -751,6 +838,71 @@ mod tests {
                 message.contains("192") && message.contains("384"),
                 "{message}"
             );
+        }
+    }
+
+    /// ★ วางแล้วไม่ได้ภาพ ต้องรู้ว่า **ทำไม** และ **ทำอะไรต่อ** ไม่ใช่เงียบไป
+    ///
+    /// เคสที่เจอบ่อยที่สุดคือก๊อปข้อความมาแล้วกด Ctrl+V — ถ้าไม่มีข้อความบอก
+    /// ผู้ใช้จะนึกว่าโปรแกรมพัง ทั้งที่ทำงานถูกต้องทุกอย่าง
+    #[test]
+    fn every_clipboard_error_variant_has_a_user_message() {
+        let cases = [
+            ClipboardError::NoImage,
+            ClipboardError::Busy,
+            ClipboardError::Unavailable {
+                reason: "no display".to_owned(),
+            },
+            ClipboardError::Undecodable,
+        ];
+        let mut seen: Vec<String> = Vec::new();
+        for err in &cases {
+            for lang in [Lang::En, Lang::Th] {
+                let message = clipboard_error(lang, err);
+                assert!(!message.trim().is_empty(), "{err:?} ({lang:?}) ว่างเปล่า");
+                assert!(!message.contains('{'), "{err:?} ({lang:?}): {message}");
+                // บรรทัดที่สองคือ "ทำอะไรต่อได้"
+                assert!(
+                    message.lines().count() >= 2,
+                    "{err:?} ({lang:?}): {message}"
+                );
+            }
+            // แต่ละสาเหตุต้องได้ข้อความคนละแบบ ไม่ใช่ "วางไม่ได้" เหมือนกันหมด
+            seen.push(clipboard_error(Lang::En, err));
+        }
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), cases.len(), "มีสาเหตุที่ใช้ข้อความซ้ำกัน");
+    }
+
+    /// error ของ clipboard ต้องเดินผ่าน `job_failure` ได้เหมือนสาเหตุอื่น
+    #[test]
+    fn clipboard_failure_reaches_the_user_through_job_failure() {
+        let err = JobFailure::Clipboard(ClipboardError::NoImage);
+        for lang in [Lang::En, Lang::Th] {
+            assert_eq!(
+                job_failure(lang, &err),
+                clipboard_error(lang, &ClipboardError::NoImage)
+            );
+        }
+    }
+
+    /// ภาพดิบที่ข้อมูลไม่ครบต้องบอกขนาดจริงที่ประกาศมา
+    #[test]
+    fn malformed_pixels_message_shows_the_declared_size() {
+        let err = LoadError::MalformedPixels {
+            width: 1920,
+            height: 1080,
+            expected: 8_294_400,
+            actual: 12,
+        };
+        for lang in [Lang::En, Lang::Th] {
+            let message = load_error(lang, &err);
+            assert!(
+                message.contains("1920") && message.contains("1080"),
+                "{message}"
+            );
+            assert!(!message.contains('{'), "{message}");
         }
     }
 

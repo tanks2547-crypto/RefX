@@ -12,11 +12,11 @@
 | **P0-1 ถึง P0-9** | ✅ เสร็จครบ ผ่านรีวิวแล้ว |
 | **P1-1 ถึง P1-6** | ✅ เสร็จ (P1-6 ครบแล้วหลังทำ `TextureAllocator`) |
 | **P1-7** working texture | ✅ เสร็จ (`9e1033e`) — mip บน CPU · LRU · 17 draw call ที่ 100 ภาพ |
-| **P1-8** drag & drop | ⚠️ ลากไฟล์ได้ · **clipboard paste ยังไม่ทำ** ← เหลือข้อเดียวของ P1 |
+| **P1-8** drag & drop + clipboard paste | ✅ เสร็จ — **P1 ปิดครบแล้ว** |
 | P2 ขึ้นไป | ยังไม่เริ่ม |
 
 **เกณฑ์คุณภาพล่าสุดที่ผ่าน:** `fmt` / `clippy --all-features -D warnings` (workspace + `fuzz/`) /
-`nextest 236/236` / `deny check` ครบ 4 หมวด / **binary 15.42 MB จากเพดาน 25 MB (บังคับใน CI)**
+`nextest 254/254` / `deny check` ครบ 4 หมวด / **binary 15.47 MB จากเพดาน 25 MB (บังคับใน CI)**
 
 crate ที่มี: `refx-app` `refx-asset` `refx-core` `refx-io` `refx-platform` `refx-render` `refx-ui`
 
@@ -41,18 +41,10 @@ repo **อยู่ใต้ git แล้ว** (branch `master`) — `git fsck`
 
 ## 2. ★ งานถัดไป (เรียงตามลำดับ ห้ามสลับ)
 
-> **P1 เหลือข้อเดียว** — งานที่เสร็จแล้วถูกย้ายออกจากหัวข้อนี้ ดูประวัติใน git log
+> **P1 ปิดครบแล้ว** — งานที่เสร็จแล้วถูกย้ายออกจากหัวข้อนี้ ดูประวัติใน git log
 > ต้นเหตุและทางแก้ของบั๊กสำคัญบันทึกไว้ใน `docs/` แล้ว ไม่ใช่ในไฟล์นี้
 
-### 2.1 P1-8 clipboard paste — ปิด P1
-
-`Ctrl+V` จากเบราว์เซอร์ / โปรแกรมวาด / Explorer · `arboard` อยู่ใน `docs/09` แล้ว
-
-**ระวัง:** clipboard เป็น input ที่ไม่น่าไว้ใจเท่าไฟล์ (I-4) ต้องผ่าน `decode_guarded` เส้นทางเดียวกัน
-ห้ามมีทางลัด · clipboard ให้ byte มาตรง ๆ ไม่มี path จึงไม่มี mtime สำหรับ cache key
-→ ตัดสินว่าจะ cache ไหม และถ้า cache จะใช้อะไรเป็น key (ดูข้อผูกมัด §4 ข้อ 4)
-
-### 2.2 เทสต์อัตโนมัติสำหรับ `force-device-lost`
+### 2.1 เทสต์อัตโนมัติสำหรับ `force-device-lost`
 
 เส้นทางกู้ device ยืนยันด้วยมือล้วนมาตลอด ทั้งที่เป็นสาเหตุ crash อันดับหนึ่งของแอปกราฟิก
 บน Windows (ARCHITECTURE §7) และตอนนี้**ยังไม่มีเทสต์ตัวไหนอยู่ใต้ `#[cfg(feature)]` เลย**
@@ -60,12 +52,12 @@ repo **อยู่ใต้ git แล้ว** (branch `master`) — `git fsck`
 P2 จะเพิ่ม GPU resource อีกมาก ถ้าไม่มีเทสต์คุม การกู้ device จะพังเงียบ ๆ ตอนไหนก็ได้
 ต้องคุมอย่างน้อย: กู้แล้ว atlas เติมกลับครบ · working texture ถูกสร้างใหม่ · ไม่กู้วนซ้ำ
 
-### 2.3 กวาด `tracing::` เป็นภาษาอังกฤษ (~100 จุด)
+### 2.2 กวาด `tracing::` เป็นภาษาอังกฤษ (~100 จุด)
 
 log มีไว้ให้นักพัฒนาอ่าน · ผู้ใช้ต่างชาติส่ง log มาต้องอ่านออก · เป็นงานเชิงกล
 ตรรกะเดียวกับที่ `#[error(…)]` ถูกเปลี่ยนเป็นอังกฤษไปแล้ว
 
-### 2.4 → เข้า P2 Canvas mode
+### 2.3 → เข้า P2 Canvas mode
 
 อ่าน `ROADMAP.md` หัวข้อ P2 และ `docs/03 §1` (โดยเฉพาะกับดัก pointer ของ egui
 และทางแก้ระยะยาว: ทำ canvas เป็น widget จริงด้วย `allocate_response`)
@@ -126,6 +118,8 @@ log มีไว้ให้นักพัฒนาอ่าน · ผู้ใ
 | 11 | **flag จำลอง device lost ต้องมีสองแบบ** นับเฟรม + **นับเวลา (`-ms`)** | ตัวนับเฟรมใช้ไม่ได้ถ้า I-1 ถูกต้อง (แอปวาด ~6 เฟรมแล้วหลับ) · ตัว `-ms` ทดสอบเคสจริงคือ device ตายตอนแอปหลับ | `ROADMAP P0-5` |
 | 13 | **เรียก `fast_image_resize` ได้จาก `refx-asset::resize` ที่เดียว** (`#[inline(never)]`) | เรียกจากสองจุดทำให้ binary โต **2.6 MB** จาก monomorphization · ต้นทุนอยู่ที่*จำนวนจุดที่เรียก* ไม่ใช่ตัวเลือกที่ส่งเข้าไป · เจอตอน P1-7 เพราะเพดานใน CI จับได้ | `docs/08 §6` |
 | 12 | **เพดาน RAM ต้องคุมรวมทุก worker** ไม่ใช่ต่อ job | 6 worker × 1 GiB = 6 GB แย่ง RAM กับ Photoshop · ปัจจุบัน 256 MB รวม + `Condvar` รอ + ใบจองเป็น RAII | `docs/05 §2` |
+| 14 | **ภาพจาก clipboard ไม่เข้า cache.sqlite** (ตัดสิน P1-8) | ข้อ 4 บังคับคีย์ `(hash, mtime, size)` แต่ clipboard ไม่มี mtime · ใส่ค่าปลอมแทน = จุดบอดของ fast hash กลับมาทันที ซึ่ง mtime มีไว้ปิดพอดี · ภาพที่วางมาใช้ครั้งเดียวเป็นปกติ เก็บไว้มีแต่จะไล่ thumbnail ของไฟล์จริงออกจาก LRU | `pool.rs` `JobSource::Clipboard` |
+| 15 | **ลำดับฟิลด์ของ `Assets` คือลำดับ drop — ห้ามสลับ** (`pool` → `io_tx` → `_io`) | `IoThread::drop` join เธรด IO ซึ่งจบก็ต่อเมื่อ sender หมดทุกใบ ถ้า `_io` ถูก drop ก่อน `io_tx` = **ปิดหน้าต่างแล้ว RefX.exe ไม่ตาย** ล็อก single-instance ค้าง เปิดใหม่ไม่ได้อีกเลย (เกิดจริง ยืนยันด้วยมือ 29 ก.ค. 2026) | `refx-ui/src/app.rs` + เทสต์ `dropping_assets_finishes_instead_of_hanging_forever` |
 
 ---
 
@@ -145,7 +139,9 @@ log มีไว้ให้นักพัฒนาอ่าน · ผู้ใ
 
 | เรื่อง | หมายเหตุ |
 |---|---|
-| clipboard paste (P1-8) | ยังไม่ทำ |
+| **`arboard` จอง RAM ของ pixel ก่อนเพดานของเราได้ตรวจ** | API ของมันไม่เปิดให้อ่าน byte ดิบของ clipboard มาเข้า `decode_guarded` — มันอ่าน `CF_DIBV5`/PNG แล้วถอดรหัสเองจนเสร็จก่อนคืนค่า เพดาน `max_pixels` ของเราจึงเป็นด่าน **หลัง** การจองก้อนนั้นหนึ่งครั้ง ตอนนี้กันด้วยการจำกัดให้วางได้ทีละครั้ง · จะปิดสนิทต้องอ่าน clipboard เองใน `refx-platform` (ต้องเพิ่ม dep `clipboard-win` — **ต้องถามก่อน**) |
+| ภาพที่วางจาก clipboard คมได้แค่ระดับ thumbnail | ไม่มีไฟล์ให้ decode ซ้ำตอนซูมเข้า จึงข้าม working texture ไปเลย (ถ้าไม่ข้าม จะได้งานที่ล้มเหลวแน่นอนหนึ่งใบทุกครั้งที่ซูม) · ทางแก้จริงคือเขียนลงไฟล์ชั่วคราวหรือ packed `.refx` — รอ P3/P4 |
+| `egui_winit` log `ERROR` ทุกครั้งที่กด `Ctrl+V` เมื่อ clipboard ไม่มีข้อความ | egui จัดการ `Ctrl+V` ของตัวเองด้วย แล้วขอ **ข้อความ** จาก clipboard ไม่ได้ → `ERROR arboard paste error: …` เป็นของ crate ภายนอก ไม่ใช่ของเรา และไม่กระทบการทำงาน แต่ทำให้คนอ่าน log เข้าใจผิด · ปิดได้ด้วย filter directive ใน `logging.rs` (ยังไม่ทำ — แตะ log config รวม) |
 | `--open-dir` วาง quad เป็นตาราง 16 คอลัมน์ตายตัว | ยังไม่ใช่ layout จริง รอ P2/P3 |
 | `xtask gen-testdata` | ทำแล้วบางส่วน · ยังไม่มี `bench` / `package` (P5-1) |
 | egui memory ตอนกู้ device | ตอนนี้ scroll position / panel ที่เปิดค้างรีเซ็ต · P5 ให้ clone `ctx.memory()` ก่อนกู้แล้วคืน |

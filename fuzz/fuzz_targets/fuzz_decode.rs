@@ -14,7 +14,7 @@
 //! spec: docs/06-security.md §2.5, §3
 
 use libfuzzer_sys::fuzz_target;
-use refx_asset::decode::{Limits, decode_guarded, probe_dimensions};
+use refx_asset::decode::{Limits, accept_rgba_guarded, decode_guarded, probe_dimensions};
 use refx_asset::thumb::read_orientation;
 
 /// เพดานสำหรับ fuzz — เล็กกว่าของจริงโดยตั้งใจ
@@ -81,6 +81,34 @@ fuzz_target!(|data: &[u8]| {
                 u64::from(width) * u64::from(height) <= u64::from(probe_w) * u64::from(probe_h),
                 "decode ได้ {width}x{height} ใหญ่กว่าที่ header บอก {probe_w}x{probe_h} \
                  — โควตา RAM ที่จองไว้จะไม่พอ"
+            );
+        }
+    }
+
+    // ---- 4. ภาพดิบจาก clipboard (P1-8) ----
+    // ★ clipboard คือ input ที่ไม่น่าไว้ใจเท่าไฟล์ (I-4) และเป็นทางที่ **ขนาดกับ
+    //   เนื้อข้อมูลมาจากคนละที่กัน** — โปรแกรมต้นทางประกาศ w×h มาเอง ส่วนบัฟเฟอร์
+    //   เป็นอีกก้อน ตรงนี้จึงต้องพิสูจน์ว่าไม่มีคู่ (w, h, bytes) ไหนที่หลุดเกราะไปได้
+    //   เอาสี่ไบต์แรกมาเป็นขนาด แล้วที่เหลือเป็น pixel — fuzzer จะไล่ขอบเองทั้งหมด
+    if data.len() >= 4 {
+        let width = u16::from_le_bytes([data[0], data[1]]);
+        let height = u16::from_le_bytes([data[2], data[3]]);
+        let pixels = data[4..].to_vec();
+        if let Ok(image) = accept_rgba_guarded(u32::from(width), u32::from(height), pixels, &limits)
+        {
+            assert_eq!(
+                (image.width(), image.height()),
+                (u32::from(width), u32::from(height)),
+                "ขนาดที่คืนมาไม่ตรงกับที่ขอ"
+            );
+            assert!(
+                u64::from(image.width()) * u64::from(image.height()) <= limits.max_pixels,
+                "ภาพดิบเกิน max_pixels หลุดเกราะออกมาได้"
+            );
+            assert_eq!(
+                image.as_raw().len(),
+                image.width() as usize * image.height() as usize * 4,
+                "buffer ไม่ตรงกับขนาด — ผู้เรียกที่เชื่อ w×h จะอ่านเกินขอบ"
             );
         }
     }

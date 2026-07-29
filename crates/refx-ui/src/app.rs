@@ -23,6 +23,7 @@ use refx_render::pipeline::{CameraUniform, QuadPipeline};
 use refx_render::texture::TextureAllocator;
 use refx_render::working::{WorkingCache, WorkingKey};
 use winit::event::WindowEvent;
+use winit::keyboard::ModifiersState;
 use winit::window::Window;
 
 /// อาร์กิวเมนต์จากบรรทัดคำสั่งที่ส่งต่อลงมาถึงชั้น render
@@ -155,6 +156,26 @@ impl FrameStats {
     }
 }
 
+/// ปุ่มนี้คือ "วางจาก clipboard" (`Ctrl+V`) หรือไม่
+///
+/// แยกเป็นฟังก์ชันบริสุทธิ์เพื่อ **ทดสอบได้จริงโดยไม่ต้องเปิดหน้าต่าง** — คีย์ลัด
+/// ที่พังเงียบ ๆ เป็นบั๊กที่ไม่มีเทสต์ไหนจับได้ถ้าตรรกะฝังอยู่ใน `match` ของ event
+///
+/// ดู **logical key** ไม่ใช่ตำแหน่งปุ่ม เพื่อให้ layout ที่ไม่ใช่ QWERTY ยังวางถูกปุ่ม
+/// (Dvorak กด `V` ที่ตำแหน่งอื่น) — บาง compositor บน X11 ส่ง `Ctrl+V` มาเป็น
+/// อักขระควบคุม `SYN` (U+0016) จึงรับตัวนั้นด้วย
+///
+/// TODO(P6): macOS ใช้ `Cmd+V` ต้องรับ `super_key()` เพิ่มตอนทำ P6
+fn is_paste(key: &winit::keyboard::Key, modifiers: ModifiersState) -> bool {
+    if !modifiers.control_key() {
+        return false;
+    }
+    match key {
+        winit::keyboard::Key::Character(text) => text.eq_ignore_ascii_case("v") || text == "\u{16}",
+        _ => false,
+    }
+}
+
 /// สีพื้นหลังของ canvas — เทาเข้มแบบเดียวกับโปรแกรมวาด
 /// (ค่า linear เพราะ surface เป็น sRGB, GPU แปลง gamma ให้เอง)
 const CLEAR_COLOR: wgpu::Color = wgpu::Color {
@@ -205,6 +226,8 @@ struct Gfx {
     working_quads: Vec<(WorkingKey, QuadInstance)>,
     /// กล้อง pan/zoom (P0-7)
     camera: Camera,
+    /// ปุ่มค้าง (Ctrl/Shift/Alt) ล่าสุด — winit ส่งมาแยก event ไม่ได้แนบมากับปุ่ม
+    modifiers: ModifiersState,
     /// ★ กรอบของช่อง canvas จริง (physical pixel) — **ไม่ใช่ขนาดหน้าต่างทั้งบาน**
     ///
     /// egui เป็นคนบอกว่าช่องกลางอยู่ตรงไหนหลังหัก panel ซ้าย/ขวา/บน/ล่างออกแล้ว
@@ -253,8 +276,13 @@ impl LoadTracker {
 ///
 /// P2 จะแทนที่ด้วย `Board`/`Item` ตัวจริงจาก `refx-core` ตอนนี้เก็บเท่าที่ P1-7 ต้องใช้
 struct BoardItem {
-    /// ไฟล์ต้นทาง — ต้องเก็บไว้เพราะ working texture ต้อง decode ใหม่จากไฟล์จริง
-    path: std::path::PathBuf,
+    /// ภาพนี้มาจากไหน
+    ///
+    /// ★ ต้องเก็บไว้เพราะ working texture ต้อง decode ใหม่จาก **ไฟล์จริง**
+    /// ภาพที่วางมาจาก clipboard ไม่มีไฟล์ให้กลับไปอ่าน จึงขอภาพคมกว่าเดิมไม่ได้
+    /// (ดู [`RefxApp::plan_working_textures`]) — ชนิดข้อมูลบังคับให้ต้องตัดสินใจ
+    /// ตรงนั้น แทนที่จะเผลอส่ง path ว่างเข้าไปแล้วได้ error ทุกครั้งที่ซูม
+    source: refx_asset::pool::JobSource,
     /// คีย์ของภาพ (ใช้เป็นคีย์ของ working cache ด้วย)
     hash: refx_asset::hash::ContentHash,
     /// ภาพย่อ 128 px — เก็บไว้เติม atlas กลับหลังกู้ device หรือหลังขยาย atlas
@@ -356,12 +384,27 @@ pub struct RefxApp {
     drop_reported: bool,
     /// ไฟล์ที่เพิ่งถูกลากเข้ามา — winit ส่งมาทีละไฟล์ จึงรวบไว้ก่อนแล้วส่งเป็นชุดเดียว
     pending_drops: Vec<std::path::PathBuf>,
+    /// ผู้ใช้กด `Ctrl+V` ในรอบ event ที่ผ่านมา — ส่งงานตอนต้นเฟรมถัดไป
+    ///
+    /// ไม่อ่าน clipboard ตรงนี้เด็ดขาด: การเปิด clipboard บล็อกได้ (I-2)
+    pending_paste: bool,
+    /// งานวางที่ส่งไปแล้วแต่ยังไม่ได้ผลกลับ
+    ///
+    /// ★ กันการกด `Ctrl+V` รัว ๆ ให้เหลือทีละครั้ง — ภาพจาก clipboard ใหญ่ได้
+    /// ระดับ 6000×4000 (96 MB) และ `arboard` จอง RAM ก้อนนั้นก่อนที่เพดานของเรา
+    /// จะได้ตรวจ ถ้าปล่อยให้ซ้อนกันสิบใบคือแย่ง RAM กับ Photoshop ตรง ๆ
+    paste_in_flight: Option<refx_asset::hash::ContentHash>,
+    /// นับครั้งที่วาง — ใช้ทำคีย์ที่ไม่ซ้ำให้แต่ละครั้ง (clipboard ไม่มี path ให้ใช้)
+    paste_count: u64,
+    /// ชุดล่าสุดที่กำลังรออยู่มาจาก clipboard หรือไม่ (ใช้เลือกข้อความสรุป)
+    batch_from_clipboard: bool,
     /// แปลงสถิติสะสมของ pool เป็นความคืบหน้าของงวดปัจจุบัน
     loading: LoadTracker,
-    /// path ของงานที่ส่งเข้า pool — ผลลัพธ์กลับมาพร้อม hash เท่านั้น
+    /// ที่มาของงานที่ส่งเข้า pool — ผลลัพธ์กลับมาพร้อม hash เท่านั้น
     ///
-    /// working texture ต้อง decode ใหม่จากไฟล์จริง จึงต้องจำ path ไว้จับคู่
-    job_paths: std::collections::HashMap<refx_asset::hash::ContentHash, std::path::PathBuf>,
+    /// working texture ต้อง decode ใหม่จากไฟล์จริง จึงต้องจำที่มาไว้จับคู่
+    job_sources:
+        std::collections::HashMap<refx_asset::hash::ContentHash, refx_asset::pool::JobSource>,
 }
 
 /// ส่วนที่จัดการภาพ — อยู่คนละโลกกับ GPU
@@ -369,8 +412,8 @@ pub struct RefxApp {
 /// ★ **ลำดับฟิลด์ที่นี่คือลำดับ drop และมันสำคัญจริง ๆ**
 /// `IoThread::drop` ปิด sender ของตัวเองแล้ว **join** เธรด IO ซึ่งจะจบก็ต่อเมื่อ
 /// sender ทุกใบถูก drop หมด ถ้า `io_tx` (ใบที่ clone ไว้) ยังอยู่ตอนนั้น
-/// การ join จะรอตลอดกาล ผลที่ผู้ใช้เจอคือ **หน้าต่างหายไปแต่ RefX.exe ยังอยู่**
-/// แล้วล็อก single-instance ค้าง จนเปิดโปรแกรมใหม่ไม่ได้อีกเลย
+/// การ join จะรอตลอดกาล = ปิดหน้าต่างแล้วโปรเซสไม่ตาย ล็อก single-instance
+/// ค้าง แล้วเปิดโปรแกรมใหม่ไม่ได้อีกเลย
 ///
 /// ลำดับที่ถูกคือ: worker (ถือ clone ของ `io_tx` คนละใบ) → `io_tx` → `IoThread`
 struct Assets {
@@ -407,8 +450,12 @@ impl RefxApp {
             drop_shown: 0,
             drop_reported: true,
             pending_drops: Vec::new(),
+            pending_paste: false,
+            paste_in_flight: None,
+            paste_count: 0,
+            batch_from_clipboard: false,
             loading: LoadTracker::default(),
-            job_paths: std::collections::HashMap::new(),
+            job_sources: std::collections::HashMap::new(),
         }
     }
 
@@ -437,16 +484,18 @@ impl RefxApp {
         self.drop_expected = paths.len();
         self.drop_shown = 0;
         self.drop_reported = false;
+        self.batch_from_clipboard = false;
 
         let mut submitted = Vec::with_capacity(paths.len());
         for (i, path) in paths.into_iter().enumerate() {
             // hash จาก path ไปก่อน — hash เนื้อไฟล์จริงเกิดบน worker (P1-2)
             // ที่นี่ต้องการแค่คีย์ชั่วคราวไว้จับคู่ผลลัพธ์
             let hash = refx_asset::hash::hash_bytes(path.to_string_lossy().as_bytes());
-            self.job_paths.insert(hash, path.clone());
+            let source = refx_asset::pool::JobSource::File(path);
+            self.job_sources.insert(hash, source.clone());
             submitted.push(refx_asset::pool::Job {
                 hash,
-                path,
+                source,
                 // ยังไม่มี layout จริง → เรียงตามลำดับที่ลากเข้ามา
                 priority: i as f32,
                 cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -463,6 +512,48 @@ impl RefxApp {
             Template::OpeningFiles,
             &[("n", &self.drop_expected.to_string())],
         );
+    }
+
+    /// ผู้ใช้กด `Ctrl+V` — ส่งงาน "ไปดูว่ามีอะไรใน clipboard" เข้าคิว
+    ///
+    /// ★ **ไม่แตะ clipboard บน UI thread เลย** (I-2) การเปิด clipboard รอ OS
+    /// ได้นานเป็นวินาทีถ้าโปรแกรมอื่นถือมันค้างอยู่ — worker เป็นคนอ่าน
+    ///
+    /// ภาพที่ได้กลับมาผ่านเกราะและเพดาน RAM ชุดเดียวกับไฟล์บนดิสก์ทุกประการ (I-4)
+    fn submit_paste(&mut self) {
+        let Some(assets) = self.assets.as_ref() else {
+            return;
+        };
+        // วางทีละครั้ง — ดูเหตุผลที่ฟิลด์ `paste_in_flight`
+        if self.paste_in_flight.is_some() {
+            tracing::debug!("ยังวางของเดิมไม่เสร็จ — ข้ามการวางครั้งนี้");
+            return;
+        }
+
+        // clipboard ไม่มี path ให้ทำคีย์ จึงนับครั้งเอา — ต่างคีย์กันทุกครั้งที่วาง
+        // (วางภาพเดิมซ้ำ = ผู้ใช้ตั้งใจให้ได้สองใบ ไม่ใช่ให้ทับกัน)
+        self.paste_count += 1;
+        let hash =
+            refx_asset::hash::hash_bytes(format!("clipboard:{}", self.paste_count).as_bytes());
+        self.job_sources
+            .insert(hash, refx_asset::pool::JobSource::Clipboard);
+        self.paste_in_flight = Some(hash);
+
+        assets.pool.submit(refx_asset::pool::Job {
+            hash,
+            source: refx_asset::pool::JobSource::Clipboard,
+            // ผู้ใช้เพิ่งกดปุ่มเมื่อกี้ — ตั้งใจที่สุดในคิว จึงได้ไปก่อน (น้อย = ก่อน)
+            priority: 0.0,
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            target: refx_asset::pool::JobTarget::Thumbnail,
+        });
+
+        self.drop_started = Some(std::time::Instant::now());
+        self.drop_expected = 1;
+        self.drop_shown = 0;
+        self.drop_reported = false;
+        self.batch_from_clipboard = true;
+        self.shell.status = text::t(self.shell.lang, Key::ReadingClipboard).to_owned();
     }
 
     /// เปิด decode pool + IO thread
@@ -530,7 +621,13 @@ impl RefxApp {
             refx_asset::hash::ContentHash,
             Box<refx_asset::working::WorkingImage>,
         )> = Vec::new();
+        // ไฟล์ที่พบใน clipboard — ส่งต่อเข้าเส้นทาง drag & drop หลังปล่อย borrow
+        let mut pasted_files: Vec<std::path::PathBuf> = Vec::new();
         while let Some(result) = assets.pool.try_recv() {
+            // งานวางจบแล้วไม่ว่าผลจะเป็นอะไร — เปิดทางให้กด Ctrl+V ครั้งต่อไปได้
+            if self.paste_in_flight == Some(result.hash()) {
+                self.paste_in_flight = None;
+            }
             match result {
                 refx_asset::pool::JobResult::Done {
                     hash,
@@ -538,8 +635,21 @@ impl RefxApp {
                     elapsed,
                 } => {
                     tracing::debug!(hash = %hash.short(), ?elapsed, "ถอดรหัสภาพเสร็จ");
-                    let path = self.job_paths.get(&hash).cloned().unwrap_or_default();
-                    done.push((hash, path, thumb));
+                    // ไม่รู้จักคีย์ = ไม่มีไฟล์ให้กลับไปอ่าน จึงถือเป็นภาพที่ขอคมกว่านี้
+                    // ไม่ได้ (ปลอดภัยกว่าการเดา path แล้วยิง error ทุกครั้งที่ซูม)
+                    let source = self
+                        .job_sources
+                        .get(&hash)
+                        .cloned()
+                        .unwrap_or(refx_asset::pool::JobSource::Clipboard);
+                    done.push((hash, source, thumb));
+                }
+                refx_asset::pool::JobResult::ClipboardFiles { hash, paths } => {
+                    // ก๊อปไฟล์จาก Explorer มาวาง — เดินเส้นทางเดียวกับลากไฟล์เข้ามา
+                    // ทั้งเส้น (มี cache, มี EXIF, ขอภาพคมตอนซูมได้)
+                    tracing::info!(hash = %hash.short(), count = paths.len(), "วางไฟล์จาก clipboard");
+                    self.job_sources.remove(&hash);
+                    pasted_files.extend(paths);
                 }
                 refx_asset::pool::JobResult::Working {
                     hash,
@@ -592,7 +702,7 @@ impl RefxApp {
         if !done.is_empty()
             && let Some(gfx) = self.gfx.as_mut()
         {
-            for (hash, path, thumb) in done {
+            for (hash, source, thumb) in done {
                 match Self::upload_thumb(gfx, &thumb.pixels) {
                     Ok(slot) => {
                         // จัดเป็นตารางง่าย ๆ ไปก่อน — layout จริงมาใน P2/P3
@@ -618,7 +728,7 @@ impl RefxApp {
                             flags: 0, // มี texture จริงแล้ว ไม่ใช่ placeholder
                         });
                         gfx.board_items.push(BoardItem {
-                            path,
+                            source,
                             hash,
                             thumb: *thumb,
                         });
@@ -637,25 +747,27 @@ impl RefxApp {
                 && let Some(started) = self.drop_started
             {
                 let elapsed = started.elapsed();
+                let ms = elapsed.as_secs_f64() * 1000.0;
                 self.drop_reported = true;
-                tracing::info!(
-                    files = self.drop_expected,
-                    ms = elapsed.as_secs_f64() * 1000.0,
-                    "ลากไฟล์เข้ามา → ภาพขึ้นจอครบ"
-                );
-                println!(
-                    "ลากไฟล์ {} ไฟล์ → ขึ้นจอครบใน {:.1} ms",
-                    self.drop_expected,
-                    elapsed.as_secs_f64() * 1000.0
-                );
-                self.shell.status = text::fill(
-                    self.shell.lang,
-                    Template::OpenedFiles,
-                    &[
-                        ("n", &self.drop_expected.to_string()),
-                        ("ms", &format!("{:.0}", elapsed.as_secs_f64() * 1000.0)),
-                    ],
-                );
+                if self.batch_from_clipboard {
+                    tracing::info!(ms, "วางจาก clipboard → ภาพขึ้นจอ");
+                    self.shell.status = text::fill(
+                        self.shell.lang,
+                        Template::PastedImage,
+                        &[("ms", &format!("{ms:.0}"))],
+                    );
+                } else {
+                    tracing::info!(files = self.drop_expected, ms, "ลากไฟล์เข้ามา → ภาพขึ้นจอครบ");
+                    println!("ลากไฟล์ {} ไฟล์ → ขึ้นจอครบใน {ms:.1} ms", self.drop_expected);
+                    self.shell.status = text::fill(
+                        self.shell.lang,
+                        Template::OpenedFiles,
+                        &[
+                            ("n", &self.drop_expected.to_string()),
+                            ("ms", &format!("{ms:.0}")),
+                        ],
+                    );
+                }
             }
         }
 
@@ -668,6 +780,12 @@ impl RefxApp {
                     self.cache_stats_rx = Some(rx);
                 }
             }
+        }
+
+        // ★ ไฟล์จาก clipboard เข้าคิวเป็นชุดใหม่ — เส้นทางเดียวกับลากไฟล์เข้ามาเป๊ะ
+        //   (ต้องอยู่หลังจากเลิกยืม `assets` แล้วเท่านั้น)
+        if !pasted_files.is_empty() {
+            self.submit_dropped(pasted_files);
         }
         finished > 0
     }
@@ -807,6 +925,12 @@ impl RefxApp {
             let Some(quad) = gfx.quads.get(index) else {
                 break;
             };
+            // ★ ภาพที่วางมาจาก clipboard ไม่มีไฟล์ให้กลับไป decode ใหม่ จึงคมได้แค่
+            //   ระดับ thumbnail ถ้าไม่ข้ามตรงนี้ ทุกครั้งที่ซูมจะได้งานที่ล้มเหลว
+            //   แน่นอนหนึ่งใบ พร้อมข้อความ error ที่ผู้ใช้ทำอะไรกับมันไม่ได้
+            if item.source.file().is_none() {
+                continue;
+            }
             // ขนาดบนจอ = ขนาดใน world × ซูม (transform[0] และ [3] คือสเกล)
             let world_side = quad.transform[0].abs().max(quad.transform[3].abs());
             let on_screen = world_side * zoom;
@@ -839,7 +963,7 @@ impl RefxApp {
             if gfx.working_pending.insert(key) {
                 requests.push(refx_asset::pool::Job {
                     hash: item.hash,
-                    path: item.path.clone(),
+                    source: item.source.clone(),
                     // ภาพที่อยู่ใกล้กึ่งกลางจอมาก่อน (docs/05 §3)
                     priority: offset.length(),
                     cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -984,6 +1108,7 @@ impl AppDelegate for RefxApp {
             canvas: CanvasRect::full(size.width, size.height),
             cursor: Vec2::ZERO,
             panning: false,
+            modifiers: ModifiersState::empty(),
         });
         self.queue_initial_files();
         Ok(())
@@ -1003,6 +1128,11 @@ impl AppDelegate for RefxApp {
         if !self.pending_drops.is_empty() {
             let batch = std::mem::take(&mut self.pending_drops);
             self.submit_dropped(batch);
+        }
+
+        // ★ Ctrl+V ที่กดไปเมื่อกี้ — งานอ่าน clipboard เกิดบน worker ทั้งหมด (I-2)
+        if std::mem::take(&mut self.pending_paste) {
+            self.submit_paste();
         }
 
         // เก็บผล decode ที่เสร็จแล้วก่อนวาด (ไม่บล็อก)
@@ -1325,6 +1455,25 @@ impl AppDelegate for RefxApp {
                 needs_redraw = true;
             }
 
+            // ปุ่มกดค้างสถานะไว้เอง — ต้องจำไว้เพราะ KeyboardInput ไม่ได้แนบมาให้
+            WindowEvent::ModifiersChanged(modifiers) => {
+                gfx.modifiers = modifiers.state();
+            }
+
+            // ★ Ctrl+V — วางภาพจาก clipboard (docs/03 §5, P1-8)
+            WindowEvent::KeyboardInput { event, .. } => {
+                // `repeat` = ผู้ใช้กดค้างไว้ ไม่ใช่เจตนาจะวางหลายรอบ
+                // ถ้าไม่กรอง การกดค้างหนึ่งวินาทีจะสั่งอ่าน clipboard หลายสิบครั้ง
+                if event.state.is_pressed()
+                    && !event.repeat
+                    && is_paste(&event.logical_key, gfx.modifiers)
+                {
+                    // อ่าน clipboard ที่นี่ไม่ได้ — บล็อกได้ (I-2) ทำที่ต้นเฟรมถัดไป
+                    self.pending_paste = true;
+                    needs_redraw = true;
+                }
+            }
+
             WindowEvent::CursorMoved { position, .. } => {
                 let next = Vec2::new(position.x as f32, position.y as f32);
                 if gfx.panning {
@@ -1594,12 +1743,75 @@ mod tests {
         assert_eq!(on_screen, c.to_local(cursor));
     }
 
+    // ---------- Ctrl+V (P1-8) ----------
+
+    fn character(text: &str) -> winit::keyboard::Key {
+        winit::keyboard::Key::Character(text.into())
+    }
+
+    /// ★ คีย์ลัดที่พังเงียบ ๆ ไม่มีใครเห็นจนกว่าผู้ใช้จะบ่น — บังคับด้วยเทสต์
+    #[test]
+    fn only_ctrl_v_counts_as_paste() {
+        let ctrl = ModifiersState::CONTROL;
+        assert!(is_paste(&character("v"), ctrl));
+        // Shift ค้างอยู่ด้วย (Ctrl+Shift+V) ยังถือว่าเป็นการวาง
+        assert!(is_paste(&character("V"), ctrl | ModifiersState::SHIFT));
+        // X11 บาง compositor ส่ง Ctrl+V มาเป็นอักขระควบคุม SYN
+        assert!(is_paste(&character("\u{16}"), ctrl));
+
+        // ไม่กด Ctrl = พิมพ์ตัว v เฉย ๆ ห้ามไปวางภาพให้
+        assert!(!is_paste(&character("v"), ModifiersState::empty()));
+        // ปุ่มอื่นที่กดพร้อม Ctrl
+        assert!(!is_paste(&character("c"), ctrl));
+        assert!(!is_paste(&character("b"), ctrl));
+        // ปุ่มที่ไม่ใช่ตัวอักษร
+        assert!(!is_paste(
+            &winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter),
+            ctrl
+        ));
+    }
+
+    /// ★ กด `Ctrl+V` รัว ๆ ต้องส่งงานทีละใบ
+    ///
+    /// ภาพจาก clipboard ใหญ่ได้ระดับ 6000×4000 (96 MB) และ `arboard` จอง RAM
+    /// ก้อนนั้นก่อนที่เพดานของเราจะได้ตรวจ ถ้าปล่อยให้ซ้อนกันคือแย่ง RAM
+    /// กับ Photoshop ที่ผู้ใช้เปิดคู่กันอยู่ตรง ๆ (ลำดับความสำคัญข้อ 3)
+    #[test]
+    fn holding_paste_down_only_submits_one_job_at_a_time() {
+        let dir = std::env::temp_dir().join(format!("refx-paste-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = RefxApp::new(AppArgs::default());
+        app.start_assets(&dir.join("cache.sqlite"));
+
+        let submitted = |app: &RefxApp| app.assets.as_ref().map_or(0, |a| a.pool.stats().submitted);
+
+        app.submit_paste();
+        assert_eq!(submitted(&app), 1, "กดครั้งแรกต้องส่งงานหนึ่งใบ");
+        assert!(app.paste_in_flight.is_some());
+
+        // กดซ้ำระหว่างที่ใบเดิมยังไม่กลับ — ต้องไม่ส่งเพิ่ม
+        for _ in 0..20 {
+            app.submit_paste();
+        }
+        assert_eq!(
+            submitted(&app),
+            1,
+            "กดรัว ๆ แล้วงานซ้อนกัน {} ใบ",
+            submitted(&app)
+        );
+
+        // ใบเดิมจบแล้วต้องวางใหม่ได้ (ไม่ใช่ล็อกตายไปตลอด)
+        app.paste_in_flight = None;
+        app.submit_paste();
+        assert_eq!(submitted(&app), 2, "ใบเดิมจบแล้วต้องวางใหม่ได้");
+    }
+
     /// ★ ปิดโปรแกรมแล้วต้อง **ตายจริง** ไม่ใช่ค้างเป็นผี
     ///
     /// `window::run` ถือ delegate ไว้แล้ว drop ตอน event loop จบ ถ้าลำดับ drop
     /// ของ [`Assets`] ผิด (`IoThread` ก่อน `io_tx`) การ join เธรด IO จะรอตลอดกาล
     /// ผลที่ผู้ใช้เจอคือ **หน้าต่างหายไปแต่ RefX.exe ยังอยู่** แล้วล็อก single-instance
-    /// ค้าง จนเปิดโปรแกรมใหม่ไม่ได้อีกเลย (ยืนยันด้วยมือแล้วว่าเกิดจริง 29 ก.ค. 2026)
+    /// ค้าง จนเปิดโปรแกรมใหม่ไม่ได้อีกเลย (ยืนยันด้วยมือมาแล้วว่าเกิดจริง 29 ก.ค. 2026)
     #[test]
     fn dropping_assets_finishes_instead_of_hanging_forever() {
         let dir = std::env::temp_dir().join(format!("refx-shutdown-{}", std::process::id()));
@@ -1617,6 +1829,17 @@ mod tests {
         assert!(
             rx.recv_timeout(std::time::Duration::from_secs(30)).is_ok(),
             "drop แล้วไม่จบภายใน 30 วินาที = ปิดโปรแกรมแล้วโปรเซสไม่ตาย"
+        );
+    }
+
+    /// ภาพที่วางมาจาก clipboard ไม่มีไฟล์ให้ decode ซ้ำ — ต้องไม่ไปขอ working texture
+    #[test]
+    fn clipboard_items_are_marked_as_having_no_source_file() {
+        assert!(refx_asset::pool::JobSource::Clipboard.file().is_none());
+        assert!(
+            refx_asset::pool::JobSource::File(std::path::PathBuf::from("a.png"))
+                .file()
+                .is_some()
         );
     }
 }

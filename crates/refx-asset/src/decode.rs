@@ -184,6 +184,21 @@ pub enum LoadError {
         /// ชื่อที่ระบุมา
         file: String,
     },
+
+    /// ภาพดิบ (clipboard) มีจำนวนไบต์ไม่ตรงกับขนาดที่ประกาศไว้
+    ///
+    /// ไม่มีทางเกิดจากภาพปกติ — แปลว่า OS หรือโปรแกรมต้นทางส่งของไม่สอดคล้องมา
+    #[error("raw image claims {width}x{height} ({expected} bytes) but has {actual} bytes")]
+    MalformedPixels {
+        /// ความกว้างที่ประกาศ
+        width: u32,
+        /// ความสูงที่ประกาศ
+        height: u32,
+        /// จำนวนไบต์ที่ควรจะเป็น
+        expected: u64,
+        /// จำนวนไบต์ที่ได้จริง
+        actual: u64,
+    },
 }
 
 /// ตรวจว่าขนาดภาพอยู่ในเพดานไหม
@@ -286,7 +301,10 @@ pub fn read_file_guarded(path: &std::path::Path, limits: &Limits) -> Result<Vec<
 }
 
 /// ชื่อไฟล์อย่างเดียว — **ห้ามใส่ path เต็มลง log** (มีชื่อผู้ใช้อยู่ในนั้น, docs/08 §5)
-fn file_label(path: &std::path::Path) -> String {
+///
+/// `pub(crate)` เพราะ decode pool ต้องใช้กติกาเดียวกันตอนตั้งป้ายให้งาน
+/// ถ้าเขียนซ้ำอีกที่ วันหนึ่งจะมีที่ใดที่หนึ่งหลุด path เต็มลง log
+pub(crate) fn file_label(path: &std::path::Path) -> String {
     path.file_name().map_or_else(
         || "(ไม่ทราบชื่อไฟล์)".to_owned(),
         |n| n.to_string_lossy().into_owned(),
@@ -328,11 +346,18 @@ pub fn probe_dimensions(bytes: &[u8], limits: &Limits) -> Result<(u32, u32), Loa
 /// # Errors
 /// คืน [`LoadError`] เสมอเมื่อทำไม่สำเร็จ — **ไม่ panic ไม่ว่า input จะเป็นอะไร**
 pub fn decode_guarded(bytes: &[u8], limits: &Limits) -> Result<RgbaImage, LoadError> {
-    decode_guarded_labelled(bytes, limits, "(clipboard)")
+    decode_guarded_labelled(bytes, limits, "(memory)")
 }
 
-/// เหมือน [`decode_guarded`] แต่ระบุป้ายไว้ใช้ตอน decoder panic
-fn decode_guarded_labelled(
+/// เหมือน [`decode_guarded`] แต่ระบุป้ายที่จะโผล่ใน log ตอน decoder panic
+///
+/// decode pool ใช้ตัวนี้เพื่อให้ log บอกได้ว่า **ไฟล์ไหน** ทำ decoder พัง
+/// ไม่ใช่บรรทัดเดียวกันหมดทุกงาน — ป้ายต้องเป็นชื่อไฟล์อย่างเดียว ไม่ใช่ path เต็ม
+/// (docs/08 §5) ใช้ [`file_label`] ประกอบให้
+///
+/// # Errors
+/// เหมือน [`decode_guarded`] ทุกประการ
+pub fn decode_guarded_labelled(
     bytes: &[u8],
     limits: &Limits,
     label: &str,
@@ -382,6 +407,71 @@ fn decode_guarded_labelled(
     check_dimensions(decoded.width(), decoded.height(), limits)?;
 
     Ok(decoded.into_rgba8())
+}
+
+/// รับภาพ **RGBA ดิบที่ OS ถอดรหัสมาให้แล้ว** (clipboard) ผ่านเกราะเท่าที่มีความหมาย
+///
+/// ★ ทำไมไม่เรียก [`decode_guarded`] ตรง ๆ: `arboard` คืน **pixel** ไม่ใช่ byte ของ
+/// ไฟล์ — มันอ่าน `CF_DIBV5`/PNG จาก clipboard แล้วถอดรหัสให้เสร็จก่อนจะถึงมือเรา
+/// จึงไม่มี container ให้ตรวจ magic bytes และไม่มี decoder ของเราทำงานให้ต้องกัน panic
+///
+/// | ชั้น | ไฟล์บนดิสก์ | ภาพดิบจาก clipboard |
+/// |---|---|---|
+/// | 1 ขนาด | ขนาดไฟล์ที่เข้ารหัสไว้ | **ความยาวบัฟเฟอร์ต้องตรงกับ w×h×4 เป๊ะ** |
+/// | 2 magic bytes | ตรวจ | ไม่มี container ให้ตรวจ |
+/// | 3 w×h ก่อน allocate | ตรวจ | **ตรวจด้วย [`check_dimensions`] ตัวเดียวกัน** |
+/// | 4 `catch_unwind` | ตรวจ | ไม่มี decoder ของเราทำงาน |
+///
+/// **ลำดับสำคัญ: ตรวจขนาดก่อนแตะบัฟเฟอร์เสมอ** ภาพที่ประกาศขนาดเกินเพดานถูกปฏิเสธ
+/// โดยไม่สนใจว่ามีข้อมูลมากี่ไบต์ (มีเทสต์บังคับไว้ด้วยบัฟเฟอร์เปล่า)
+///
+/// > ข้อจำกัดที่ยังปิดไม่ได้ (P1-8): `arboard` จองหน่วยความจำสำหรับ pixel
+/// > **ก่อน** ที่เราจะได้ตรวจเพดาน `max_pixels` เพราะ API ของมันไม่เปิดให้อ่าน byte ดิบ
+/// > ของ clipboard ที่จะเอามาผ่าน [`decode_guarded`] ได้ เพดานของเราจึงเป็นด่าน
+/// > **หลัง** การจองก้อนนั้นหนึ่งครั้ง ไม่ใช่ก่อน
+///
+/// # Errors
+/// คืน [`LoadError`] เสมอเมื่อไม่ผ่าน — **ไม่ panic ไม่ว่าค่าที่ส่งมาจะเป็นอะไร**
+pub fn accept_rgba_guarded(
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+    limits: &Limits,
+) -> Result<RgbaImage, LoadError> {
+    // ภาพกว้างหรือสูง 0 ไม่ใช่ภาพ — ปฏิเสธก่อนเพราะ w×h×4 = 0 จะ "ตรง" กับบัฟเฟอร์เปล่า
+    if width == 0 || height == 0 {
+        return Err(LoadError::ImageTooLarge {
+            width,
+            height,
+            pixels: 0,
+            limit: limits.max_pixels,
+        });
+    }
+
+    // ★ ชั้น 3 ก่อนเสมอ — เกราะเดียวกับไฟล์บนดิสก์ (decompression bomb / T2)
+    check_dimensions(width, height, limits)?;
+
+    // ชั้น 1 ในรูปที่มีความหมายกับ pixel ดิบ: บัฟเฟอร์ต้องยาวเท่าที่ประกาศเป๊ะ
+    // สั้นกว่า = ข้อมูลไม่ครบ · ยาวกว่า = มีอะไรแปลกปลอมติดมา ทั้งคู่เชื่อไม่ได้
+    let expected = u64::from(width) * u64::from(height) * 4;
+    let actual = rgba.len() as u64;
+    if actual != expected {
+        return Err(LoadError::MalformedPixels {
+            width,
+            height,
+            expected,
+            actual,
+        });
+    }
+
+    // ความยาวตรงแล้วจึงเป็นไปไม่ได้ที่ from_raw จะคืน None — แต่ไม่ unwrap
+    // เพราะเงื่อนไขนั้นเป็นของ crate ภายนอก ไม่ใช่ของเรา (CLAUDE.md)
+    RgbaImage::from_raw(width, height, rgba).ok_or(LoadError::MalformedPixels {
+        width,
+        height,
+        expected,
+        actual,
+    })
 }
 
 /// แปลงเพดานของเราเป็นเพดานของ `image` (เกราะชั้นสองที่ crate นั้นบังคับเอง)
@@ -831,6 +921,124 @@ mod tests {
                 // ทุก error ต้องมีข้อความอ่านรู้เรื่อง ไม่ใช่ Debug เปล่า ๆ
                 assert!(!err.to_string().is_empty(), "เคส {i} ไม่มีข้อความ error");
             }
+        }
+    }
+
+    // ---------- ภาพดิบจาก clipboard (P1-8) ----------
+
+    /// ภาพดิบปกติต้องผ่าน และ pixel ต้องมาถึงครบไม่สลับตำแหน่ง
+    #[test]
+    fn raw_rgba_round_trips_pixel_for_pixel() {
+        let mut rgba = vec![0u8; 4 * 3 * 4];
+        // ทำลายลายที่จับได้ถ้ามีการสลับแถว/ช่องสี
+        for (i, byte) in rgba.iter_mut().enumerate() {
+            *byte = u8::try_from(i % 251).unwrap_or(0);
+        }
+        let image =
+            accept_rgba_guarded(4, 3, rgba.clone(), &Limits::default()).expect("ภาพดิบปกติต้องผ่าน");
+        assert_eq!((image.width(), image.height()), (4, 3));
+        assert_eq!(image.as_raw(), &rgba);
+    }
+
+    /// ★ หัวใจของเกราะนี้: **ขนาดถูกตรวจก่อนแตะบัฟเฟอร์**
+    ///
+    /// ส่งบัฟเฟอร์เปล่าไปพร้อมขนาดระดับ bomb — ถ้าโค้ดเผลอเช็คความยาวก่อน
+    /// จะได้ `MalformedPixels` ซึ่งแปลว่าเพดาน `max_pixels` ไม่ได้ทำงานเป็นด่านแรก
+    /// (เคสจริง: ก๊อปจากโปรแกรมที่ประกาศขนาดเกินจริง แล้วเราจะไปจองตามที่มันบอก)
+    #[test]
+    fn raw_bomb_is_rejected_by_size_before_the_buffer_is_trusted() {
+        let limits = Limits {
+            max_pixels: 1_000_000,
+            ..Limits::default()
+        };
+        let err = accept_rgba_guarded(20_000, 20_000, Vec::new(), &limits).unwrap_err();
+        match err {
+            LoadError::ImageTooLarge {
+                width,
+                height,
+                pixels,
+                limit,
+            } => {
+                assert_eq!((width, height), (20_000, 20_000));
+                assert_eq!(pixels, 400_000_000);
+                assert_eq!(limit, 1_000_000);
+            }
+            other => panic!("ต้องถูกปฏิเสธเพราะขนาด แต่ได้ {other:?}"),
+        }
+    }
+
+    /// เพดานของ clipboard ต้องเป็น **ตัวเดียวกับ** ของไฟล์บนดิสก์ ไม่ใช่ชุดที่สอง
+    #[test]
+    fn raw_uses_the_same_pixel_ceiling_as_files() {
+        let limits = Limits {
+            max_pixels: 64,
+            ..Limits::default()
+        };
+        // 8×8 = 64 พอดี → ผ่าน
+        accept_rgba_guarded(8, 8, vec![0; 8 * 8 * 4], &limits).expect("เท่าเพดานพอดีต้องผ่าน");
+        // 9×8 = 72 → เกิน
+        let err = accept_rgba_guarded(9, 8, vec![0; 9 * 8 * 4], &limits).unwrap_err();
+        assert!(matches!(err, LoadError::ImageTooLarge { .. }), "ได้ {err:?}");
+
+        // และเป็นเพดานเดียวกับที่ไฟล์ PNG เจอ
+        let png = real_png(9, 8);
+        let file_err = decode_guarded(&png, &limits).unwrap_err();
+        assert!(
+            matches!(file_err, LoadError::ImageTooLarge { .. }),
+            "ได้ {file_err:?}"
+        );
+    }
+
+    /// บัฟเฟอร์ที่ยาวไม่ตรงกับขนาด = เชื่อไม่ได้ ต้องเป็น Err ไม่ใช่อ่านเลยขอบ
+    #[test]
+    fn raw_length_must_match_the_declared_size() {
+        let limits = Limits::default();
+        for (width, height, len) in [
+            (4u32, 3u32, 4 * 3 * 4 - 1),
+            (4, 3, 4 * 3 * 4 + 1),
+            (4, 3, 0),
+        ] {
+            let err = accept_rgba_guarded(width, height, vec![0; len], &limits).unwrap_err();
+            match err {
+                LoadError::MalformedPixels {
+                    expected, actual, ..
+                } => {
+                    assert_eq!(expected, 48);
+                    assert_eq!(actual, len as u64);
+                }
+                other => panic!("len={len} ต้องได้ MalformedPixels แต่ได้ {other:?}"),
+            }
+        }
+    }
+
+    /// ขนาด 0 ไม่ใช่ภาพ — และห้ามผ่านเพราะ "บัฟเฟอร์เปล่ายาวตรงกับ 0×0×4"
+    #[test]
+    fn raw_zero_sized_image_is_rejected() {
+        let limits = Limits::default();
+        for (width, height) in [(0u32, 0u32), (0, 16), (16, 0)] {
+            let err = accept_rgba_guarded(width, height, Vec::new(), &limits).unwrap_err();
+            assert!(
+                matches!(err, LoadError::ImageTooLarge { .. }),
+                "{width}×{height} ได้ {err:?}"
+            );
+        }
+    }
+
+    /// ★ ค่าที่โกงจนล้น u32 ต้องไม่กลายเป็นเลขเล็กที่ "ผ่าน" เกราะ
+    #[test]
+    fn raw_dimensions_never_overflow_into_passing() {
+        let limits = Limits::default();
+        for (width, height) in [
+            (u32::MAX, u32::MAX),
+            (u32::MAX, 1),
+            (1, u32::MAX),
+            (65_536, 2),
+        ] {
+            let err = accept_rgba_guarded(width, height, Vec::new(), &limits).unwrap_err();
+            assert!(
+                matches!(err, LoadError::ImageTooLarge { .. }),
+                "{width}×{height} ได้ {err:?}"
+            );
         }
     }
 }

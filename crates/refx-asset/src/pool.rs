@@ -23,7 +23,8 @@ use parking_lot::{Condvar, Mutex};
 use crate::budget::{RamBudget, estimate_decode_bytes};
 use crate::cache::{CacheKey, IoRequest, PathFingerprint, ThumbEntry, ThumbFormat};
 use crate::decode::{
-    Limits, LoadError, decode_guarded, load_guarded, probe_dimensions, read_file_guarded,
+    Limits, LoadError, accept_rgba_guarded, decode_guarded_labelled, file_label, load_guarded,
+    probe_dimensions, read_file_guarded,
 };
 use crate::hash::{ContentHash, hash_file};
 use crate::thumb::{Thumbnail, make_thumbnail, read_orientation};
@@ -108,13 +109,55 @@ pub enum JobTarget {
     },
 }
 
+/// ภาพของงานนี้มาจากไหน
+///
+/// ★ ทั้งสองทางใช้เกราะ เพดาน RAM คิว และ cancellation ชุดเดียวกันหมด (I-4)
+/// ต่างกันแค่ "หยิบ pixel มาจากไหน" ซึ่งเป็นสองบรรทัดแรกของงานเท่านั้น
+#[derive(Debug, Clone)]
+pub enum JobSource {
+    /// ไฟล์บนดิสก์ — เส้นทางปกติของ drag & drop และ `--open-dir`
+    File(PathBuf),
+
+    /// ภาพจาก clipboard (`Ctrl+V`)
+    ///
+    /// ★ **ไม่ผ่าน cache.sqlite โดยตั้งใจ** (ตัดสิน P1-8): cache key ที่ผูกมัดไว้คือ
+    /// `(hash, mtime, size)` ซึ่ง clipboard ไม่มี `mtime` ให้ ถ้าใส่ค่าปลอมแทน
+    /// จุดบอดของ fast hash จะกลับมาทันที — ซึ่ง `mtime` มีไว้ปิดพอดี
+    /// บวกกับภาพจาก clipboard ตามธรรมชาติใช้ครั้งเดียว การเก็บมีแต่จะไล่
+    /// thumbnail ของไฟล์จริงออกจาก LRU
+    ///
+    /// **อ่าน clipboard เกิดบน worker นี้** เพราะการเปิด clipboard บล็อกได้ (I-2)
+    Clipboard,
+}
+
+impl JobSource {
+    /// ไฟล์ต้นทาง ถ้ามี — clipboard ไม่มีไฟล์ให้กลับไปอ่านซ้ำ
+    #[must_use]
+    pub fn file(&self) -> Option<&std::path::Path> {
+        match self {
+            Self::File(path) => Some(path),
+            Self::Clipboard => None,
+        }
+    }
+
+    /// ป้ายสำหรับ log และข้อความ error — **ชื่อไฟล์อย่างเดียว ไม่ใช่ path เต็ม**
+    /// (docs/08 §5: path เต็มมีชื่อผู้ใช้อยู่ในนั้น)
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::File(path) => file_label(path),
+            Self::Clipboard => "(clipboard)".to_owned(),
+        }
+    }
+}
+
 /// งาน decode หนึ่งชิ้น
 #[derive(Debug, Clone)]
 pub struct Job {
-    /// คีย์ของเนื้อไฟล์
+    /// คีย์ที่ใช้จับคู่ผลลัพธ์กลับไปหา item บน board
     pub hash: ContentHash,
-    /// ไฟล์ที่จะอ่าน
-    pub path: PathBuf,
+    /// ภาพมาจากไหน
+    pub source: JobSource,
     /// ระยะจากกึ่งกลาง viewport — **น้อย = ทำก่อน**
     ///
     /// ภาพนอกจอ (prefetch) ให้บวก penalty คงที่ไปเลยเพื่อให้ไปอยู่ท้ายคิวเสมอ
@@ -140,6 +183,10 @@ pub enum JobFailure {
         /// เพดานเวลา (วินาที)
         seconds: u64,
     },
+
+    /// อ่าน clipboard ไม่ได้ หรือใน clipboard ไม่มีอะไรที่เปิดเป็นภาพได้
+    #[error(transparent)]
+    Clipboard(#[from] refx_platform::clipboard::ClipboardError),
 }
 
 /// ผลของงาน decode
@@ -170,6 +217,17 @@ pub enum JobResult {
         /// คีย์ของภาพ
         hash: ContentHash,
     },
+    /// ★ ใน clipboard เป็น **รายชื่อไฟล์** (ก๊อปไฟล์จาก Explorer) ไม่ใช่ภาพดิบ
+    ///
+    /// worker เป็นคนเดียวที่รู้ได้ เพราะต้องเปิด clipboard ถึงจะเห็น และการเปิด
+    /// clipboard บล็อกได้ (I-2) — ส่งกลับให้ UI ยัดเข้าเส้นทาง drag & drop
+    /// เส้นเดิมทั้งเส้น (มี cache, มี EXIF, ขอภาพคมตอนซูมได้)
+    ClipboardFiles {
+        /// คีย์ของงานที่ขอมา — ใช้ปิดสถานะ "กำลังวาง" ของ UI
+        hash: ContentHash,
+        /// ไฟล์ที่อยู่ใน clipboard
+        paths: Vec<PathBuf>,
+    },
     /// ล้มเหลว — item จะขึ้นสถานะ "โหลดไม่ได้" ไม่ใช่ crash (I-7)
     Failed {
         /// คีย์ของภาพ
@@ -187,6 +245,7 @@ impl JobResult {
             Self::Done { hash, .. }
             | Self::Working { hash, .. }
             | Self::Cancelled { hash }
+            | Self::ClipboardFiles { hash, .. }
             | Self::Failed { hash, .. } => *hash,
         }
     }
@@ -512,7 +571,9 @@ fn worker_loop(
         let result = run_job(&job, budget, limits, stats, io);
 
         match &result {
-            JobResult::Done { .. } | JobResult::Working { .. } => {
+            JobResult::Done { .. }
+            | JobResult::Working { .. }
+            | JobResult::ClipboardFiles { .. } => {
                 stats.completed.fetch_add(1, AtomicOrdering::Relaxed);
             }
             JobResult::Cancelled { .. } => {
@@ -550,17 +611,15 @@ fn run_job(
         return JobResult::Cancelled { hash: job.hash };
     }
 
-    let file = job.path.file_name().map_or_else(
-        || "(ไม่ทราบชื่อไฟล์)".to_owned(),
-        |n| n.to_string_lossy().into_owned(),
-    );
+    let file = job.source.label();
 
     // ★ ถาม cache ก่อน — เจอแล้วไม่ต้องอ่านไฟล์ ไม่ต้อง decode เลย
     //   นี่คือเส้นทางที่ผู้ใช้เจอทุกวัน (เปิดไฟล์เดิมซ้ำ ๆ)
     //   working texture ข้ามขั้นนี้ — cache เก็บแต่ thumbnail 128 px (docs/05 §5)
-    let lookup = match job.target {
-        JobTarget::Thumbnail => cache_lookup(job, io),
-        JobTarget::Working { .. } => CacheLookup::Unavailable,
+    //   clipboard ข้ามเช่นกัน — ไม่มี mtime ให้ประกอบคีย์ (ดู `JobSource::Clipboard`)
+    let lookup = match (job.target, job.source.file()) {
+        (JobTarget::Thumbnail, Some(path)) => cache_lookup(path, io),
+        _ => CacheLookup::Unavailable,
     };
     if let CacheLookup::Hit(thumb) = lookup {
         return JobResult::Done {
@@ -570,53 +629,23 @@ fn run_job(
         };
     }
 
-    // อ่านไฟล์ (ไม่ mmap — docs/06 §3) แล้วดูขนาดจาก header ก่อนขอโควตา
-    let bytes = match read_for_job(job, limits) {
-        Ok(bytes) => bytes,
-        Err(reason) => {
+    // ★ หยิบ pixel เข้ามา — จุดเดียวที่สองแหล่งต่างกัน หลังจากนี้เหมือนกันหมด
+    let (image, _reservation) = match acquire_pixels(job, budget, limits) {
+        Acquired::Ready { image, reservation } => (image, reservation),
+        Acquired::Files(paths) => {
+            return JobResult::ClipboardFiles {
+                hash: job.hash,
+                paths,
+            };
+        }
+        Acquired::Cancelled => return JobResult::Cancelled { hash: job.hash },
+        Acquired::Failed(reason) => {
             return JobResult::Failed {
                 hash: job.hash,
                 reason,
             };
         }
     };
-
-    // เช็คซ้ำหลังอ่านไฟล์เสร็จ — การอ่านอาจใช้เวลานานถ้าไฟล์อยู่บนไดรฟ์เครือข่าย
-    if job.cancel.load(AtomicOrdering::Relaxed) {
-        return JobResult::Cancelled { hash: job.hash };
-    }
-
-    let (width, height) = match probe_dimensions(&bytes, limits) {
-        Ok(dims) => dims,
-        Err(err) => {
-            return JobResult::Failed {
-                hash: job.hash,
-                reason: err.into(),
-            };
-        }
-    };
-
-    // ★ ขอโควตาจากถังกลาง — นอนรอถ้ายังไม่ว่าง (I-6)
-    let needed = estimate_decode_bytes(width, height);
-    let _reservation = budget.reserve(needed);
-
-    // รอโควตาอาจใช้เวลานาน — เช็คธงอีกรอบก่อนลงมือจริง
-    if job.cancel.load(AtomicOrdering::Relaxed) {
-        return JobResult::Cancelled { hash: job.hash };
-    }
-
-    let image = match decode_guarded(&bytes, limits) {
-        Ok(image) => image,
-        Err(err) => {
-            return JobResult::Failed {
-                hash: job.hash,
-                reason: err.into(),
-            };
-        }
-    };
-
-    // ขั้น 5: แก้ EXIF orientation — ภาพจากมือถือจะตะแคงถ้าไม่ทำ
-    let image = read_orientation(&bytes).apply(image);
 
     // ★ working texture แยกทางตรงนี้ — ใช้เกราะทุกชั้นร่วมกันมาจนถึงจุดนี้
     if let JobTarget::Working { size } = job.target {
@@ -689,6 +718,114 @@ fn run_job(
     }
 }
 
+/// ผลของการหยิบ pixel เข้ามา
+enum Acquired {
+    /// ได้ภาพพร้อมใบจองโควตา RAM ที่ต้องถือไว้ตลอดอายุของภาพ
+    Ready {
+        image: RgbaImage,
+        reservation: crate::budget::RamReservation,
+    },
+    /// clipboard มีรายชื่อไฟล์ ไม่ใช่ภาพดิบ
+    Files(Vec<PathBuf>),
+    /// ผู้ใช้ pan/ซูมผ่านไปแล้ว
+    Cancelled,
+    /// ไม่ผ่านเกราะ
+    Failed(JobFailure),
+}
+
+/// หยิบ pixel ของงานนี้เข้ามาให้พร้อมใช้
+///
+/// ★ นี่คือจุดเดียวที่ไฟล์กับ clipboard เดินคนละทาง หลังจากฟังก์ชันนี้คืนค่า
+/// ทุกอย่าง (orientation ที่ทำไปแล้ว, ย่อ, timeout, cache, การส่งกลับ) เหมือนกันหมด
+fn acquire_pixels(job: &Job, budget: &Arc<RamBudget>, limits: &Limits) -> Acquired {
+    match &job.source {
+        JobSource::File(path) => acquire_from_file(path, job, budget, limits),
+        JobSource::Clipboard => acquire_from_clipboard(job, budget, limits),
+    }
+}
+
+/// อ่านไฟล์จากดิสก์แล้ว decode ผ่านเกราะครบทุกชั้น
+fn acquire_from_file(
+    path: &std::path::Path,
+    job: &Job,
+    budget: &Arc<RamBudget>,
+    limits: &Limits,
+) -> Acquired {
+    // อ่านไฟล์ (ไม่ mmap — docs/06 §3) แล้วดูขนาดจาก header ก่อนขอโควตา
+    let bytes = match read_file_guarded(path, limits) {
+        Ok(bytes) => bytes,
+        Err(err) => return Acquired::Failed(err.into()),
+    };
+
+    // เช็คซ้ำหลังอ่านไฟล์เสร็จ — การอ่านอาจใช้เวลานานถ้าไฟล์อยู่บนไดรฟ์เครือข่าย
+    if job.cancel.load(AtomicOrdering::Relaxed) {
+        return Acquired::Cancelled;
+    }
+
+    let (width, height) = match probe_dimensions(&bytes, limits) {
+        Ok(dims) => dims,
+        Err(err) => return Acquired::Failed(err.into()),
+    };
+
+    // ★ ขอโควตาจากถังกลาง — นอนรอถ้ายังไม่ว่าง (I-6)
+    let reservation = budget.reserve(estimate_decode_bytes(width, height));
+
+    // รอโควตาอาจใช้เวลานาน — เช็คธงอีกรอบก่อนลงมือจริง
+    if job.cancel.load(AtomicOrdering::Relaxed) {
+        return Acquired::Cancelled;
+    }
+
+    let image = match decode_guarded_labelled(&bytes, limits, &file_label(path)) {
+        Ok(image) => image,
+        Err(err) => return Acquired::Failed(JobFailure::Load(err)),
+    };
+
+    // แก้ EXIF orientation — ภาพจากมือถือจะตะแคงถ้าไม่ทำ
+    Acquired::Ready {
+        image: read_orientation(&bytes).apply(image),
+        reservation,
+    }
+}
+
+/// อ่านสิ่งที่อยู่ใน clipboard แล้วผ่านเกราะเท่าที่มีความหมายกับ pixel ดิบ
+///
+/// ★ **ทำไมอยู่บน worker:** การเปิด clipboard รอ OS ได้นานเป็นวินาทีถ้าโปรแกรมอื่น
+/// ถือมันค้างอยู่ ทำบน UI thread = แอปค้างทั้งบาน (I-2)
+///
+/// ★ **ข้อจำกัดที่ยังปิดไม่ได้:** `arboard` จอง RAM ของ pixel ตั้งแต่ก่อนคืนค่า
+/// เราจึงขอโควตาถังกลางได้หลังภาพอยู่ในมือแล้ว (ต่างจากไฟล์ที่ขอก่อน decode)
+/// ผลคือ peak ชั่วคราวของการวางหนึ่งครั้งอยู่นอกถัง — ชั้น UI จึงจำกัดให้
+/// **วางได้ทีละครั้ง** เพื่อไม่ให้ซ้อนกันหลายก้อน
+fn acquire_from_clipboard(job: &Job, budget: &Arc<RamBudget>, limits: &Limits) -> Acquired {
+    let content = match refx_platform::clipboard::read() {
+        Ok(content) => content,
+        Err(err) => return Acquired::Failed(err.into()),
+    };
+
+    let raw = match content {
+        refx_platform::clipboard::ClipboardContent::Files(paths) => {
+            return Acquired::Files(paths);
+        }
+        refx_platform::clipboard::ClipboardContent::Image(image) => image,
+    };
+
+    // อ่าน clipboard อาจนาน — ผู้ใช้อาจกดอย่างอื่นไปแล้ว
+    if job.cancel.load(AtomicOrdering::Relaxed) {
+        return Acquired::Cancelled;
+    }
+
+    // ★ ผ่านเกราะ **ก่อน** ขอโควตา — ถ้าขอก่อน ภาพที่ประกาศขนาดโกงจะไปนอนรอ
+    //   ถังว่างเปล่า ๆ ทั้งที่สุดท้ายก็โดนปฏิเสธอยู่ดี
+    let image = match accept_rgba_guarded(raw.width, raw.height, raw.rgba, limits) {
+        Ok(image) => image,
+        Err(err) => return Acquired::Failed(err.into()),
+    };
+
+    // ถือโควตาไว้เท่ากับที่ภาพกินจริง ตลอดช่วงที่ยังถือภาพอยู่ — เกณฑ์เดียวกับไฟล์
+    let reservation = budget.reserve(estimate_decode_bytes(image.width(), image.height()));
+    Acquired::Ready { image, reservation }
+}
+
 /// ถาม cache ว่ามี thumbnail ของไฟล์นี้อยู่แล้วไหม
 ///
 /// ขั้นตอน (docs/05 §3–§5):
@@ -699,12 +836,19 @@ fn run_job(
 ///   4. ถาม `thumbs` ด้วยคีย์ (hash, mtime, size)
 ///
 /// **รันบน worker thread** จึงรอคำตอบจาก IO thread ได้ (I-2 คุมแค่ UI thread)
-fn cache_lookup(job: &Job, io: Option<&crossbeam_channel::Sender<IoRequest>>) -> CacheLookup {
+///
+/// รับ `path` ไม่ใช่ทั้ง `Job` เพราะ **มีแต่งานที่มีไฟล์จริงเท่านั้นที่เข้า cache ได้** —
+/// clipboard ไม่มี `mtime` ให้ประกอบคีย์ (ดู [`JobSource::Clipboard`]) การให้ชนิดข้อมูล
+/// บังคับไว้ตรงนี้ทำให้ลืมไม่ได้
+fn cache_lookup(
+    path: &std::path::Path,
+    io: Option<&crossbeam_channel::Sender<IoRequest>>,
+) -> CacheLookup {
     let Some(io) = io else {
         return CacheLookup::Unavailable;
     };
-    let Ok(meta) = std::fs::metadata(&job.path) else {
-        return CacheLookup::Unavailable; // ปล่อยให้ read_for_job รายงาน error ที่ชัดกว่า
+    let Ok(meta) = std::fs::metadata(path) else {
+        return CacheLookup::Unavailable; // ปล่อยให้ขั้นอ่านไฟล์รายงาน error ที่ชัดกว่า
     };
 
     let mtime = meta
@@ -722,7 +866,7 @@ fn cache_lookup(job: &Job, io: Option<&crossbeam_channel::Sender<IoRequest>>) ->
     let (reply, rx) = crossbeam_channel::bounded(1);
     let known = io
         .send(IoRequest::LookupPath {
-            path: job.path.clone(),
+            path: path.to_path_buf(),
             fingerprint,
             reply,
         })
@@ -734,11 +878,11 @@ fn cache_lookup(job: &Job, io: Option<&crossbeam_channel::Sender<IoRequest>>) ->
     let hash = match known {
         Some(hash) => hash,
         None => {
-            let Ok(hash) = hash_file(&job.path) else {
+            let Ok(hash) = hash_file(path) else {
                 return CacheLookup::Unavailable;
             };
             let _ = io.send(IoRequest::RecordPath {
-                path: job.path.clone(),
+                path: path.to_path_buf(),
                 hash,
                 fingerprint,
             });
@@ -768,13 +912,6 @@ fn cache_lookup(job: &Job, io: Option<&crossbeam_channel::Sender<IoRequest>>) ->
         // แถวขนาดผิด = cache เพี้ยน ถือว่า miss แล้ว decode ใหม่ทับ
         _ => CacheLookup::Miss(key),
     }
-}
-
-/// อ่านไฟล์ของงานนี้เข้าหน่วยความจำ
-///
-/// ใช้ [`read_file_guarded`] ตัวเดียวกับ `load_guarded` — เกราะชุดเดียว ไม่เขียนซ้ำ
-fn read_for_job(job: &Job, limits: &Limits) -> Result<Vec<u8>, JobFailure> {
-    read_file_guarded(&job.path, limits).map_err(JobFailure::Load)
 }
 
 /// สะดวกสำหรับผู้เรียก: โหลดไฟล์เดียวแบบ synchronous (ใช้ในเทสต์/เครื่องมือ)
@@ -816,7 +953,7 @@ mod tests {
     fn job(path: PathBuf, priority: f32, seed: &[u8]) -> Job {
         Job {
             hash: crate::hash::hash_bytes(seed),
-            path,
+            source: JobSource::File(path),
             priority,
             cancel: Arc::new(AtomicBool::new(false)),
             target: JobTarget::Thumbnail,
@@ -883,7 +1020,9 @@ mod tests {
             {
                 JobResult::Failed { .. } => failed += 1,
                 JobResult::Done { .. } => done += 1,
-                JobResult::Working { .. } | JobResult::Cancelled { .. } => {}
+                JobResult::Working { .. }
+                | JobResult::Cancelled { .. }
+                | JobResult::ClipboardFiles { .. } => {}
             }
         }
         assert_eq!((failed, done), (1, 1), "ไฟล์เสียต้องไม่ลากไฟล์ดีลงไปด้วย");
@@ -941,7 +1080,7 @@ mod tests {
         for (i, flag) in flags.iter().enumerate() {
             pool.submit(Job {
                 hash: crate::hash::hash_bytes(&(i as u32).to_le_bytes()),
-                path: path.clone(),
+                source: JobSource::File(path.clone()),
                 priority: i as f32,
                 cancel: Arc::clone(flag),
                 target: JobTarget::Thumbnail,
@@ -976,7 +1115,7 @@ mod tests {
         for (priority, seed) in [(30.0f32, 30u32), (10.0, 10), (20.0, 20)] {
             pool.submit(Job {
                 hash: crate::hash::hash_bytes(&seed.to_le_bytes()),
-                path: path.clone(),
+                source: JobSource::File(path.clone()),
                 priority,
                 cancel: Arc::new(AtomicBool::new(false)),
                 target: JobTarget::Thumbnail,
@@ -1025,7 +1164,7 @@ mod tests {
         for i in 0..40u32 {
             pool.submit(Job {
                 hash: crate::hash::hash_bytes(&i.to_le_bytes()),
-                path: path.clone(),
+                source: JobSource::File(path.clone()),
                 priority: i as f32,
                 cancel: Arc::new(AtomicBool::new(false)),
                 target: JobTarget::Thumbnail,
@@ -1048,7 +1187,7 @@ mod tests {
         for i in 0..50u32 {
             pool.submit(Job {
                 hash: crate::hash::hash_bytes(&i.to_le_bytes()),
-                path: path.clone(),
+                source: JobSource::File(path.clone()),
                 priority: i as f32,
                 cancel: Arc::new(AtomicBool::new(false)),
                 target: JobTarget::Thumbnail,
@@ -1067,5 +1206,139 @@ mod tests {
         let (used, limit) = pool.ram_usage();
         assert_eq!(used, 0);
         assert_eq!(limit, 64 << 20);
+    }
+
+    // ---------- clipboard (P1-8) ----------
+
+    fn clipboard_job(seed: &[u8]) -> Job {
+        Job {
+            hash: crate::hash::hash_bytes(seed),
+            source: JobSource::Clipboard,
+            priority: 0.0,
+            cancel: Arc::new(AtomicBool::new(false)),
+            target: JobTarget::Thumbnail,
+        }
+    }
+
+    /// ★ วางจาก clipboard ต้องได้คำตอบกลับมาเสมอ และห้ามลากงานอื่นลงไปด้วย
+    ///
+    /// เครื่องที่รันเทสต์มีอะไรใน clipboard ก็ได้ — ภาพ, ไฟล์, ข้อความล้วน,
+    /// หรือไม่มี clipboard เลย (CI ที่ไม่มี display) **ทุกกรณีต้องได้ผลหนึ่งชิ้น**
+    /// ไม่ใช่ panic ไม่ใช่ค้าง และไฟล์ปกติที่ตามมาต้องยังเปิดได้ตามเดิม (I-7)
+    #[test]
+    fn clipboard_job_always_answers_and_never_kills_the_pool() {
+        let good = write_png("clip", "good.png", 24, 16);
+        let pool = test_pool(2);
+        pool.submit(clipboard_job(b"clip"));
+        pool.submit(job(good, 1.0, b"good"));
+
+        let mut file_done = false;
+        let mut clipboard_answered = false;
+        for _ in 0..2 {
+            let result = pool
+                .results()
+                .recv_timeout(Duration::from_secs(30))
+                .expect("ทุกงานต้องได้คำตอบกลับมา");
+            if result.hash() == crate::hash::hash_bytes(b"clip") {
+                clipboard_answered = true;
+                // ผลเป็นอะไรก็รับได้ ยกเว้น "ไม่มีอะไรกลับมา"
+                // ★ พิมพ์ว่าเดินสาขาไหน เพราะมันขึ้นกับว่าเครื่องที่รันมีอะไรใน
+                //   clipboard — คนที่ตรวจงานด้วยมือต้องรู้ว่าเทสต์นี้ครอบคลุมอะไรจริง
+                match result {
+                    JobResult::Done { thumb, .. } => {
+                        println!(
+                            "clipboard มีภาพ {}×{} → ได้ thumbnail แล้ว",
+                            thumb.source_width, thumb.source_height
+                        );
+                        assert!(thumb.source_width > 0 && thumb.source_height > 0);
+                        assert_eq!(thumb.pixels.len(), EXPECTED_THUMB_BYTES);
+                    }
+                    JobResult::ClipboardFiles { paths, .. } => {
+                        println!("clipboard มีไฟล์ {} รายการ", paths.len());
+                    }
+                    JobResult::Cancelled { .. } => println!("งาน clipboard ถูกยกเลิก"),
+                    JobResult::Failed { reason, .. } => {
+                        println!("clipboard เปิดไม่ได้: {reason}");
+                        assert!(!reason.to_string().trim().is_empty(), "error ไม่มีข้อความ");
+                    }
+                    JobResult::Working { .. } => panic!("ขอ thumbnail แต่ได้ working"),
+                }
+            } else {
+                file_done = matches!(result, JobResult::Done { .. });
+            }
+        }
+        assert!(clipboard_answered, "งาน clipboard เงียบหาย");
+        assert!(file_done, "ไฟล์ปกติต้องยังเปิดได้แม้ clipboard จะเป็นอะไรก็ตาม");
+        assert_eq!(pool.ram_usage().0, 0, "คืนโควตา RAM ครบ");
+    }
+
+    /// ★ ข้อผูกมัด §4 ข้อ 4: cache key คือ `(hash, mtime, size)`
+    ///
+    /// clipboard ไม่มี mtime จึง **ห้ามแตะ cache เลย** — ไม่ใช่ "แตะแล้วพลาด"
+    /// เทสต์นี้ดักที่ช่องคุยกับ IO thread โดยตรง: งาน clipboard ต้องไม่ส่งคำขอ
+    /// สักใบ ส่วนงานของไฟล์ต้องส่ง เพื่อพิสูจน์ว่าช่องนี้ทำงานอยู่จริง
+    #[test]
+    fn clipboard_never_touches_the_cache() {
+        let (io_tx, io_rx) = crossbeam_channel::unbounded::<IoRequest>();
+        let pool = DecodePool::new(
+            1,
+            Arc::new(RamBudget::new(64 << 20)),
+            Limits::default(),
+            Some(io_tx),
+        );
+
+        pool.submit(clipboard_job(b"no-cache"));
+        pool.results()
+            .recv_timeout(Duration::from_secs(30))
+            .expect("ต้องได้ผลกลับมา");
+        assert!(
+            io_rx.try_recv().is_err(),
+            "งาน clipboard ส่งคำขอไปหา cache ซึ่งไม่มี mtime ให้ประกอบคีย์"
+        );
+
+        // ช่องเดียวกันนี้ต้องมีของจริงไหลผ่านเมื่อเป็นไฟล์ — ไม่งั้นเทสต์ข้างบนว่างเปล่า
+        //
+        // ตอบกลับให้ด้วย (เป็น "ไม่มีใน cache" ทุกใบ) ไม่งั้น worker จะรอจนครบ
+        // `IO_TIMEOUT` สองรอบ = เทสต์ช้าไป 10 วินาทีโดยไม่ได้ตรวจอะไรเพิ่ม
+        let asked = Arc::new(AtomicU64::new(0));
+        let responder = {
+            let asked = Arc::clone(&asked);
+            std::thread::spawn(move || {
+                for request in io_rx {
+                    asked.fetch_add(1, AtomicOrdering::Relaxed);
+                    match request {
+                        IoRequest::LookupPath { reply, .. } => {
+                            let _ = reply.send(None);
+                        }
+                        IoRequest::GetThumb { reply, .. } => {
+                            let _ = reply.send(None);
+                        }
+                        _ => {}
+                    }
+                }
+            })
+        };
+
+        let path = write_png("cache-io", "c.png", 16, 16);
+        pool.submit(job(path, 0.0, b"cache-io"));
+        pool.results()
+            .recv_timeout(Duration::from_secs(30))
+            .expect("ต้องได้ผลกลับมา");
+        drop(pool); // ปิด sender ฝั่ง worker ให้ responder จบลูปได้
+        responder.join().expect("responder ต้องจบปกติ");
+        assert!(
+            asked.load(AtomicOrdering::Relaxed) > 0,
+            "งานของไฟล์ต้องคุยกับ cache — ถ้าไม่คุยเลย เทสต์ข้างบนก็ไม่ได้พิสูจน์อะไร"
+        );
+    }
+
+    /// ป้ายที่ไปโผล่ใน log ห้ามมี path เต็ม (docs/08 §5 — path มีชื่อผู้ใช้อยู่)
+    #[test]
+    fn job_labels_never_leak_a_full_path() {
+        let source = JobSource::File(PathBuf::from("C:/Users/somchai/ref/แมว.png"));
+        assert_eq!(source.label(), "แมว.png");
+        assert!(!source.label().contains("somchai"));
+        assert_eq!(JobSource::Clipboard.label(), "(clipboard)");
+        assert!(JobSource::Clipboard.file().is_none());
     }
 }
