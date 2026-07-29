@@ -86,6 +86,12 @@ pub struct WorkingCache {
     clock: u64,
     /// จำนวนใบที่ถูกไล่ออกไปแล้ว — หลักฐานว่า LRU ทำงานจริง
     evicted: u64,
+    /// รุ่นของ device ที่ texture ในคลังนี้ผูกอยู่
+    ///
+    /// ★ ทุกใบในนี้ตายพร้อม device — หลังกู้ device ต้อง **สร้างคลังใหม่ทั้งก้อน**
+    /// (sampler กับ `TextureAllocator` ก็ผูกกับ device เดิมเหมือนกัน)
+    /// ตัวเลขนี้มีไว้ให้ชั้นบนตรวจได้ว่าเผลอถือของรุ่นเก่าไว้หรือเปล่า
+    generation: u64,
 }
 
 impl WorkingCache {
@@ -96,7 +102,12 @@ impl WorkingCache {
     ///
     /// `limit` คือครึ่งบนของงบ VRAM (อีกครึ่งเป็นของ atlas — docs/05 §1)
     #[must_use]
-    pub fn new(device: &wgpu::Device, textures: TextureAllocator, limit: usize) -> Self {
+    pub fn new(
+        device: &wgpu::Device,
+        textures: TextureAllocator,
+        limit: usize,
+        generation: u64,
+    ) -> Self {
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("refx-working-sampler"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -116,7 +127,14 @@ impl WorkingCache {
             used: 0,
             clock: 0,
             evicted: 0,
+            generation,
         }
+    }
+
+    /// รุ่นของ device ที่คลังนี้ผูกอยู่ — ชั้นบนใช้ตรวจว่ายังตรงกับ device ปัจจุบันไหม
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// VRAM ที่คลังนี้ถืออยู่ (ไบต์)
@@ -149,7 +167,11 @@ impl WorkingCache {
         self.evicted
     }
 
-    /// ทิ้งทุกใบ (ใช้ตอนกู้ device — texture เดิมผูกกับ device ที่ตายไปแล้ว)
+    /// ทิ้งทุกใบ
+    ///
+    /// ★ **ไม่พอสำหรับการกู้ device** — sampler กับ `TextureAllocator` ที่คลังนี้ถือ
+    /// ก็ผูกกับ device เดิมด้วย เส้นทางกู้ device จึงสร้างคลังใหม่ทั้งก้อนแทน
+    /// (ดู `DeviceBound` ใน `refx-ui::app`) ตัวนี้ไว้ใช้ตอนต้องคืน VRAM ด่วน
     pub fn clear(&mut self) {
         self.entries.clear();
         self.used = 0;
@@ -321,7 +343,8 @@ impl WorkingCache {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    // เทสต์ต้อง panic! ได้เมื่อสร้าง device ใหม่ไม่สำเร็จ — นั่นคือความล้มเหลวจริง
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
 
@@ -440,5 +463,109 @@ mod tests {
         let b = crate::texture::texture_bytes(&with_mips);
         assert_eq!(a, 4 << 20, "1024² RGBA = 4 MB");
         assert_eq!(b, a + a / 3, "mip chain เพิ่มอีกราว 1/3");
+    }
+
+    // ---------- ★ GPU จริง: working texture หลัง device lost (P0-5 / P1-7) ----------
+
+    /// layout ที่ใช้จริงตอนวาด — ขอจาก atlas เพราะ working texture ใช้ layout เดียวกัน
+    fn layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+        let textures = TextureAllocator::with_limit(64 << 20);
+        let atlas = crate::atlas::ThumbnailAtlas::new(device, &textures, 1).expect("atlas");
+        // clone ไม่ได้ — สร้าง layout ชุดใหม่ที่หน้าตาเหมือนกันแทน
+        drop(atlas);
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("refx-test-working-layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        })
+    }
+
+    /// mip chain ปลอมขนาด `size` — ค่าไม่สำคัญ ที่สำคัญคือมันขึ้น GPU ได้จริง
+    fn levels_for(size: u32) -> Vec<Vec<u8>> {
+        let mut levels = Vec::new();
+        let mut side = size;
+        while side >= 1 {
+            levels.push(vec![180u8; (side * side * 4) as usize]);
+            if side == 1 {
+                break;
+            }
+            side /= 2;
+        }
+        levels
+    }
+
+    /// ★ หลังกู้ device คลัง working texture ต้องเป็น **ของใหม่ที่ว่างเปล่า**
+    /// แล้วเติมกลับได้จริงบน device ใบใหม่
+    ///
+    /// บั๊กที่เทสต์นี้กันไว้ (เจอจริง 29 ก.ค. 2026): `recover_device()` ไม่ได้สร้าง
+    /// คลังใหม่ ทำให้หลังกู้ device แล้ว `contains()` ยังตอบ true สำหรับ texture
+    /// ของ device ที่ตายไปแล้ว → เอา bind group นั้นไปวาด = ภาพหายทั้ง board
+    /// และเพราะ `working_pending` ยังจำคีย์เดิมไว้ ภาพคมจึงไม่มีวันถูกขอใหม่เลย
+    #[test]
+    fn working_cache_is_rebuilt_empty_on_a_new_device() {
+        let Some((device, queue, _)) = crate::device::headless_device() else {
+            println!("ข้าม: เครื่องนี้ไม่มี GPU ที่ใช้ได้");
+            return;
+        };
+
+        let wanted = key(256, 7);
+        let levels = levels_for(256);
+
+        // ---- device รุ่น 0: มีภาพคมอยู่ในคลัง ----
+        {
+            let layout = layout(&device);
+            let mut cache =
+                WorkingCache::new(&device, TextureAllocator::with_limit(64 << 20), 32 << 20, 0);
+            cache
+                .insert(&device, &queue, &layout, wanted, &levels)
+                .expect("อัปโหลด working texture ไม่ได้");
+            assert!(cache.contains(wanted), "รอบแรกต้องมีของอยู่จริง");
+            assert!(cache.used() > 0, "รอบแรกต้องกิน VRAM จริง");
+            assert_eq!(cache.generation(), 0);
+        }
+
+        // ---- device ตาย แล้วกู้เป็นรุ่น 1 ----
+        drop(device);
+        drop(queue);
+        let Some((device2, queue2, _)) = crate::device::headless_device() else {
+            panic!("สร้าง device ใหม่ไม่ได้");
+        };
+
+        let layout2 = layout(&device2);
+        let mut cache2 = WorkingCache::new(
+            &device2,
+            TextureAllocator::with_limit(64 << 20),
+            32 << 20,
+            1,
+        );
+        assert_eq!(cache2.generation(), 1, "คลังใหม่ต้องผูกกับ device รุ่นใหม่");
+        assert!(
+            !cache2.contains(wanted),
+            "คลังหลังกู้ต้องว่าง — ถ้ายังตอบว่ามีของ เราจะวาดด้วย texture ของ device ที่ตายแล้ว"
+        );
+        assert_eq!(cache2.used(), 0, "โควตา VRAM ต้องเริ่มนับใหม่จากศูนย์");
+
+        // ---- แล้วต้องเติมกลับได้จริงบน device ใบใหม่ ----
+        cache2
+            .insert(&device2, &queue2, &layout2, wanted, &levels)
+            .expect("เติม working texture กลับบน device ใหม่ไม่ได้");
+        assert!(cache2.contains(wanted), "ภาพคมต้องกลับมาหลังกู้ device");
+        assert!(cache2.used() > 0);
     }
 }

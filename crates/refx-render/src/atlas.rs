@@ -200,6 +200,26 @@ impl SlotAllocator {
     }
 }
 
+/// ต้องมีกี่ layer ถึงจะเก็บภาพ `slots` ภาพได้
+///
+/// ★ มีไว้ให้ **เติม atlas กลับหลังกู้ device** ขยาย texture ให้พอ *ก่อน* เริ่มเติม
+///
+/// ทำไมต้องขยายก่อน ไม่ใช่ขยายตอนเจอ `NeedsResize` กลางทาง:
+/// [`ThumbnailAtlas::resize`] สร้าง texture ใบใหม่แล้ว **ล้างตัวจัดสรรทั้งหมด**
+/// ช่องที่แจกไปแล้วในรอบเดียวกันจะชี้ไปที่ texture ที่ถูกทิ้งไปแล้วทันที
+///
+/// เจอของจริง 29 ก.ค. 2026: atlas ที่เพิ่งสร้างมี 0 layer (จองแบบ lazy — docs/05 §2)
+/// การเติมกลับจึงได้ `NeedsResize` ตั้งแต่ภาพแรกแล้ว **ทุกภาพกลายเป็น placeholder**
+/// = board ว่างเปล่าหลัง driver อัปเดต ซึ่งคือสิ่งที่ข้อผูกมัดเรื่องเติม atlas กลับ
+/// (docs/04 §4) มีไว้กันพอดี
+#[must_use]
+pub fn layers_needed(slots: usize) -> u32 {
+    let per_layer = SLOTS_PER_LAYER as usize;
+    // ปัดขึ้นเสมอ — เหลือเศษหนึ่งภาพก็ต้องมี layer ให้มันอยู่
+    let layers = slots.div_ceil(per_layer);
+    u32::try_from(layers).unwrap_or(u32::MAX).max(1)
+}
+
 /// atlas จริงบน GPU
 ///
 /// ★ **จอง layer แบบ lazy** (ตัดสิน 28 ก.ค. 2026, docs/05 §2)
@@ -569,7 +589,13 @@ pub fn layers_for_budget(caps: &GpuCapabilities, vram_budget: u64) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
+    // เทสต์ต้อง panic! ได้เมื่อผลไม่ตรงชนิดที่คาด — "ล้มเหลวด้วยเหตุผลที่ถูก" สำคัญพอกัน
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::float_cmp,
+        clippy::panic
+    )]
 
     use super::*;
 
@@ -809,5 +835,252 @@ mod tests {
         assert_eq!(layers_for_budget(&caps, 64 << 20), 4);
         // งบเล็กมากต้องยังได้อย่างน้อย 1 layer ไม่ใช่ 0
         assert_eq!(layers_for_budget(&caps, 1024), 1);
+    }
+
+    // ---------- ★ GPU จริง: เติม atlas กลับหลัง device lost (P0-5) ----------
+    //
+    // เทสต์กลุ่มนี้ต้องมี GPU จริง เพราะสิ่งที่ต้องพิสูจน์คือ **pixel อยู่บน texture
+    // ของ device ใบใหม่จริง ๆ** ไม่ใช่แค่ตัวนับ slot ตรงกัน — ตัวนับตรงได้ทั้งที่
+    // ภาพไม่ได้ขึ้น ซึ่งเป็นบั๊ก "canvas ว่างเปล่า" แบบเดียวกับที่โปรเจกต์นี้เคยโดน
+    //
+    // เครื่องที่ไม่มี GPU จะ **ข้ามพร้อมพิมพ์เหตุผล** (docs/08 §3.9 ข้อ 2)
+
+    /// สีทึบขนาดเท่าช่อง atlas พอดี
+    fn solid_thumb(rgba: [u8; 4]) -> Vec<u8> {
+        rgba.iter()
+            .copied()
+            .cycle()
+            .take((SLOT_SIZE * SLOT_SIZE * 4) as usize)
+            .collect()
+    }
+
+    /// อ่าน pixel ของช่องหนึ่งกลับจาก GPU — **หลักฐานว่าภาพขึ้นจริง**
+    fn read_slot(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        atlas: &ThumbnailAtlas,
+        slot: AtlasSlot,
+    ) -> Vec<u8> {
+        let (x, y) = slot.origin_px();
+        // 128 × 4 = 512 ไบต์ต่อแถว ซึ่งหาร 256 ลงตัวพอดีตามที่ wgpu บังคับ
+        let bytes_per_row = SLOT_SIZE * 4;
+        let size = u64::from(bytes_per_row) * u64::from(SLOT_SIZE);
+
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("refx-test-readback"),
+            size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("refx-test-readback"),
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: atlas.texture.texture(),
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x,
+                    y,
+                    z: slot.layer,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(bytes_per_row),
+                    rows_per_image: Some(SLOT_SIZE),
+                },
+            },
+            wgpu::Extent3d {
+                width: SLOT_SIZE,
+                height: SLOT_SIZE,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+
+        buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        // ★ ต้องมี timeout เสมอ — เทสต์ที่ค้างตลอดกาลใน CI แย่กว่าเทสต์ที่ล้ม
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(std::time::Duration::from_secs(10)),
+            })
+            .expect("รอ GPU ไม่สำเร็จ");
+        let pixels = buffer.slice(..).get_mapped_range().to_vec();
+        buffer.unmap();
+        pixels
+    }
+
+    /// สร้าง atlas พร้อมใช้บน device ที่ให้มา
+    fn fresh_atlas(device: &wgpu::Device) -> (TextureAllocator, ThumbnailAtlas) {
+        let textures = TextureAllocator::with_limit(128 << 20);
+        let atlas = ThumbnailAtlas::new(device, &textures, 4).expect("สร้าง atlas ไม่ได้");
+        (textures, atlas)
+    }
+
+    /// อัปโหลดชุดภาพเดียวกันตามลำดับ — เลียนแบบสิ่งที่ `refill_atlas` ทำเป๊ะ
+    fn upload_all(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        atlas: &mut ThumbnailAtlas,
+        thumbs: &[Vec<u8>],
+    ) -> Vec<AtlasSlot> {
+        thumbs
+            .iter()
+            .map(|pixels| match atlas.upload(queue, pixels) {
+                Ok(slot) => slot,
+                Err(AtlasError::NeedsResize { layers }) => {
+                    atlas.resize(device, layers).expect("ขยาย atlas ไม่ได้");
+                    atlas.upload(queue, pixels).expect("อัปโหลดหลังขยายไม่ได้")
+                }
+                Err(err) => panic!("อัปโหลดไม่สำเร็จ: {err}"),
+            })
+            .collect()
+    }
+
+    /// ★ หัวใจของ P0-5: device ตายทั้งใบ → สร้างใหม่ → **ภาพต้องกลับมาครบ**
+    ///
+    /// ทิ้ง device ใบเก่าทั้งก้อน (เหมือน `RenderContext::recover`) แล้วสร้างใหม่
+    /// จากนั้นเติมภาพจาก RAM กลับขึ้น atlas ใบใหม่ แล้ว **อ่าน pixel กลับมาเทียบ**
+    ///
+    /// ถ้าไม่เติมกลับ ผู้ใช้จะเห็น board ว่างเปล่าหลัง driver อัปเดต
+    /// ซึ่งจากมุมเขาแยกไม่ออกจาก "งานหาย" (docs/04 §4)
+    #[test]
+    fn atlas_comes_back_with_the_same_pixels_on_a_brand_new_device() {
+        let Some((device, queue, _)) = crate::device::headless_device() else {
+            println!("ข้าม: เครื่องนี้ไม่มี GPU ที่ใช้ได้");
+            return;
+        };
+
+        let thumbs = vec![
+            solid_thumb([200, 30, 40, 255]),
+            solid_thumb([30, 200, 40, 255]),
+            solid_thumb([30, 40, 200, 255]),
+        ];
+
+        // ---- device ใบแรก ----
+        let before: Vec<Vec<u8>> = {
+            let (_textures, mut atlas) = fresh_atlas(&device);
+            let slots = upload_all(&device, &queue, &mut atlas, &thumbs);
+            let read: Vec<Vec<u8>> = slots
+                .iter()
+                .map(|&slot| read_slot(&device, &queue, &atlas, slot))
+                .collect();
+            // ยืนยันว่ารอบแรกภาพขึ้นจริงก่อน — ไม่งั้นเทียบ "ว่างกับว่าง" ก็ผ่าน
+            for (i, pixels) in read.iter().enumerate() {
+                assert_eq!(&pixels[..4], &thumbs[i][..4], "รอบแรกภาพที่ {i} ไม่ขึ้น");
+            }
+            read
+        };
+
+        // ---- device ตาย: ทิ้งทั้ง atlas ทั้ง device แล้วสร้างใหม่ทั้งชุด ----
+        drop(device);
+        drop(queue);
+        let Some((device2, queue2, _)) = crate::device::headless_device() else {
+            panic!("สร้าง device ใหม่ไม่ได้ — เส้นทางกู้ device จะพังในสถานการณ์จริง");
+        };
+
+        let (_textures2, mut atlas2) = fresh_atlas(&device2);
+        let refilled = upload_all(&device2, &queue2, &mut atlas2, &thumbs);
+
+        for (i, &slot) in refilled.iter().enumerate() {
+            let pixels = read_slot(&device2, &queue2, &atlas2, slot);
+            assert_eq!(
+                pixels, before[i],
+                "ภาพที่ {i} ไม่เหมือนเดิมหลังกู้ device — ผู้ใช้จะเห็นภาพหาย/สลับ"
+            );
+        }
+        assert_eq!(
+            atlas2.allocator().slots_in_use(),
+            thumbs.len() as u32,
+            "จำนวนช่องที่ใช้หลังเติมกลับต้องเท่าเดิมเป๊ะ"
+        );
+    }
+
+    #[test]
+    fn layers_needed_rounds_up() {
+        assert_eq!(layers_needed(0), 1, "board ว่างก็ยังต้องมีอย่างน้อย 1 layer");
+        assert_eq!(layers_needed(1), 1);
+        assert_eq!(
+            layers_needed(SLOTS_PER_LAYER as usize),
+            1,
+            "เต็มพอดี = 1 layer"
+        );
+        assert_eq!(
+            layers_needed(SLOTS_PER_LAYER as usize + 1),
+            2,
+            "เกินมาหนึ่งภาพต้องได้ layer ที่สอง"
+        );
+        assert_eq!(layers_needed(1000), 4, "1000 ภาพ = 4 layer (docs/04 §4)");
+    }
+
+    /// ★ กับดักที่ทำให้ board ว่างเปล่าหลังกู้ device (เจอจริง 29 ก.ค. 2026)
+    ///
+    /// atlas ที่เพิ่งสร้างมี **0 layer** เพราะจองแบบ lazy → การเติมภาพกลับ
+    /// **ต้องขยายให้พอก่อน** ไม่งั้นได้ `NeedsResize` ตั้งแต่ภาพแรก แล้วเส้นทาง
+    /// เติมกลับจะเปลี่ยนทุกภาพเป็น placeholder ทั้ง board
+    #[test]
+    fn refilling_a_fresh_atlas_needs_a_resize_first() {
+        let Some((device, queue, _)) = crate::device::headless_device() else {
+            println!("ข้าม: เครื่องนี้ไม่มี GPU ที่ใช้ได้");
+            return;
+        };
+        let thumbs: Vec<Vec<u8>> = (0..5).map(|i| solid_thumb([i * 20, 30, 40, 255])).collect();
+        let (_textures, mut atlas) = fresh_atlas(&device);
+
+        // ---- negative control: ไม่ขยายก่อน = พังตั้งแต่ภาพแรก ----
+        assert_eq!(atlas.layers_allocated(), 0, "atlas ใหม่ต้องยังไม่จอง layer");
+        match atlas.upload(&queue, &thumbs[0]) {
+            Err(AtlasError::NeedsResize { layers }) => assert_eq!(layers, 1),
+            other => panic!("ต้องได้ NeedsResize แต่ได้ {other:?} — กับดักนี้หายไปแล้วหรือ?"),
+        }
+
+        // ---- ทำแบบที่ refill_atlas ทำจริง: ขยายให้พอก่อน แล้วเติมรวดเดียว ----
+        atlas
+            .resize(&device, layers_needed(thumbs.len()))
+            .expect("ขยาย atlas ไม่ได้");
+        for (i, pixels) in thumbs.iter().enumerate() {
+            atlas
+                .upload(&queue, pixels)
+                .unwrap_or_else(|err| panic!("ภาพที่ {i} เติมกลับไม่ได้: {err}"));
+        }
+        assert_eq!(
+            atlas.allocator().slots_in_use(),
+            thumbs.len() as u32,
+            "ต้องเติมกลับได้ครบทุกภาพ ไม่ใช่กลายเป็น placeholder"
+        );
+    }
+
+    /// ★ negative control (docs/08 §3.9 ข้อ 1)
+    ///
+    /// ถ้า **ไม่** เติมภาพกลับ ช่องนั้นต้องอ่านได้เป็นพื้นที่ว่าง — พิสูจน์ว่า
+    /// ตัวอ่าน pixel แยก "เติมแล้ว" กับ "ยังไม่เติม" ออกจากกันได้จริง
+    /// ไม่งั้นเทสต์ข้างบนจะผ่านแม้การเติมกลับจะพังทั้งหมด
+    #[test]
+    fn a_fresh_atlas_reads_back_empty_until_it_is_refilled() {
+        let Some((device, queue, _)) = crate::device::headless_device() else {
+            println!("ข้าม: เครื่องนี้ไม่มี GPU ที่ใช้ได้");
+            return;
+        };
+
+        let filled = solid_thumb([200, 30, 40, 255]);
+        let (_textures, mut atlas) = fresh_atlas(&device);
+        // อัปโหลดช่องแรกช่องเดียว แล้วจองช่องที่สองทิ้งไว้โดยไม่เขียนอะไรลงไป
+        let slots = upload_all(&device, &queue, &mut atlas, std::slice::from_ref(&filled));
+        let untouched = atlas.allocator.allocate().expect("จองช่องที่สองไม่ได้");
+
+        let written = read_slot(&device, &queue, &atlas, slots[0]);
+        let blank = read_slot(&device, &queue, &atlas, untouched);
+
+        assert_eq!(&written[..4], &filled[..4], "ช่องที่เขียนแล้วต้องมีสีจริง");
+        assert!(
+            blank.iter().all(|&byte| byte == 0),
+            "ช่องที่ยังไม่เติมต้องว่าง — ถ้าไม่ว่าง แปลว่าตัวอ่านนี้เชื่อไม่ได้"
+        );
     }
 }

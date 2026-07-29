@@ -16,7 +16,7 @@
 | P2 ขึ้นไป | ยังไม่เริ่ม |
 
 **เกณฑ์คุณภาพล่าสุดที่ผ่าน:** `fmt` / `clippy --all-features -D warnings` (workspace + `fuzz/`) /
-`nextest 254/254` / `deny check` ครบ 4 หมวด / **binary 15.47 MB จากเพดาน 25 MB (บังคับใน CI)**
+`nextest 268/268` / `deny check` ครบ 4 หมวด / **binary 15.47 MB จากเพดาน 25 MB (บังคับใน CI)**
 
 crate ที่มี: `refx-app` `refx-asset` `refx-core` `refx-io` `refx-platform` `refx-render` `refx-ui`
 
@@ -44,36 +44,18 @@ repo **อยู่ใต้ git แล้ว** (branch `master`) — `git fsck`
 > **P1 ปิดครบแล้ว** — งานที่เสร็จแล้วถูกย้ายออกจากหัวข้อนี้ ดูประวัติใน git log
 > ต้นเหตุและทางแก้ของบั๊กสำคัญบันทึกไว้ใน `docs/` แล้ว ไม่ใช่ในไฟล์นี้
 
-### 2.0 เก็บของค้างจาก P1-8 (สั้น ทำก่อน)
-
-1. **ปิดเสียง `ERROR arboard paste error` ของ `egui_winit`**
-   ขึ้นทุกครั้งที่กด Ctrl+V เมื่อ clipboard ไม่มีข้อความ · ไม่กระทบการทำงาน
-   แต่เราเพิ่งเปลี่ยน log เป็นอังกฤษเพื่อให้ผู้ใช้ต่างชาติส่งมาให้เราอ่านได้
-   **`ERROR` ปลอมที่โผล่ทุกครั้งจะสร้างรายงานบั๊กที่ไม่มีอยู่จริง** และกลบของจริง
-   → filter directive ใน `logging.rs` ลดระดับเฉพาะ target นั้น
-
-2. **ภาพจาก clipboard คมได้แค่ระดับ thumbnail** — ปล่อยไว้ตามเดิม ลงหนี้ใน §6 พอ
-   > **ห้ามแก้ด้วยการเขียนไฟล์ชั่วคราวลง cache** — ภาพที่ board อ้างถึงต้องไม่หายไปกับ
-   > LRU eviction (I-3) · เรื่องนี้เป็นปัญหาเดียวกับ **P4-5 packed mode + asset table**
-   > ที่ออกแบบให้ภาพอยู่ในไฟล์ `.refx` อยู่แล้ว → **รอทำพร้อมกันที่ P4-5**
-
 > **`clipboard-win` — ตัดสินแล้วว่าไม่เพิ่ม** ดูเหตุผลใน `docs/06 §2.6`
 > (แก้ได้เฉพาะ Windows · เกราะที่ทำงานแพลตฟอร์มเดียวให้ความมั่นใจผิด ๆ)
+>
+> **ภาพจาก clipboard คมได้แค่ระดับ thumbnail** — ปล่อยไว้ รอทำพร้อม **P4-5 packed mode**
+> ห้ามแก้ด้วยไฟล์ชั่วคราวใน cache (ภาพที่ board อ้างถึงจะหายไปกับ LRU = ผิด I-3)
 
-### 2.1 เทสต์อัตโนมัติสำหรับ `force-device-lost`
-
-เส้นทางกู้ device ยืนยันด้วยมือล้วนมาตลอด ทั้งที่เป็นสาเหตุ crash อันดับหนึ่งของแอปกราฟิก
-บน Windows (ARCHITECTURE §7) และตอนนี้**ยังไม่มีเทสต์ตัวไหนอยู่ใต้ `#[cfg(feature)]` เลย**
-
-P2 จะเพิ่ม GPU resource อีกมาก ถ้าไม่มีเทสต์คุม การกู้ device จะพังเงียบ ๆ ตอนไหนก็ได้
-ต้องคุมอย่างน้อย: กู้แล้ว atlas เติมกลับครบ · working texture ถูกสร้างใหม่ · ไม่กู้วนซ้ำ
-
-### 2.2 กวาด `tracing::` เป็นภาษาอังกฤษ (~100 จุด)
+### 2.1 กวาด `tracing::` เป็นภาษาอังกฤษ (~100 จุด)
 
 log มีไว้ให้นักพัฒนาอ่าน · ผู้ใช้ต่างชาติส่ง log มาต้องอ่านออก · เป็นงานเชิงกล
 ตรรกะเดียวกับที่ `#[error(…)]` ถูกเปลี่ยนเป็นอังกฤษไปแล้ว
 
-### 2.3 → เข้า P2 Canvas mode
+### 2.2 → เข้า P2 Canvas mode
 
 อ่าน `ROADMAP.md` หัวข้อ P2 และ `docs/03 §1` (โดยเฉพาะกับดัก pointer ของ egui
 และทางแก้ระยะยาว: ทำ canvas เป็น widget จริงด้วย `allocate_response`)
@@ -108,8 +90,13 @@ log มีไว้ให้นักพัฒนาอ่าน · ผู้ใ
 
 ### อื่น ๆ
 
-- atlas เติมกลับหลังกู้ device: **100/100 ภาพใน 0.99 ms**
-- device lost recovery: หลับ 6.7 s → ยิง → กู้ใน 128 ms → กลับไป idle
+- atlas เติมกลับหลังกู้ device: **8/8 ภาพใน 0.23 ms** (วัดใหม่ 29 ก.ค. 2026)
+  > ⚠️ ตัวเลขเดิม "100/100 ภาพใน 0.99 ms" จริงตอนที่วัด แต่หลังจากนั้น atlas
+  > เปลี่ยนไปจอง layer แบบ lazy แล้ว **การเติมกลับพังเงียบ ๆ เหลือ 0/8**
+  > จนกระทั่งงานเทสต์ device lost (29 ก.ค.) ไปรันของจริงถึงเจอ — ตัวเลขที่วัดครั้งเดียวแล้วไม่มีเทสต์คุม
+  > จะกลายเป็นตัวเลขที่ *เคย* จริง โดยไม่มีใครรู้ว่ามันเลิกจริงตั้งแต่เมื่อไหร่
+- device lost recovery: หลับ 2.5 s → ยิง → กู้ใน **126 ms** → เติม atlas ครบ → กลับไป idle
+  (ยืนยันด้วยมือ 29 ก.ค. 2026: กู้ 1 ครั้งพอดี · validation error 0 · panic 0 · ปิดโปรแกรมแล้วโปรเซสตายสะอาด)
 - **binary release: 15.35 MB** (เพดาน 25 MB → headroom เหลือ **9.65 MB**)
   > ตัวเลข "12 MB" ที่เคยเขียนไว้ **ไม่เคยเป็นความจริง** — build commit `b100661` ใหม่
   > ด้วย profile และ toolchain เดียวกันได้ 15.26 MB
@@ -136,6 +123,8 @@ log มีไว้ให้นักพัฒนาอ่าน · ผู้ใ
 | 12 | **เพดาน RAM ต้องคุมรวมทุก worker** ไม่ใช่ต่อ job | 6 worker × 1 GiB = 6 GB แย่ง RAM กับ Photoshop · ปัจจุบัน 256 MB รวม + `Condvar` รอ + ใบจองเป็น RAII | `docs/05 §2` |
 | 14 | **ภาพจาก clipboard ไม่เข้า cache.sqlite** (ตัดสิน P1-8) | ข้อ 4 บังคับคีย์ `(hash, mtime, size)` แต่ clipboard ไม่มี mtime · ใส่ค่าปลอมแทน = จุดบอดของ fast hash กลับมาทันที ซึ่ง mtime มีไว้ปิดพอดี · ภาพที่วางมาใช้ครั้งเดียวเป็นปกติ เก็บไว้มีแต่จะไล่ thumbnail ของไฟล์จริงออกจาก LRU | `pool.rs` `JobSource::Clipboard` |
 | 15 | **ลำดับฟิลด์ของ `Assets` คือลำดับ drop — ห้ามสลับ** (`pool` → `io_tx` → `_io`) | `IoThread::drop` join เธรด IO ซึ่งจบก็ต่อเมื่อ sender หมดทุกใบ ถ้า `_io` ถูก drop ก่อน `io_tx` = **ปิดหน้าต่างแล้ว RefX.exe ไม่ตาย** ล็อก single-instance ค้าง เปิดใหม่ไม่ได้อีกเลย (เกิดจริง ยืนยันด้วยมือ 29 ก.ค. 2026) | `refx-ui/src/app.rs` + เทสต์ `dropping_assets_finishes_instead_of_hanging_forever` |
+| 16 | **resource ที่ผูกกับ device ต้องสร้างผ่าน `DeviceBound::build` จุดเดียว** และรับด้วยการ destructure | เปิดโปรแกรมกับกู้ device เคยเป็นโค้ดคนละชุด แล้ว **drift**: P1-7 เพิ่ม `WorkingCache` แต่ `recover_device()` ไม่ได้สร้างใหม่ → หลังกู้ยังถือ texture/bind group ของ device ที่ตายแล้ว · destructure ทำให้เพิ่ม resource ใหม่แล้ว **คอมไพล์ไม่ผ่านทั้งสองที่** จนกว่าจะจัดการครบ (หลักการเดียวกับ `GpuStack`) | `refx-ui/src/app.rs` |
+| 17 | **เติม atlas กลับ ต้อง `resize(layers_needed(n))` ก่อนเริ่มเติมเสมอ** | atlas ที่เพิ่งสร้างมี **0 layer** (จอง lazy ตั้งแต่ 28 ก.ค.) ถ้าเติมเลยจะได้ `NeedsResize` ตั้งแต่ภาพแรก แล้ว**ทุกภาพกลายเป็น placeholder** = board ว่างเปล่าหลัง driver อัปเดต (เกิดจริง: `restored=0 total=8`) · ขยายกลางคันไม่ได้เพราะ `resize()` ล้างตัวจัดสรรทั้งชุด | `refx-render::atlas::layers_needed` + เทสต์ `refilling_a_fresh_atlas_needs_a_resize_first` |
 
 ---
 
@@ -157,12 +146,12 @@ log มีไว้ให้นักพัฒนาอ่าน · ผู้ใ
 |---|---|
 | **`arboard` จอง RAM ของ pixel ก่อนเพดานของเราได้ตรวจ** | API ของมันไม่เปิดให้อ่าน byte ดิบของ clipboard มาเข้า `decode_guarded` — มันอ่าน `CF_DIBV5`/PNG แล้วถอดรหัสเองจนเสร็จก่อนคืนค่า เพดาน `max_pixels` ของเราจึงเป็นด่าน **หลัง** การจองก้อนนั้นหนึ่งครั้ง ตอนนี้กันด้วยการจำกัดให้วางได้ทีละครั้ง · จะปิดสนิทต้องอ่าน clipboard เองใน `refx-platform` (ต้องเพิ่ม dep `clipboard-win` — **ต้องถามก่อน**) |
 | ภาพที่วางจาก clipboard คมได้แค่ระดับ thumbnail | ไม่มีไฟล์ให้ decode ซ้ำตอนซูมเข้า จึงข้าม working texture ไปเลย (ถ้าไม่ข้าม จะได้งานที่ล้มเหลวแน่นอนหนึ่งใบทุกครั้งที่ซูม) · ทางแก้จริงคือเขียนลงไฟล์ชั่วคราวหรือ packed `.refx` — รอ P3/P4 |
-| `egui_winit` log `ERROR` ทุกครั้งที่กด `Ctrl+V` เมื่อ clipboard ไม่มีข้อความ | egui จัดการ `Ctrl+V` ของตัวเองด้วย แล้วขอ **ข้อความ** จาก clipboard ไม่ได้ → `ERROR arboard paste error: …` เป็นของ crate ภายนอก ไม่ใช่ของเรา และไม่กระทบการทำงาน แต่ทำให้คนอ่าน log เข้าใจผิด · ปิดได้ด้วย filter directive ใน `logging.rs` (ยังไม่ทำ — แตะ log config รวม) |
 | `--open-dir` วาง quad เป็นตาราง 16 คอลัมน์ตายตัว | ยังไม่ใช่ layout จริง รอ P2/P3 |
 | `xtask gen-testdata` | ทำแล้วบางส่วน · ยังไม่มี `bench` / `package` (P5-1) |
 | egui memory ตอนกู้ device | ตอนนี้ scroll position / panel ที่เปิดค้างรีเซ็ต · P5 ให้ clone `ctx.memory()` ก่อนกู้แล้วคืน |
 | จุดบอด fast hash ตรงกลางไฟล์ | ปิดด้วย mtime แล้ว แต่จุดบอดตัว hash เองยังอยู่ (มีเทสต์บันทึกไว้ว่าตั้งใจ) |
-| **ไม่มีเทสต์อัตโนมัติสำหรับ `force-device-lost` เลย** | เส้นทางกู้ device ยืนยันด้วยมือล้วน ๆ ผ่าน `--force-device-lost-after-ms` ทั้งที่เป็นสาเหตุ crash อันดับหนึ่งของแอปกราฟิกบน Windows (ARCHITECTURE §7) · ตอนนี้ยังไม่มีเทสต์ตัวไหนอยู่ใต้ `#[cfg(feature)]` เลย |
+| **เทสต์ GPU ถูกข้ามบน CI** (ไม่มี adapter บน runner) | เทสต์ที่แตะ texture จริง (`atlas_comes_back_…`, `working_cache_is_rebuilt_…`, `refilling_a_fresh_atlas_…`) ใช้ `headless_device()` ซึ่งคืน `None` เมื่อไม่มี GPU แล้ว **พิมพ์บอกว่าข้าม** (docs/08 §3.9 ข้อ 2) · บนเครื่องนักพัฒนาที่มี GPU มันรันจริงทุกครั้ง · จะให้ CI รันด้วยต้องลง software adapter (Ubuntu: `mesa-vulkan-drivers` = lavapipe · Windows runner มี WARP อยู่แล้ว) — **ยังไม่ได้ทำ** |
+| ชั้น UI ของการกู้ device ยังไม่มี unit test | `recover_device()` ต้องมีหน้าต่างจริงจึงเรียกในเทสต์ไม่ได้ · ตอนนี้คุมด้วย (ก) `DeviceBound` ที่บังคับตอนคอมไพล์ (ข) `debug_assert` เทียบ generation ของ `WorkingCache` ทุกเฟรม (ค) รันจริงด้วย `--force-device-lost-after-ms` |
 | `tracing::` ยังเป็นภาษาไทย ~100 จุด | log มีไว้ให้นักพัฒนาอ่าน · ผู้ใช้ต่างชาติส่ง log มาต้องอ่านออก · งานเชิงกลข้ามทุก crate |
 
 ---

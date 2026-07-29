@@ -272,6 +272,57 @@ impl LoadTracker {
     }
 }
 
+/// resource ทุกชิ้นที่ **ผูกกับ GPU device รุ่นหนึ่ง** — ตายพร้อม device เสมอ
+///
+/// ★ **ทำไมต้องรวมเป็นชุดเดียว:** P1-7 เพิ่ม working texture เข้ามาทีหลัง แล้ว
+/// `recover_device()` ไม่ได้สร้างมันใหม่ — หลังกู้ device เสร็จ `WorkingCache`
+/// ยังถือ texture/bind group ของ device ที่ **ตายไปแล้ว** ทั้งชุด แล้วเอาไปวาดต่อ
+/// (validation error ทุกเฟรม) ส่วน `working_pending` ก็ยังจำคีย์เดิมไว้
+/// ทำให้ภาพคมไม่มีวันถูกขอใหม่อีกเลย
+///
+/// ตอนนี้ทั้ง `window_ready` และ `recover_device` สร้างผ่าน [`DeviceBound::build`]
+/// **จุดเดียวกัน** และรับด้วยการ destructure — ถ้ามีคนเพิ่ม resource ใหม่เข้ามา
+/// ทั้งสองที่จะคอมไพล์ไม่ผ่านจนกว่าจะจัดการให้ครบทั้งคู่
+/// (หลักการเดียวกับ `GpuStack` ใน `refx-render::device`)
+struct DeviceBound {
+    textures: TextureAllocator,
+    atlas: ThumbnailAtlas,
+    pipeline: QuadPipeline,
+    working: WorkingCache,
+}
+
+impl DeviceBound {
+    /// สร้าง resource ที่ผูกกับ device ปัจจุบันทั้งชุด
+    fn build(render: &RenderContext) -> Result<Self, refx_render::texture::VramError> {
+        // ★ ทางเดียวที่สร้าง texture ได้ (I-6) — atlas ต้องขอผ่านตัวนี้
+        let textures = TextureAllocator::new(render.capabilities());
+        // atlas ขอได้ไม่เกินครึ่งงบ VRAM — อีกครึ่งเผื่อ working texture (P1-7)
+        // ★ ตัวเลขนี้เป็น **เพดาน** ไม่ใช่การจองจริง — atlas จองทีละ layer
+        //   ตอนมีภาพเข้ามาจริง เปิดโปรแกรมเปล่าจึงกิน VRAM ≈ 0 (docs/05 §2)
+        let atlas_budget = textures.budget().limit() as u64 / 2;
+        // อีกครึ่งเป็นของ working texture ชั้น B (docs/05 §1)
+        let working_budget = textures.budget().limit() / 2;
+        let max_layers = layers_for_budget(render.capabilities(), atlas_budget);
+
+        let atlas = ThumbnailAtlas::new(render.device(), &textures, max_layers)?;
+        let pipeline =
+            QuadPipeline::new(render.device(), render.format(), atlas.bind_group_layout());
+        let working = WorkingCache::new(
+            render.device(),
+            textures.clone(),
+            working_budget,
+            render.generation(),
+        );
+
+        Ok(Self {
+            textures,
+            atlas,
+            pipeline,
+            working,
+        })
+    }
+}
+
 /// หนึ่งภาพบน board — ทุกอย่างที่ต้องรู้เพื่อวาดและเพื่อขอภาพคมกว่าเดิม
 ///
 /// P2 จะแทนที่ด้วย `Board`/`Item` ตัวจริงจาก `refx-core` ตอนนี้เก็บเท่าที่ P1-7 ต้องใช้
@@ -854,24 +905,34 @@ impl RefxApp {
         gfx.egui_ctx = egui_ctx;
         gfx.egui_winit = egui_winit;
         gfx.egui_renderer = egui_renderer;
-        // atlas + pipeline ผูกกับ device เดิม ต้องสร้างใหม่ทั้งคู่ (docs/04 §7 ข้อ 3)
+
+        // ★ resource ที่ผูกกับ device เดิม **ต้องสร้างใหม่ทั้งชุด** (docs/04 §7 ข้อ 3)
+        //   สร้างผ่านจุดเดียวกับตอนเปิดโปรแกรม แล้วรับด้วยการ destructure
+        //   เพื่อให้คอมไพเลอร์บังคับว่าห้ามลืมชิ้นไหน (ดู `DeviceBound`)
         // TODO(P1-5): re-upload thumbnail จาก cache.sqlite แทนที่จะปล่อยว่าง
-        // ★ สร้าง allocator ใหม่ด้วย — ของเก่านับโควตาของ device ที่ตายไปแล้ว
-        gfx.textures = TextureAllocator::new(gfx.render.capabilities());
-        let atlas_budget = (gfx.textures.budget().limit() / 2) as u64;
-        let max_layers = layers_for_budget(gfx.render.capabilities(), atlas_budget);
-        match ThumbnailAtlas::new(gfx.render.device(), &gfx.textures, max_layers) {
-            Ok(atlas) => gfx.atlas = atlas,
+        let DeviceBound {
+            textures,
+            atlas,
+            pipeline,
+            working,
+        } = match DeviceBound::build(&gfx.render) {
+            Ok(bound) => bound,
             Err(err) => {
-                tracing::error!(%err, "สร้าง atlas ใหม่หลังกู้ device ไม่ได้");
+                tracing::error!(%err, "สร้าง resource ของ device ใหม่ไม่ได้");
                 return None;
             }
-        }
-        gfx.pipeline = QuadPipeline::new(
-            gfx.render.device(),
-            gfx.render.format(),
-            gfx.atlas.bind_group_layout(),
-        );
+        };
+        gfx.textures = textures;
+        gfx.atlas = atlas;
+        gfx.pipeline = pipeline;
+        // ★ WorkingCache เก่าถือ texture ของ device ที่ตายไปแล้ว — ทิ้งทั้งก้อน
+        //   ถ้าเก็บไว้ `contains()` จะตอบ true แล้วเราจะเอา bind group ของ device
+        //   ที่ตายแล้วไปวาด (validation error ทุกเฟรม) — ผู้ใช้เห็นภาพหาย
+        gfx.working = working;
+        // คีย์ที่ "สั่งไปแล้วรอผลอยู่" ก็ตายไปกับ device เดิม ถ้าไม่ล้าง ภาพคม
+        // จะไม่มีวันถูกขอใหม่เลยเพราะ insert() คืน false ตลอด
+        gfx.working_pending.clear();
+        gfx.working_quads.clear();
         gfx.device_generation = gfx.render.generation();
 
         // ★ เติม atlas กลับ (docs/04 §4) — ถ้าไม่ทำ ผู้ใช้จะเห็น board ว่างเปล่า
@@ -912,6 +973,14 @@ impl RefxApp {
             return;
         };
         gfx.working_quads.clear();
+        // ★ ตัวดักบั๊กที่เคยเกิดจริง: หลังกู้ device ถ้าใครลืมสร้าง WorkingCache ใหม่
+        //   เราจะเอา bind group ของ device ที่ตายไปแล้วไปวาด แล้วภาพหายทั้ง board
+        //   ให้ล้มดัง ๆ ตั้งแต่ build debug แทนที่จะไปพังเงียบ ๆ ที่เครื่องผู้ใช้
+        debug_assert_eq!(
+            gfx.working.generation(),
+            gfx.render.generation(),
+            "working texture cache ยังเป็นของ device รุ่นเก่า — ลืมสร้างใหม่ตอนกู้ device"
+        );
         if gfx.board_items.is_empty() {
             return;
         }
@@ -997,6 +1066,22 @@ impl RefxApp {
         let started = std::time::Instant::now();
         let mut restored = 0usize;
 
+        // ★ atlas ที่เพิ่งสร้าง (ตอนกู้ device) มี **0 layer** เพราะจองแบบ lazy
+        //   (docs/05 §2) ต้องขยายให้พอ **ก่อน** เริ่มเติม ไม่ใช่ตอนเจอ NeedsResize
+        //   กลางทาง — `resize()` ล้างตัวจัดสรรทั้งชุด ช่องที่แจกไปแล้วในรอบนี้
+        //   จะชี้ไปที่ texture ที่ถูกทิ้งไปแล้ว
+        //
+        //   ถ้าไม่ทำขั้นนี้ ภาพ **ทุกใบ** กลายเป็น placeholder หลังกู้ device
+        //   (เจอจริง 29 ก.ค. 2026: restored=0 total=8) ซึ่งคือ "board ว่างเปล่า"
+        //   ที่ docs/04 §4 สั่งห้ามไว้ตรง ๆ
+        let needed = refx_render::atlas::layers_needed(gfx.board_items.len());
+        if gfx.atlas.layers_allocated() < needed
+            && let Err(err) = gfx.atlas.resize(gfx.render.device(), needed)
+        {
+            // ขยายไม่ได้ = VRAM ไม่พอ เติมได้เท่าที่ได้ ที่เหลือเป็น placeholder
+            tracing::warn!(%err, needed, "ขยาย atlas ก่อนเติมกลับไม่สำเร็จ");
+        }
+
         for (index, item) in gfx.board_items.iter().enumerate() {
             let thumb = &item.thumb;
             let Some(quad) = gfx.quads.get_mut(index) else {
@@ -1063,23 +1148,18 @@ impl AppDelegate for RefxApp {
         )?;
 
         let (egui_ctx, egui_winit, egui_renderer) = Self::build_egui(&window, &render);
-        // ★ ทางเดียวที่สร้าง texture ได้ (I-6) — atlas ต้องขอผ่านตัวนี้
-        let textures = TextureAllocator::new(render.capabilities());
-        // atlas ขอได้ไม่เกินครึ่งงบ VRAM — อีกครึ่งเผื่อ working texture (P1-7)
-        // ★ ตัวเลขนี้เป็น **เพดาน** ไม่ใช่การจองจริง — atlas จองทีละ layer
-        //   ตอนมีภาพเข้ามาจริง เปิดโปรแกรมเปล่าจึงกิน VRAM ≈ 0 (docs/05 §2)
-        let atlas_budget = textures.budget().limit() as u64 / 2;
-        // อีกครึ่งเป็นของ working texture ชั้น B (docs/05 §1)
-        let working_budget = textures.budget().limit() / 2;
-        let max_layers = layers_for_budget(render.capabilities(), atlas_budget);
-        let atlas = ThumbnailAtlas::new(render.device(), &textures, max_layers).map_err(|err| {
+        // ★ destructure ไว้โดยตั้งใจ — เพิ่ม resource ใหม่ใน DeviceBound เมื่อไหร่
+        //   ตรงนี้จะคอมไพล์ไม่ผ่าน พร้อมกับฝั่ง recover_device()
+        let DeviceBound {
+            textures,
+            atlas,
+            pipeline,
+            working,
+        } = DeviceBound::build(&render).map_err(|err| {
             tracing::error!(%err, "สร้าง atlas ไม่ได้");
             DeviceError::NoSupportedFormat
         })?;
-        let pipeline =
-            QuadPipeline::new(render.device(), render.format(), atlas.bind_group_layout());
         let device_generation = render.generation();
-        let working = WorkingCache::new(render.device(), textures.clone(), working_budget);
 
         let quads = self.args.demo_quads.map_or_else(Vec::new, |n| {
             let quads = demo_quads(n, 4000.0);

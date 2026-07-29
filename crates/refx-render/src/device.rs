@@ -186,16 +186,9 @@ pub struct RenderContext {
     consecutive_errors: u32,
     /// นับเฟรมที่วาดสำเร็จ — ใช้กับ `--force-device-lost-after=N`
     frames: u64,
-    /// จำลอง device lost ไปแล้วหรือยัง — ต้องยิงครั้งเดียว
-    /// ไม่งั้นหลังกู้เสร็จ `frames` รีเซ็ตเป็น 0 แล้วจะยิงซ้ำเป็นลูปไม่รู้จบ
-    ///
-    /// มีเฉพาะ build ทดสอบ — release ไม่ต้องแบกฟิลด์นี้เลย
+    /// ตัวจำลอง device lost — มีเฉพาะ build ทดสอบ release ไม่ต้องแบกฟิลด์นี้เลย
     #[cfg(feature = "force-device-lost")]
-    forced_once: bool,
-
-    /// เวลาที่ต้องปลุกมาจำลอง device lost — `None` = ไม่ได้ตั้งไว้ หรือยิงไปแล้ว
-    #[cfg(feature = "force-device-lost")]
-    forced_deadline: Option<std::time::Instant>,
+    forced: ForcedLoss,
 }
 
 impl RenderContext {
@@ -227,10 +220,7 @@ impl RenderContext {
         // ตั้งนาฬิกาปลุกไว้ตั้งแต่ตอนสร้าง เพื่อให้เวลานับจาก "เปิดโปรแกรม"
         // ไม่ใช่จาก "เฟรมแรก" — ตรงกับสถานการณ์จริงที่แอปหลับอยู่
         #[cfg(feature = "force-device-lost")]
-        let forced_deadline = options.force_device_lost_after_ms.map(|ms| {
-            tracing::info!(ms, "ตั้งเวลาจำลอง device lost ตอนแอปหลับ");
-            std::time::Instant::now() + std::time::Duration::from_millis(ms)
-        });
+        let forced = ForcedLoss::new(&options);
 
         let stack = build_stack(
             window.as_ref(),
@@ -252,9 +242,7 @@ impl RenderContext {
             consecutive_errors: 0,
             frames: 0,
             #[cfg(feature = "force-device-lost")]
-            forced_once: false,
-            #[cfg(feature = "force-device-lost")]
-            forced_deadline,
+            forced,
         })
     }
 
@@ -358,12 +346,8 @@ impl RenderContext {
 
         // จำลอง device lost ตามที่สั่งไว้ (เฉพาะ build ที่เปิด feature)
         #[cfg(feature = "force-device-lost")]
-        if let Some(after) = self.options.force_device_lost_after
-            && !self.forced_once
-            && self.frames >= after
-        {
+        if self.forced.due_by_frames(self.frames) {
             tracing::warn!(frames = self.frames, "จำลอง device lost ตามคำสั่ง");
-            self.forced_once = true;
             self.device_lost.store(true, Ordering::SeqCst);
         }
 
@@ -522,7 +506,7 @@ impl RenderContext {
     pub fn forced_lost_deadline(&self) -> Option<std::time::Instant> {
         #[cfg(feature = "force-device-lost")]
         {
-            self.forced_deadline
+            self.forced.deadline()
         }
         #[cfg(not(feature = "force-device-lost"))]
         {
@@ -536,15 +520,9 @@ impl RenderContext {
     pub fn fire_forced_device_lost(&mut self) -> bool {
         #[cfg(feature = "force-device-lost")]
         {
-            let Some(deadline) = self.forced_deadline else {
-                return false;
-            };
-            if std::time::Instant::now() < deadline {
+            if !self.forced.due_by_time(std::time::Instant::now()) {
                 return false;
             }
-            // เคลียร์ทั้งนาฬิกาและตั้ง forced_once เพื่อกันยิงซ้ำทุกทาง
-            self.forced_deadline = None;
-            self.forced_once = true;
             tracing::warn!("จำลอง device lost ตามเวลา (แอปหลับอยู่)");
             self.device_lost.store(true, Ordering::SeqCst);
             true
@@ -567,16 +545,105 @@ impl RenderContext {
     pub fn wants_forced_frames(&self) -> bool {
         #[cfg(feature = "force-device-lost")]
         {
-            // ★ เงื่อนไขคือ "ยังไม่ยิง" ไม่ใช่ "frames < after"
-            //   ถ้าใช้ frames < after ลูปจะหยุดพอดีตอน frames == after
-            //   แต่ตัวยิงอยู่ต้นทาง acquire_frame() ของเฟรม*ถัดไป* ซึ่งไม่มีวันมา
-            //   → ต้องขอเฟรมต่อไปอีกหนึ่งครั้งเสมอจนกว่าจะยิงจริง
-            !self.forced_once && self.options.force_device_lost_after.is_some()
+            self.forced.wants_frames()
         }
         #[cfg(not(feature = "force-device-lost"))]
         {
             false
         }
+    }
+}
+
+/// device หายแบบ "อุบัติเหตุ" ที่ต้องกู้ หรือเป็นเราเองที่สั่งปิด
+///
+/// ★ **ข้อผูกมัด: `Destroyed` ห้ามนับเป็นอุบัติเหตุ** (docs/04 §7)
+/// wgpu ยิง `Destroyed` ตอนเรา drop device เอง ซึ่งเกิดขึ้น **ทุกครั้งที่กู้**
+/// ถ้านับด้วย การกู้ครั้งหนึ่งจะจุดชนวนการกู้ครั้งถัดไปทันที → วนไม่รู้จบ
+/// ผู้ใช้เห็นจอกระพริบไม่หยุดแล้วโปรแกรมกิน CPU 100% (ขัด I-1 ด้วย)
+///
+/// แยกเป็นฟังก์ชันบริสุทธิ์เพราะตัว callback เรียกจากในไส้ wgpu ทดสอบตรง ๆ ไม่ได้
+#[must_use]
+fn is_accidental_loss(reason: wgpu::DeviceLostReason) -> bool {
+    match reason {
+        // เราเป็นคนสั่งเอง (ตอนกู้ หรือตอนปิดโปรแกรม)
+        wgpu::DeviceLostReason::Destroyed => false,
+        // driver update / sleep-resume / TDR / สลับ GPU — ของจริงที่ต้องกู้
+        _ => true,
+    }
+}
+
+/// ตัวจำลอง device lost สำหรับทดสอบ (feature `force-device-lost` เท่านั้น)
+///
+/// ★ **ต้องยิงครั้งเดียวตลอดการรัน** ไม่ว่าจะสั่งด้วยตัวนับเฟรมหรือตัวนับเวลา
+/// เพราะหลังกู้เสร็จ `frames` ถูกรีเซ็ตเป็น 0 ถ้าเงื่อนไขยังเป็นจริงอยู่
+/// มันจะยิงซ้ำทันทีแล้วกลายเป็น **ลูปกู้ device ไม่รู้จบ** ซึ่งเป็นอาการเดียวกับ
+/// ที่ข้อผูกมัดเรื่อง `DeviceLostReason::Destroyed` กันไว้ (docs/04 §7)
+///
+/// แยกออกมาเป็น struct เพื่อให้ทดสอบได้ **โดยไม่ต้องมี GPU หรือหน้าต่าง** —
+/// `RenderContext` ทั้งก้อนต้องมี surface จริงจึงสร้างในเทสต์ไม่ได้
+#[cfg(feature = "force-device-lost")]
+#[derive(Debug)]
+struct ForcedLoss {
+    /// ยิงเมื่อวาดครบ N เฟรม — "device ตายระหว่างผู้ใช้ลากภาพ"
+    after_frames: Option<u64>,
+    /// ยิงเมื่อถึงเวลานี้ — "device ตายตอนแอปหลับ" (เคสจริงที่เจอบ่อยกว่า)
+    deadline: Option<std::time::Instant>,
+    /// ยิงไปแล้วหรือยัง — ★ ธงนี้คือสิ่งเดียวที่กันลูป
+    fired: bool,
+}
+
+#[cfg(feature = "force-device-lost")]
+impl ForcedLoss {
+    fn new(options: &RenderOptions) -> Self {
+        let deadline = options.force_device_lost_after_ms.map(|ms| {
+            tracing::info!(ms, "ตั้งเวลาจำลอง device lost ตอนแอปหลับ");
+            std::time::Instant::now() + std::time::Duration::from_millis(ms)
+        });
+        Self {
+            after_frames: options.force_device_lost_after,
+            deadline,
+            fired: false,
+        }
+    }
+
+    /// ถึงเวลายิงตามจำนวนเฟรมหรือยัง (เรียกทุกเฟรม)
+    fn due_by_frames(&mut self, frames: u64) -> bool {
+        let Some(after) = self.after_frames else {
+            return false;
+        };
+        if self.fired || frames < after {
+            return false;
+        }
+        self.fired = true;
+        true
+    }
+
+    /// ถึงเวลายิงตามนาฬิกาหรือยัง (เรียกตอนถูกปลุก)
+    fn due_by_time(&mut self, now: std::time::Instant) -> bool {
+        let Some(deadline) = self.deadline else {
+            return false;
+        };
+        if now < deadline {
+            return false;
+        }
+        // เคลียร์ทั้งนาฬิกาและตั้งธง เพื่อกันยิงซ้ำทุกทาง
+        self.deadline = None;
+        self.fired = true;
+        true
+    }
+
+    /// เวลาที่ต้องปลุก event loop มา — `None` = ไม่ต้องปลุก (หลับยาวได้ ตาม I-1)
+    fn deadline(&self) -> Option<std::time::Instant> {
+        self.deadline
+    }
+
+    /// ต้องวาดต่อเนื่องเพื่อให้ตัวนับเฟรมถึงเป้าหรือยัง
+    ///
+    /// ★ เงื่อนไขคือ "ยังไม่ยิง" ไม่ใช่ "frames < after" — ตัวยิงอยู่ต้นทาง
+    /// `acquire_frame()` ของเฟรม*ถัดไป* ถ้าหยุดขอเฟรมตอน `frames == after`
+    /// เฟรมนั้นจะไม่มีวันมา แล้วการทดสอบจะค้างรอตลอดกาล
+    fn wants_frames(&self) -> bool {
+        !self.fired && self.after_frames.is_some()
     }
 }
 
@@ -617,9 +684,7 @@ fn build_stack(
     {
         let flag = Arc::clone(device_lost);
         device.set_device_lost_callback(move |reason, message| {
-            // ★ Destroyed = เราเป็นคนทิ้ง device เอง (ตอนกู้ หรือตอนปิดโปรแกรม)
-            //   ห้ามถือเป็นอุบัติเหตุ ไม่งั้นการกู้ครั้งหนึ่งจะจุดชนวนการกู้ครั้งถัดไปไม่รู้จบ
-            if matches!(reason, wgpu::DeviceLostReason::Destroyed) {
+            if !is_accidental_loss(reason) {
                 tracing::debug!(generation, "ปิด device เดิมตามปกติ");
                 return;
             }
@@ -768,6 +833,44 @@ fn block_on<F: Future>(fut: F) -> F::Output {
     }
 }
 
+/// GPU จริงแบบไม่มีหน้าต่าง — สำหรับเทสต์ที่ต้องแตะ texture จริง (P0-5)
+///
+/// ★ **`None` = เครื่องนี้ไม่มี GPU ที่ใช้ได้** ผู้เรียกต้องรายงานว่า "ข้าม"
+/// อย่างชัดเจน ห้ามผ่านเงียบ ๆ (docs/08 §3.9 ข้อ 2)
+///
+/// ไม่ต้องมี surface เพราะเทสต์พวกนี้ตรวจ **resource ที่ผูกกับ device**
+/// (atlas, working texture) ไม่ได้ตรวจการ present ลงหน้าต่าง
+#[cfg(test)]
+pub(crate) fn headless_device() -> Option<(wgpu::Device, wgpu::Queue, GpuCapabilities)> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::LowPower,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+    }))
+    .ok()?;
+
+    let info = adapter.get_info();
+    let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("refx-test-device"),
+        required_features: wgpu::Features::empty(),
+        required_limits: adapter.limits(),
+        ..Default::default()
+    }))
+    .ok()?;
+
+    let caps = GpuCapabilities {
+        adapter_name: info.name.clone(),
+        backend: info.backend,
+        device_type: info.device_type,
+        bc_compression: adapter
+            .features()
+            .contains(wgpu::Features::TEXTURE_COMPRESSION_BC),
+        max_texture_dimension_2d: device.limits().max_texture_dimension_2d,
+    };
+    Some((device, queue, caps))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -798,6 +901,127 @@ mod tests {
     fn atlas_size_respects_small_gpu() {
         // การ์ดเล็กต้องได้ atlas เล็กตาม ไม่ใช่ 2048 แล้วล้มตอน allocate
         assert_eq!(fake_caps(1024).atlas_size(), 1024);
+    }
+
+    /// พิมพ์ว่าเครื่องนี้เทสต์ GPU ได้ไหม — ไม่ใช่การตรวจ แต่เป็นการ **รายงาน**
+    ///
+    /// ถ้าเครื่อง/CI ไม่มี GPU เทสต์กลุ่ม `gpu_` จะข้าม บรรทัดนี้คือหลักฐานใน log
+    /// ว่าข้ามเพราะอะไร (docs/08 §3.9 ข้อ 2: โครงเปล่าห้ามเงียบ)
+    #[test]
+    fn report_whether_this_machine_can_run_gpu_tests() {
+        match headless_device() {
+            Some((_, _, caps)) => println!(
+                "GPU tests: ทำงานจริงบน {} ({:?} / {:?})",
+                caps.adapter_name, caps.backend, caps.device_type
+            ),
+            None => println!("GPU tests: ข้าม — เครื่องนี้ไม่มี adapter ที่ใช้ได้"),
+        }
+    }
+
+    // ---------- ★ กฎที่กันลูปกู้ device ไม่รู้จบ (P0-5 / docs/04 §7) ----------
+
+    /// ★ ข้อผูกมัด: `Destroyed` = เราสั่งปิดเอง **ห้ามนับเป็นอุบัติเหตุ**
+    ///
+    /// ทุกครั้งที่กู้ device เราทิ้งของเก่า → wgpu ยิง `Destroyed` เสมอ
+    /// ถ้านับด้วย การกู้ครั้งหนึ่งจะจุดชนวนครั้งถัดไปทันที = จอกระพริบไม่หยุด
+    #[test]
+    fn destroying_our_own_device_is_never_an_accident() {
+        assert!(
+            !is_accidental_loss(wgpu::DeviceLostReason::Destroyed),
+            "นับ Destroyed เป็นอุบัติเหตุ = กู้วนไม่รู้จบ"
+        );
+        // ของจริงที่ต้องกู้: driver update / sleep-resume / TDR / สลับ GPU
+        assert!(is_accidental_loss(wgpu::DeviceLostReason::Unknown));
+    }
+
+    #[cfg(feature = "force-device-lost")]
+    mod forced {
+        use std::time::{Duration, Instant};
+
+        use super::*;
+
+        fn by_frames(after: u64) -> ForcedLoss {
+            ForcedLoss::new(&RenderOptions {
+                force_device_lost_after: Some(after),
+                ..RenderOptions::default()
+            })
+        }
+
+        fn by_time(ms: u64) -> ForcedLoss {
+            ForcedLoss::new(&RenderOptions {
+                force_device_lost_after_ms: Some(ms),
+                ..RenderOptions::default()
+            })
+        }
+
+        /// ★ ยิงครั้งเดียวเท่านั้น — หลังกู้เสร็จตัวนับเฟรมถูกรีเซ็ตเป็น 0
+        /// ถ้ายิงซ้ำได้ จะกลายเป็นลูปกู้ device ไม่รู้จบทันที
+        #[test]
+        fn frame_trigger_fires_exactly_once_even_after_the_counter_resets() {
+            let mut forced = by_frames(3);
+            assert!(!forced.due_by_frames(0));
+            assert!(!forced.due_by_frames(2), "ยังไม่ถึงเป้าต้องไม่ยิง");
+            assert!(forced.due_by_frames(3), "ถึงเป้าแล้วต้องยิง");
+
+            // จำลองสิ่งที่เกิดหลังกู้: frames กลับไปนับหนึ่งใหม่แล้ววิ่งผ่านเป้าอีกรอบ
+            for frames in [0, 1, 2, 3, 4, 100] {
+                assert!(
+                    !forced.due_by_frames(frames),
+                    "ยิงซ้ำที่เฟรม {frames} = ลูปกู้ device ไม่รู้จบ"
+                );
+            }
+        }
+
+        /// ★ ตัวนับเวลาก็ต้องยิงครั้งเดียว และต้อง **เคลียร์นาฬิกาปลุก** ด้วย
+        /// ไม่งั้น event loop จะถูกปลุกซ้ำทุกครั้งที่หลับ = เผา CPU ทั้งที่เขียนว่า Wait (I-1)
+        #[test]
+        fn time_trigger_fires_once_then_stops_waking_the_loop() {
+            let mut forced = by_time(0); // ถึงเวลาทันที
+            assert!(forced.deadline().is_some(), "ต้องตั้งนาฬิกาปลุกไว้");
+
+            let now = Instant::now() + Duration::from_millis(1);
+            assert!(forced.due_by_time(now), "ถึงเวลาแล้วต้องยิง");
+            assert_eq!(
+                forced.deadline(),
+                None,
+                "ยิงแล้วต้องเลิกขอให้ปลุก ไม่งั้นตื่นซ้ำไม่รู้จบ (I-1)"
+            );
+            for _ in 0..10 {
+                assert!(!forced.due_by_time(Instant::now()), "ยิงซ้ำ = กู้วนไม่จบ");
+            }
+        }
+
+        /// ยังไม่ถึงเวลา = ห้ามยิง และนาฬิกาต้องยังอยู่
+        #[test]
+        fn time_trigger_waits_for_its_deadline() {
+            let mut forced = by_time(60_000);
+            assert!(!forced.due_by_time(Instant::now()));
+            assert!(forced.deadline().is_some(), "ยังไม่ถึงเวลา ต้องยังปลุกอยู่");
+        }
+
+        /// ไม่ได้สั่งจำลองไว้ = ต้องไม่ยิงเลย และไม่ขอให้ปลุก (เส้นทางปกติของผู้ใช้)
+        #[test]
+        fn without_a_flag_nothing_ever_fires() {
+            let mut forced = ForcedLoss::new(&RenderOptions::default());
+            assert!(!forced.due_by_frames(u64::MAX));
+            assert!(!forced.due_by_time(Instant::now()));
+            assert_eq!(forced.deadline(), None);
+            assert!(!forced.wants_frames(), "ไม่ได้สั่งไว้ ต้องไม่ฝืนวาดต่อเนื่อง (I-1)");
+        }
+
+        /// ★ ต้องขอเฟรมต่อไปเรื่อย ๆ **จนกว่าจะยิงจริง** ไม่ใช่หยุดตอน frames == after
+        ///
+        /// ตัวยิงอยู่ต้นทาง `acquire_frame()` ของเฟรมถัดไป ถ้าหยุดขอก่อน
+        /// เฟรมนั้นไม่มีวันมา แล้วการทดสอบจะค้างรอตลอดกาล (เจอจริงตอน P0-5)
+        #[test]
+        fn keeps_asking_for_frames_until_it_actually_fires() {
+            let mut forced = by_frames(2);
+            assert!(forced.wants_frames());
+            assert!(!forced.due_by_frames(1));
+            assert!(forced.wants_frames(), "ยังไม่ยิง ต้องขอเฟรมต่อ");
+            assert!(forced.due_by_frames(2));
+            assert!(!forced.wants_frames(), "ยิงแล้วต้องปล่อยให้กลับไปหลับ (I-1)");
+        }
     }
 
     /// flag ของ device lost ต้องถูกตั้ง/เคลียร์ได้ข้ามเธรด (callback ของ wgpu
