@@ -32,6 +32,26 @@ pub enum LogError {
 
 /// ชื่อไฟล์ log หลัก
 const LOG_FILE: &str = "refx.log";
+
+/// filter เริ่มต้นเมื่อผู้ใช้ไม่ได้ตั้ง `RUST_LOG`
+///
+/// ★ `egui_winit::clipboard=off` — **ปิดเสียง `ERROR` ปลอมตอนกด `Ctrl+V`**
+///
+/// egui จัดการ `Ctrl+V` ของตัวเองคู่ขนานกับเรา แล้วขอ **ข้อความ** จาก clipboard
+/// ทุกครั้ง ถ้าใน clipboard มีแต่ภาพ (ซึ่งคือกรณีปกติของการวางภาพ) มันจะเขียน
+/// `ERROR arboard paste error: …` ลง log **ทุกครั้งที่ผู้ใช้วางภาพสำเร็จ**
+///
+/// ทำไมต้องปิด: log ถูกเปลี่ยนเป็นภาษาอังกฤษเพื่อให้ผู้ใช้ต่างชาติส่งมาให้เราอ่าน
+/// `ERROR` ที่ไม่ใช่ error จริงจะสร้างรายงานบั๊กที่ไม่มีอยู่จริง และกลบของจริง
+/// ที่อยู่ในไฟล์เดียวกัน (docs/08 §5: log คือสิ่งเดียวที่ผู้ใช้มีให้ส่ง)
+///
+/// สิ่งที่ยอมเสียไปด้วย: `WARN` ตอน egui สร้าง clipboard ของตัวเองไม่สำเร็จ —
+/// ยอมรับได้เพราะเส้นทางวางภาพของ **เรา** ไม่ได้ใช้ตัวนั้นเลย และรายงานปัญหา
+/// clipboard เองอยู่แล้วผ่าน `ClipboardError` พร้อมข้อความที่ผู้ใช้ทำอะไรต่อได้
+///
+/// ตั้ง `RUST_LOG` เมื่อไหร่ directive นี้หายไปทั้งชุด — ตั้งใจ: คนที่ตั้ง `RUST_LOG`
+/// คือนักพัฒนาที่กำลังไล่ปัญหาอยู่ ควรได้เห็นทุกอย่างตามที่สั่ง
+const DEFAULT_FILTER: &str = "info,egui_winit::clipboard=off";
 /// ขนาดสูงสุดก่อนหมุนไฟล์ (docs/08 §5)
 const MAX_BYTES: u64 = 5 * 1024 * 1024;
 /// เก็บไฟล์เก่ากี่ไฟล์ (docs/08 §5)
@@ -143,7 +163,8 @@ pub fn init(log_dir: &Path) -> Result<LogGuard, LogError> {
     // non_blocking = เขียนดิสก์บน worker thread ไม่บล็อก UI (I-2)
     let (non_blocking, worker) = tracing_appender::non_blocking(writer);
 
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
 
     // ไฟล์ไม่เอาสี ไม่งั้นได้ escape code เต็มไฟล์จนอ่านไม่ออก
     tracing_subscriber::fmt()
@@ -338,6 +359,83 @@ mod tests {
 
         let result = handle.join().unwrap();
         assert!(result.is_err(), "catch_unwind ต้องดัก panic ของ worker ได้");
+    }
+
+    // ---------- filter เริ่มต้น ----------
+
+    /// ตัวรับ log ในหน่วยความจำ — ใช้ตรวจว่า filter **ตัดของจริง** ไม่ใช่แค่มี directive อยู่
+    #[derive(Clone, Default)]
+    struct Buffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl Buffer {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    impl Write for Buffer {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buffer {
+        type Writer = Self;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// ยิง log สองบรรทัดผ่าน filter ที่กำหนด แล้วคืนสิ่งที่ **รอดออกมาจริง**
+    fn capture_with(filter: &str) -> String {
+        let buffer = Buffer::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::new(filter))
+            .with_writer(buffer.clone())
+            .with_ansi(false)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            // บรรทัดที่ egui เขียนทุกครั้งที่ผู้ใช้วางภาพสำเร็จ (ไม่ใช่ error จริง)
+            tracing::error!(target: "egui_winit::clipboard", "arboard paste error: empty");
+            // บรรทัดของเราเอง ต้องไม่หายไปด้วย
+            tracing::info!(target: "refx_ui::app", "pasted image is on screen");
+        });
+        buffer.text()
+    }
+
+    /// ★ `ERROR` ปลอมของ egui ต้องไม่ไปโผล่ใน log ที่ผู้ใช้ส่งมาให้เรา
+    ///
+    /// ตรวจของจริง: ยิง record ที่ target เดียวกับ egui แล้วดูว่ามันถูกตัดไหม
+    /// ไม่ใช่แค่เทียบสตริงของ [`DEFAULT_FILTER`] ซึ่งไม่ได้พิสูจน์อะไรเลย
+    #[test]
+    fn default_filter_drops_the_fake_clipboard_error() {
+        let captured = capture_with(DEFAULT_FILTER);
+        assert!(
+            !captured.contains("arboard paste error"),
+            "ERROR ปลอมของ egui ยังหลุดเข้ามา: {captured}"
+        );
+        assert!(
+            captured.contains("pasted image is on screen"),
+            "ตัด egui ไปแล้วแต่ log ของเราหายไปด้วย: {captured}"
+        );
+    }
+
+    /// ★ negative control (docs/08 §3.9): ถ้าไม่มี directive บรรทัดนั้น **ต้องโผล่**
+    ///
+    /// ถ้าเทสต์นี้ล้ม แปลว่าตัวจับ log หรือชื่อ target ผิด แล้วเทสต์ข้างบน
+    /// จะกลายเป็นสัญญาณเขียวปลอมอีกอันหนึ่ง ซึ่งโปรเจกต์นี้โดนมาแล้วสองครั้ง
+    #[test]
+    fn without_the_directive_the_noise_really_is_there() {
+        let captured = capture_with("info");
+        assert!(
+            captured.contains("arboard paste error"),
+            "negative control ล้ม — ตัวจับ log ไม่ทำงาน จึงยืนยันอะไรไม่ได้เลย: {captured}"
+        );
     }
 
     /// เขียน log ไม่ได้ต้องไม่ทำให้โปรแกรมล้ม (เสถียรมาก่อน)
