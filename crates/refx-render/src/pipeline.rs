@@ -237,7 +237,7 @@ impl QuadPipeline {
             if n == 0 {
                 tracing::warn!(
                     capacity = self.instances.capacity(),
-                    "instance buffer เต็ม — ภาพที่เหลือในเฟรมนี้ไม่ถูกวาด"
+                    "instance buffer is full — the remaining images are not drawn this frame"
                 );
                 break;
             }

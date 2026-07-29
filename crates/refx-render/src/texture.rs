@@ -159,7 +159,7 @@ impl TextureAllocator {
         tracing::info!(
             limit_mb = limit / (1 << 20),
             device_type = ?caps.device_type,
-            "ตั้งเพดาน VRAM"
+            "VRAM budget set"
         );
         Self {
             budget: Arc::new(VramBudget::new(limit)),

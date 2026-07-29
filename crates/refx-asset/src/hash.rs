@@ -87,7 +87,7 @@ pub fn hash_bytes(bytes: &[u8]) -> ContentHash {
 pub fn hash_file(path: &Path) -> Result<ContentHash, HashError> {
     let label = || {
         path.file_name().map_or_else(
-            || "(ไม่ทราบชื่อไฟล์)".to_owned(),
+            || "(unknown file)".to_owned(),
             |n| n.to_string_lossy().into_owned(),
         )
     };

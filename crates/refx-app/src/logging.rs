@@ -118,7 +118,7 @@ impl SizeRotatingWriter {
         let _ = std::fs::rename(self.current_path(), self.dir.join(format!("{LOG_FILE}.1")));
 
         if let Err(err) = self.open_current() {
-            eprintln!("หมุนไฟล์ log ไม่สำเร็จ: {err}");
+            eprintln!("cannot rotate the log file: {err}");
         }
     }
 }
@@ -193,7 +193,7 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
         .downcast_ref::<&str>()
         .map(|s| (*s).to_owned())
         .or_else(|| payload.downcast_ref::<String>().cloned())
-        .unwrap_or_else(|| "ไม่มีข้อความ".to_owned())
+        .unwrap_or_else(|| "(no message)".to_owned())
 }
 
 /// ติดตั้ง panic hook ที่เขียน log + แสดง dialog
@@ -206,7 +206,7 @@ pub fn install_panic_hook(log_dir: &Path) {
     std::panic::set_hook(Box::new(move |info| {
         let location = info
             .location()
-            .map_or_else(|| "ไม่ทราบตำแหน่ง".to_owned(), ToString::to_string);
+            .map_or_else(|| "(unknown location)".to_owned(), ToString::to_string);
 
         let message = panic_message(info.payload());
 
@@ -217,7 +217,7 @@ pub fn install_panic_hook(log_dir: &Path) {
             tracing::warn!(
                 file = label,
                 message,
-                "ถอดรหัสภาพไม่สำเร็จ (ตัวถอดรหัส panic แต่ถูกดักไว้แล้ว) — ข้ามไฟล์นี้"
+                "image decoder panicked but was caught — skipping this file"
             );
             return; // ไม่เรียก hook เดิม ไม่เด้ง dialog ไม่เขียน backtrace
         }
@@ -229,8 +229,8 @@ pub fn install_panic_hook(log_dir: &Path) {
         tracing::error!(
             location,
             message,
-            thread = thread_name.as_deref().unwrap_or("ไม่มีชื่อ"),
-            "โปรแกรมพัง (panic)\n{backtrace}"
+            thread = thread_name.as_deref().unwrap_or("(unnamed)"),
+            "the program panicked and is going down\n{backtrace}"
         );
 
         if should_show_dialog(thread_name.as_deref()) {
@@ -342,7 +342,7 @@ mod tests {
 
         // payload แปลก ๆ ต้องไม่ทำให้ hook พังซ้ำ
         let odd: Box<dyn std::any::Any + Send> = Box::new(42u32);
-        assert_eq!(panic_message(odd.as_ref()), "ไม่มีข้อความ");
+        assert_eq!(panic_message(odd.as_ref()), "(no message)");
     }
 
     /// panic บน worker ต้องถูกดักได้ ไม่ล้มทั้งโปรเซส (I-7)

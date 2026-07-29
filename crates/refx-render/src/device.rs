@@ -213,7 +213,7 @@ impl RenderContext {
             || options.force_device_lost_after_ms.is_some();
         if forced_requested && !cfg!(feature = "force-device-lost") {
             tracing::warn!(
-                "ระบุ flag จำลอง device lost ไว้ แต่ไม่ได้เปิด feature force-device-lost — จะไม่มีผล"
+                "device-lost simulation flag given but the force-device-lost feature is off — it does nothing"
             );
         }
 
@@ -260,7 +260,7 @@ impl RenderContext {
             .map_or((1, 1), |s| (s.config.width, s.config.height));
         let next_generation = self.generation + 1;
 
-        tracing::warn!(generation = next_generation, "กำลังสร้าง GPU device ใหม่");
+        tracing::warn!(generation = next_generation, "creating a new GPU device");
 
         // ★ ต้องทิ้งของเก่าให้หมดก่อน — หน้าต่างหนึ่งบานมี surface ได้ทีละอันเดียว
         //   ถ้าสร้างใหม่คร่อมของเก่า จะได้ "Native window is in use" แล้ว panic
@@ -293,7 +293,7 @@ impl RenderContext {
         self.consecutive_errors = 0;
         self.frames = 0;
 
-        tracing::info!(generation = self.generation, "กู้ GPU device สำเร็จ");
+        tracing::info!(generation = self.generation, "GPU device recovered");
         Ok(())
     }
 
@@ -347,7 +347,10 @@ impl RenderContext {
         // จำลอง device lost ตามที่สั่งไว้ (เฉพาะ build ที่เปิด feature)
         #[cfg(feature = "force-device-lost")]
         if self.forced.due_by_frames(self.frames) {
-            tracing::warn!(frames = self.frames, "จำลอง device lost ตามคำสั่ง");
+            tracing::warn!(
+                frames = self.frames,
+                "simulating device lost (frame counter reached)"
+            );
             self.device_lost.store(true, Ordering::SeqCst);
         }
 
@@ -382,7 +385,7 @@ impl RenderContext {
 
             // surface ตายแต่ device ยังอยู่ — configure ใหม่พอ
             Cst::Lost | Cst::Outdated => {
-                tracing::debug!("surface ใช้ไม่ได้แล้ว — ตั้งค่าใหม่");
+                tracing::debug!("surface is no longer usable — reconfiguring it");
                 stack.surface.configure(&stack.device, &stack.config);
                 FrameStatus::Recovered
             }
@@ -391,7 +394,7 @@ impl RenderContext {
                 self.consecutive_errors += 1;
                 tracing::error!(
                     count = self.consecutive_errors,
-                    "surface validation error — ข้ามเฟรมนี้"
+                    "surface validation error — skipping this frame"
                 );
                 // ผิดพลาดติดกันหลายเฟรม = ไม่ใช่อาการชั่วคราวแล้ว ให้กู้ device
                 if self.looks_broken() {
@@ -523,7 +526,7 @@ impl RenderContext {
             if !self.forced.due_by_time(std::time::Instant::now()) {
                 return false;
             }
-            tracing::warn!("จำลอง device lost ตามเวลา (แอปหลับอยู่)");
+            tracing::warn!("simulating device lost on the timer (app was idle)");
             self.device_lost.store(true, Ordering::SeqCst);
             true
         }
@@ -596,7 +599,7 @@ struct ForcedLoss {
 impl ForcedLoss {
     fn new(options: &RenderOptions) -> Self {
         let deadline = options.force_device_lost_after_ms.map(|ms| {
-            tracing::info!(ms, "ตั้งเวลาจำลอง device lost ตอนแอปหลับ");
+            tracing::info!(ms, "device-lost simulation armed for the idle case");
             std::time::Instant::now() + std::time::Duration::from_millis(ms)
         });
         Self {
@@ -685,10 +688,15 @@ fn build_stack(
         let flag = Arc::clone(device_lost);
         device.set_device_lost_callback(move |reason, message| {
             if !is_accidental_loss(reason) {
-                tracing::debug!(generation, "ปิด device เดิมตามปกติ");
+                tracing::debug!(generation, "previous device destroyed on purpose");
                 return;
             }
-            tracing::error!(?reason, message, generation, "GPU device หาย — จะกู้เฟรมถัดไป");
+            tracing::error!(
+                ?reason,
+                message,
+                generation,
+                "GPU device lost — recovering on the next frame"
+            );
             flag.store(true, Ordering::SeqCst);
         });
     }
@@ -700,14 +708,17 @@ fn build_stack(
         device.on_uncaptured_error(Arc::new(move |err: wgpu::Error| match err {
             wgpu::Error::OutOfMemory { .. } => {
                 // ห้ามทำงานหนักใน callback นี้ — แค่ตั้ง flag แล้วให้เฟรมถัดไปจัดการ
-                tracing::error!("GPU หน่วยความจำเต็ม — จะทิ้ง cache แล้วบันทึกงานอัตโนมัติ");
+                tracing::error!("GPU out of memory — will drop caches and autosave");
                 flag.store(true, Ordering::SeqCst);
             }
             wgpu::Error::Validation { description, .. } => {
                 tracing::error!(description, "wgpu validation error");
             }
             wgpu::Error::Internal { description, .. } => {
-                tracing::error!(description, "wgpu internal error — ถือว่า device เสีย");
+                tracing::error!(
+                    description,
+                    "wgpu internal error — treating the device as broken"
+                );
                 lost.store(true, Ordering::SeqCst);
             }
         }));
@@ -731,7 +742,7 @@ fn build_stack(
         bc = caps.bc_compression,
         format = ?config.format,
         generation,
-        "เตรียมกราฟิกเสร็จ"
+        "graphics ready"
     );
 
     Ok(GpuStack {
@@ -797,14 +808,14 @@ fn select_present_mode(supported: &[wgpu::PresentMode], uncapped: bool) -> wgpu:
     // Immediate ก่อน (ไม่รอ vsync เลย) แล้วค่อย Mailbox (ไม่บล็อกแต่ยัง sync ตอน present)
     for candidate in [wgpu::PresentMode::Immediate, wgpu::PresentMode::Mailbox] {
         if supported.contains(&candidate) {
-            tracing::info!(?candidate, "โหมด benchmark: ปลด vsync แล้ว");
+            tracing::info!(?candidate, "benchmark mode: vsync disabled");
             return candidate;
         }
     }
 
     tracing::warn!(
         ?supported,
-        "การ์ดจอนี้ไม่รองรับ Immediate/Mailbox — ตัวเลขที่วัดได้จะชนเพดาน vsync ของจอ อ่านเป็นต้นทุนการวาดไม่ได้"
+        "this GPU supports neither Immediate nor Mailbox — the numbers will hit the display's vsync ceiling and cannot be read as draw cost"
     );
     wgpu::PresentMode::AutoVsync
 }

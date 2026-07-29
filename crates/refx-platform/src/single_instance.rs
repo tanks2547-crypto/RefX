@@ -79,10 +79,10 @@ impl SingleInstance {
             .set_len(0)
             .and_then(|()| write!(writer, "{}", std::process::id()))
         {
-            tracing::warn!(?err, "เขียน PID ลงไฟล์ lock ไม่ได้ (ไม่กระทบการทำงาน)");
+            tracing::warn!(?err, "cannot write the PID into the lock file (harmless)");
         }
 
-        tracing::debug!(path = %path.display(), "จับ lock อินสแตนซ์เดียวสำเร็จ");
+        tracing::debug!(path = %path.display(), "single-instance lock acquired");
         Ok(Self { _file: file, path })
     }
 

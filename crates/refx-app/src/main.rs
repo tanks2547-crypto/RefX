@@ -132,7 +132,7 @@ fn main() -> anyhow::Result<()> {
     // ถือ guard ไว้ถึงจบ main — drop แล้ว log ที่ค้างใน buffer จะหาย
     let _log_guard = logging::init(paths.log_dir())?;
     logging::install_panic_hook(paths.log_dir());
-    tracing::info!(version = env!("CARGO_PKG_VERSION"), "เปิด RefX");
+    tracing::info!(version = env!("CARGO_PKG_VERSION"), "RefX starting");
 
     // ต้องถือ guard ไว้ถึงจบ main — drop เมื่อไหร่ = ปลดล็อกทันที
     // เปิดซ้ำสองตัวแล้วเขียน cache.sqlite พร้อมกันเสี่ยงข้อมูลเสีย (I-3)

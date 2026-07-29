@@ -254,7 +254,7 @@ impl WorkingCache {
                     size = victim.size,
                     bytes = entry.bytes,
                     used_mb = self.used / (1 << 20),
-                    "ไล่ working texture ออกตาม LRU"
+                    "evicted a working texture (LRU)"
                 );
             }
         }
@@ -271,7 +271,7 @@ impl WorkingCache {
                     side,
                     got = pixels.len(),
                     expected,
-                    "mip level ขนาดผิด"
+                    "mip level has the wrong byte length"
                 );
                 break;
             }
@@ -335,7 +335,7 @@ impl WorkingCache {
             bytes,
             used_mb = self.used / (1 << 20),
             limit_mb = self.limit / (1 << 20),
-            "เพิ่ม working texture"
+            "working texture added"
         );
         Ok(())
     }

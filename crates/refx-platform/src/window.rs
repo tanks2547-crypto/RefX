@@ -235,14 +235,14 @@ impl<D: AppDelegate> ApplicationHandler<WakeEvent> for WindowHost<D> {
         let window = match event_loop.create_window(attrs) {
             Ok(window) => Arc::new(window),
             Err(err) => {
-                tracing::error!(%err, "สร้างหน้าต่างไม่ได้");
+                tracing::error!(%err, "cannot create the window");
                 event_loop.exit();
                 return;
             }
         };
 
         if let Err(err) = self.delegate.window_ready(Arc::clone(&window)) {
-            tracing::error!(%err, "เตรียมกราฟิกไม่สำเร็จ");
+            tracing::error!(%err, "graphics setup failed");
             self.failure = Some(err);
             event_loop.exit();
             return;
@@ -360,7 +360,7 @@ pub fn run<D: AppDelegate>(
     let mut host = WindowHost::new(delegate, config);
     event_loop.run_app(&mut host).map_err(WindowError::from)?;
 
-    tracing::info!(redraws = %host.tracker().summary(), "ปิดโปรแกรม");
+    tracing::info!(redraws = %host.tracker().summary(), "shutting down");
 
     // error ตอน window_ready ต้องไม่เงียบหาย — ผู้ใช้ต้องได้เห็นสาเหตุ
     match host.failure {

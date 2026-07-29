@@ -199,7 +199,11 @@ pub fn make_thumbnail(image: &RgbaImage) -> Thumbnail {
 
     let pixels = resize_to_square(image).unwrap_or_else(|| {
         // resize ล้มเหลว (ขนาด 0 ฯลฯ) — คืนสี่เหลี่ยมสีเด่นแทน ไม่ใช่ล้ม
-        tracing::warn!(source_width, source_height, "ย่อภาพไม่สำเร็จ — ใช้สีเด่นแทน");
+        tracing::warn!(
+            source_width,
+            source_height,
+            "downscale failed — falling back to the dominant colour"
+        );
         solid_square(dominant)
     });
 

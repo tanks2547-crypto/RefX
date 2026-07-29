@@ -53,7 +53,7 @@ impl Lang {
         let lang = refx_platform::locale::user_language_tag()
             .as_deref()
             .map_or(Self::En, Self::from_tag);
-        tracing::info!(?lang, "เลือกภาษาของ UI");
+        tracing::info!(?lang, "UI language selected");
         lang
     }
 }

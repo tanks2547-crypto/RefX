@@ -82,7 +82,7 @@ impl RamBudget {
             tracing::warn!(
                 bytes,
                 limit = self.limit,
-                "ภาพเดียวใหญ่กว่าเพดาน RAM ทั้งถัง — ให้รันคนเดียวชั่วคราว"
+                "one image is larger than the whole RAM budget — letting it run alone"
             );
         }
 

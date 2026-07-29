@@ -16,7 +16,7 @@
 | P2 ขึ้นไป | ยังไม่เริ่ม |
 
 **เกณฑ์คุณภาพล่าสุดที่ผ่าน:** `fmt` / `clippy --all-features -D warnings` (workspace + `fuzz/`) /
-`nextest 268/268` / `deny check` ครบ 4 หมวด / **binary 15.47 MB จากเพดาน 25 MB (บังคับใน CI)**
+`nextest 271/271` / `deny check` ครบ 4 หมวด / **binary 15.47 MB จากเพดาน 25 MB (บังคับใน CI)**
 
 crate ที่มี: `refx-app` `refx-asset` `refx-core` `refx-io` `refx-platform` `refx-render` `refx-ui`
 
@@ -50,12 +50,7 @@ repo **อยู่ใต้ git แล้ว** (branch `master`) — `git fsck`
 > **ภาพจาก clipboard คมได้แค่ระดับ thumbnail** — ปล่อยไว้ รอทำพร้อม **P4-5 packed mode**
 > ห้ามแก้ด้วยไฟล์ชั่วคราวใน cache (ภาพที่ board อ้างถึงจะหายไปกับ LRU = ผิด I-3)
 
-### 2.1 กวาด `tracing::` เป็นภาษาอังกฤษ (~100 จุด)
-
-log มีไว้ให้นักพัฒนาอ่าน · ผู้ใช้ต่างชาติส่ง log มาต้องอ่านออก · เป็นงานเชิงกล
-ตรรกะเดียวกับที่ `#[error(…)]` ถูกเปลี่ยนเป็นอังกฤษไปแล้ว
-
-### 2.2 → เข้า P2 Canvas mode
+### 2.1 → เข้า P2 Canvas mode
 
 อ่าน `ROADMAP.md` หัวข้อ P2 และ `docs/03 §1` (โดยเฉพาะกับดัก pointer ของ egui
 และทางแก้ระยะยาว: ทำ canvas เป็น widget จริงด้วย `allocate_response`)
@@ -152,7 +147,7 @@ log มีไว้ให้นักพัฒนาอ่าน · ผู้ใ
 | จุดบอด fast hash ตรงกลางไฟล์ | ปิดด้วย mtime แล้ว แต่จุดบอดตัว hash เองยังอยู่ (มีเทสต์บันทึกไว้ว่าตั้งใจ) |
 | **เทสต์ GPU ถูกข้ามบน CI** (ไม่มี adapter บน runner) | เทสต์ที่แตะ texture จริง (`atlas_comes_back_…`, `working_cache_is_rebuilt_…`, `refilling_a_fresh_atlas_…`) ใช้ `headless_device()` ซึ่งคืน `None` เมื่อไม่มี GPU แล้ว **พิมพ์บอกว่าข้าม** (docs/08 §3.9 ข้อ 2) · บนเครื่องนักพัฒนาที่มี GPU มันรันจริงทุกครั้ง · จะให้ CI รันด้วยต้องลง software adapter (Ubuntu: `mesa-vulkan-drivers` = lavapipe · Windows runner มี WARP อยู่แล้ว) — **ยังไม่ได้ทำ** |
 | ชั้น UI ของการกู้ device ยังไม่มี unit test | `recover_device()` ต้องมีหน้าต่างจริงจึงเรียกในเทสต์ไม่ได้ · ตอนนี้คุมด้วย (ก) `DeviceBound` ที่บังคับตอนคอมไพล์ (ข) `debug_assert` เทียบ generation ของ `WorkingCache` ทุกเฟรม (ค) รันจริงด้วย `--force-device-lost-after-ms` |
-| `tracing::` ยังเป็นภาษาไทย ~100 จุด | log มีไว้ให้นักพัฒนาอ่าน · ผู้ใช้ต่างชาติส่ง log มาต้องอ่านออก · งานเชิงกลข้ามทุก crate |
+| ข้อความ **CLI** กับ **crash dialog** ยังเป็นภาษาไทย | `tracing::` กวาดเป็นอังกฤษครบแล้ว (84 จุด) แต่ `--help` / error ของ CLI ใน `main.rs` และ `dialog::show_crash_dialog` ยังเป็นไทยล้วน · เป็นผิวที่ผู้ใช้ต่างชาติเจอได้เหมือนกัน แต่เป็นคนละระบบกับ log จึงแยกทำทีหลัง (crash dialog ควรไปอยู่ใต้ `refx-ui::text` ตอนที่ P5-3 ทำระบบภาษาเต็มรูปแบบ) |
 
 ---
 

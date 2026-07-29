@@ -18,7 +18,7 @@ pub fn user_language_tag() -> Option<String> {
     if tag.is_empty() {
         return None;
     }
-    tracing::info!(tag, "อ่านภาษาของผู้ใช้จากระบบ");
+    tracing::info!(tag, "read the user's language from the OS");
     Some(tag.to_owned())
 }
 

@@ -462,7 +462,7 @@ impl DecodePool {
                     worker_loop(&queue, &stats, &budget, &limits, &tx, &wake, io.as_ref())
                 }) {
                 Ok(handle) => handles.push(handle),
-                Err(err) => tracing::error!(%err, index, "สร้าง decode worker ไม่ได้"),
+                Err(err) => tracing::error!(%err, index, "cannot spawn a decode worker"),
             }
         }
         // ทิ้ง sender ต้นฉบับ ไม่งั้น receiver จะไม่มีวันเห็นว่า worker ปิดหมดแล้ว
@@ -471,7 +471,7 @@ impl DecodePool {
         tracing::info!(
             workers = handles.len(),
             ram_limit_mb = budget.limit() / (1 << 20),
-            "เปิด decode pool"
+            "decode pool started"
         );
 
         Self {
@@ -551,7 +551,7 @@ impl Drop for DecodePool {
         self.queue.shutdown();
         for handle in self.workers.drain(..) {
             if handle.join().is_err() {
-                tracing::error!("decode worker จบแบบผิดปกติ");
+                tracing::error!("decode worker ended abnormally");
             }
         }
     }
@@ -664,7 +664,7 @@ fn run_job(
                 elapsed,
             },
             None => {
-                tracing::warn!(file, size, "สร้าง working texture ไม่สำเร็จ");
+                tracing::warn!(file, size, "could not build the working texture");
                 JobResult::Cancelled { hash: job.hash }
             }
         };
@@ -681,7 +681,7 @@ fn run_job(
     //   และต้องบอกผู้ใช้ได้ว่าไฟล์ไหนมีปัญหา (docs/06 §3)
     if elapsed > DECODE_TIMEOUT {
         stats.timed_out.fetch_add(1, AtomicOrdering::Relaxed);
-        tracing::warn!(file, ?elapsed, "decode ใช้เวลานานเกินเพดาน");
+        tracing::warn!(file, ?elapsed, "decode took longer than the timeout");
         return JobResult::Failed {
             hash: job.hash,
             reason: JobFailure::Timeout {

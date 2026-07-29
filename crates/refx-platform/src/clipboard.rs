@@ -99,7 +99,7 @@ pub fn read() -> Result<ClipboardContent, ClipboardError> {
     // 1. ไฟล์ก่อน — รายการว่างถือว่าไม่มี (บาง OS คืน Ok(vec![]) แทนที่จะเป็น Err)
     match clipboard.get().file_list() {
         Ok(files) if !files.is_empty() => {
-            tracing::debug!(count = files.len(), "clipboard มีรายชื่อไฟล์");
+            tracing::debug!(count = files.len(), "clipboard holds a file list");
             return Ok(ClipboardContent::Files(files));
         }
         // ไม่มีไฟล์ = เรื่องปกติ ไปลองภาพต่อ ไม่ใช่ error ของผู้ใช้
@@ -112,7 +112,12 @@ pub fn read() -> Result<ClipboardContent, ClipboardError> {
     let height = u32::try_from(image.height).unwrap_or(u32::MAX);
     let rgba = image.bytes.into_owned();
 
-    tracing::debug!(width, height, bytes = rgba.len(), "clipboard มีภาพ");
+    tracing::debug!(
+        width,
+        height,
+        bytes = rgba.len(),
+        "clipboard holds an image"
+    );
     Ok(ClipboardContent::Image(ClipboardImage {
         // ค่าที่ใหญ่เกิน u32 ไม่มีทางผ่านเพดาน `max_dimension` (65535) อยู่แล้ว
         // จึงย่อเป็น u32::MAX เพื่อให้เกราะฝั่ง refx-asset ปฏิเสธด้วยเหตุผลเดียวกัน

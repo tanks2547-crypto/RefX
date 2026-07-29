@@ -146,7 +146,7 @@ pub fn install(ctx: &egui::Context) {
     if !looks_like_a_font(THAI_FONT) {
         tracing::error!(
             bytes = THAI_FONT.len(),
-            "ฟอนต์ไทยที่ฝังมาไม่ใช่ไฟล์ฟอนต์ที่ถูกต้อง — ใช้ฟอนต์เดิมของ egui              (ตัวหนังสือไทยจะขึ้นเป็นสี่เหลี่ยม แต่โปรแกรมยังใช้งานได้ตามปกติ)"
+            "the bundled Thai font is not a valid font file — falling back to egui's own font (Thai text renders as boxes, everything else keeps working)"
         );
         return;
     }
@@ -155,7 +155,7 @@ pub fn install(ctx: &egui::Context) {
     let fonts = definitions_with_thai();
     if !parses_without_panicking(&fonts) {
         tracing::error!(
-            "egui อ่านฟอนต์ไทยไม่ผ่าน — ใช้ฟอนต์เดิมของ egui              (ตัวหนังสือไทยจะขึ้นเป็นสี่เหลี่ยม แต่โปรแกรมยังใช้งานได้ตามปกติ)"
+            "egui rejected the Thai font — falling back to egui's own font (Thai text renders as boxes, everything else keeps working)"
         );
         return;
     }
@@ -164,7 +164,7 @@ pub fn install(ctx: &egui::Context) {
     tracing::info!(
         font = THAI_FONT_NAME,
         bytes = THAI_FONT.len(),
-        "ติดตั้งฟอนต์ไทยแล้ว"
+        "Thai font installed"
     );
 }
 

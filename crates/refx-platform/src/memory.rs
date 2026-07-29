@@ -24,7 +24,7 @@ pub fn total_ram() -> u64 {
     platform_total_ram().unwrap_or_else(|| {
         tracing::warn!(
             fallback_gb = FALLBACK_TOTAL_RAM / (1 << 30),
-            "ถามขนาด RAM จากระบบไม่ได้ — ใช้ค่าสำรองแบบระมัดระวัง"
+            "cannot ask the OS for total RAM — using a conservative fallback"
         );
         FALLBACK_TOTAL_RAM
     })

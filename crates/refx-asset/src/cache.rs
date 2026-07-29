@@ -170,7 +170,7 @@ impl CacheDb {
             Ok(db) => Ok(db),
             Err(err) => {
                 // cache พังไม่ใช่เรื่องคอขาดบาดตาย — ลบแล้วเริ่มใหม่
-                tracing::warn!(%err, "เปิด cache ไม่ได้ — ลบทิ้งแล้วสร้างใหม่");
+                tracing::warn!(%err, "cannot open the cache — deleting it and starting a fresh one");
                 Self::remove_db_files(path);
                 Self::try_open(path)
             }
@@ -250,7 +250,7 @@ impl CacheDb {
         // ค่าที่อ่านจาก DB คือ input ที่ไม่น่าไว้ใจเหมือนกัน (I-4)
         // ไฟล์ cache อาจถูกแก้จากภายนอกได้ — แถวที่ค่าเพี้ยนถือเป็น cache miss
         let (Ok(width), Ok(height)) = (u32::try_from(width), u32::try_from(height)) else {
-            tracing::warn!("แถวใน cache มีขนาดภาพผิดปกติ — ถือว่าไม่มีใน cache");
+            tracing::warn!("cache row has an implausible image size — treating it as a miss");
             return Ok(None);
         };
         let Some(thumb_fmt) = ThumbFormat::from_i64(thumb_fmt) else {
@@ -438,7 +438,7 @@ impl CacheDb {
         }
 
         if removed > 0 {
-            tracing::info!(removed, "ล้าง thumbnail เก่าออกจาก cache");
+            tracing::info!(removed, "evicted old thumbnails from the cache");
         }
         Ok(removed)
     }
@@ -578,10 +578,10 @@ impl Drop for IoThread {
                 // รอได้ ตอนนี้กำลังปิดโปรแกรมอยู่แล้ว แต่ต้องมีเพดานเวลากันค้าง
                 match rx.recv_timeout(std::time::Duration::from_secs(10)) {
                     Ok(removed) if removed > 0 => {
-                        tracing::info!(removed, "ล้าง cache ตอนปิดโปรแกรม");
+                        tracing::info!(removed, "evicted cache entries during shutdown");
                     }
                     Ok(_) => {}
-                    Err(_) => tracing::warn!("ล้าง cache ไม่ทันเวลา — ข้ามไปก่อน"),
+                    Err(_) => tracing::warn!("cache eviction did not finish in time — skipped"),
                 }
             }
         }
@@ -591,7 +591,7 @@ impl Drop for IoThread {
         if let Some(handle) = self.handle.take()
             && handle.join().is_err()
         {
-            tracing::error!("IO thread จบแบบผิดปกติ — cache อาจไม่ถูกล้าง");
+            tracing::error!("IO thread ended abnormally — the cache may not have been evicted");
         }
     }
 }
@@ -603,7 +603,7 @@ fn io_loop(db: &CacheDb, rx: &crossbeam_channel::Receiver<IoRequest>) {
         match request {
             IoRequest::GetThumb { key, reply } => {
                 let result = db.get_thumb(&key).unwrap_or_else(|err| {
-                    tracing::warn!(%err, "อ่าน thumbnail จาก cache ไม่ได้");
+                    tracing::warn!(%err, "cannot read a thumbnail from the cache");
                     None
                 });
                 // ผู้ขออาจเลิกสนใจไปแล้ว (ผู้ใช้ pan ผ่านไป) — ไม่ใช่ error
@@ -611,7 +611,7 @@ fn io_loop(db: &CacheDb, rx: &crossbeam_channel::Receiver<IoRequest>) {
             }
             IoRequest::PutThumb { key, entry } => {
                 if let Err(err) = db.put_thumb(&key, &entry) {
-                    tracing::warn!(%err, "เก็บ thumbnail ลง cache ไม่ได้");
+                    tracing::warn!(%err, "cannot store a thumbnail in the cache");
                 }
             }
             IoRequest::LookupPath {
@@ -620,7 +620,7 @@ fn io_loop(db: &CacheDb, rx: &crossbeam_channel::Receiver<IoRequest>) {
                 reply,
             } => {
                 let result = db.lookup_path(&path, fingerprint).unwrap_or_else(|err| {
-                    tracing::warn!(%err, "ค้น path ใน cache ไม่ได้");
+                    tracing::warn!(%err, "cannot look up a path in the cache");
                     None
                 });
                 let _ = reply.send(result);
@@ -631,12 +631,12 @@ fn io_loop(db: &CacheDb, rx: &crossbeam_channel::Receiver<IoRequest>) {
                 fingerprint,
             } => {
                 if let Err(err) = db.record_path(&path, &hash, fingerprint) {
-                    tracing::warn!(%err, "บันทึก path ลง cache ไม่ได้");
+                    tracing::warn!(%err, "cannot record a path in the cache");
                 }
             }
             IoRequest::EvictUnder { limit_bytes, reply } => {
                 let removed = db.evict_until_under(limit_bytes).unwrap_or_else(|err| {
-                    tracing::warn!(%err, "ล้าง cache ไม่สำเร็จ");
+                    tracing::warn!(%err, "cache eviction failed");
                     0
                 });
                 let _ = reply.send(removed);
@@ -650,7 +650,7 @@ fn io_loop(db: &CacheDb, rx: &crossbeam_channel::Receiver<IoRequest>) {
             }
         }
     }
-    tracing::debug!("IO thread ปิดตัว");
+    tracing::debug!("IO thread stopped");
 }
 
 /// เวลาปัจจุบันเป็นวินาที unix

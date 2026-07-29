@@ -334,7 +334,7 @@ impl ThumbnailAtlas {
             max_layers,
             vram_bytes = texture.bytes(),
             format = ?Self::FORMAT,
-            "สร้าง thumbnail atlas (ยังไม่จอง layer — จองทีละชั้นตอนมีภาพจริง)"
+            "thumbnail atlas created (no layer reserved yet — layers are allocated lazily)"
         );
 
         Ok(Self {
@@ -428,7 +428,7 @@ impl ThumbnailAtlas {
                     self.layers = previous;
                     self.rebuild_bindings(device);
                 }
-                tracing::warn!(%err, want, previous, "ขยาย atlas ไม่สำเร็จ — ถอยกลับขนาดเดิม");
+                tracing::warn!(%err, want, previous, "cannot grow the atlas — falling back to the previous size");
                 return Err(err);
             }
         };
@@ -442,7 +442,7 @@ impl ThumbnailAtlas {
             vram_before = before,
             vram_after_release = after_release,
             vram_after = self.textures.budget().used(),
-            "สร้าง atlas ใหม่ (ปล่อยใบเก่าก่อนจองใบใหม่ — ไม่มีช่วงที่ถือสองใบ)"
+            "atlas texture recreated (old one released first — never holding two at once)"
         );
         Ok(())
     }
@@ -484,7 +484,11 @@ impl ThumbnailAtlas {
         debug_assert_eq!(pixels.len(), expected, "ขนาด thumbnail ต้องเป็น 128×128 RGBA");
         if pixels.len() != expected {
             // ข้อมูลผิดขนาดต้องไม่ทำให้ write_texture ล้ม — ถือว่า atlas เต็มไปเลย
-            tracing::error!(len = pixels.len(), expected, "ขนาด thumbnail ไม่ถูกต้อง");
+            tracing::error!(
+                len = pixels.len(),
+                expected,
+                "thumbnail has the wrong byte length"
+            );
             return Err(AtlasError::Full {
                 layers: self.allocator.layers_used(),
             });

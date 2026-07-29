@@ -98,7 +98,7 @@ impl Limits {
             max_pixels,
             approx_side = side,
             capped = max_pixels >= MAX_PIXELS_ABS,
-            "ตั้งเพดานขนาดภาพตาม RAM ของเครื่อง"
+            "image size ceiling derived from this machine's RAM"
         );
         Self {
             max_pixels,
@@ -306,7 +306,7 @@ pub fn read_file_guarded(path: &std::path::Path, limits: &Limits) -> Result<Vec<
 /// ถ้าเขียนซ้ำอีกที่ วันหนึ่งจะมีที่ใดที่หนึ่งหลุด path เต็มลง log
 pub(crate) fn file_label(path: &std::path::Path) -> String {
     path.file_name().map_or_else(
-        || "(ไม่ทราบชื่อไฟล์)".to_owned(),
+        || "(unknown file)".to_owned(),
         |n| n.to_string_lossy().into_owned(),
     )
 }

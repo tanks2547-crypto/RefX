@@ -111,7 +111,7 @@ impl FrameStats {
     /// ไม่ใช่ต้นทุนการวาด เอาไปสรุปว่า "ผ่านเพดาน" ไม่ได้
     fn report(&mut self, quads: usize, present: wgpu::PresentMode) {
         if self.times_us.is_empty() {
-            tracing::warn!("ไม่มีเฟรมให้วัด");
+            tracing::warn!("no frames were measured");
             return;
         }
         self.times_us.sort_unstable();
@@ -134,7 +134,7 @@ impl FrameStats {
             p50_ms = format!("{p50:.3}"),
             p99_ms = format!("{p99:.3}"),
             fps = format!("{fps:.1}"),
-            "ผลวัด frame time"
+            "frame time results"
         );
 
         println!(
@@ -577,7 +577,7 @@ impl RefxApp {
         };
         // วางทีละครั้ง — ดูเหตุผลที่ฟิลด์ `paste_in_flight`
         if self.paste_in_flight.is_some() {
-            tracing::debug!("ยังวางของเดิมไม่เสร็จ — ข้ามการวางครั้งนี้");
+            tracing::debug!("the previous paste has not finished — ignoring this one");
             return;
         }
 
@@ -621,7 +621,7 @@ impl RefxApp {
             }
             Err(err) => {
                 // เปิด cache ไม่ได้ไม่ใช่เหตุให้ล้ม — thumbnail สร้างใหม่ได้เสมอ
-                tracing::error!(%err, "เปิด cache ไม่ได้ — ทำงานต่อโดยไม่มี cache");
+                tracing::error!(%err, "cannot open the cache — continuing without one");
                 self.shell.status = text::t(self.shell.lang, Key::RunningWithoutCache).to_owned();
                 (None, None)
             }
@@ -636,7 +636,7 @@ impl RefxApp {
             workers = pool.worker_count(),
             ram_limit_mb = limit / (1 << 20),
             cache = io.is_some(),
-            "เปิด decode pool"
+            "decode pool started"
         );
 
         // ขอสถิติครั้งแรก — หลังจากนี้ขอใหม่เฉพาะตอนมีงาน decode เสร็จ
@@ -685,7 +685,7 @@ impl RefxApp {
                     thumb,
                     elapsed,
                 } => {
-                    tracing::debug!(hash = %hash.short(), ?elapsed, "ถอดรหัสภาพเสร็จ");
+                    tracing::debug!(hash = %hash.short(), ?elapsed, "image decoded");
                     // ไม่รู้จักคีย์ = ไม่มีไฟล์ให้กลับไปอ่าน จึงถือเป็นภาพที่ขอคมกว่านี้
                     // ไม่ได้ (ปลอดภัยกว่าการเดา path แล้วยิง error ทุกครั้งที่ซูม)
                     let source = self
@@ -698,7 +698,7 @@ impl RefxApp {
                 refx_asset::pool::JobResult::ClipboardFiles { hash, paths } => {
                     // ก๊อปไฟล์จาก Explorer มาวาง — เดินเส้นทางเดียวกับลากไฟล์เข้ามา
                     // ทั้งเส้น (มี cache, มี EXIF, ขอภาพคมตอนซูมได้)
-                    tracing::info!(hash = %hash.short(), count = paths.len(), "วางไฟล์จาก clipboard");
+                    tracing::info!(hash = %hash.short(), count = paths.len(), "pasted a file list from the clipboard");
                     self.job_sources.remove(&hash);
                     pasted_files.extend(paths);
                 }
@@ -709,14 +709,14 @@ impl RefxApp {
                 } => {
                     tracing::debug!(
                         hash = %hash.short(), size = image.size, ?elapsed,
-                        "working texture พร้อมแล้ว"
+                        "working texture ready"
                     );
                     ready.push((hash, image));
                 }
                 refx_asset::pool::JobResult::Cancelled { .. } => {}
                 refx_asset::pool::JobResult::Failed { hash, reason } => {
                     // I-7: ภาพเสียหนึ่งไฟล์ = item ขึ้นสถานะ "โหลดไม่ได้" ไม่ใช่ crash
-                    tracing::warn!(hash = %hash.short(), %reason, "เปิดภาพไม่ได้");
+                    tracing::warn!(hash = %hash.short(), %reason, "cannot open the image");
                     // ★ `reason.to_string()` เป็นอังกฤษสำหรับ log เท่านั้น (docs/03 §0)
                     //   ข้อความของผู้ใช้ประกอบจากฟิลด์ของ error แล้วแปลตามภาษา
                     self.shell.status = text::job_failure(self.shell.lang, &reason);
@@ -744,7 +744,7 @@ impl RefxApp {
                     &image.levels,
                 ) {
                     // ไม่พอก็ใช้ thumbnail ต่อไป — ภาพยังขึ้น แค่เบลอกว่า
-                    tracing::warn!(%err, size = key.size, "อัปโหลด working texture ไม่ได้");
+                    tracing::warn!(%err, size = key.size, "cannot upload the working texture");
                 }
             }
         }
@@ -786,7 +786,7 @@ impl RefxApp {
                         self.drop_shown += 1;
                     }
                     Err(err) => {
-                        tracing::warn!(%err, "เก็บภาพย่อลง atlas ไม่ได้");
+                        tracing::warn!(%err, "cannot store the thumbnail in the atlas");
                         self.shell.status = text::atlas_error(self.shell.lang, &err);
                     }
                 }
@@ -801,14 +801,18 @@ impl RefxApp {
                 let ms = elapsed.as_secs_f64() * 1000.0;
                 self.drop_reported = true;
                 if self.batch_from_clipboard {
-                    tracing::info!(ms, "วางจาก clipboard → ภาพขึ้นจอ");
+                    tracing::info!(ms, "clipboard paste → image on screen");
                     self.shell.status = text::fill(
                         self.shell.lang,
                         Template::PastedImage,
                         &[("ms", &format!("{ms:.0}"))],
                     );
                 } else {
-                    tracing::info!(files = self.drop_expected, ms, "ลากไฟล์เข้ามา → ภาพขึ้นจอครบ");
+                    tracing::info!(
+                        files = self.drop_expected,
+                        ms,
+                        "drag & drop → every image on screen"
+                    );
                     println!("ลากไฟล์ {} ไฟล์ → ขึ้นจอครบใน {ms:.1} ms", self.drop_expected);
                     self.shell.status = text::fill(
                         self.shell.lang,
@@ -897,7 +901,7 @@ impl RefxApp {
 
         if let Err(err) = gfx.render.recover() {
             // กู้ไม่สำเร็จ — ของเดิมยังอยู่ครบ ไม่ล้มโปรแกรม ลองใหม่เฟรมหน้า
-            tracing::error!(%err, "กู้ GPU device ไม่สำเร็จ");
+            tracing::error!(%err, "GPU device recovery failed");
             return None;
         }
 
@@ -918,7 +922,7 @@ impl RefxApp {
         } = match DeviceBound::build(&gfx.render) {
             Ok(bound) => bound,
             Err(err) => {
-                tracing::error!(%err, "สร้าง resource ของ device ใหม่ไม่ได้");
+                tracing::error!(%err, "cannot build the resources for the new device");
                 return None;
             }
         };
@@ -1045,7 +1049,7 @@ impl RefxApp {
             return;
         }
         if let Some(assets) = self.assets.as_ref() {
-            tracing::debug!(count = requests.len(), "สั่ง decode working texture");
+            tracing::debug!(count = requests.len(), "queued working texture decodes");
             for job in requests {
                 assets.pool.submit(job);
             }
@@ -1079,7 +1083,7 @@ impl RefxApp {
             && let Err(err) = gfx.atlas.resize(gfx.render.device(), needed)
         {
             // ขยายไม่ได้ = VRAM ไม่พอ เติมได้เท่าที่ได้ ที่เหลือเป็น placeholder
-            tracing::warn!(%err, needed, "ขยาย atlas ก่อนเติมกลับไม่สำเร็จ");
+            tracing::warn!(%err, needed, "cannot grow the atlas before refilling it");
         }
 
         for (index, item) in gfx.board_items.iter().enumerate() {
@@ -1098,7 +1102,7 @@ impl RefxApp {
                 }
                 Err(err) => {
                     // atlas เต็ม — ที่เหลือขึ้นเป็นสี่เหลี่ยมสีเด่นแทนช่องว่าง
-                    tracing::warn!(%err, index, "เติม atlas กลับไม่ครบ — ที่เหลือใช้ placeholder");
+                    tracing::warn!(%err, index, "atlas refill incomplete — the rest fall back to placeholders");
                     let [a, r, g, b] = thumb.dominant.to_be_bytes();
                     quad.tint = [
                         f32::from(r) / 255.0,
@@ -1115,7 +1119,7 @@ impl RefxApp {
             restored,
             total = gfx.board_items.len(),
             ms = started.elapsed().as_secs_f64() * 1000.0,
-            "เติมภาพย่อกลับขึ้น atlas ที่สร้างใหม่"
+            "refilled thumbnails into the new atlas"
         );
     }
 }
@@ -1156,14 +1160,14 @@ impl AppDelegate for RefxApp {
             pipeline,
             working,
         } = DeviceBound::build(&render).map_err(|err| {
-            tracing::error!(%err, "สร้าง atlas ไม่ได้");
+            tracing::error!(%err, "cannot create the atlas");
             DeviceError::NoSupportedFormat
         })?;
         let device_generation = render.generation();
 
         let quads = self.args.demo_quads.map_or_else(Vec::new, |n| {
             let quads = demo_quads(n, 4000.0);
-            tracing::info!(count = quads.len(), "สร้างสี่เหลี่ยมทดสอบ");
+            tracing::info!(count = quads.len(), "generated demo quads");
             quads
         });
 
@@ -1199,7 +1203,7 @@ impl AppDelegate for RefxApp {
         if self.gfx.as_mut().is_some_and(|g| g.render.take_oom()) {
             // TODO(P1-6): cache.emergency_evict() ทิ้ง T2 แล้ว T1
             // TODO(P4-2): autosave ทันทีถ้ายังไม่พอ
-            tracing::error!("GPU หน่วยความจำเต็ม — ยังไม่มี cache ให้ทิ้งใน P0");
+            tracing::error!("GPU out of memory — there is no cache to drop yet (P0)");
         }
 
         let frame_start = std::time::Instant::now();

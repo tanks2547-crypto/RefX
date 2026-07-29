@@ -78,7 +78,7 @@ impl RedrawTracker {
         self.counts[reason.index()] += 1;
         self.total += 1;
         self.last = Some(reason);
-        tracing::trace!(?reason, total = self.total, "ขอวาดเฟรมใหม่");
+        tracing::trace!(?reason, total = self.total, "redraw requested");
         true
     }
 
