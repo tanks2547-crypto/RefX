@@ -365,13 +365,21 @@ pub struct RefxApp {
 }
 
 /// ส่วนที่จัดการภาพ — อยู่คนละโลกกับ GPU
+///
+/// ★ **ลำดับฟิลด์ที่นี่คือลำดับ drop และมันสำคัญจริง ๆ**
+/// `IoThread::drop` ปิด sender ของตัวเองแล้ว **join** เธรด IO ซึ่งจะจบก็ต่อเมื่อ
+/// sender ทุกใบถูก drop หมด ถ้า `io_tx` (ใบที่ clone ไว้) ยังอยู่ตอนนั้น
+/// การ join จะรอตลอดกาล ผลที่ผู้ใช้เจอคือ **หน้าต่างหายไปแต่ RefX.exe ยังอยู่**
+/// แล้วล็อก single-instance ค้าง จนเปิดโปรแกรมใหม่ไม่ได้อีกเลย
+///
+/// ลำดับที่ถูกคือ: worker (ถือ clone ของ `io_tx` คนละใบ) → `io_tx` → `IoThread`
 struct Assets {
     pool: DecodePool,
+    io_tx: Option<crossbeam_channel::Sender<IoRequest>>,
     /// ต้องถือไว้ให้ IO thread มีชีวิตอยู่ (drop = ปิด thread + ล้าง cache)
     ///
     /// `None` เมื่อเปิด cache ไม่ได้ — โปรแกรมยังใช้งานได้ แค่ decode ใหม่ทุกครั้ง
     _io: Option<IoThread>,
-    io_tx: Option<crossbeam_channel::Sender<IoRequest>>,
 }
 
 impl RefxApp {
@@ -1584,5 +1592,31 @@ mod tests {
         let camera = Camera::new(Vec2::new(2000.0, 2000.0), 0.25);
         let on_screen = camera.world_to_screen(camera.center(), c.size);
         assert_eq!(on_screen, c.to_local(cursor));
+    }
+
+    /// ★ ปิดโปรแกรมแล้วต้อง **ตายจริง** ไม่ใช่ค้างเป็นผี
+    ///
+    /// `window::run` ถือ delegate ไว้แล้ว drop ตอน event loop จบ ถ้าลำดับ drop
+    /// ของ [`Assets`] ผิด (`IoThread` ก่อน `io_tx`) การ join เธรด IO จะรอตลอดกาล
+    /// ผลที่ผู้ใช้เจอคือ **หน้าต่างหายไปแต่ RefX.exe ยังอยู่** แล้วล็อก single-instance
+    /// ค้าง จนเปิดโปรแกรมใหม่ไม่ได้อีกเลย (ยืนยันด้วยมือแล้วว่าเกิดจริง 29 ก.ค. 2026)
+    #[test]
+    fn dropping_assets_finishes_instead_of_hanging_forever() {
+        let dir = std::env::temp_dir().join(format!("refx-shutdown-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("cache.sqlite");
+
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        std::thread::spawn(move || {
+            let mut app = RefxApp::new(AppArgs::default());
+            app.start_assets(&db);
+            drop(app); // ← จุดที่เคยค้าง
+            let _ = tx.send(());
+        });
+
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_secs(30)).is_ok(),
+            "drop แล้วไม่จบภายใน 30 วินาที = ปิดโปรแกรมแล้วโปรเซสไม่ตาย"
+        );
     }
 }
