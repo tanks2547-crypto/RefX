@@ -27,7 +27,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Linux deps
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev
+        # mesa-vulkan-drivers = lavapipe (Vulkan บน CPU) — ทำให้เทสต์ที่แตะ texture
+        # จริงมีโอกาสได้รันบน Linux ด้วย ไม่ใช่ข้ามทั้ง matrix (docs/08 §3.9 ข้อ 7)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev mesa-vulkan-drivers
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       # ★ ต้องมี --all-features ให้ตรงกับเกณฑ์ใน CLAUDE.md เป๊ะ
@@ -37,7 +41,33 @@ jobs:
       #   จึงไม่เคยถูก build ใน `cargo test` เลย — "CI เขียว" แปลว่าน้อยกว่าที่ทุกคน
       #   เข้าใจ โดยไม่มีใครรู้ตัว รูปแบบเดียวกับ fuzz stub (docs/06 §2.5, docs/08 §3.9)
       - uses: taiki-e/install-action@nextest
-      - run: cargo nextest run --workspace --all-features
+
+      # ★ หลักฐานใน log ว่า job นี้ตรวจ GPU จริงหรือข้าม พร้อมชื่อ adapter
+      #   (เทสต์กลุ่ม GPU ปิดเสียง stdout ตอนผ่าน จึงต้องเรียกตัวนี้แยกด้วย --no-capture)
+      - name: job นี้ตรวจ GPU ด้วย adapter ตัวไหน
+        shell: bash
+        run: cargo nextest run -p refx-render --all-features --no-capture -E 'test(gpu_tests_run_where_they_are_required)'
+
+      # ★ docs/08 §3.9 ข้อ 7 — ต้องมีอย่างน้อยหนึ่ง job ที่ **บังคับ** ว่าต้องมี GPU จริง
+      #
+      #   ถ้าปล่อยให้ทุก job "ข้ามอย่างชัดเจน" ได้เหมือนกันหมด วันที่ runner เปลี่ยน
+      #   แล้วหา adapter ไม่เจอ CI จะยังเขียวทั้งที่ไม่มีใครตรวจเส้นทางกู้ device เลย
+      #   ซึ่งเป็นรูปแบบเดียวกับ fuzz stub ที่เขียวอยู่ 5 session (docs/06 §2.5)
+      #
+      #   เลือก Windows เป็นตัวบังคับเพราะ (ก) เป็นแพลตฟอร์มเป้าหมายหลัก
+      #   (ข) runner มี WARP (software adapter ของ D3D12) ติดมากับ OS อยู่แล้ว
+      #   ส่วน Linux ใช้ lavapipe ซึ่งเป็น dependency ที่เราลงเอง จึงยังไม่บังคับ
+      #   — ถ้ามันนิ่งพอค่อยเลื่อนขึ้นมาบังคับด้วยทีหลัง
+      - name: เทสต์ทั้งชุด (Windows — บังคับว่าต้องมี GPU จริง)
+        if: runner.os == 'Windows'
+        env:
+          REFX_REQUIRE_GPU: "1"
+        run: cargo nextest run --workspace --all-features
+
+      - name: เทสต์ทั้งชุด (Linux — ได้ lavapipe ก็รัน ไม่ได้ก็ข้ามพร้อมพิมพ์เหตุผล)
+        if: runner.os == 'Linux'
+        run: cargo nextest run --workspace --all-features
+
       - run: cargo build --release --all-features
 
       # ★ เพดาน binary ต้องบังคับอัตโนมัติ ไม่ใช่ความหวัง (docs/08 §6)

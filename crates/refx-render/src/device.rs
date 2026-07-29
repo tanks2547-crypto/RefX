@@ -833,22 +833,81 @@ fn block_on<F: Future>(fut: F) -> F::Output {
     }
 }
 
+/// ชื่อ env ที่ CI ใช้บอกว่า **job นี้ต้องมี GPU จริง** (docs/08 §3.9 ข้อ 7)
+#[cfg(test)]
+pub(crate) const REQUIRE_GPU_ENV: &str = "REFX_REQUIRE_GPU";
+
+/// ค่าใน env นี้แปลว่า "ต้องมี GPU" หรือไม่
+///
+/// ★ ว่างเปล่าต้องแปลว่า **ไม่บังคับ** — GitHub Actions ตั้ง env เป็นสตริงว่าง
+/// เมื่อ expression ไม่เข้าเงื่อนไข ถ้าตีความว่า "มีค่า = บังคับ" job ที่ไม่ควร
+/// บังคับจะแดงทันทีโดยไม่มีใครเข้าใจว่าทำไม
+#[cfg(test)]
+pub(crate) fn gpu_required_from(value: Option<&str>) -> bool {
+    matches!(value, Some(v) if !v.is_empty() && v != "0")
+}
+
+/// ไม่มี adapter ให้ใช้ — จะข้ามหรือจะล้ม
+///
+/// ★ docs/08 §3.9 ข้อ 7: การข้ามพร้อมพิมพ์เหตุผลถูกต้องในระดับ job เดียว
+/// แต่ต้องมีอย่างน้อยหนึ่ง job ที่**บังคับ**ว่าต้องรันจริง ไม่งั้นทั้ง matrix
+/// ข้ามพร้อมกันแล้ว CI ยังเขียว = ไม่มีใครตรวจเลย
+///
+/// แยกเป็นฟังก์ชันเพื่อให้ **ทดสอบสาขา "บังคับแล้วไม่มี" ได้โดยไม่ต้องถอดการ์ดจอ**
+///
+/// # Panics
+/// panic เมื่อ `required` เป็นจริง — นั่นคือพฤติกรรมที่ต้องการบน CI
+#[cfg(test)]
+pub(crate) fn no_adapter_available(required: bool) {
+    assert!(
+        !required,
+        "ตั้ง {REQUIRE_GPU_ENV}=1 ไว้แต่หา GPU adapter ไม่เจอ — job นี้ถูกกำหนดให้เป็น \
+         job ที่รันเทสต์ GPU จริง (docs/08 §3.9 ข้อ 7) ถ้า runner ไม่มี software adapter \
+         ให้แก้ที่ CI ไม่ใช่ปลดการบังคับทิ้ง ไม่งั้นจะไม่เหลือใครตรวจกลุ่มนี้เลย"
+    );
+    println!("ข้าม: เครื่องนี้ไม่มี GPU ที่ใช้ได้ (ไม่ได้ตั้ง {REQUIRE_GPU_ENV})");
+}
+
+/// GPU สำหรับเทสต์ หรือ `None` ถ้าเครื่องนี้ไม่มี (และไม่ได้บังคับไว้)
+#[cfg(test)]
+pub(crate) fn gpu_for_test() -> Option<(wgpu::Device, wgpu::Queue, GpuCapabilities)> {
+    if let Some(gpu) = headless_device() {
+        return Some(gpu);
+    }
+    no_adapter_available(gpu_required_from(
+        std::env::var(REQUIRE_GPU_ENV).ok().as_deref(),
+    ));
+    None
+}
+
 /// GPU จริงแบบไม่มีหน้าต่าง — สำหรับเทสต์ที่ต้องแตะ texture จริง (P0-5)
 ///
 /// ★ **`None` = เครื่องนี้ไม่มี GPU ที่ใช้ได้** ผู้เรียกต้องรายงานว่า "ข้าม"
-/// อย่างชัดเจน ห้ามผ่านเงียบ ๆ (docs/08 §3.9 ข้อ 2)
+/// อย่างชัดเจน ห้ามผ่านเงียบ ๆ (docs/08 §3.9 ข้อ 2) — ใช้ [`gpu_for_test`] แทน
+/// การเรียกตัวนี้ตรง ๆ เพื่อให้ได้กติกาการข้าม/ล้มชุดเดียวกันทั้งโปรเจกต์
 ///
 /// ไม่ต้องมี surface เพราะเทสต์พวกนี้ตรวจ **resource ที่ผูกกับ device**
 /// (atlas, working texture) ไม่ได้ตรวจการ present ลงหน้าต่าง
 #[cfg(test)]
 pub(crate) fn headless_device() -> Option<(wgpu::Device, wgpu::Queue, GpuCapabilities)> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-    let adapter = block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-        power_preference: wgpu::PowerPreference::LowPower,
-        compatible_surface: None,
-        force_fallback_adapter: false,
-    }))
-    .ok()?;
+    let ask = |force_fallback_adapter| {
+        block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::LowPower,
+            compatible_surface: None,
+            force_fallback_adapter,
+        }))
+    };
+    // ★ ไม่มีการ์ดจริงก็ยังเทสต์ได้ — ขอ software adapter แทน
+    //   (WARP ที่ติดมากับ Windows · lavapipe จาก mesa-vulkan-drivers บน Linux)
+    //   CI ไม่มี GPU จริง ถ้าไม่ลองขั้นนี้ เทสต์กลุ่ม GPU จะไม่มีวันได้รันบน CI เลย
+    let adapter = match ask(false) {
+        Ok(adapter) => adapter,
+        Err(err) => {
+            println!("ไม่มีการ์ดจอจริง ({err}) — ลอง software adapter");
+            ask(true).ok()?
+        }
+    };
 
     let info = adapter.get_info();
     let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
@@ -903,19 +962,49 @@ mod tests {
         assert_eq!(fake_caps(1024).atlas_size(), 1024);
     }
 
-    /// พิมพ์ว่าเครื่องนี้เทสต์ GPU ได้ไหม — ไม่ใช่การตรวจ แต่เป็นการ **รายงาน**
+    /// ★ ประตูบานเดียวที่บอกว่า "job นี้ตรวจ GPU จริงไหม" (docs/08 §3.9 ข้อ 7)
     ///
-    /// ถ้าเครื่อง/CI ไม่มี GPU เทสต์กลุ่ม `gpu_` จะข้าม บรรทัดนี้คือหลักฐานใน log
-    /// ว่าข้ามเพราะอะไร (docs/08 §3.9 ข้อ 2: โครงเปล่าห้ามเงียบ)
+    /// รันได้ → พิมพ์ชื่อ adapter ลง log ของ CI เป็นหลักฐานว่ามีคนตรวจจริง
+    /// รันไม่ได้ → ข้ามพร้อมเหตุผล **เว้นแต่** job นั้นตั้ง `REFX_REQUIRE_GPU`
+    /// ไว้ ซึ่งแปลว่ามันคือ job ที่รับหน้าที่ตรวจกลุ่มนี้ให้ทั้ง matrix → ต้องแดง
     #[test]
-    fn report_whether_this_machine_can_run_gpu_tests() {
-        match headless_device() {
+    fn gpu_tests_run_where_they_are_required() {
+        match gpu_for_test() {
             Some((_, _, caps)) => println!(
                 "GPU tests: ทำงานจริงบน {} ({:?} / {:?})",
                 caps.adapter_name, caps.backend, caps.device_type
             ),
-            None => println!("GPU tests: ข้าม — เครื่องนี้ไม่มี adapter ที่ใช้ได้"),
+            None => println!("GPU tests: ข้าม — job นี้ไม่ได้ถูกกำหนดให้ตรวจ GPU"),
         }
+    }
+
+    /// ค่าที่ CI ส่งมาต้องถูกตีความให้ถูก — โดยเฉพาะ **สตริงว่าง**
+    ///
+    /// GitHub Actions ตั้ง env เป็นสตริงว่างเมื่อ expression ไม่เข้าเงื่อนไข
+    /// ถ้าตีความว่า "มีค่า = บังคับ" job ฝั่ง Linux จะแดงทันทีโดยไม่มีใครเข้าใจว่าทำไม
+    #[test]
+    fn empty_env_never_means_required() {
+        assert!(gpu_required_from(Some("1")));
+        assert!(gpu_required_from(Some("true")));
+        assert!(!gpu_required_from(Some("")), "สตริงว่าง = ไม่บังคับ");
+        assert!(!gpu_required_from(Some("0")));
+        assert!(!gpu_required_from(None));
+    }
+
+    /// ★ negative control ของกลไกข้อ 7 เอง (docs/08 §3.9 ข้อ 1)
+    ///
+    /// พิสูจน์ว่าสาขา "บังคับไว้แต่ไม่มี GPU" **ล้มจริง** โดยไม่ต้องถอดการ์ดจอ
+    /// ถ้าสาขานี้ไม่ล้ม การตั้ง `REFX_REQUIRE_GPU` บน CI ก็ไม่มีความหมายอะไรเลย
+    #[test]
+    #[should_panic(expected = "REFX_REQUIRE_GPU")]
+    fn requiring_a_gpu_that_is_missing_turns_ci_red() {
+        no_adapter_available(true);
+    }
+
+    /// ไม่ได้บังคับไว้ = ข้ามเงียบ ๆ ได้ (แต่พิมพ์เหตุผลไว้ใน log)
+    #[test]
+    fn missing_gpu_without_the_flag_is_only_a_skip() {
+        no_adapter_available(false);
     }
 
     // ---------- ★ กฎที่กันลูปกู้ device ไม่รู้จบ (P0-5 / docs/04 §7) ----------

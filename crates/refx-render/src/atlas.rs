@@ -952,9 +952,8 @@ mod tests {
     /// ซึ่งจากมุมเขาแยกไม่ออกจาก "งานหาย" (docs/04 §4)
     #[test]
     fn atlas_comes_back_with_the_same_pixels_on_a_brand_new_device() {
-        let Some((device, queue, _)) = crate::device::headless_device() else {
-            println!("ข้าม: เครื่องนี้ไม่มี GPU ที่ใช้ได้");
-            return;
+        let Some((device, queue, _)) = crate::device::gpu_for_test() else {
+            return; // ข้าม/ล้ม ถูกตัดสินที่ gpu_for_test แล้ว (docs/08 §3.9 ข้อ 7)
         };
 
         let thumbs = vec![
@@ -1026,9 +1025,8 @@ mod tests {
     /// เติมกลับจะเปลี่ยนทุกภาพเป็น placeholder ทั้ง board
     #[test]
     fn refilling_a_fresh_atlas_needs_a_resize_first() {
-        let Some((device, queue, _)) = crate::device::headless_device() else {
-            println!("ข้าม: เครื่องนี้ไม่มี GPU ที่ใช้ได้");
-            return;
+        let Some((device, queue, _)) = crate::device::gpu_for_test() else {
+            return; // ข้าม/ล้ม ถูกตัดสินที่ gpu_for_test แล้ว (docs/08 §3.9 ข้อ 7)
         };
         let thumbs: Vec<Vec<u8>> = (0..5).map(|i| solid_thumb([i * 20, 30, 40, 255])).collect();
         let (_textures, mut atlas) = fresh_atlas(&device);
@@ -1063,9 +1061,8 @@ mod tests {
     /// ไม่งั้นเทสต์ข้างบนจะผ่านแม้การเติมกลับจะพังทั้งหมด
     #[test]
     fn a_fresh_atlas_reads_back_empty_until_it_is_refilled() {
-        let Some((device, queue, _)) = crate::device::headless_device() else {
-            println!("ข้าม: เครื่องนี้ไม่มี GPU ที่ใช้ได้");
-            return;
+        let Some((device, queue, _)) = crate::device::gpu_for_test() else {
+            return; // ข้าม/ล้ม ถูกตัดสินที่ gpu_for_test แล้ว (docs/08 §3.9 ข้อ 7)
         };
 
         let filled = solid_thumb([200, 30, 40, 255]);

@@ -519,9 +519,8 @@ mod tests {
     /// และเพราะ `working_pending` ยังจำคีย์เดิมไว้ ภาพคมจึงไม่มีวันถูกขอใหม่เลย
     #[test]
     fn working_cache_is_rebuilt_empty_on_a_new_device() {
-        let Some((device, queue, _)) = crate::device::headless_device() else {
-            println!("ข้าม: เครื่องนี้ไม่มี GPU ที่ใช้ได้");
-            return;
+        let Some((device, queue, _)) = crate::device::gpu_for_test() else {
+            return; // ข้าม/ล้ม ถูกตัดสินที่ gpu_for_test แล้ว (docs/08 §3.9 ข้อ 7)
         };
 
         let wanted = key(256, 7);
