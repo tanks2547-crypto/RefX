@@ -120,8 +120,29 @@ cargo run --features force-device-lost -p refx-app -- --force-device-lost-after-
 | P5-3 | Settings (memory budget, theme, present mode, keymap.toml) |
 | P5-4 | Export PNG/JPEG แบบ tile |
 | P5-5 | Sidecar `.refx-meta` (opt-in) |
-| P5-6 | Binary hardening + packaging (MSI/portable zip, AppImage/deb) |
+| P5-6 | Binary hardening + packaging (MSI/portable zip, AppImage/deb) · **+ ลดขนาด binary (ดูด้านล่าง)** |
 | P5-7 | เอกสารผู้ใช้ + คู่มือคีย์ลัด |
+
+### P5-6: รายการลดขนาด binary (สำรวจไว้แล้ว 28 ก.ค. 2026)
+
+ค่าปัจจุบัน **15.37 MB / เพดาน 25 MB** — เลื่อนมาทำตรงนี้ได้เพราะ
+**CI บังคับเพดานแล้ว** (`scripts/check-binary-size.sh` + negative control ถาวร)
+ถ้ามันโตผิดปกติระหว่าง P2–P5 เราจะรู้ทันที ไม่ใช่มารู้ตอนแพ็กเกจ
+
+> **อ่าน `docs/08 §6` หัวข้อ "นโยบายการลดขนาด binary" ก่อนเริ่ม**
+> โดยเฉพาะรายการ **ห้ามเด็ดขาด** — `panic = "abort"` ทำลาย I-7 ทั้งข้อ
+> และการตัด wgpu backend จนเหลือตัวเดียวทำลายทางถอยเมื่อ driver มีปัญหา
+
+1. **วัดก่อนด้วย `cargo bloat --release --crates`** — ห้ามเดาว่าอะไรใหญ่
+2. ตัด backend ของ wgpu ที่ build ไม่ได้ใช้ แบบ per-OS
+   (Win: DX12+Vulkan · Linux: Vulkan+GL) — น่าจะเป็นก้อนใหญ่สุด
+3. วัดว่า `rusqlite` feature `bundled` (SQLite ภาษา C) กินเท่าไหร่
+   **ห้ามเปลี่ยนไปใช้ SQLite ของระบบ** — Windows ไม่มีให้ใช้
+4. `tga` / `bmp` ใน feature ของ `image` — ต้องถามก่อน เป็นการตัดฟีเจอร์
+5. `opt-level = "s"/"z"` — ทางเลือกสุดท้าย ต้องวัดคู่ benchmark เสมอ
+
+**เกณฑ์:** รายงานตารางก่อน/หลังทั้งขนาดและ benchmark ·
+decode time หรือ frame time แย่ลงเกิน 5% ให้ถอยการเปลี่ยนนั้นออก
 
 ---
 
