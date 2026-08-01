@@ -22,11 +22,16 @@ crate ที่มี: `refx-app` `refx-asset` `refx-core` `refx-io` `refx-platf
 
 ### สถานะ git
 
-repo **อยู่ใต้ git แล้ว** (branch `master`) — `git fsck` สะอาด working tree สะอาด
+repo อยู่ใต้ git แล้ว (branch **`main`**) และ **push ขึ้น GitHub แบบ private แล้ว**
+(`origin` = `tanks2547-crypto/RefX`) — `git fsck` สะอาด working tree สะอาด
 
-- **identity ตั้งไว้แบบ repo-local** คือ `RefX <00ifrit00@gmail.com>`
+- **identity ตั้งไว้แบบ repo-local** คือ `RefX <297583263+tanks2547-crypto@users.noreply.github.com>`
   (global ยังว่าง จงใจ — repo อื่นในเครื่องไม่ถูกกระทบ)
   ถ้า `git commit` ฟ้อง `unable to auto-detect email address` แปลว่าอยู่คนละ repo หรือ config หาย
+  > ★ ใช้ **noreply ของ GitHub** ไม่ใช่อีเมลจริง — อีเมลใน commit เป็นสาธารณะเสมอ
+  > ถ้า repo ถูกเปิดเป็น public วันหนึ่ง อีเมลทั้งประวัติจะโผล่ตามไปด้วย
+  > GitHub ผูก commit เข้ากับโปรไฟล์ด้วย**อีเมล**ไม่ใช่ชื่อ ชื่อจึงยังเป็น `RefX` ได้ตามเดิม
+  > ประวัติทั้งก้อนถูกเขียนใหม่ครั้งเดียว **ก่อน push ครั้งแรก** — หลังจากนี้ห้ามทำอีก
 - **`.gitattributes` ตรึง line ending เป็น LF ทั้งโปรเจกต์** และ renormalize ไปแล้ว
   ตรวจได้ด้วย `git ls-files --eol | grep -c 'w/crlf'` → ต้องเป็น **0** เสมอ
   > ★ ระวัง: `core.autocrlf = true` ถูกตั้งไว้ที่ **system level** ของ Git for Windows
@@ -147,6 +152,8 @@ repo **อยู่ใต้ git แล้ว** (branch `master`) — `git fsck`
 | จุดบอด fast hash ตรงกลางไฟล์ | ปิดด้วย mtime แล้ว แต่จุดบอดตัว hash เองยังอยู่ (มีเทสต์บันทึกไว้ว่าตั้งใจ) |
 | **เทสต์ GPU ถูกข้ามบน CI** (ไม่มี adapter บน runner) | เทสต์ที่แตะ texture จริง (`atlas_comes_back_…`, `working_cache_is_rebuilt_…`, `refilling_a_fresh_atlas_…`) ใช้ `headless_device()` ซึ่งคืน `None` เมื่อไม่มี GPU แล้ว **พิมพ์บอกว่าข้าม** (docs/08 §3.9 ข้อ 2) · บนเครื่องนักพัฒนาที่มี GPU มันรันจริงทุกครั้ง · จะให้ CI รันด้วยต้องลง software adapter (Ubuntu: `mesa-vulkan-drivers` = lavapipe · Windows runner มี WARP อยู่แล้ว) — **ยังไม่ได้ทำ** |
 | ชั้น UI ของการกู้ device ยังไม่มี unit test | `recover_device()` ต้องมีหน้าต่างจริงจึงเรียกในเทสต์ไม่ได้ · ตอนนี้คุมด้วย (ก) `DeviceBound` ที่บังคับตอนคอมไพล์ (ข) `debug_assert` เทียบ generation ของ `WorkingCache` ทุกเฟรม (ค) รันจริงด้วย `--force-device-lost-after-ms` |
+| **ผู้ถือลิขสิทธิ์ใน LICENSE เป็นชื่อผลิตภัณฑ์ ไม่ใช่บุคคล/นิติบุคคล** | `Copyright (c) 2026 RefX` · ตามกฎหมายผู้ถือลิขสิทธิ์ควรเป็นบุคคลหรือนิติบุคคล · ตอนนี้ repo เป็น private และไม่มี contributor คนอื่น จึงยังไม่มีผล → **ทบทวนก่อนเปิด public หรือก่อนรับ contributor คนแรก** |
+| `refx-asset` / `refx-io` / `refx-ui` / `refx-app` ยังไม่เคยคอมไพล์บน Linux | cross-check จากเครื่อง Windows ติดที่ `libsqlite3-sys` กับ `zstd` ต้องใช้ C cross-compiler · `refx-core` / `refx-render` / `refx-platform` (ตัวที่มี `cfg(target_os)`) ผ่านแล้ว · ที่เหลือรอผล CI ฝั่ง ubuntu เป็นตัวยืนยัน |
 | ข้อความ **CLI** กับ **crash dialog** ยังเป็นภาษาไทย | `tracing::` กวาดเป็นอังกฤษครบแล้ว (84 จุด) แต่ `--help` / error ของ CLI ใน `main.rs` และ `dialog::show_crash_dialog` ยังเป็นไทยล้วน · เป็นผิวที่ผู้ใช้ต่างชาติเจอได้เหมือนกัน แต่เป็นคนละระบบกับ log จึงแยกทำทีหลัง (crash dialog ควรไปอยู่ใต้ `refx-ui::text` ตอนที่ P5-3 ทำระบบภาษาเต็มรูปแบบ) |
 
 ---
