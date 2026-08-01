@@ -1122,26 +1122,78 @@ mod tests {
             });
         }
 
-        let mut order = Vec::new();
+        // ★ ยืนยันแค่ว่า **ทุกใบได้ทำจนครบ** ไม่ยืนยันลำดับตรงนี้
+        //
+        //   ลำดับผลลัพธ์ที่ปลายทางขึ้นกับ *จังหวะ* ว่า worker หยิบงานไปกี่ใบก่อนที่
+        //   ใบถัดไปจะเข้าคิวทัน — บนเครื่องพัฒนามันหยิบไม่ทันจึงดูเหมือนเรียงถูก
+        //   แต่บน CI (2 core) worker ทำใบแรกจบก่อนใบที่สามเข้าคิวด้วยซ้ำ
+        //   เทสต์เดิมจึงล้ม **ทั้งที่คิวทำงานถูกต้องเป๊ะ** (เจอจริง 1 ส.ค. 2026)
+        //
+        //   ตัวคิวเองถูกทดสอบแบบ deterministic ที่ `queue_pops_in_priority_order`
+        let mut done = Vec::new();
         for _ in 0..3 {
-            order.push(
+            done.push(
                 pool.results()
-                    .recv_timeout(Duration::from_secs(10))
+                    .recv_timeout(Duration::from_secs(30))
                     .unwrap()
                     .hash(),
             );
         }
+        done.sort_unstable_by_key(|hash| *hash.as_bytes());
 
-        let expected: Vec<_> = [10u32, 20, 30]
+        let mut expected: Vec<_> = [10u32, 20, 30]
             .iter()
             .map(|v| crate::hash::hash_bytes(&v.to_le_bytes()))
             .collect();
-        // งานแรกอาจถูกหยิบไปก่อนที่ตัวอื่นจะเข้าคิวทัน จึงเทียบเฉพาะสองตัวหลัง
-        assert_eq!(
-            &order[order.len() - 2..],
-            &expected[expected.len() - 2..],
-            "คิวต้องเรียงตาม priority: ได้ {order:?}"
-        );
+        expected.sort_unstable_by_key(|hash| *hash.as_bytes());
+        assert_eq!(done, expected, "ต้องได้ผลกลับมาครบทุกใบ");
+    }
+
+    /// ★ คิวเรียงตาม priority — ทดสอบ **ที่ตัวคิวโดยตรง ไม่ผ่าน worker**
+    ///
+    /// นี่คือกลไกจริงที่ docs/05 §3 สั่งไว้ว่า "ภาพที่ผู้ใช้กำลังมองมาก่อนเสมอ"
+    /// ทดสอบตรงนี้ได้ผลคงที่ 100% เพราะไม่มีเธรดมาเกี่ยว — ต่างจากการดูลำดับ
+    /// ผลลัพธ์ที่ปลายทางซึ่งขึ้นกับความเร็วเครื่อง
+    #[test]
+    fn queue_pops_in_priority_order() {
+        let queue = Queue::new();
+        let hash_of = |seed: u32| crate::hash::hash_bytes(&seed.to_le_bytes());
+
+        // ใส่สลับลำดับ แล้วต้องออกมาเรียงจากน้อยไปมาก (น้อย = ใกล้กึ่งกลางจอ = ทำก่อน)
+        for (priority, seed) in [(30.0f32, 30u32), (10.0, 10), (20.0, 20)] {
+            queue.push(Job {
+                hash: hash_of(seed),
+                source: JobSource::File(PathBuf::from("x.png")),
+                priority,
+                cancel: Arc::new(AtomicBool::new(false)),
+                target: JobTarget::Thumbnail,
+            });
+        }
+
+        let order: Vec<ContentHash> = (0..3).map(|_| queue.pop().unwrap().hash).collect();
+        assert_eq!(order, vec![hash_of(10), hash_of(20), hash_of(30)]);
+    }
+
+    /// priority เท่ากันต้องออกตามลำดับที่ส่งเข้ามา (FIFO)
+    ///
+    /// `BinaryHeap` ไม่รับประกันลำดับของค่าที่เท่ากัน ถ้าไม่มีตัวตัดสิน `seq`
+    /// ผลจะสลับไปมาระหว่างการรัน = ไม่ deterministic (CLAUDE.md ห้ามไว้)
+    #[test]
+    fn equal_priorities_keep_submission_order() {
+        let queue = Queue::new();
+        let hash_of = |seed: u32| crate::hash::hash_bytes(&seed.to_le_bytes());
+        for seed in [1u32, 2, 3, 4, 5] {
+            queue.push(Job {
+                hash: hash_of(seed),
+                source: JobSource::File(PathBuf::from("x.png")),
+                priority: 7.0, // เท่ากันหมด
+                cancel: Arc::new(AtomicBool::new(false)),
+                target: JobTarget::Thumbnail,
+            });
+        }
+        let order: Vec<ContentHash> = (0..5).map(|_| queue.pop().unwrap().hash).collect();
+        let expected: Vec<ContentHash> = [1u32, 2, 3, 4, 5].iter().map(|s| hash_of(*s)).collect();
+        assert_eq!(order, expected, "priority เท่ากันต้อง FIFO ไม่ใช่สุ่ม");
     }
 
     #[test]
