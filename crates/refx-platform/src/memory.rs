@@ -81,6 +81,18 @@ fn platform_total_ram() -> Option<u64> {
 fn platform_total_ram() -> Option<u64> {
     // /proc/meminfo อ่านได้ด้วย fs ธรรมดา ไม่ต้องใช้ unsafe เลย
     // รูปแบบ: "MemTotal:       16070024 kB"
+    //
+    // ★ ข้อยกเว้นของกฎห้ามใช้ `fs::read_to_string` (clippy.toml) — กฎนั้นมีไว้กัน
+    //   **ดิสก์ I/O บน UI thread** (I-2) ซึ่งไม่ตรงกับที่นี่ด้วยสองเหตุผล:
+    //     1. `/proc` เป็นไฟล์เสมือนของเคอร์เนล ไม่แตะดิสก์เลย ไม่มี seek ไม่มี
+    //        network mount ไม่มีทางค้างแบบไฟล์บน OneDrive/NAS ที่กฎนั้นกันอยู่
+    //     2. เรียกครั้งเดียวตอน init (`Limits::for_system`) ก่อนเข้าลูปเฟรม
+    //        — ข้อยกเว้นแบบเดียวกับที่ `block_on` ใช้ได้เฉพาะตอน init (docs/09)
+    //   ฝั่ง Windows ถามค่าเดียวกันผ่าน syscall จึงไม่ติดกฎนี้ตั้งแต่แรก
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "/proc เป็นไฟล์เสมือน + เรียกครั้งเดียวตอน init ไม่ใช่ดิสก์ I/O บนลูปเฟรม"
+    )]
     let text = std::fs::read_to_string("/proc/meminfo").ok()?;
     let line = text.lines().find(|l| l.starts_with("MemTotal:"))?;
     let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
