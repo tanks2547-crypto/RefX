@@ -7,9 +7,13 @@
 
 ★ ใครดึงไฟล์ใหม่ต้องได้ค่า SHA-256 เดิมเป๊ะ  ไม่ตรง = หยุด อย่า commit ทับ
 
-ตรวจ (จากรากโปรเจกต์):
+ตรวจ (ต้อง cd เข้ามาก่อน — ชื่อไฟล์ในตารางท้ายไฟล์เป็นชื่อล้วน ไม่ใช่ path
+จากรากโปรเจกต์ ถ้ารันจากที่อื่นจะได้ "FAILED open or read" ซึ่งไม่ใช่ checksum ผิด):
 
-    sha256sum -c assets/fonts/CHECKSUMS.txt
+    cd assets/fonts && sha256sum -c CHECKSUMS.txt
+
+ผลที่ถูกต้องคือ OK ทั้งสองไฟล์ (บรรทัดคำอธิบายข้างบนจะถูกรายงานว่า
+"improperly formatted" ซึ่งเป็นเรื่องปกติ ไม่ใช่ความล้มเหลว)
 
 
 NotoSansThai-Regular.ttf

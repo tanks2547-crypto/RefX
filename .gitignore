@@ -10,3 +10,25 @@
 # ตั้งค่าเครื่องมือที่เป็นของ "ต่อเครื่อง" ไม่ใช่ของโปรเจกต์
 # (allowlist ของ permission งอกทุก session จนมี diff ค้างใน git status ตลอด)
 .claude/settings.local.json
+
+# ---- ของที่โปรแกรมสร้างตอนใช้งาน ----
+#
+# ของจริงอยู่นอก repo อยู่แล้ว (`%LOCALAPPDATA%\RefX` บน Windows,
+# `~/.cache/refx` บน Linux) แต่ทั้ง cache dir และปลายทางของ `gen-testdata`
+# **ถูก override ให้ชี้เข้ามาในโปรเจกต์ได้** เวลาไล่ปัญหา
+# — ไฟล์พวกนี้มี path/ชื่อไฟล์ของเครื่องผู้ใช้อยู่ข้างใน และไล่ลบออกจาก
+#   ประวัติ git ทีหลังแพงกว่ากันไว้ก่อนมาก
+cache.sqlite
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.log
+/logs/
+/testdata/
+
+# ---- ขยะของ OS / editor ----
+Thumbs.db
+desktop.ini
+.DS_Store
+/.vscode/
+/.idea/
