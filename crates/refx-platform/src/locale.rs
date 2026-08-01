@@ -15,11 +15,26 @@
 pub fn user_language_tag() -> Option<String> {
     let tag = platform_language_tag()?;
     let tag = tag.trim();
-    if tag.is_empty() {
+    if !is_real_language(tag) {
         return None;
     }
     tracing::info!(tag, "read the user's language from the OS");
     Some(tag.to_owned())
+}
+
+/// ค่านี้เป็น "ภาษาจริง" หรือแค่ locale เปล่าของระบบ
+///
+/// ★ `C` และ `POSIX` **ไม่ใช่ชื่อภาษา** — มันแปลว่า "ไม่ได้ตั้งภาษาไว้"
+/// และต้องตัดรูปที่มีชุดอักขระต่อท้ายด้วย (`C.UTF-8`, `POSIX.UTF-8`)
+/// ซึ่งเป็นค่าเริ่มต้นของ container และ CI runner แทบทุกตัวบน Linux
+///
+/// ถ้าไม่ตัด จะได้รหัสภาษา `"c"` ที่ไม่มีอยู่จริงหลุดเข้าไปในระบบเลือกภาษา
+/// แล้ว log จะรายงานว่าผู้ใช้ "ตั้งภาษาไว้" ทั้งที่เขาไม่ได้ตั้ง
+/// (เจอเพราะ CI ฝั่ง ubuntu ตั้ง `LANG=C.UTF-8` — 1 ส.ค. 2026)
+#[must_use]
+fn is_real_language(value: &str) -> bool {
+    let primary = primary_language(value);
+    !primary.is_empty() && primary != "c" && primary != "posix"
 }
 
 /// รหัสภาษาสองตัวอักษรจากแท็ก เช่น `"th-TH"` → `"th"`, `"th_TH.UTF-8"` → `"th"`
@@ -62,11 +77,12 @@ fn platform_language_tag() -> Option<String> {
 #[cfg(not(target_os = "windows"))]
 fn platform_language_tag() -> Option<String> {
     // POSIX: เรียงตามลำดับความสำคัญที่มาตรฐานกำหนด
-    // "C" กับ "POSIX" แปลว่า "ไม่ได้ตั้งภาษา" ไม่ใช่ชื่อภาษาจริง
+    // ตัวที่เป็น locale เปล่า (C / POSIX / C.UTF-8) ถูกข้ามไปหาตัวถัดไป
+    // เพราะมันแปลว่า "ไม่ได้ตั้งภาษา" ไม่ใช่ชื่อภาษาจริง — ดู [`is_real_language`]
     ["LC_ALL", "LC_MESSAGES", "LANG"]
         .into_iter()
         .filter_map(|name| std::env::var(name).ok())
-        .find(|value| !value.is_empty() && value != "C" && value != "POSIX")
+        .find(|value| is_real_language(value))
 }
 
 #[cfg(test)]
@@ -96,6 +112,22 @@ mod tests {
                 primary.is_empty() || !primary.contains(['-', '_', '.', '@']),
                 "แท็ก {tag:?} ให้ผลแปลก: {primary:?}"
             );
+        }
+    }
+
+    /// ★ locale เปล่าของระบบ **ไม่ใช่ภาษา** — ต้องถือว่า "ไม่ได้ตั้ง"
+    ///
+    /// `C.UTF-8` คือค่าเริ่มต้นของ container และ CI runner แทบทุกตัวบน Linux
+    /// ถ้าไม่ตัด `primary_language` จะให้รหัส `"c"` ที่ไม่มีอยู่จริงหลุดเข้าไป
+    /// ในระบบเลือกภาษา แล้ว log จะรายงานว่าผู้ใช้ตั้งภาษาไว้ทั้งที่เขาไม่ได้ตั้ง
+    #[test]
+    fn empty_system_locales_are_not_languages() {
+        for value in ["C", "POSIX", "C.UTF-8", "C.utf8", "POSIX.UTF-8", "c", ""] {
+            assert!(!is_real_language(value), "{value:?} ไม่ใช่ภาษา แต่ถูกนับว่าเป็น");
+        }
+        // ของจริงต้องผ่านตามเดิม
+        for value in ["th_TH.UTF-8", "en-US", "th", "ja_JP"] {
+            assert!(is_real_language(value), "{value:?} เป็นภาษาจริงแต่ถูกตัดทิ้ง");
         }
     }
 
