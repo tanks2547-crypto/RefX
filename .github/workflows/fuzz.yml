@@ -3,6 +3,21 @@ on:
   schedule: [{ cron: "0 3 * * *" }]
   workflow_dispatch:
 
+# ★ ทำไมต้องตั้ง RUSTUP_TOOLCHAIN (แก้ 2 ส.ค. 2026)
+#
+# `rust-toolchain.toml` ที่รากตรึง channel = "1.92" ไว้ และ **ไฟล์นั้นชนะ**
+# `rustup default nightly` ที่ dtolnay/rust-toolchain ตั้งให้ ผลคือทุก job ในไฟล์นี้
+# รันด้วย stable 1.92 ทั้งที่ workflow ชื่อ "Fuzz (nightly)" และลง nightly ไปแล้ว
+#
+# `cargo fuzz` ต้องใช้ `-Zsanitizer` จึงล้มเสียงดัง (ดีแล้ว) แต่ `fuzz-lint`
+# **ผ่านแบบเงียบ ๆ บน stable** ทั้งที่หน้าที่ของมันคือตรวจว่าโค้ดคอมไพล์บน nightly ได้
+# — เขียวโดยไม่ได้ตรวจสิ่งที่ตั้งใจจะตรวจ ซึ่งคือกับดักเดียวกับ docs/08 §3.9
+#
+# `RUSTUP_TOOLCHAIN` ชนะ toolchain file ตามลำดับความสำคัญของ rustup
+# **ไม่ใช่การปักหมุดวันที่** — ยังเป็น nightly ล่าสุดเสมอ ถ้า nightly พังเราต้องรู้
+env:
+  RUSTUP_TOOLCHAIN: nightly
+
 jobs:
   # ★ ยิงเฉพาะ target ที่ **ต่อกับโค้ดจริงแล้ว**
   #
@@ -18,6 +33,16 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
+
+      # ★ negative control ของตัวเอง: ถ้า toolchain หลุดกลับไป stable อีกครั้ง
+      #   job นี้ต้องแดงทันที ไม่ใช่ผ่านแบบเงียบ ๆ แล้วบอกว่า "ตรวจ nightly แล้ว"
+      - name: ยืนยันว่าใช้ nightly จริง
+        run: |
+          rustc --version
+          if ! rustc --version | grep -q nightly; then
+            echo "::error::job นี้ไม่ได้รันบน nightly — rust-toolchain.toml ชนะอีกแล้ว"
+            exit 1
+          fi
       - run: cargo install cargo-fuzz --locked
 
       # corpus ตั้งต้นถูก commit ไว้ที่ fuzz/seeds/ ส่วน fuzz/corpus/ อยู่ใน .gitignore
@@ -80,4 +105,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with: { components: clippy }
       - uses: Swatinem/rust-cache@v2
+
+      # ★ negative control ของตัวเอง: ถ้า toolchain หลุดกลับไป stable อีกครั้ง
+      #   job นี้ต้องแดงทันที ไม่ใช่ผ่านแบบเงียบ ๆ แล้วบอกว่า "ตรวจ nightly แล้ว"
+      - name: ยืนยันว่าใช้ nightly จริง
+        run: |
+          rustc --version
+          if ! rustc --version | grep -q nightly; then
+            echo "::error::job นี้ไม่ได้รันบน nightly — rust-toolchain.toml ชนะอีกแล้ว"
+            exit 1
+          fi
       - run: cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
