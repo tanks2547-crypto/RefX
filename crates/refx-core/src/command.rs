@@ -635,6 +635,110 @@ impl Command for EditMeta {
 }
 
 // ---------------------------------------------------------------------------
+// SelectItems
+// ---------------------------------------------------------------------------
+
+/// เปลี่ยนสิ่งที่ถูกเลือก
+///
+/// ★ **ทำไมการเลือกถึงเป็น `Command`:** docs/08 §4 ข้อ 10 บังคับว่าทุก mutation ของ
+/// `Board` ต้องผ่าน `Command` และ `selection` เป็นฟิลด์ของ `Board` การเปิดช่องพิเศษ
+/// ให้แก้ตรง ๆ จะทำให้กฎนี้ไม่ใช่กฎอีกต่อไป (คอมไพเลอร์บังคับไม่ได้แล้ว)
+///
+/// ★ **แล้วทำไม undo stack ถึงไม่เต็มไปด้วยการคลิก:** [`SelectItems::merge`] รับ
+/// `SelectItems` ตัวถัดไป **เสมอ** ดังนั้นการเลือกติด ๆ กันจะยุบเป็นขั้นเดียว
+/// ตราบใดที่ชั้น UI **ไม่เรียก [`History::seal`] หลังการเลือกล้วน ๆ**
+/// (เรียกเฉพาะหลังการแก้ของจริง) ผลคือระหว่างการแก้สองครั้งมีขั้นของการเลือก
+/// อย่างมากหนึ่งขั้น — undo stack จึงยังใช้กู้งานได้จริง ไม่ถูกกลบด้วยเสียงรบกวน
+#[derive(Debug)]
+pub struct SelectItems {
+    after: Vec<ItemId>,
+    after_anchor: Option<ItemId>,
+    /// สิ่งที่เลือกอยู่ก่อนหน้า — เติมตอน `apply` ครั้งแรก
+    before: Option<(Vec<ItemId>, Option<ItemId>)>,
+}
+
+impl SelectItems {
+    /// เลือกตามลำดับที่ให้มา — anchor เป็นตัวท้าย
+    ///
+    /// รายการว่าง = ล้างการเลือก ซึ่งเป็นการกระทำที่ถูกต้อง จึงไม่คืน `Empty`
+    #[must_use]
+    pub fn new(items: Vec<ItemId>) -> Self {
+        let anchor = items.last().copied();
+        Self::with_anchor(items, anchor)
+    }
+
+    /// เลือกพร้อมระบุ anchor เอง (ใช้ตอน toggle ที่ตัวสุดท้ายไม่ใช่ตัวที่เพิ่งคลิก)
+    #[must_use]
+    pub fn with_anchor(items: Vec<ItemId>, anchor: Option<ItemId>) -> Self {
+        Self {
+            after: items,
+            after_anchor: anchor,
+            before: None,
+        }
+    }
+
+    /// คำสั่งนี้จะเปลี่ยนอะไรจริงไหม — ใช้กันไม่ให้คลิกที่ว่างซ้ำ ๆ สร้างขั้นเปล่า
+    #[must_use]
+    pub fn changes_anything(&self, board: &Board) -> bool {
+        let selection = board.selection();
+        selection.anchor() != self.after_anchor || !selection.iter().eq(self.after.iter().copied())
+    }
+}
+
+impl Command for SelectItems {
+    fn apply(&mut self, board: &mut Board) -> Result<(), CmdError> {
+        let previous = (
+            board.selection().iter().collect::<Vec<_>>(),
+            board.selection().anchor(),
+        );
+        // id ที่ตายไปแล้วต้องไม่เข้าไปอยู่ใน selection — ไม่งั้น align จะอ้างของว่าง
+        let live: Vec<ItemId> = self
+            .after
+            .iter()
+            .copied()
+            .filter(|id| board.item(*id).is_some())
+            .collect();
+        let anchor = self.after_anchor.filter(|id| live.contains(id));
+
+        board.selection_mut().restore(live, anchor);
+        if self.before.is_none() {
+            self.before = Some(previous);
+        }
+        Ok(())
+    }
+
+    fn undo(&mut self, board: &mut Board) -> Result<(), CmdError> {
+        if let Some((items, anchor)) = self.before.clone() {
+            board.selection_mut().restore(items, anchor);
+        }
+        Ok(())
+    }
+
+    /// รับตัวถัดไปเสมอ — ดูเหตุผลที่หัว struct
+    fn merge(&mut self, next: &dyn Command) -> bool {
+        let Some(next) = next.as_any().downcast_ref::<Self>() else {
+            return false;
+        };
+        self.after.clone_from(&next.after);
+        self.after_anchor = next.after_anchor;
+        true
+    }
+
+    fn label(&self) -> &'static str {
+        "Select"
+    }
+
+    fn heap_size(&self) -> usize {
+        let before = self.before.as_ref().map_or(0, |(items, _)| items.len());
+        (self.after.len() + before) * std::mem::size_of::<ItemId>()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+// ---------------------------------------------------------------------------
 // History
 // ---------------------------------------------------------------------------
 

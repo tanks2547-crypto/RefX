@@ -1,0 +1,712 @@
+//! `SelectTool` — เครื่องสถานะของการเลือกบน canvas (P2-4)
+//!
+//! ★ **ทำไมตรรกะนี้อยู่ `refx-core` ไม่ใช่ `refx-ui`:** การเลือกคือพฤติกรรมที่ผู้ใช้
+//! สัมผัสทุกวินาที (คลิก · Ctrl+คลิก · ลากกรอบ) และมันมีเคสขอบเยอะกว่าที่คิด
+//! ถ้าตรรกะอยู่ในชั้นที่ต้องเปิดหน้าต่างจริงถึงจะทดสอบได้ ก็จะไม่มีใครทดสอบมัน
+//! ที่นี่ทดสอบครบได้โดยไม่มี GPU — `refx-ui` เหลือหน้าที่แค่แปลง pointer ของ egui
+//! เป็น [`CanvasEvent`] แล้วเอา [`Interaction`] ไปวาด
+//!
+//! ตามรูปแบบที่ docs/03 §1 กำหนดไว้ให้ `ViewportBehavior::handle_input`:
+//! **คืน `Vec<Box<dyn Command>>` ไม่ใช่แก้ board เอง** — ทุกการเปลี่ยนแปลงจึงไหล
+//! ผ่านทางเดียว (history → journal) และเทสต์ interaction ได้โดยไม่ต้องเปิดหน้าต่าง
+//!
+//! spec: docs/03-modes-and-ui.md §1, ROADMAP P2-4
+
+use glam::Vec2;
+
+use crate::arena::ItemId;
+use crate::board::Board;
+use crate::command::{Command, SelectItems};
+use crate::geom::Rect;
+use crate::spatial::SpatialIndex;
+
+/// ปุ่มเมาส์เท่าที่ canvas สนใจ
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CanvasButton {
+    /// ปุ่มซ้าย — เลือก / ลากกรอบ / (P2-5) ย้าย
+    Primary,
+    /// ปุ่มกลาง — เลื่อนกล้อง (ชั้น UI จัดการเอง กล้องไม่ใช่สถานะของ board)
+    Middle,
+}
+
+/// ปุ่มดัดแปลงที่มีผลกับการเลือก
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Modifiers {
+    /// เพิ่ม/ถอดทีละตัว
+    pub ctrl: bool,
+    /// เพิ่มเข้าไปในชุดเดิม
+    pub shift: bool,
+}
+
+impl Modifiers {
+    /// ผู้ใช้ต้องการ **เพิ่มเข้าไปในชุดเดิม** ไม่ใช่เริ่มใหม่
+    #[must_use]
+    pub fn is_additive(self) -> bool {
+        self.ctrl || self.shift
+    }
+}
+
+/// เหตุการณ์จาก pointer ที่แปลงเป็นพิกัด world แล้ว
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CanvasEvent {
+    /// กดปุ่มลง
+    Press {
+        /// ปุ่มที่กด
+        button: CanvasButton,
+        /// ตำแหน่งใน world
+        world: Vec2,
+        /// ปุ่มดัดแปลงตอนกด
+        modifiers: Modifiers,
+    },
+    /// ขยับขณะกดค้าง
+    Move {
+        /// ตำแหน่งใน world
+        world: Vec2,
+    },
+    /// ปล่อยปุ่ม
+    Release {
+        /// ปุ่มที่ปล่อย
+        button: CanvasButton,
+        /// ตำแหน่งใน world
+        world: Vec2,
+    },
+}
+
+/// สิ่งที่ชั้น UI ต้องเอาไปทำต่อหลังส่ง event เข้ามาหนึ่งตัว
+#[derive(Default)]
+pub struct Interaction {
+    /// คำสั่งที่ต้องส่งเข้า `History` ตามลำดับ
+    pub commands: Vec<Box<dyn Command>>,
+    /// กรอบ rubber-band ที่กำลังลากอยู่ (world space) — `None` = ไม่ต้องวาด
+    pub rubber_band: Option<Rect>,
+    /// ★ ต้องเรียก `History::seal()` หรือไม่
+    ///
+    /// **การเลือกล้วน ๆ ไม่ seal** เพื่อให้การคลิกติด ๆ กันยุบเป็นขั้น undo เดียว
+    /// (ดูเหตุผลเต็มที่ `SelectItems`) — seal เมื่อจบการกระทำที่แก้ของจริงเท่านั้น
+    pub seal: bool,
+    /// มีอะไรเปลี่ยนที่ต้องวาดใหม่ไหม (I-1 — ไม่มีอะไรเปลี่ยนต้องไม่ขอเฟรม)
+    pub needs_redraw: bool,
+}
+
+impl std::fmt::Debug for Interaction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Interaction")
+            .field("commands", &self.commands.len())
+            .field("rubber_band", &self.rubber_band)
+            .field("seal", &self.seal)
+            .field("needs_redraw", &self.needs_redraw)
+            .finish()
+    }
+}
+
+/// ของที่เครื่องสถานะต้องรู้เพื่อตัดสินใจ
+#[derive(Debug, Clone, Copy)]
+pub struct CanvasContext<'a> {
+    /// board ปัจจุบัน (อ่านอย่างเดียว — การแก้ไหลออกไปเป็น `Command`)
+    pub board: &'a Board,
+    /// index สำหรับ hit-test
+    pub index: &'a SpatialIndex,
+    /// ระยะที่ถือว่า "เริ่มลากแล้ว" ในหน่วย world
+    ///
+    /// ชั้น UI คำนวณจาก **พิกเซลบนจอ ÷ zoom** เพื่อให้ความรู้สึกเท่ากันทุกระดับซูม
+    /// ถ้าใช้ค่าคงที่ใน world ตอนซูมออกมาก ๆ ผู้ใช้จะลากกรอบไม่ได้เลย
+    pub drag_threshold: f32,
+}
+
+/// ระยะเริ่มลากเริ่มต้น (พิกเซลบนจอ) — กันมือสั่นตอนคลิก
+pub const DEFAULT_DRAG_THRESHOLD_PX: f32 = 4.0;
+
+/// สถานะของการกดค้างหนึ่งครั้ง
+#[derive(Debug, Clone)]
+struct Press {
+    origin: Vec2,
+    modifiers: Modifiers,
+    /// ขยับเกินระยะจนถือว่าเป็นการลากแล้วหรือยัง
+    dragging: bool,
+    /// item ที่อยู่ใต้จุดที่กด (`None` = กดที่ว่าง)
+    on_item: Option<ItemId>,
+    /// สิ่งที่เลือกอยู่ก่อนเริ่มกด — rubber-band แบบเพิ่มต้องบวกจากชุดนี้
+    base: Vec<ItemId>,
+}
+
+/// เครื่องสถานะของการเลือก
+#[derive(Debug, Clone, Default)]
+pub struct SelectTool {
+    press: Option<Press>,
+}
+
+impl SelectTool {
+    /// เครื่องมือที่ยังไม่มีอะไรค้าง
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// กำลังลากกรอบอยู่หรือไม่ (ชั้น UI ใช้เลือกเคอร์เซอร์)
+    #[must_use]
+    pub fn is_dragging(&self) -> bool {
+        self.press.as_ref().is_some_and(|press| press.dragging)
+    }
+
+    /// ทิ้งสถานะที่ค้างอยู่ — เรียกเมื่อหน้าต่างเสีย focus หรือ board เปลี่ยน
+    ///
+    /// ถ้าไม่ล้าง ผู้ใช้ที่สลับไปโปรแกรมอื่นแล้วปล่อยเมาส์ที่นั่นจะกลับมาเจอ
+    /// กรอบ rubber-band ค้างอยู่กลางจอโดยกดอะไรก็ไม่หาย
+    pub fn cancel(&mut self) {
+        self.press = None;
+    }
+
+    /// ป้อน event หนึ่งตัว
+    #[must_use]
+    pub fn handle(&mut self, ctx: CanvasContext<'_>, event: CanvasEvent) -> Interaction {
+        match event {
+            CanvasEvent::Press {
+                button: CanvasButton::Primary,
+                world,
+                modifiers,
+            } => self.on_press(ctx, world, modifiers),
+            CanvasEvent::Move { world } => self.on_move(ctx, world),
+            CanvasEvent::Release {
+                button: CanvasButton::Primary,
+                world,
+            } => self.on_release(ctx, world),
+            // ปุ่มกลางเป็นเรื่องของกล้อง ไม่แตะการเลือก
+            CanvasEvent::Press {
+                button: CanvasButton::Middle,
+                ..
+            }
+            | CanvasEvent::Release {
+                button: CanvasButton::Middle,
+                ..
+            } => Interaction::default(),
+        }
+    }
+
+    fn on_press(
+        &mut self,
+        ctx: CanvasContext<'_>,
+        world: Vec2,
+        modifiers: Modifiers,
+    ) -> Interaction {
+        let hit = ctx.index.hit_test(ctx.board, world);
+        let base: Vec<ItemId> = ctx.board.selection().iter().collect();
+
+        self.press = Some(Press {
+            origin: world,
+            modifiers,
+            dragging: false,
+            on_item: hit,
+            base: base.clone(),
+        });
+
+        let mut out = Interaction::default();
+        match hit {
+            // กดโดนภาพ
+            Some(id) if modifiers.is_additive() => {
+                // Ctrl+คลิก = สลับสถานะทีละตัว
+                let mut next = base;
+                let anchor = if let Some(at) = next.iter().position(|other| *other == id) {
+                    next.remove(at);
+                    next.last().copied()
+                } else {
+                    next.push(id);
+                    Some(id)
+                };
+                push_selection(&mut out, ctx.board, next, anchor);
+            }
+            Some(id) => {
+                // คลิกบนภาพที่เลือกอยู่แล้ว = ไม่เปลี่ยนอะไร (จะได้ลากทั้งชุดต่อได้ — P2-5)
+                if !ctx.board.selection().contains(id) {
+                    push_selection(&mut out, ctx.board, vec![id], Some(id));
+                }
+            }
+            // กดที่ว่าง — ยังไม่ล้างทันที รอดูว่าจะกลายเป็นการลากกรอบไหม
+            // (ล้างตอนปล่อยแทน ดู `on_release`)
+            None => {}
+        }
+        out
+    }
+
+    fn on_move(&mut self, ctx: CanvasContext<'_>, world: Vec2) -> Interaction {
+        let Some(press) = self.press.as_mut() else {
+            return Interaction::default();
+        };
+
+        // ★ กดโดนภาพแล้วลาก = การย้าย ซึ่งเป็นงานของ P2-5 ไม่ใช่ rubber-band
+        //   ตรงนี้จึงไม่ทำอะไร แต่ก็ต้องไม่ไปเริ่มลากกรอบทับด้วย
+        if press.on_item.is_some() {
+            return Interaction::default();
+        }
+
+        if !press.dragging {
+            let threshold = if ctx.drag_threshold.is_finite() {
+                ctx.drag_threshold.max(0.0)
+            } else {
+                0.0
+            };
+            if (world - press.origin).length() < threshold {
+                return Interaction::default(); // ยังนับเป็นคลิก ไม่ใช่ลาก
+            }
+            press.dragging = true;
+        }
+
+        let rect = Rect::from_corners(press.origin, world);
+        let inside = ctx.index.hit_test_rect(ctx.board, rect);
+        let (items, anchor) = combine(&press.base, &inside, press.modifiers);
+
+        let mut out = Interaction {
+            rubber_band: Some(rect),
+            needs_redraw: true,
+            ..Interaction::default()
+        };
+        push_selection(&mut out, ctx.board, items, anchor);
+        out
+    }
+
+    fn on_release(&mut self, ctx: CanvasContext<'_>, world: Vec2) -> Interaction {
+        let Some(press) = self.press.take() else {
+            return Interaction::default();
+        };
+        // อย่างน้อยกรอบ rubber-band ต้องหายไป จึงต้องวาดใหม่เสมอ
+        let mut out = Interaction {
+            needs_redraw: true,
+            ..Interaction::default()
+        };
+
+        if press.dragging {
+            // จบการลากกรอบ — ยืนยันชุดสุดท้ายอีกครั้งด้วยกรอบตอนปล่อย
+            let rect = Rect::from_corners(press.origin, world);
+            let inside = ctx.index.hit_test_rect(ctx.board, rect);
+            let (items, anchor) = combine(&press.base, &inside, press.modifiers);
+            push_selection(&mut out, ctx.board, items, anchor);
+            return out;
+        }
+
+        // คลิกเปล่า ๆ ที่ว่าง (ไม่ได้ลาก) = ล้างการเลือก
+        // ★ ล้างตอน **ปล่อย** ไม่ใช่ตอนกด: ถ้าล้างตอนกด ผู้ใช้ที่เริ่มลากกรอบ
+        //   จะเห็นสิ่งที่เลือกไว้กะพริบหายไปหนึ่งเฟรมก่อนกรอบจะขึ้น
+        if press.on_item.is_none() && !press.modifiers.is_additive() {
+            push_selection(&mut out, ctx.board, Vec::new(), None);
+        }
+        out
+    }
+}
+
+/// รวมชุดเดิมกับสิ่งที่อยู่ในกรอบ ตามปุ่มดัดแปลง
+///
+/// คงลำดับเดิมไว้ก่อนแล้วต่อท้ายด้วยตัวใหม่ — ลำดับคือสถานะที่ผู้ใช้สัมผัสได้
+/// (anchor ของ align) จึงต้องไม่สลับไปมาระหว่างลาก
+fn combine(
+    base: &[ItemId],
+    inside: &[ItemId],
+    modifiers: Modifiers,
+) -> (Vec<ItemId>, Option<ItemId>) {
+    if !modifiers.is_additive() {
+        return (inside.to_vec(), inside.last().copied());
+    }
+    let mut items = base.to_vec();
+    for id in inside {
+        if !items.contains(id) {
+            items.push(*id);
+        }
+    }
+    let anchor = items.last().copied();
+    (items, anchor)
+}
+
+/// ใส่คำสั่งเลือกลงผลลัพธ์ **เฉพาะเมื่อมันเปลี่ยนอะไรจริง**
+///
+/// กันไม่ให้การขยับเมาส์ระหว่างลากกรอบที่ผลไม่เปลี่ยน ไปสร้างคำสั่งทุกเฟรม
+/// (merge จะยุบให้อยู่แล้ว แต่การไม่สร้างตั้งแต่แรกถูกกว่าและทำให้ I-1 ชัดกว่า)
+fn push_selection(
+    out: &mut Interaction,
+    board: &Board,
+    items: Vec<ItemId>,
+    anchor: Option<ItemId>,
+) {
+    let command = SelectItems::with_anchor(items, anchor);
+    if command.changes_anything(board) {
+        out.commands.push(Box::new(command));
+        out.needs_redraw = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+    use crate::board::ItemCanvas;
+    use crate::board::tests::image_item;
+    use crate::command::History;
+
+    /// board ที่มีภาพ 100×100 เรียงเป็นแถวห่างกัน 200 หน่วย
+    fn row_board(n: u32) -> (Board, Vec<ItemId>, SpatialIndex) {
+        let mut board = Board::default();
+        let ids = (0..n)
+            .map(|i| {
+                let mut item = image_item(0);
+                item.canvas = ItemCanvas {
+                    pos: Vec2::new(i as f32 * 200.0, 0.0),
+                    size: Vec2::splat(100.0),
+                    ..ItemCanvas::default()
+                };
+                board.insert_item(item)
+            })
+            .collect();
+        board.mark_dirty(false);
+        let index = SpatialIndex::from_board(&board);
+        (board, ids, index)
+    }
+
+    /// เดินเครื่องสถานะแล้วส่งคำสั่งเข้า history จริง ๆ — เทสต์ต้องเดินเส้นทางเต็ม
+    struct Harness {
+        board: Board,
+        index: SpatialIndex,
+        history: History,
+        tool: SelectTool,
+        last: Option<Rect>,
+    }
+
+    impl Harness {
+        fn new(n: u32) -> (Self, Vec<ItemId>) {
+            let (board, ids, index) = row_board(n);
+            (
+                Self {
+                    board,
+                    index,
+                    history: History::default(),
+                    tool: SelectTool::new(),
+                    last: None,
+                },
+                ids,
+            )
+        }
+
+        fn feed(&mut self, event: CanvasEvent) {
+            let ctx = CanvasContext {
+                board: &self.board,
+                index: &self.index,
+                drag_threshold: 4.0,
+            };
+            let outcome = self.tool.handle(ctx, event);
+            self.last = outcome.rubber_band;
+            for command in outcome.commands {
+                self.history.apply(&mut self.board, command).unwrap();
+            }
+            if outcome.seal {
+                self.history.seal();
+            }
+        }
+
+        fn press(&mut self, at: Vec2, modifiers: Modifiers) {
+            self.feed(CanvasEvent::Press {
+                button: CanvasButton::Primary,
+                world: at,
+                modifiers,
+            });
+        }
+
+        fn drag_to(&mut self, at: Vec2) {
+            self.feed(CanvasEvent::Move { world: at });
+        }
+
+        fn release(&mut self, at: Vec2) {
+            self.feed(CanvasEvent::Release {
+                button: CanvasButton::Primary,
+                world: at,
+            });
+        }
+
+        fn click(&mut self, at: Vec2) {
+            self.press(at, Modifiers::default());
+            self.release(at);
+        }
+
+        fn selected(&self) -> Vec<ItemId> {
+            self.board.selection().iter().collect()
+        }
+    }
+
+    const CTRL: Modifiers = Modifiers {
+        ctrl: true,
+        shift: false,
+    };
+
+    // ---------- คลิกเดี่ยว ----------
+
+    #[test]
+    fn clicking_an_item_selects_only_it() {
+        let (mut h, ids) = Harness::new(3);
+        h.click(Vec2::ZERO);
+        assert_eq!(h.selected(), vec![ids[0]]);
+        assert_eq!(h.board.selection().anchor(), Some(ids[0]));
+
+        h.click(Vec2::new(200.0, 0.0));
+        assert_eq!(h.selected(), vec![ids[1]], "คลิกธรรมดาต้องทิ้งของเดิม");
+    }
+
+    #[test]
+    fn clicking_empty_space_clears_the_selection() {
+        let (mut h, ids) = Harness::new(3);
+        h.click(Vec2::ZERO);
+        assert_eq!(h.selected(), vec![ids[0]]);
+
+        h.click(Vec2::new(100.0, 0.0)); // ระหว่างภาพ
+        assert!(h.selected().is_empty());
+        assert_eq!(h.board.selection().anchor(), None);
+    }
+
+    /// ★ ล้างการเลือกต้องเกิดตอน **ปล่อย** ไม่ใช่ตอนกด
+    ///
+    /// ถ้าล้างตอนกด ผู้ใช้ที่เริ่มลากกรอบจะเห็นสิ่งที่เลือกไว้กะพริบหายไปหนึ่งเฟรม
+    #[test]
+    fn pressing_on_empty_space_does_not_clear_until_release() {
+        let (mut h, ids) = Harness::new(3);
+        h.click(Vec2::ZERO);
+
+        h.press(Vec2::new(100.0, 0.0), Modifiers::default());
+        assert_eq!(h.selected(), vec![ids[0]], "กดค้างยังไม่ควรล้าง");
+
+        h.release(Vec2::new(100.0, 0.0));
+        assert!(h.selected().is_empty());
+    }
+
+    /// คลิกบนภาพที่เลือกอยู่แล้วต้องไม่เปลี่ยนชุด — ไม่งั้นลากทั้งชุดไม่ได้ (P2-5)
+    #[test]
+    fn clicking_an_already_selected_item_keeps_the_whole_group() {
+        let (mut h, ids) = Harness::new(3);
+        h.press(Vec2::ZERO, CTRL);
+        h.release(Vec2::ZERO);
+        h.press(Vec2::new(200.0, 0.0), CTRL);
+        h.release(Vec2::new(200.0, 0.0));
+        assert_eq!(h.selected(), vec![ids[0], ids[1]]);
+
+        h.click(Vec2::ZERO); // คลิกธรรมดาบนตัวที่เลือกอยู่แล้ว
+        assert_eq!(
+            h.selected(),
+            vec![ids[0], ids[1]],
+            "ต้องไม่ยุบเหลือตัวเดียว ไม่งั้นลากทั้งชุดไม่ได้"
+        );
+    }
+
+    // ---------- multi-select ----------
+
+    #[test]
+    fn ctrl_click_toggles_one_item_at_a_time() {
+        let (mut h, ids) = Harness::new(3);
+        for i in 0..3 {
+            h.press(Vec2::new(i as f32 * 200.0, 0.0), CTRL);
+            h.release(Vec2::new(i as f32 * 200.0, 0.0));
+        }
+        assert_eq!(h.selected(), vec![ids[0], ids[1], ids[2]]);
+        assert_eq!(h.board.selection().anchor(), Some(ids[2]));
+
+        // ถอดตัวกลางออก — ลำดับของที่เหลือต้องไม่สลับ
+        h.press(Vec2::new(200.0, 0.0), CTRL);
+        h.release(Vec2::new(200.0, 0.0));
+        assert_eq!(h.selected(), vec![ids[0], ids[2]]);
+        assert_eq!(
+            h.board.selection().anchor(),
+            Some(ids[2]),
+            "anchor ต้องตกไปที่ตัวท้ายที่ยังเหลือ ไม่ใช่ค้างที่ตัวที่เพิ่งถอด"
+        );
+    }
+
+    // ---------- rubber-band ----------
+
+    #[test]
+    fn dragging_a_band_selects_everything_it_touches() {
+        let (mut h, ids) = Harness::new(4);
+        h.press(Vec2::new(-60.0, -60.0), Modifiers::default());
+        h.drag_to(Vec2::new(260.0, 60.0));
+
+        assert!(h.last.is_some(), "ต้องมีกรอบให้วาด");
+        assert_eq!(h.selected(), vec![ids[0], ids[1]]);
+
+        // ลากต่อให้กว้างขึ้น ชุดต้องโตตาม
+        h.drag_to(Vec2::new(460.0, 60.0));
+        assert_eq!(h.selected(), vec![ids[0], ids[1], ids[2]]);
+
+        h.release(Vec2::new(460.0, 60.0));
+        assert_eq!(h.selected(), vec![ids[0], ids[1], ids[2]]);
+        assert!(h.last.is_none(), "ปล่อยแล้วกรอบต้องหาย");
+    }
+
+    #[test]
+    fn a_band_drawn_backwards_works_the_same() {
+        let (mut h, ids) = Harness::new(3);
+        h.press(Vec2::new(260.0, 60.0), Modifiers::default());
+        h.drag_to(Vec2::new(-60.0, -60.0));
+        h.release(Vec2::new(-60.0, -60.0));
+        assert_eq!(h.selected(), vec![ids[0], ids[1]]);
+    }
+
+    #[test]
+    fn ctrl_dragging_a_band_adds_to_the_existing_selection() {
+        let (mut h, ids) = Harness::new(4);
+        h.click(Vec2::new(600.0, 0.0)); // เลือกตัวที่สี่ไว้ก่อน
+        assert_eq!(h.selected(), vec![ids[3]]);
+
+        h.press(Vec2::new(-60.0, -60.0), CTRL);
+        h.drag_to(Vec2::new(260.0, 60.0));
+        h.release(Vec2::new(260.0, 60.0));
+
+        assert_eq!(
+            h.selected(),
+            vec![ids[3], ids[0], ids[1]],
+            "ของเดิมต้องอยู่ครบและอยู่ก่อน"
+        );
+    }
+
+    /// ★ ขยับไม่ถึงระยะ = ยังเป็นคลิก ไม่ใช่การลาก
+    /// มือสั่นสองพิกเซลไม่ควรกลายเป็นการลากกรอบที่ล้างสิ่งที่เลือกไว้
+    #[test]
+    fn a_tiny_wobble_is_still_a_click() {
+        let (mut h, ids) = Harness::new(3);
+        h.click(Vec2::ZERO);
+
+        h.press(Vec2::new(100.0, 0.0), Modifiers::default());
+        h.drag_to(Vec2::new(101.5, 0.5)); // ต่ำกว่าระยะ 4.0
+        assert!(h.last.is_none(), "ยังไม่ควรขึ้นกรอบ");
+        assert_eq!(h.selected(), vec![ids[0]], "ยังไม่ควรแตะการเลือก");
+
+        h.release(Vec2::new(101.5, 0.5));
+        assert!(h.selected().is_empty(), "จบแล้วต้องนับเป็นคลิกที่ว่าง");
+    }
+
+    /// กดบนภาพแล้วลาก = การย้าย (P2-5) ต้องไม่กลายเป็น rubber-band ทับ
+    #[test]
+    fn dragging_from_an_item_never_starts_a_band() {
+        let (mut h, ids) = Harness::new(3);
+        h.press(Vec2::ZERO, Modifiers::default());
+        h.drag_to(Vec2::new(400.0, 0.0));
+
+        assert!(h.last.is_none(), "ลากจากบนภาพต้องไม่ขึ้นกรอบเลือก");
+        assert_eq!(h.selected(), vec![ids[0]]);
+        h.release(Vec2::new(400.0, 0.0));
+        assert_eq!(h.selected(), vec![ids[0]]);
+    }
+
+    // ---------- undo ----------
+
+    /// ★ การเลือกติด ๆ กันต้องยุบเป็นขั้น undo **ขั้นเดียว**
+    ///
+    /// ไม่งั้นการลากกรอบหนึ่งครั้ง (ขยับ 100 เฟรม) จะกิน undo stack ทั้งก้อน
+    /// แล้วผู้ใช้จะกด Ctrl+Z ย้อนงานจริงไม่ถึง — undo ที่ใช้กู้งานไม่ได้ = ผิด I-3
+    #[test]
+    fn a_whole_drag_collapses_into_one_undo_step() {
+        let (mut h, _) = Harness::new(6);
+        h.press(Vec2::new(-60.0, -60.0), Modifiers::default());
+        for step in 1..=100 {
+            h.drag_to(Vec2::new(step as f32 * 10.0, 60.0));
+        }
+        h.release(Vec2::new(1_000.0, 60.0));
+
+        assert_eq!(h.history.undo_depth(), 1, "การลากหนึ่งครั้งต้องเป็นขั้นเดียว");
+    }
+
+    #[test]
+    fn undo_brings_back_the_previous_selection_exactly() {
+        let (mut h, ids) = Harness::new(3);
+        h.click(Vec2::ZERO);
+        h.history.seal(); // จำลองว่ามีการแก้ของจริงคั่นอยู่
+        let before = h.board.clone();
+
+        h.click(Vec2::new(200.0, 0.0));
+        assert_eq!(h.selected(), vec![ids[1]]);
+
+        h.history.undo(&mut h.board).unwrap();
+        assert_eq!(h.board, before, "ต้องคืนทั้งชุดและ anchor");
+    }
+
+    /// คลิกที่ว่างซ้ำ ๆ ตอนไม่มีอะไรเลือกอยู่ ต้องไม่สร้างขั้น undo เปล่า
+    #[test]
+    fn clicking_empty_space_repeatedly_creates_no_history_at_all() {
+        let (mut h, _) = Harness::new(3);
+        for _ in 0..20 {
+            h.click(Vec2::new(100.0, 0.0));
+            h.history.seal();
+        }
+        assert_eq!(h.history.undo_depth(), 0);
+        assert!(!h.board.is_dirty(), "ไม่มีอะไรเปลี่ยน ต้องไม่ขึ้นว่าแก้แล้ว");
+    }
+
+    // ---------- I-1 / ความทนทาน ----------
+
+    /// ★ I-1: event ที่ไม่ได้เปลี่ยนอะไรต้องไม่ขอวาดเฟรมใหม่
+    #[test]
+    fn a_move_that_changes_nothing_does_not_ask_for_a_redraw() {
+        let (board, _, index) = row_board(3);
+        let mut tool = SelectTool::new();
+        let ctx = CanvasContext {
+            board: &board,
+            index: &index,
+            drag_threshold: 4.0,
+        };
+
+        // ขยับโดยไม่ได้กดปุ่ม
+        let outcome = tool.handle(ctx, CanvasEvent::Move { world: Vec2::ZERO });
+        assert!(!outcome.needs_redraw);
+        assert!(outcome.commands.is_empty());
+
+        // ปล่อยปุ่มทั้งที่ไม่เคยกด
+        let outcome = tool.handle(
+            ctx,
+            CanvasEvent::Release {
+                button: CanvasButton::Primary,
+                world: Vec2::ZERO,
+            },
+        );
+        assert!(!outcome.needs_redraw);
+    }
+
+    /// ปุ่มกลางเป็นเรื่องของกล้อง ต้องไม่แตะการเลือกเลย
+    #[test]
+    fn the_middle_button_never_touches_the_selection() {
+        let (mut h, ids) = Harness::new(3);
+        h.click(Vec2::ZERO);
+
+        h.feed(CanvasEvent::Press {
+            button: CanvasButton::Middle,
+            world: Vec2::new(200.0, 0.0),
+            modifiers: Modifiers::default(),
+        });
+        h.feed(CanvasEvent::Release {
+            button: CanvasButton::Middle,
+            world: Vec2::new(400.0, 0.0),
+        });
+        assert_eq!(h.selected(), vec![ids[0]]);
+    }
+
+    /// เสีย focus ระหว่างลาก แล้วปล่อยเมาส์ที่โปรแกรมอื่น — กรอบต้องไม่ค้าง
+    #[test]
+    fn cancelling_mid_drag_leaves_nothing_stuck() {
+        let (mut h, _) = Harness::new(3);
+        h.press(Vec2::new(-60.0, -60.0), Modifiers::default());
+        h.drag_to(Vec2::new(260.0, 60.0));
+        assert!(h.tool.is_dragging());
+
+        h.tool.cancel();
+        assert!(!h.tool.is_dragging());
+
+        // event ที่ตามมาหลังยกเลิกต้องไม่ทำอะไรแปลก ๆ
+        h.drag_to(Vec2::new(500.0, 60.0));
+        h.release(Vec2::new(500.0, 60.0));
+        assert!(h.last.is_none());
+    }
+
+    /// I-4: พิกัดที่ไม่ใช่ตัวเลขต้องไม่ทำให้เลือกมั่วหรือ panic
+    #[test]
+    fn non_finite_pointer_positions_are_harmless() {
+        let (mut h, ids) = Harness::new(3);
+        h.click(Vec2::ZERO);
+
+        h.press(Vec2::new(f32::NAN, 0.0), Modifiers::default());
+        h.drag_to(Vec2::new(f32::INFINITY, 0.0));
+        h.release(Vec2::new(f32::NAN, f32::NAN));
+
+        assert!(h.selected().is_empty() || h.selected() == vec![ids[0]]);
+        assert!(h.board.z_order_is_consistent());
+    }
+}
