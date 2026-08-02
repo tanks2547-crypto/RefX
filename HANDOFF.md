@@ -16,9 +16,31 @@
 | P2 ขึ้นไป | ยังไม่เริ่ม |
 
 **เกณฑ์คุณภาพล่าสุดที่ผ่าน:** `fmt` / `clippy --all-features -D warnings` (workspace + `fuzz/`) /
-`nextest 271/271` / `deny check` ครบ 4 หมวด / **binary 15.47 MB จากเพดาน 25 MB (บังคับใน CI)**
+`nextest 274/274` / `deny check` ครบ 4 หมวด / **binary 15.47 MB จากเพดาน 25 MB (บังคับใน CI)**
 
 crate ที่มี: `refx-app` `refx-asset` `refx-core` `refx-io` `refx-platform` `refx-render` `refx-ui`
+
+### สถานะ CI (มีชีวิตแล้วตั้งแต่ 1 ส.ค. 2026)
+
+repo: **`github.com/tanks2547-crypto/RefX` (private)** · branch `main`
+
+| | windows-latest | ubuntu-latest |
+|---|---|---|
+| GPU ที่ใช้ตรวจจริง | **WARP** (Dx12/Cpu) | **lavapipe** (Vulkan/Cpu) |
+| เทสต์ | 274/274 | 274/274 |
+| binary | 15.34 MB | 17.02 MB |
+
+**เทสต์ GPU ถูกรันจริงทั้งสองแพลตฟอร์ม** — `REFX_REQUIRE_GPU=1` ทำให้ "ไม่มี adapter" = แดง
+ไม่ใช่ข้ามเงียบ ๆ · `.config/nextest.toml` ฆ่าเทสต์ที่เกิน 4 นาที เพื่อให้เทสต์ค้างเป็น
+"แดงพร้อมชื่อ" ไม่ใช่ซอมบี้กิน runner หลายชั่วโมง
+
+> ★ **ก่อน 1 ส.ค. 2026 CI ไม่เคยรันเลยสักครั้ง** (ไม่มี remote) — ทุกอย่างที่สร้างมา
+> (เพดาน binary, fuzz cron, `deny` รายสัปดาห์, เทสต์ GPU) เป็นทฤษฎีล้วน
+> พอรันจริงครั้งแรกก็เจอบั๊ก 2 ตัวทันที รวมถึงโค้ด `#[cfg(target_os = "linux")]`
+> ที่**ไม่เคยถูกคอมไพล์เลยตลอดโปรเจกต์**
+>
+> **บทเรียน:** เครื่องมือตรวจที่ไม่เคยเดินจริง = ไม่มีเครื่องมือ (ดู `docs/08 §3.9`)
+> รอบแรก cold cache ~40 นาที · รอบถัดมา 7–14 นาที (`rust-cache` อุ่นแล้ว)
 
 ### สถานะ git
 
