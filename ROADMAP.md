@@ -66,7 +66,13 @@ cargo run --features force-device-lost -p refx-app -- --force-device-lost-after-
 
 | # | Task | เสร็จเมื่อ |
 |---|---|---|
-| P2-1 | `Arena` + `ItemId` + `Board` + `Item` ครบตาม 02-data-model | unit test ครบ ไม่ต้องมี GPU |
+| P2-1 | `Arena` + `ItemId` + `Board` + `Item` ตาม 02-data-model **เฉพาะส่วนที่มีคนใช้จริง** | unit test ครบ ไม่ต้องมี GPU |
+
+> **P2-1 หมายเหตุ (2 ส.ค. 2026):** คำว่า "ครบตาม 02-data-model" เดิมกำกวม
+> `Workspace` (§2) และ `AssetId`/`Arena<Asset>` (§1) **ยังไม่ต้องทำ** —
+> multi-board tabs คือ P4-7 และยังไม่มีใครเรียกใช้
+> เขียนไว้ก่อนโดยไม่มีคนใช้ = โครงเปล่าที่ `docs/08 §3.9` ข้อ 2 ห้ามไว้
+> `SetCrop` / `ApplyLayout` / `GroupItems` ก็เช่นกัน — เป็นของ P2-7 / P3-2 / P2-9
 | P2-2 | `Command` trait + `History` + merge/seal | property test `undo_restores_exactly` ผ่าน |
 | P2-3 | `SpatialIndex` (loose grid) + hit-test | คลิกโดนภาพบนสุดเสมอแม้ทับกัน 50 ชั้น |
 | P2-4 | Select / rubber-band / multi-select | |

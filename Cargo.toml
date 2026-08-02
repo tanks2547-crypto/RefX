@@ -85,7 +85,12 @@ glam        = { version = "0.29", features = ["bytemuck"] }
 bytemuck    = { version = "1", features = ["derive"] }
 smallvec    = { version = "1", features = ["union"] }
 indexmap    = "2"
-slotmap     = "1"
+# ★ เคยมี `slotmap` ตรงนี้ "เผื่อใช้ทำ arena" แต่ไม่มีโค้ดไหนเรียกเลย (ลบ 2 ส.ค. 2026)
+#   P2-1 เขียน arena เองเพราะ slotmap **ไม่มี API ใส่ของกลับที่คีย์เดิม** (คีย์ที่ลบแล้ว
+#   ตายถาวร) ซึ่งแปลว่า undo ของ "ลบภาพ" จะได้ ItemId ใหม่ แล้ว z_order/Selection/group
+#   ที่ยังถือคีย์เก่าจะห้อยหมด — ทำ I-3 ไม่ได้ตั้งแต่ต้น
+#   ปล่อยประกาศค้างไว้คือโครงเปล่าแบบเดียวกับ zune-jpeg ที่หลอกเราหลาย session
+#   ว่า "ความสามารถนี้มีรออยู่แล้ว" (ดูคอมเมนต์หมวด image decode ข้างบน)
 thiserror   = "2"
 anyhow      = "1"
 tracing     = "0.1"

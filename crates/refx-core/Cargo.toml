@@ -12,8 +12,7 @@ workspace = true
 [dependencies]
 glam.workspace     = true
 smallvec.workspace = true
-indexmap.workspace = true
-slotmap.workspace  = true
+indexmap.workspace = true   # Selection ต้องรู้ลำดับที่คลิก (docs/02 §4) — ใช้จริงใน selection.rs
 thiserror.workspace = true
 serde.workspace    = true
 tracing.workspace  = true

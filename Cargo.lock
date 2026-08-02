@@ -2854,7 +2854,6 @@ dependencies = [
  "indexmap",
  "proptest",
  "serde",
- "slotmap",
  "smallvec",
  "thiserror 2.0.19",
  "tracing",

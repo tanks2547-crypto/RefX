@@ -72,7 +72,16 @@ refx/
 refx-app → refx-ui → refx-render → refx-core
                   ↘ refx-asset  ↗
                   ↘ refx-io    ↗
-ทุกตัว → refx-platform (leaf)
+ทุกตัว → refx-platform → refx-core
+
+> ★ **แก้ 2 ส.ค. 2026: `refx-platform` ไม่ใช่ leaf อีกต่อไป**
+> มันพึ่ง `refx-core` เพื่อ implement trait ที่ core นิยามไว้ (เช่น `ClipboardReader`)
+> กราฟยังเป็น DAG ทิศทางเดียวเพราะ `refx-core` ไม่พึ่ง crate ภายในตัวไหนเลย
+>
+> **ทำไมต้องยอม:** เดิม `refx-asset` พึ่ง `refx-platform` เพื่ออ่าน clipboard
+> ทำให้ชั้น asset ลาก `rfd`/`winit`/`arboard` มาทั้งกอง — และทำให้ fuzz ต้องคอมไพล์
+> ทั้งกอง GUI ด้วย nightly จนแตก · การกลับทิศด้วย trait ใน core แก้ที่ต้นเหตุ
+> ทางเลือกอื่นคือย้าย adapter ของ `arboard` ไป `refx-ui` ซึ่งขัด ADR-007 — แย่กว่า
 ```
 
 `refx-core` ต้อง unit-test ได้โดยไม่ต้องมี GPU และไม่ต้องแตะดิสก์ นี่คือตัวชี้วัดว่าแยกชั้นถูก

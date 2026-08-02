@@ -17,10 +17,13 @@
 | **P1-1 ถึง P1-6** | ✅ เสร็จ (P1-6 ครบแล้วหลังทำ `TextureAllocator`) |
 | **P1-7** working texture | ✅ เสร็จ (`9e1033e`) — mip บน CPU · LRU · 17 draw call ที่ 100 ภาพ |
 | **P1-8** drag & drop + clipboard paste | ✅ เสร็จ — **P1 ปิดครบแล้ว** |
-| P2 ขึ้นไป | ยังไม่เริ่ม |
+| **แยกชั้น `refx-asset`** (§2.0 เดิม) | ✅ เสร็จ (`41c2693`) — ดู §2.0 ด้านล่าง |
+| **P2-1** `Arena`/`Board`/`Item` | ✅ เสร็จ (`43b76d5`) |
+| **P2-2** `Command` + `History` + merge/seal | ✅ เสร็จ (`43b76d5`) — **ผ่านรีวิวแล้ว** |
+| P2-3 ขึ้นไป | ยังไม่เริ่ม ← **เริ่มที่นี่** |
 
 **เกณฑ์คุณภาพล่าสุดที่ผ่าน:** `fmt` / `clippy --all-features -D warnings` (workspace + `fuzz/`) /
-`nextest 274/274` / `deny check` ครบ 4 หมวด / **binary 15.47 MB จากเพดาน 25 MB (บังคับใน CI)**
+`nextest 336/336` / `deny check` ครบ 4 หมวด / **binary 15.46 MB จากเพดาน 25 MB (บังคับใน CI)**
 
 crate ที่มี: `refx-app` `refx-asset` `refx-core` `refx-io` `refx-platform` `refx-render` `refx-ui`
 
@@ -31,8 +34,11 @@ repo: **`github.com/tanks2547-crypto/RefX` (private)** · branch `main`
 | | windows-latest | ubuntu-latest |
 |---|---|---|
 | GPU ที่ใช้ตรวจจริง | **WARP** (Dx12/Cpu) | **lavapipe** (Vulkan/Cpu) |
-| เทสต์ | 274/274 | 274/274 |
-| binary | 15.34 MB | 17.02 MB |
+| เทสต์ | 336/336 | 336/336 |
+| binary | 15.35 MB | 17.01 MB |
+
+**`Fuzz (nightly)` เขียวครั้งแรก 2 ส.ค. 2026** — ทั้งสาม job (`fuzz_decode` ยิงเต็ม 15 นาที ·
+`unwired-targets` · `fuzz-lint`) บน `rustc 1.99.0-nightly (73dc9167f)` ดูเหตุใน §5 ข้อ false green
 
 **เทสต์ GPU ถูกรันจริงทั้งสองแพลตฟอร์ม** — `REFX_REQUIRE_GPU=1` ทำให้ "ไม่มี adapter" = แดง
 ไม่ใช่ข้ามเงียบ ๆ · `.config/nextest.toml` ฆ่าเทสต์ที่เกิน 4 นาที เพื่อให้เทสต์ค้างเป็น
@@ -81,34 +87,53 @@ repo อยู่ใต้ git แล้ว (branch **`main`**) และ **push
 > **ภาพจาก clipboard คมได้แค่ระดับ thumbnail** — ปล่อยไว้ รอทำพร้อม **P4-5 packed mode**
 > ห้ามแก้ด้วยไฟล์ชั่วคราวใน cache (ภาพที่ board อ้างถึงจะหายไปกับ LRU = ผิด I-3)
 
-### 2.0 ★ แยกชั้น `refx-asset` ออกจาก `refx-platform` — ทำก่อน P2
+### 2.0 ✅ แยกชั้น `refx-asset` ออกจาก `refx-platform` (เสร็จ `41c2693`)
 
-**`Fuzz (nightly)` แดงตั้งแต่รันครั้งแรก (1 ส.ค. 2026)** — job `fuzz-lint` ล้มตอนคอมไพล์
-`zbus 5.18.0` ด้วย nightly (`Stats is defined multiple times`, proc-macro พัง) **ไม่ใช่โค้ดเรา**
+เก็บไว้เพราะ **ผลลัพธ์เป็นข้อผูกมัดต่อไป** — ห้ามใส่ `refx-platform` กลับเข้า `refx-asset`
 
-สายที่ลากมา: `fuzz/` → `refx-asset` → `refx-platform` → `rfd` → `ashpd` → `zbus`
+เดิม `fuzz/` → `refx-asset` → `refx-platform` → `rfd` → `ashpd` → `zbus` ทำให้ fuzz
+ต้องคอมไพล์ทั้งกอง GUI ด้วย nightly แล้วแตกที่ `zbus` (ไม่ใช่โค้ดเรา)
 
-→ **fuzz ลากทั้งกอง GUI มาคอมไพล์ ทั้งที่ต้องการแค่ `panic_guard`**
+**ข้อเสนอเดิมในไฟล์นี้ผิดบางส่วน:** เขียนว่าย้าย `panic_guard` อย่างเดียวแล้ว
+"dependency หายทั้งเส้น" — ของจริง `refx-asset` ใช้จาก `refx-platform` **สามอย่าง**
 
-นี่ไม่ใช่แค่ปัญหาของ fuzz แต่เป็น **การรั่วของชั้นสถาปัตยกรรม** — ชั้น asset
-ไม่ควรพึ่ง windowing / dialog / clipboard เลย (ดู ARCHITECTURE §2)
+| | เดิม | ตอนนี้ |
+|---|---|---|
+| `panic_guard` | `refx-platform` | `refx-core::panic_guard` (std ล้วน) |
+| `total_ram()` | เรียกเองใน `with_defaults` | ผู้เรียกส่งเข้ามา (`refx-ui`) |
+| clipboard | เรียก `arboard` ผ่าน `refx-platform` | DTO + trait `ClipboardReader` อยู่ `refx-core` · ตัวที่คุย `arboard` อยู่ `refx-platform` · `refx-ui` เสียบให้ |
 
-สองทางที่ควรพิจารณา เลือกหลังดูโค้ดจริง:
+หลักการเดียวกับ `WakeHandle` ที่ทำให้ `refx-asset` ไม่รู้จัก `winit` อยู่ก่อนแล้ว
+ต่างกันแค่ใช้ trait แทน closure เพราะมี error type ที่สองฝั่งต้องแชร์
 
-1. **ย้าย `panic_guard` ไป `refx-core`** — มันเป็นแค่ธง thread-local + RAII ไม่มีโค้ดเฉพาะ
-   แพลตฟอร์มเลย ถ้าย้ายได้ **dependency หายทั้งเส้น** ไม่ต้อง feature-gate อะไร
-   (panic *hook* ที่อ่านธงยังอยู่ `refx-platform` ตามเดิม)
-2. ถ้าย้ายไม่ได้ → แยก dep ของ `refx-platform` เป็น feature ให้ `refx-asset` เอาเฉพาะที่ใช้
+**ผลข้างเคียงที่ ARCHITECTURE §2 บันทึกไว้แล้ว:** `refx-platform` ไม่ใช่ leaf อีกต่อไป
+(พึ่ง `refx-core`) กราฟยังเป็น DAG ทิศทางเดียว
 
-**ห้ามปักหมุด nightly ที่วันที่ใช้ได้เพื่อให้เขียว** — นั่นคือการเลื่อนปัญหาและทำให้
-สัญญาณที่กำลังบอกความจริงเงียบลง (`docs/08 §3.9`)
+ยืนยันด้วย `cargo tree`: `refx-asset` และ `fuzz/` ไม่เหลือ `rfd`/`winit`/`arboard`/`refx-platform`
 
-ได้ประโยชน์พลอยได้: เวลา build ทั้งโปรเจกต์เร็วขึ้น และ P2 จะเพิ่มโค้ดใน `refx-asset` อีกมาก
+### 2.1 ✅ P2-1 + P2-2 (เสร็จ `43b76d5` ผ่านรีวิว 2 ส.ค. 2026)
 
-### 2.1 → เข้า P2 Canvas mode
+`Arena` + `ItemId`/`GroupId`/`BoardId` · `Board`/`Item`/`ItemCanvas`/`ItemMeta`/`AssetRef` ·
+`Selection` · `ViewState` · `Command` + `History` + merge/seal + `AddItems`/`RemoveItems`/
+`TransformItems`/`ReorderZ`/`EditMeta`
+
+**สิ่งที่ต้องรู้ก่อนเขียน `Command` ตัวใหม่** (รายละเอียดอยู่ใน doc comment ของ `command.rs`):
+
+1. `apply` ที่คืน `Err` **ต้องไม่แตะ board เลย** — คำสั่งที่แตะหลาย item ย้อนสิ่งที่ทำไปแล้วคืนก่อน
+2. `undo` คืนสภาพ **เป๊ะ**: `ItemId` เดิม · ชั้น z เดิม · selection เดิม · anchor เดิม · ธง `dirty` เดิม
+3. **redo ต้องได้ `ItemId` ชุดเดิม** ไม่งั้นคำสั่งถัดไปในสาย redo ชี้ไปที่ว่าง
+   (นี่คือเหตุผลที่ `Arena::insert_at` มีอยู่ และเหตุผลที่ไม่ใช้ `slotmap`)
+4. `heap_size()` **ไม่มีค่าเริ่มต้น** — ต้องเขียนเองทุกตัว ไม่งั้นเพดาน 64 MB ไม่นับคำสั่งใหม่
+
+### 2.2 → เริ่มที่ P2-3 `SpatialIndex` + hit-test
 
 อ่าน `ROADMAP.md` หัวข้อ P2 และ `docs/03 §1` (โดยเฉพาะกับดัก pointer ของ egui
 และทางแก้ระยะยาว: ทำ canvas เป็น widget จริงด้วย `allocate_response`)
+
+> ⚠️ `crates/refx-core/src/layout.rs` ยังเป็นไฟล์ TODO บรรทัดเดียวโดยตั้งใจ —
+> job `unwired-targets` ใน `fuzz.yml` จะ **แดงทันที** ที่มันมีโค้ดเกิน 2 บรรทัด
+> จนกว่าจะต่อ `fuzz_layout` ให้ครบสามขั้นตามที่ job นั้นพิมพ์บอก (เรื่องเดียวกันกับ
+> `refx-io::dto` และ `refx-io::journal`)
 
 ---
 
@@ -175,6 +200,9 @@ repo อยู่ใต้ git แล้ว (branch **`main`**) และ **push
 | 15 | **ลำดับฟิลด์ของ `Assets` คือลำดับ drop — ห้ามสลับ** (`pool` → `io_tx` → `_io`) | `IoThread::drop` join เธรด IO ซึ่งจบก็ต่อเมื่อ sender หมดทุกใบ ถ้า `_io` ถูก drop ก่อน `io_tx` = **ปิดหน้าต่างแล้ว RefX.exe ไม่ตาย** ล็อก single-instance ค้าง เปิดใหม่ไม่ได้อีกเลย (เกิดจริง ยืนยันด้วยมือ 29 ก.ค. 2026) | `refx-ui/src/app.rs` + เทสต์ `dropping_assets_finishes_instead_of_hanging_forever` |
 | 16 | **resource ที่ผูกกับ device ต้องสร้างผ่าน `DeviceBound::build` จุดเดียว** และรับด้วยการ destructure | เปิดโปรแกรมกับกู้ device เคยเป็นโค้ดคนละชุด แล้ว **drift**: P1-7 เพิ่ม `WorkingCache` แต่ `recover_device()` ไม่ได้สร้างใหม่ → หลังกู้ยังถือ texture/bind group ของ device ที่ตายแล้ว · destructure ทำให้เพิ่ม resource ใหม่แล้ว **คอมไพล์ไม่ผ่านทั้งสองที่** จนกว่าจะจัดการครบ (หลักการเดียวกับ `GpuStack`) | `refx-ui/src/app.rs` |
 | 17 | **เติม atlas กลับ ต้อง `resize(layers_needed(n))` ก่อนเริ่มเติมเสมอ** | atlas ที่เพิ่งสร้างมี **0 layer** (จอง lazy ตั้งแต่ 28 ก.ค.) ถ้าเติมเลยจะได้ `NeedsResize` ตั้งแต่ภาพแรก แล้ว**ทุกภาพกลายเป็น placeholder** = board ว่างเปล่าหลัง driver อัปเดต (เกิดจริง: `restored=0 total=8`) · ขยายกลางคันไม่ได้เพราะ `resize()` ล้างตัวจัดสรรทั้งชุด | `refx-render::atlas::layers_needed` + เทสต์ `refilling_a_fresh_atlas_needs_a_resize_first` |
+| 18 | **`refx-asset` ห้าม depend `refx-platform`** (ตัดสิน 2 ส.ค. 2026) | ชั้น asset ที่รู้จัก windowing/dialog/clipboard ลาก `rfd`→`ashpd`→`zbus` เข้า fuzz จนคอมไพล์ nightly ไม่ผ่าน · ของที่ต้องถาม OS ให้ **ผู้เรียกส่งเข้ามา** หรือกลับทิศด้วย trait ใน `refx-core` | `refx-asset/Cargo.toml` (มีคอมเมนต์ห้ามไว้) + `refx-core::clipboard` |
+| 19 | **เขียน `Arena` เอง ห้ามกลับไปใช้ `slotmap`** | `slotmap` ไม่มี API ใส่ของกลับที่คีย์เดิม (คีย์ที่ลบแล้วตายถาวร) → undo ของ "ลบภาพ" จะคืน `ItemId` **ใหม่** แล้ว `z_order`/`Selection`/`ItemMeta::group` ที่ถือคีย์เก่าจะห้อยหมด = ภาพกลับมาแต่ลำดับและการเลือกหาย · ทำ I-3 ไม่ได้ตั้งแต่ต้น | `refx-core::arena::Arena::insert_at` |
+| 20 | **`Arena`/`Selection` `PartialEq` เทียบสิ่งที่ผู้ใช้สัมผัสได้ ไม่ใช่โครงข้างใน** | `Arena` เทียบ **คีย์+ค่าของสิ่งที่มีชีวิต** ไม่ใช่ `slots` ดิบ — นับช่องว่างท้าย vec ด้วยจะทำให้ undo ของ "เพิ่มภาพ" ไม่มีวันคืนสภาพได้ ทั้งที่นั่นคือการวัด*ตัวจัดสรร* · ส่วน `Selection` เทียบ **ตามลำดับ** ไม่ใช่แบบเซต เพราะ anchor ของ align ขึ้นกับลำดับคลิก | `arena.rs` / `selection.rs` + เทสต์คู่ที่อธิบายทั้งสองทิศ |
 
 ---
 
@@ -187,6 +215,39 @@ repo อยู่ใต้ git แล้ว (branch **`main`**) และ **push
 - `docs/09` มีตาราง wgpu 29 API delta: `push_constant_ranges`→`immediate_size`,
   `bind_group_layouts` รับ `&[Option<&_>]`, `multiview`→`multiview_mask`
 - `tracing-appender` 0.2 **หมุนไฟล์ตามขนาดไม่ได้** (มีแค่ตามเวลา) ต้องเขียน writer เอง
+- `docs/02 §2` เคยให้ `refx-core` ถือ `ImageFormat` กับ `LoadError` ของ crate `image`
+  ซึ่ง **ทำไม่ได้และไม่เคยทำได้** (`refx-core` depend `image` ไม่ได้ · `image::ImageError`
+  serialize ไม่ได้ แต่ §7 บังคับให้ทุกอย่างใน `Board` ลง DTO ได้) → แก้แล้วที่ **§2.2.5**:
+  core นิยาม enum เอง ส่วน `impl From<&LoadError> for MissingReason` อยู่ `refx-asset` จุดเดียว
+  **`MissingReason::Unknown` ต้องมีเสมอ** — ไฟล์จากรุ่นใหม่กว่าอาจมีเหตุผลที่รุ่นนี้ไม่รู้จัก
+  อ่านเจอต้องตกมาที่นั่น ห้าม error ทิ้งทั้งไฟล์ (I-3) · **กฎนี้ใช้กับทุก enum ที่ลงไฟล์**
+- `docs/02 §5` เคยเขียน zoom `0.02..=32.0` ทั้งที่โค้ดใช้ `0.01..=64.0` มาตั้งแต่ P0-7
+  → แก้เอกสารให้ตรงโค้ด (เอกสารเป็นฝ่ายผิด)
+- `HANDOFF §2.0` เดิมเขียนว่าย้าย `panic_guard` อย่างเดียวแล้ว dependency หายทั้งเส้น
+  → ของจริงมีสามอย่าง (ดู §2.0)
+
+### ★ false green ตัวที่สี่: `Fuzz (nightly)` ไม่เคยรันบน nightly เลย (2 ส.ค. 2026)
+
+หลังแยกชั้น `refx-asset` แล้ว `fuzz-lint` เขียว แต่ job `fuzz` ยังแดง — **คนละสาเหตุกับ `zbus`**
+log บอกตรง ๆ ว่า rustc ที่ถูกเรียกคือ `1.92-x86_64-unknown-linux-gnu`
+
+`rust-toolchain.toml` ที่รากตรึง `channel = "1.92"` ไว้ และ **ไฟล์นั้นชนะ**
+`rustup default nightly` ที่ `dtolnay/rust-toolchain` ตั้งให้ ผลคือ:
+
+- job `fuzz` ล้มเสียงดัง เพราะ `cargo fuzz` ต้องใช้ `-Zsanitizer` (ดีแล้ว)
+- job `fuzz-lint` **ผ่านแบบเงียบ ๆ บน stable** ทั้งที่หน้าที่เดียวของมันคือตรวจว่า
+  โค้ดคอมไพล์บน nightly ได้ → **ชื่อของ job บอกตรงข้ามกับสิ่งที่มันทำ**
+
+แก้: `RUSTUP_TOOLCHAIN: nightly` ระดับ workflow (ชนะ toolchain file ตามลำดับของ rustup)
+**ไม่ใช่การปักหมุดวันที่** — ยังเป็น nightly ล่าสุดเสมอ
+
+> ★ **นี่คือครั้งที่สี่ของรูปแบบเดิม** (canvas ว่าง · `fuzz_decode` stub · เพดาน binary
+> ที่ไม่มีใครตรวจ · toolchain ที่ไม่ตรงชื่อ) และ **ทั้งสี่ครั้งเจอเพราะมีอย่างอื่นแตก
+> แล้วไปตามต่อ ไม่ใช่เพราะมีใครไปตรวจว่าตัวตรวจทำงานจริงไหม**
+>
+> ทางแก้ที่ใช้ได้คือทำให้สภาพผิดเป็น **ความล้มเหลวที่ส่งเสียง** ไม่ใช่ความเงียบ —
+> ทั้งสอง job จึงมีขั้น `rustc --version | grep nightly` ที่แดงถ้า toolchain หลุด
+> **เพิ่ม job/harness ใหม่เมื่อไหร่ ให้ถามก่อนว่า "ถ้ามันไม่ได้ทำงาน จะรู้ได้ยังไง"**
 
 ---
 
@@ -200,10 +261,11 @@ repo อยู่ใต้ git แล้ว (branch **`main`**) และ **push
 | `xtask gen-testdata` | ทำแล้วบางส่วน · ยังไม่มี `bench` / `package` (P5-1) |
 | egui memory ตอนกู้ device | ตอนนี้ scroll position / panel ที่เปิดค้างรีเซ็ต · P5 ให้ clone `ctx.memory()` ก่อนกู้แล้วคืน |
 | จุดบอด fast hash ตรงกลางไฟล์ | ปิดด้วย mtime แล้ว แต่จุดบอดตัว hash เองยังอยู่ (มีเทสต์บันทึกไว้ว่าตั้งใจ) |
-| **เทสต์ GPU ถูกข้ามบน CI** (ไม่มี adapter บน runner) | เทสต์ที่แตะ texture จริง (`atlas_comes_back_…`, `working_cache_is_rebuilt_…`, `refilling_a_fresh_atlas_…`) ใช้ `headless_device()` ซึ่งคืน `None` เมื่อไม่มี GPU แล้ว **พิมพ์บอกว่าข้าม** (docs/08 §3.9 ข้อ 2) · บนเครื่องนักพัฒนาที่มี GPU มันรันจริงทุกครั้ง · จะให้ CI รันด้วยต้องลง software adapter (Ubuntu: `mesa-vulkan-drivers` = lavapipe · Windows runner มี WARP อยู่แล้ว) — **ยังไม่ได้ทำ** |
+| ~~เทสต์ GPU ถูกข้ามบน CI~~ | ✅ **ปิดแล้ว 1 ส.ค. 2026** — ทั้งสอง runner รันจริง (WARP / lavapipe) และ `REFX_REQUIRE_GPU=1` ทำให้ "ไม่มี adapter" = แดง ดู §1 |
 | ชั้น UI ของการกู้ device ยังไม่มี unit test | `recover_device()` ต้องมีหน้าต่างจริงจึงเรียกในเทสต์ไม่ได้ · ตอนนี้คุมด้วย (ก) `DeviceBound` ที่บังคับตอนคอมไพล์ (ข) `debug_assert` เทียบ generation ของ `WorkingCache` ทุกเฟรม (ค) รันจริงด้วย `--force-device-lost-after-ms` |
 | **ผู้ถือลิขสิทธิ์ใน LICENSE เป็นชื่อผลิตภัณฑ์ ไม่ใช่บุคคล/นิติบุคคล** | `Copyright (c) 2026 RefX` · ตามกฎหมายผู้ถือลิขสิทธิ์ควรเป็นบุคคลหรือนิติบุคคล · ตอนนี้ repo เป็น private และไม่มี contributor คนอื่น จึงยังไม่มีผล → **ทบทวนก่อนเปิด public หรือก่อนรับ contributor คนแรก** |
-| `refx-asset` / `refx-io` / `refx-ui` / `refx-app` ยังไม่เคยคอมไพล์บน Linux | cross-check จากเครื่อง Windows ติดที่ `libsqlite3-sys` กับ `zstd` ต้องใช้ C cross-compiler · `refx-core` / `refx-render` / `refx-platform` (ตัวที่มี `cfg(target_os)`) ผ่านแล้ว · ที่เหลือรอผล CI ฝั่ง ubuntu เป็นตัวยืนยัน |
+| ~~`refx-asset` / `refx-io` / `refx-ui` / `refx-app` ยังไม่เคยคอมไพล์บน Linux~~ | ✅ **ปิดแล้ว 1 ส.ค. 2026** — job `check (ubuntu-latest)` build ครบทุก crate + รันเทสต์ + วัดขนาด binary (17.01 MB) |
+| **ชื่อขั้น undo ยังไม่ถูกแปล** | `Command::label()` คืน `&'static str` อังกฤษ (`"Add items"` ฯลฯ) แต่ `refx-ui::text` ยังไม่มีตารางแปลให้ · ต้องทำตอนที่ UI มีเมนู/ปุ่ม undo จริง (P2-4 ขึ้นไป) — อย่าเอา `label()` ไปแสดงตรง ๆ กับผู้ใช้ |
 | ข้อความ **CLI** กับ **crash dialog** ยังเป็นภาษาไทย | `tracing::` กวาดเป็นอังกฤษครบแล้ว (84 จุด) แต่ `--help` / error ของ CLI ใน `main.rs` และ `dialog::show_crash_dialog` ยังเป็นไทยล้วน · เป็นผิวที่ผู้ใช้ต่างชาติเจอได้เหมือนกัน แต่เป็นคนละระบบกับ log จึงแยกทำทีหลัง (crash dialog ควรไปอยู่ใต้ `refx-ui::text` ตอนที่ P5-3 ทำระบบภาษาเต็มรูปแบบ) |
 
 ---
