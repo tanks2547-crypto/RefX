@@ -100,6 +100,42 @@ pub struct ItemMeta {
 
 **สองอันนี้ต้องอยู่คู่กันตลอดชีวิตของ item** สลับ mode ไปมาแล้วข้อมูลอีกฝั่งไม่หาย — นี่คือข้อกำหนดหลักของดีไซน์สองโหมด
 
+### ★ 2.2.5 ชนิดใน `refx-core` ต้องเป็นของตัวเอง ห้ามยืมจาก `image` (แก้ 2 ส.ค. 2026)
+
+เอกสารฉบับแรกเขียนว่า `AssetRef.format` เป็น `ImageFormat` และ `ItemKind::Missing.reason`
+เป็น `LoadError` โดยตั้งใจให้หมายถึงชนิดของ crate `image` — **ทำไม่ได้ และไม่เคยทำได้**
+
+1. `refx-core` **ห้าม** depend `image` (ARCHITECTURE §2) → คอมไพล์ไม่ผ่านตั้งแต่ต้น
+2. §7 บังคับให้ทุกอย่างใน `Board` serialize ลง DTO ที่มีเวอร์ชัน แต่ **`image::ImageError`
+   serialize ไม่ได้เลย** → ต่อให้ข้อ 1 ไม่มีปัญหา ข้อนี้ก็ยังตัน
+
+**ทางที่ถูก — `refx-core` นิยาม enum ของตัวเอง:**
+
+```rust
+// refx-core — ข้อมูลล้วน serialize ได้ ไม่พึ่ง crate ภายนอก
+pub enum ImageFormat { Png, Jpeg, WebP, Gif, Bmp, Tga, Tiff }
+
+pub enum MissingReason {
+    FileNotFound, TooLarge, UnsupportedFormat, Damaged, Unreadable,
+    /// ★ ต้องมี — ไฟล์ที่บันทึกด้วยรุ่นใหม่กว่าอาจมีเหตุผลที่รุ่นนี้ไม่รู้จัก
+    /// อ่านเจอค่าที่ไม่รู้จักต้องตกมาที่นี่ **ห้าม error ทิ้งทั้งไฟล์** (I-3)
+    Unknown,
+}
+```
+
+`refx-asset` เป็นฝั่งที่รู้จักทั้งสองโลก จึงเป็นที่เดียวที่มี `impl From<&LoadError> for MissingReason`
+→ เพิ่ม variant ใน `LoadError` เมื่อไหร่ **คอมไพล์ไม่ผ่านจนกว่าจะจัดการที่จุดเดียวนั้น**
+
+**ห้ามเก็บเป็น `String`** ถึงจะง่ายกว่า — ข้อความจะถูกบันทึกลงไฟล์ `.refx`
+ด้วยภาษาที่ผู้ใช้ตั้งไว้ *ตอนบันทึก* แล้วสลับภาษาทีหลังก็แปลกลับไม่ได้อีก
+ขัดกับกฎใน `docs/03 §0` ที่ว่าข้อความผู้ใช้ต้องประกอบขึ้นจากข้อมูลที่มีโครงสร้าง
+`refx-ui::text` แปลจาก variant ได้ตรง ๆ อยู่แล้ว
+
+`ContentHash` เป็นข้อมูลล้วนอยู่แล้ว → ย้ายลง `refx-core` ได้ตามเดิม
+แล้ว `refx-asset` re-export กลับที่ `refx_asset::hash` เพื่อไม่ต้องแก้ call site เดิม
+
+---
+
 ### 2.3 AssetRef — แยกภาพออกจาก item
 
 ```rust

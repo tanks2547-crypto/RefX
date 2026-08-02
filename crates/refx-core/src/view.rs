@@ -161,6 +161,40 @@ impl Camera {
     }
 }
 
+/// กล้องของทั้งสองโหมด เก็บแยกกัน
+///
+/// ★ แยกกล้องต่อโหมดเพราะสลับโหมดแล้วกลับมา ผู้ใช้คาดหวังว่ายังอยู่ตำแหน่งเดิม
+/// ถ้าใช้กล้องร่วมกัน canvas จะเด้งไปอยู่ที่ที่ arrange เพิ่ง scroll ไว้ ซึ่งน่ารำคาญมาก
+/// เวลาสลับไปมาบ่อย ๆ (docs/02 §5)
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct ViewState {
+    /// กล้องของโหมด Canvas (pan/zoom)
+    pub canvas: Camera,
+    /// กล้องของโหมด Arrange (scroll/zoom)
+    pub arrange: Camera,
+    /// โหมดที่กำลังใช้อยู่
+    pub mode: Mode,
+}
+
+impl ViewState {
+    /// กล้องของโหมดปัจจุบัน
+    #[must_use]
+    pub fn active(&self) -> &Camera {
+        match self.mode {
+            Mode::Canvas => &self.canvas,
+            Mode::Arrange => &self.arrange,
+        }
+    }
+
+    /// กล้องของโหมดปัจจุบัน (แก้ได้)
+    pub fn active_mut(&mut self) -> &mut Camera {
+        match self.mode {
+            Mode::Canvas => &mut self.canvas,
+            Mode::Arrange => &mut self.arrange,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // เทียบ float ตรง ๆ ได้ในเทสต์: ค่าที่ assert คือค่าคงที่หลัง clamp/ประกอบ struct
@@ -344,5 +378,30 @@ mod tests {
                 .iter()
                 .all(|v| v.is_finite())
         );
+    }
+
+    /// ★ ข้อกำหนดของ docs/02 §5: สลับโหมดไปกลับแล้วต้องอยู่ที่เดิมทั้งสองฝั่ง
+    #[test]
+    fn each_mode_keeps_its_own_camera_across_switches() {
+        let mut view = ViewState::default();
+
+        view.active_mut().set_center(Vec2::new(100.0, 200.0));
+        view.mode = Mode::Arrange;
+        assert_eq!(
+            view.active().center(),
+            Vec2::ZERO,
+            "arrange ต้องเป็นกล้องคนละตัว"
+        );
+
+        view.active_mut().set_center(Vec2::new(-30.0, 5.0));
+        view.mode = Mode::Canvas;
+        assert_eq!(
+            view.active().center(),
+            Vec2::new(100.0, 200.0),
+            "กลับมาแล้วต้องอยู่ที่เดิม ไม่ใช่เด้งไปที่ที่ arrange scroll ไว้"
+        );
+
+        view.mode = Mode::Arrange;
+        assert_eq!(view.active().center(), Vec2::new(-30.0, 5.0));
     }
 }

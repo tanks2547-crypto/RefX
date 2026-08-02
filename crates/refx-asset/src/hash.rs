@@ -24,37 +24,11 @@ const TAG_FULL: u8 = 0x00;
 const TAG_SAMPLED: u8 = 0x01;
 
 /// hash ของเนื้อไฟล์ (blake3-256)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ContentHash([u8; 32]);
-
-impl ContentHash {
-    /// ไบต์ดิบ 32 ไบต์ — ใช้เป็น BLOB key ใน sqlite
-    #[must_use]
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-
-    /// สร้างจากไบต์ดิบ (ใช้ตอนอ่านกลับจาก DB)
-    #[must_use]
-    pub fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self(bytes)
-    }
-
-    /// เลขฐานสิบหกแบบสั้นสำหรับ log (8 ตัวอักษรพอแยกแยะได้ในทางปฏิบัติ)
-    #[must_use]
-    pub fn short(&self) -> String {
-        self.0[..4].iter().map(|b| format!("{b:02x}")).collect()
-    }
-}
-
-impl std::fmt::Display for ContentHash {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for byte in &self.0 {
-            write!(f, "{byte:02x}")?;
-        }
-        Ok(())
-    }
-}
+///
+/// ★ ตัวชนิดย้ายลง `refx-core` แล้ว (docs/02 §2.2.5) เพราะ `AssetRef` ถือมันไว้
+/// และ `refx-core` depend `blake3` ไม่ได้ — re-export กลับที่นี่เพื่อให้ call site
+/// เดิมทั้งหมดยังเขียน `refx_asset::hash::ContentHash` ได้เหมือนเดิม
+pub use refx_core::hash::ContentHash;
 
 /// hash ไฟล์ไม่สำเร็จ
 #[derive(Debug, thiserror::Error)]
@@ -75,7 +49,7 @@ pub fn hash_bytes(bytes: &[u8]) -> ContentHash {
     let mut hasher = blake3::Hasher::new();
     hasher.update(&[TAG_FULL]);
     hasher.update(bytes);
-    ContentHash(*hasher.finalize().as_bytes())
+    ContentHash::from_bytes(*hasher.finalize().as_bytes())
 }
 
 /// hash ไฟล์บนดิสก์ — เลือก full หรือ fast path ตามขนาดอัตโนมัติ
@@ -111,7 +85,7 @@ pub fn hash_file(path: &Path) -> Result<ContentHash, HashError> {
             }
             hasher.update(&buffer[..n]);
         }
-        return Ok(ContentHash(*hasher.finalize().as_bytes()));
+        return Ok(ContentHash::from_bytes(*hasher.finalize().as_bytes()));
     }
 
     // ---- fast path: หัว 1 MB + ท้าย 1 MB + ขนาด ----
@@ -134,7 +108,7 @@ pub fn hash_file(path: &Path) -> Result<ContentHash, HashError> {
     file.read_exact(&mut buffer).map_err(io_err)?;
     hasher.update(&buffer);
 
-    Ok(ContentHash(*hasher.finalize().as_bytes()))
+    Ok(ContentHash::from_bytes(*hasher.finalize().as_bytes()))
 }
 
 #[cfg(test)]
