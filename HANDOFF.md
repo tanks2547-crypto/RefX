@@ -20,10 +20,12 @@
 | **แยกชั้น `refx-asset`** (§2.0 เดิม) | ✅ เสร็จ (`41c2693`) — ดู §2.0 ด้านล่าง |
 | **P2-1** `Arena`/`Board`/`Item` | ✅ เสร็จ (`43b76d5`) |
 | **P2-2** `Command` + `History` + merge/seal | ✅ เสร็จ (`43b76d5`) — **ผ่านรีวิวแล้ว** |
-| P2-3 ขึ้นไป | ยังไม่เริ่ม ← **เริ่มที่นี่** |
+| **P2-3** `SpatialIndex` + hit-test | ✅ เสร็จ (`7a81b4e`) |
+| **P2-4** select / rubber-band / multi-select | 🟡 **ครึ่งเดียว** (`dd51d60`) — ตรรกะครบและเทสต์ครบใน `refx-core` แต่ **ยังไม่มีใครเรียก** ดู §2.2 |
+| P2-5 ขึ้นไป | ยังไม่เริ่ม |
 
 **เกณฑ์คุณภาพล่าสุดที่ผ่าน:** `fmt` / `clippy --all-features -D warnings` (workspace + `fuzz/`) /
-`nextest 336/336` / `deny check` ครบ 4 หมวด / **binary 15.46 MB จากเพดาน 25 MB (บังคับใน CI)**
+`nextest 380/380` / `deny check` ครบ 4 หมวด / **binary 15.46 MB จากเพดาน 25 MB (บังคับใน CI)**
 
 crate ที่มี: `refx-app` `refx-asset` `refx-core` `refx-io` `refx-platform` `refx-render` `refx-ui`
 
@@ -34,7 +36,7 @@ repo: **`github.com/tanks2547-crypto/RefX` (private)** · branch `main`
 | | windows-latest | ubuntu-latest |
 |---|---|---|
 | GPU ที่ใช้ตรวจจริง | **WARP** (Dx12/Cpu) | **lavapipe** (Vulkan/Cpu) |
-| เทสต์ | 336/336 | 336/336 |
+| เทสต์ | 380/380 | 380/380 |
 | binary | 15.35 MB | 17.01 MB |
 
 **`Fuzz (nightly)` เขียวครั้งแรก 2 ส.ค. 2026** — ทั้งสาม job (`fuzz_decode` ยิงเต็ม 15 นาที ·
@@ -125,10 +127,47 @@ repo อยู่ใต้ git แล้ว (branch **`main`**) และ **push
    (นี่คือเหตุผลที่ `Arena::insert_at` มีอยู่ และเหตุผลที่ไม่ใช้ `slotmap`)
 4. `heap_size()` **ไม่มีค่าเริ่มต้น** — ต้องเขียนเองทุกตัว ไม่งั้นเพดาน 64 MB ไม่นับคำสั่งใหม่
 
-### 2.2 → เริ่มที่ P2-3 `SpatialIndex` + hit-test
+### 2.2 ★★ งานถัดไป: ย้าย `refx-ui` มาใช้ `refx_core::Board`
 
-อ่าน `ROADMAP.md` หัวข้อ P2 และ `docs/03 §1` (โดยเฉพาะกับดัก pointer ของ egui
-และทางแก้ระยะยาว: ทำ canvas เป็น widget จริงด้วย `allocate_response`)
+**นี่คือสิ่งที่ขวาง P2-4 ครึ่งหลังอยู่ และไม่มีใครเคยลงมันไว้ใน ROADMAP**
+
+`refx-ui` ยังเก็บสถานะเองเป็น `Vec<QuadInstance>` คู่ขนานกับ `Vec<BoardItem>`
+(`app.rs` — มี TODO เขียนไว้ตั้งแต่ P1 ว่า "P2 จะแทนที่ด้วย `Board`/`Item` ตัวจริง")
+ตราบใดที่ยังเป็นแบบนี้ ของที่ P2-1…P2-4 สร้างไว้ **ไม่มีทางไปถึงผู้ใช้เลย**
+
+สิ่งที่พร้อมใช้แล้วและรอ caller อยู่:
+
+| ของ | อยู่ที่ | ใครควรเรียก |
+|---|---|---|
+| `Board` / `Item` / `Command` / `History` | `refx-core` | `RefxApp` แทน `board_items` + `quads` |
+| `SpatialIndex` | `refx_core::spatial` | culling ต่อเฟรม + hit-test |
+| `SelectTool` / `SelectItems` | `refx_core::interact` | ตัวแปลง pointer ของ egui |
+
+> ⚠️ **ของที่เทสต์ครบแต่ไม่มีใครเรียก คือสภาพเดียวกับที่ทำให้ `fuzz_decode`
+> เป็น stub อยู่ 5 session** ต่างกันแค่ตรงนี้ไม่ได้ *โกหก* ว่าทำงานอยู่
+> ถ้ารอบหน้าไม่ได้ต่อให้ครบ ต้องเขียนไว้ตรงนี้ว่าทำไม อย่าปล่อยเงียบ
+
+**ลำดับที่แนะนำ** (แต่ละข้อจบแล้ว build ผ่านและเทสต์ผ่านก่อนขึ้นข้อถัดไป):
+
+1. `RefxApp` ถือ `Board` + `History` + `SpatialIndex` · `BoardItem` เหลือเฉพาะ
+   *สถานะฝั่ง render* (atlas slot, working key) แยกเป็น side map ที่คีย์ด้วย `ItemId`
+   — ห้ามเอากลับไปปนกับข้อมูลโดเมน
+2. drag & drop / paste สร้าง `AddItems` แล้วส่งเข้า `History` แทนการ `push` ตรง ๆ
+3. สร้าง `quads` จาก `board.items_in_z_order()` (ลำดับ render = ลำดับใน `Vec` อยู่แล้ว)
+4. **แล้วค่อย** ทำ `allocate_response` + ต่อ `SelectTool` + วาดกรอบเลือก/rubber-band
+
+### 2.3 กับดัก pointer ของ egui — ถึงเวลาแก้ที่ต้นเหตุแล้ว
+
+`docs/03 §1` บันทึกทางแก้ชั่วคราวที่ใช้อยู่ (`egui_is_using_pointer()` +
+`canvas.contains(cursor)`) พร้อมเงื่อนไขว่า **ทางที่ถูกคือทำ canvas เป็น widget จริง
+ด้วย `ui.allocate_response(rect, Sense::click_and_drag())` แล้วขับทุกอย่างจาก response นั้น**
+
+P2-4 คือจุดที่มันคุ้มแล้ว เพราะปุ่มซ้ายต้องเปลี่ยนหน้าที่จาก "pan" ไปเป็น
+"เลือก/ลากกรอบ" ซึ่งแปลว่าต้องรื้อการตัดสินใจเรื่อง pointer อยู่ดี
+และ `docs/03 §1` เตือนไว้ว่า **ถ้าเอา widget ของ egui ไปวางในช่อง canvas
+ก่อนจะแก้ตรงนี้ เราจะแย่ง event นั้นไป**
+
+ปุ่มกลาง = pan (กล้องไม่ใช่สถานะของ board จึงไม่ผ่าน `Command`)
 
 > ⚠️ `crates/refx-core/src/layout.rs` ยังเป็นไฟล์ TODO บรรทัดเดียวโดยตั้งใจ —
 > job `unwired-targets` ใน `fuzz.yml` จะ **แดงทันที** ที่มันมีโค้ดเกิน 2 บรรทัด
@@ -266,6 +305,7 @@ log บอกตรง ๆ ว่า rustc ที่ถูกเรียกค�
 | **ผู้ถือลิขสิทธิ์ใน LICENSE เป็นชื่อผลิตภัณฑ์ ไม่ใช่บุคคล/นิติบุคคล** | `Copyright (c) 2026 RefX` · ตามกฎหมายผู้ถือลิขสิทธิ์ควรเป็นบุคคลหรือนิติบุคคล · ตอนนี้ repo เป็น private และไม่มี contributor คนอื่น จึงยังไม่มีผล → **ทบทวนก่อนเปิด public หรือก่อนรับ contributor คนแรก** |
 | ~~`refx-asset` / `refx-io` / `refx-ui` / `refx-app` ยังไม่เคยคอมไพล์บน Linux~~ | ✅ **ปิดแล้ว 1 ส.ค. 2026** — job `check (ubuntu-latest)` build ครบทุก crate + รันเทสต์ + วัดขนาด binary (17.01 MB) |
 | **ชื่อขั้น undo ยังไม่ถูกแปล** | `Command::label()` คืน `&'static str` อังกฤษ (`"Add items"` ฯลฯ) แต่ `refx-ui::text` ยังไม่มีตารางแปลให้ · ต้องทำตอนที่ UI มีเมนู/ปุ่ม undo จริง (P2-4 ขึ้นไป) — อย่าเอา `label()` ไปแสดงตรง ๆ กับผู้ใช้ |
+| **การเลือกเข้า undo stack — ต้องรีวิว UX** | `SelectItems` เป็น `Command` เพราะ `selection` อยู่ใน `Board` และ docs/08 §4 ข้อ 10 บังคับ · ยุบเป็นขั้นเดียวด้วย `merge` แล้ว แต่ผลคือ **กด Ctrl+Z แล้วการเลือกกลับมาด้วย** ซึ่งโปรแกรมส่วนใหญ่ไม่ทำ · ทางเลือกอื่นคือเจาะรูให้แก้ `Board` ได้โดยไม่ผ่าน `Command` ซึ่งทำให้กฎที่คอมไพเลอร์บังคับอยู่กลายเป็นกฎที่ต้องจำเอง — **ยังไม่ตัดสิน รอเห็นของจริงบนจอก่อน** |
 | ข้อความ **CLI** กับ **crash dialog** ยังเป็นภาษาไทย | `tracing::` กวาดเป็นอังกฤษครบแล้ว (84 จุด) แต่ `--help` / error ของ CLI ใน `main.rs` และ `dialog::show_crash_dialog` ยังเป็นไทยล้วน · เป็นผิวที่ผู้ใช้ต่างชาติเจอได้เหมือนกัน แต่เป็นคนละระบบกับ log จึงแยกทำทีหลัง (crash dialog ควรไปอยู่ใต้ `refx-ui::text` ตอนที่ P5-3 ทำระบบภาษาเต็มรูปแบบ) |
 
 ---
