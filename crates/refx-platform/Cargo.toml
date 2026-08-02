@@ -26,6 +26,11 @@ float_cmp          = "warn"
 large_stack_arrays = "warn"
 
 [dependencies]
+# ★ refx-core เป็นชั้นล่างสุด (ไม่ depend crate ภายในตัวไหนเลย) การพึ่งมันจึงไม่เกิดวง
+#   และไม่ผิดกฎ "ชั้นล่างห้ามรู้จักชั้นบน" — ARCHITECTURE §2 เขียนว่า refx-platform
+#   เป็น leaf ซึ่งตอนนี้ไม่จริงแล้ว **ต้องอัปเดตเอกสาร** (ดูรายงาน HANDOFF §2.0)
+#   เหตุผล: DTO/trait ของ clipboard ต้องอยู่ที่ที่ทั้ง refx-asset และที่นี่เรียกได้
+refx-core.workspace = true
 winit.workspace   = true
 rfd.workspace     = true
 arboard.workspace = true

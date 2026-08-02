@@ -627,7 +627,14 @@ impl RefxApp {
             }
         };
 
-        let pool = DecodePool::with_defaults(io_tx.clone());
+        // ★ `refx-ui` เป็นชั้นเดียวที่รู้จักทั้ง OS และ decode pool จึงเป็นคนเสียบ
+        //   ของที่ต้องถาม OS ให้ (ARCHITECTURE §2, HANDOFF §2.0) — `refx-asset`
+        //   ไม่ depend `refx-platform` แล้ว หลักการเดียวกับ `WakeHandle` กับ winit
+        let pool = DecodePool::with_defaults(
+            refx_platform::memory::total_ram(),
+            std::sync::Arc::new(refx_platform::clipboard::SystemClipboard),
+            io_tx.clone(),
+        );
         let (used, limit) = pool.ram_usage();
         self.shell.ram_used = used;
         self.shell.ram_limit = limit;

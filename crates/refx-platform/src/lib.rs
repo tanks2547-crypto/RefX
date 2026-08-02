@@ -8,7 +8,6 @@ pub mod clipboard; // อ่าน/เขียนภาพจาก clipboard
 pub mod dialog; // native file dialog (ต้องไม่บล็อก UI thread — I-2)
 pub mod locale; // ภาษาที่ผู้ใช้ตั้งไว้ใน OS (เลือกภาษาเริ่มต้นของ UI — docs/03 §0)
 pub mod memory; // ถาม OS ว่าเครื่องมี RAM เท่าไหร่ (ตั้งเพดาน max_pixels)
-pub mod panic_guard; // ธงบอก panic hook ว่า panic นี้ถูกดักไว้แล้ว (I-7)
 pub mod paths; // cache/config/log dir ตามมาตรฐานแต่ละ OS
 pub mod redraw; // RedrawTracker — ประตูเดียวที่ขอวาดเฟรมได้ (I-1)
 pub mod single_instance;

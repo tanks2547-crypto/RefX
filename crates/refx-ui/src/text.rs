@@ -22,7 +22,7 @@
 
 use refx_asset::decode::LoadError;
 use refx_asset::pool::JobFailure;
-use refx_platform::clipboard::ClipboardError;
+use refx_core::clipboard::ClipboardError;
 use refx_render::atlas::AtlasError;
 
 /// ภาษาของ UI

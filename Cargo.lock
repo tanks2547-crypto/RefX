@@ -2840,7 +2840,6 @@ dependencies = [
  "kamadak-exif",
  "parking_lot",
  "refx-core",
- "refx-platform",
  "rusqlite",
  "smallvec",
  "thiserror 2.0.19",
@@ -2882,6 +2881,7 @@ version = "0.1.0"
 dependencies = [
  "arboard",
  "directories",
+ "refx-core",
  "rfd",
  "thiserror 2.0.19",
  "tracing",

@@ -10,36 +10,16 @@
 //! ถ้าโปรแกรมอื่นถือมันค้างอยู่ (Windows: `OpenClipboard` ต้องรอเจ้าของเดิมปล่อย
 //! และเจ้าของอาจเป็นโปรแกรมที่กำลังค้าง) — ของจริงเรียกจาก decode worker
 //!
+//! ★ **ชนิดข้อมูลย้ายไป `refx_core::clipboard` แล้ว** (HANDOFF §2.0)
+//! `refx-asset` ต้องอ่าน clipboard บน worker แต่ต้องไม่ depend `arboard`/`winit`/`rfd`
+//! จึงกลับทิศ: core ถือ trait + DTO ส่วนที่นี่คือตัว implement ที่คุยกับ OS จริง
+//! และ `refx-ui` เป็นคนเสียบ [`SystemClipboard`] เข้า decode pool ตอนสร้าง
+//!
 //! spec: docs/03 §5 (`Ctrl+V`), ARCHITECTURE §1 I-4
 
-use std::path::PathBuf;
-
-/// อ่าน clipboard ไม่สำเร็จ
-///
-/// ★ ข้อความใน `#[error(…)]` เป็น **อังกฤษสำหรับ log/นักพัฒนา**
-/// ข้อความที่ผู้ใช้เห็นประกอบที่ `refx-ui::text::clipboard_error` แล้วแปลตามภาษา
-/// (docs/03 §0) — variant จึงต้องแยกให้ละเอียดพอที่ผู้ใช้จะรู้ว่าต้องทำอะไรต่อ
-#[derive(Debug, thiserror::Error)]
-pub enum ClipboardError {
-    /// ใน clipboard ไม่มีภาพและไม่มีไฟล์ — เคสที่พบบ่อยที่สุดคือ **ก๊อปข้อความมา**
-    #[error("clipboard holds no image and no file")]
-    NoImage,
-
-    /// โปรแกรมอื่นถือ clipboard อยู่ ลองใหม่อีกครั้งได้
-    #[error("clipboard is held by another program")]
-    Busy,
-
-    /// เครื่องนี้ไม่มี clipboard ให้ใช้ (เช่นรันแบบไม่มี display)
-    #[error("no usable clipboard on this system: {reason}")]
-    Unavailable {
-        /// เหตุผลจาก OS (อังกฤษ — ไม่มีข้อมูลของผู้ใช้อยู่ในนั้น)
-        reason: String,
-    },
-
-    /// มีภาพอยู่จริงแต่แปลงเป็น pixel ไม่ได้ — ข้อมูลใน clipboard เสียหรือเป็นขยะ
-    #[error("the image in the clipboard could not be decoded")]
-    Undecodable,
-}
+use refx_core::clipboard::{
+    ClipboardContent, ClipboardError, ClipboardImage, ClipboardReader as CoreClipboardReader,
+};
 
 /// แปลง error ของ `arboard` เป็นของเรา
 ///
@@ -57,30 +37,17 @@ fn translate(err: &arboard::Error) -> ClipboardError {
     }
 }
 
-/// ภาพดิบจาก clipboard — **ค่าตามที่ OS ให้มา ยังไม่ผ่านเกราะ**
+/// clipboard ของเครื่องจริง — ตัวที่ `refx-ui` เสียบเข้า decode pool
 ///
-/// ห้ามเชื่อว่า `rgba.len() == width * height * 4` ตรงนี้ (I-4)
-/// `refx-asset::decode::accept_rgba_guarded` เป็นคนตรวจ
-#[derive(Debug, Clone)]
-pub struct ClipboardImage {
-    /// ความกว้างที่ OS ประกาศ (pixel)
-    pub width: u32,
-    /// ความสูงที่ OS ประกาศ (pixel)
-    pub height: u32,
-    /// ข้อมูล RGBA ที่ OS ให้มา
-    pub rgba: Vec<u8>,
-}
+/// ไม่ถือสถานะอะไรเลย (`arboard::Clipboard` ถูกสร้างใหม่ทุกครั้งที่อ่าน)
+/// จึงแชร์ข้ามเธรดได้โดยไม่ต้องล็อก
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemClipboard;
 
-/// สิ่งที่อยู่ใน clipboard ตอนนี้ เท่าที่ RefX เอาไปใช้ได้
-#[derive(Debug, Clone)]
-pub enum ClipboardContent {
-    /// รายชื่อไฟล์ (ก๊อปไฟล์จาก Explorer/Finder)
-    ///
-    /// ★ เคสนี้ต้องเดินเส้นทางเดียวกับ drag & drop เป๊ะ ๆ — มี cache, มี EXIF
-    /// และขอภาพคมตอนซูมได้ ต่างจากภาพดิบที่ไม่มีไฟล์ให้กลับไปอ่านใหม่
-    Files(Vec<PathBuf>),
-    /// ภาพดิบที่ OS ถอดรหัสมาให้แล้ว (screenshot, ก๊อปจากเบราว์เซอร์/โปรแกรมวาด)
-    Image(ClipboardImage),
+impl CoreClipboardReader for SystemClipboard {
+    fn read(&self) -> Result<ClipboardContent, ClipboardError> {
+        read()
+    }
 }
 
 /// อ่านสิ่งที่อยู่ใน clipboard ตอนนี้
@@ -178,9 +145,14 @@ mod tests {
     ///
     /// เทสต์นี้พิสูจน์ว่าเส้นทางจริงเดินได้ทั้งเส้น (สร้าง `Clipboard` → ถามไฟล์ →
     /// ถามภาพ → แมป error) บนเครื่องที่ไม่มี display ก็ต้องได้ `Err` ไม่ใช่ล้ม
+    ///
+    /// ★ เรียกผ่าน **trait** ไม่ใช่ `read()` ตรง ๆ เพราะสิ่งที่ decode pool ใช้จริง
+    /// คือ `SystemClipboard as ClipboardReader` — ถ้าเทสต์ตรวจแต่ `read()`
+    /// การเสียบ trait ที่พังจะไม่มีใครจับได้ (docs/08 §3.9 ข้อ 1)
     #[test]
     fn reading_the_real_clipboard_never_panics() {
-        match read() {
+        let reader: &dyn CoreClipboardReader = &SystemClipboard;
+        match reader.read() {
             Ok(ClipboardContent::Files(files)) => assert!(!files.is_empty()),
             Ok(ClipboardContent::Image(image)) => {
                 // ห้ามยืนยันว่า len ตรงกับ w×h×4 ตรงนี้ — โมดูลนี้ไม่ตรวจโดยตั้งใจ

@@ -5,8 +5,13 @@
 //! → log หมุนทะลุ 5 MB → **ทับ crash log จริงหายหมด**
 //! ซึ่งขัด docs/08 §5 ที่ว่า crash log คือสิ่งเดียวที่ผู้ใช้มีให้ส่งเวลารายงานปัญหา
 //!
-//! อยู่ใน `refx-platform` เพราะเป็น leaf ที่ทุก crate depend ได้ (ARCHITECTURE §2)
+//! อยู่ใน `refx-core` เพราะเป็นแค่ธง thread-local + RAII **ไม่มีโค้ดเฉพาะแพลตฟอร์มเลย**
 //! — `refx-asset` เป็นคนตั้งธง ส่วน panic hook ใน `refx-app` เป็นคนอ่าน
+//!
+//! ★ ย้ายมาจาก `refx-platform` (HANDOFF §2.0): ตอนอยู่ที่นั่น `refx-asset` ต้อง
+//! depend `refx-platform` ทั้งก้อนเพียงเพื่อธงตัวนี้ ซึ่งลาก `winit`/`rfd`/`arboard`
+//! ตามมาทั้งกอง — `fuzz/` ที่ต้องการแค่ decoder จึงต้องคอมไพล์ GUI ทั้งชั้นด้วย
+//! nightly แล้วล้มที่ `zbus` ปัญหาไม่ใช่ของ fuzz แต่เป็นการรั่วของชั้น (ARCHITECTURE §2)
 //!
 //! เป็น **thread-local** จึงไม่กระทบ panic ของเธรดอื่นที่เกิดขึ้นพร้อมกัน
 //!

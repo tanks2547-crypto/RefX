@@ -213,7 +213,7 @@ pub fn install_panic_hook(log_dir: &Path) {
         // ★ panic ที่ถูกดักไว้แล้ว (decoder ภาพเสีย) — บันทึกบรรทัดเดียวพอ
         //   ถ้าเขียน backtrace ทุกครั้ง โฟลเดอร์ที่มีไฟล์เสีย 500 ไฟล์จะหมุน log
         //   ทะลุ 5 MB จน crash log จริงหายหมด (docs/06 §3)
-        if let Some(label) = refx_platform::panic_guard::current_label() {
+        if let Some(label) = refx_core::panic_guard::current_label() {
             tracing::warn!(
                 file = label,
                 message,

@@ -393,7 +393,7 @@ pub fn decode_guarded_labelled(
     //   ไม่งั้นโฟลเดอร์ที่มีไฟล์เสีย 500 ไฟล์ = backtrace 500 ชุดลง log
     //   จนหมุนทับ crash log จริงหายหมด (docs/06 §3)
     let decoded = {
-        let _guard = refx_platform::panic_guard::enter(label);
+        let _guard = refx_core::panic_guard::enter(label);
         std::panic::catch_unwind(AssertUnwindSafe(|| {
             let mut reader = image::ImageReader::with_format(Cursor::new(bytes), format);
             reader.limits(image_limits(limits));

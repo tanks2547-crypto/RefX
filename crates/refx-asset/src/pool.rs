@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use image::RgbaImage;
 use parking_lot::{Condvar, Mutex};
+use refx_core::clipboard::{ClipboardContent, ClipboardError, ClipboardReader};
 
 use crate::budget::{RamBudget, estimate_decode_bytes};
 use crate::cache::{CacheKey, IoRequest, PathFingerprint, ThumbEntry, ThumbFormat};
@@ -55,6 +56,32 @@ pub fn default_worker_count() -> usize {
 
 /// closure ที่ปลุก UI — แยกเป็น alias เพราะชนิดเต็มยาวจนอ่านไม่ออก
 type WakeFn = Arc<dyn Fn() + Send + Sync>;
+
+/// ตัวอ่าน clipboard ที่ชั้นบนเสียบเข้ามาตอนสร้าง pool
+///
+/// ★ หลักการเดียวกับ [`WakeHandle`]: `refx-asset` ไม่รู้จัก `winit` ฉันใด
+/// ก็ไม่รู้จัก `arboard` ฉันนั้น (ARCHITECTURE §2) — มันรู้แค่ว่า "มีใครสักคน
+/// หยิบของจาก clipboard มาให้ได้" ตัวจริงคือ `refx_platform::clipboard::SystemClipboard`
+/// ซึ่ง `refx-ui` เป็นคนเสียบให้
+///
+/// ต่างจาก `WakeHandle` ตรงที่ **เสียบตอนสร้างเท่านั้น ต่อทีหลังไม่ได้** —
+/// งาน clipboard ที่วิ่งมาก่อนใครจะต่อสายให้ ต้องไม่กลายเป็น "เงียบหาย"
+type ClipboardHandle = Arc<dyn ClipboardReader>;
+
+/// ของที่ worker ทุกตัวใช้ร่วมกันตลอดอายุ pool
+///
+/// รวมเป็น struct เดียวเพราะส่งทีละตัวทำให้ลายเซ็นของ [`worker_loop`] ยาวจนอ่านไม่ออก
+/// และทุกครั้งที่เพิ่มของใหม่ต้องไปแก้ทุกชั้นที่ส่งต่อกันลงไป
+struct WorkerContext {
+    stats: Arc<PoolStats>,
+    budget: Arc<RamBudget>,
+    limits: Limits,
+    wake: WakeHandle,
+    io: Option<crossbeam_channel::Sender<IoRequest>>,
+    /// `None` = pool นี้อ่าน clipboard ไม่ได้ (เทสต์/fuzz ที่ไม่ต้องการ)
+    /// งาน `JobSource::Clipboard` จะได้ `Failed` พร้อมเหตุผลที่ชัด **ไม่ใช่เงียบหาย**
+    clipboard: Option<ClipboardHandle>,
+}
 
 /// ตัวปลุก UI ที่ worker เรียกเมื่อมีผลใหม่
 ///
@@ -186,7 +213,7 @@ pub enum JobFailure {
 
     /// อ่าน clipboard ไม่ได้ หรือใน clipboard ไม่มีอะไรที่เปิดเป็นภาพได้
     #[error(transparent)]
-    Clipboard(#[from] refx_platform::clipboard::ClipboardError),
+    Clipboard(#[from] ClipboardError),
 }
 
 /// ผลของงาน decode
@@ -439,6 +466,7 @@ impl DecodePool {
         budget: Arc<RamBudget>,
         limits: Limits,
         io: Option<crossbeam_channel::Sender<IoRequest>>,
+        clipboard: Option<ClipboardHandle>,
     ) -> Self {
         let workers = workers.max(1);
         let queue = Arc::new(Queue::new());
@@ -449,18 +477,20 @@ impl DecodePool {
         let mut handles = Vec::with_capacity(workers);
         for index in 0..workers {
             let queue = Arc::clone(&queue);
-            let stats = Arc::clone(&stats);
-            let budget = Arc::clone(&budget);
-            let limits = limits.clone();
+            let ctx = WorkerContext {
+                stats: Arc::clone(&stats),
+                budget: Arc::clone(&budget),
+                limits: limits.clone(),
+                wake: wake.clone(),
+                io: io.clone(),
+                clipboard: clipboard.clone(),
+            };
             let tx = tx.clone();
-            let wake = wake.clone();
-            let io = io.clone();
 
             match std::thread::Builder::new()
                 .name(format!("refx-decode-{index}"))
-                .spawn(move || {
-                    worker_loop(&queue, &stats, &budget, &limits, &tx, &wake, io.as_ref())
-                }) {
+                .spawn(move || worker_loop(&queue, &ctx, &tx))
+            {
                 Ok(handle) => handles.push(handle),
                 Err(err) => tracing::error!(%err, index, "cannot spawn a decode worker"),
             }
@@ -494,13 +524,22 @@ impl DecodePool {
     ///
     /// เพดานขนาดภาพคำนวณจาก RAM ที่ติดตั้ง (docs/05 §3) ไม่ใช่ค่าคงที่
     /// — ภาพที่ผ่านเกราะมาได้จึงไม่มีทางเกิน 1/8 ของ RAM เครื่อง
+    ///
+    /// `total_ram` กับ `clipboard` **รับเข้ามา ไม่ได้ไปถามเอง** เพราะทั้งสองอย่าง
+    /// ต้องถาม OS ซึ่งเป็นงานของ `refx-platform` — ชั้น asset ไม่รู้จักมัน
+    /// (ARCHITECTURE §2, HANDOFF §2.0) ผู้เรียกจริงคือ `refx-ui`
     #[must_use]
-    pub fn with_defaults(io: Option<crossbeam_channel::Sender<IoRequest>>) -> Self {
+    pub fn with_defaults(
+        total_ram: u64,
+        clipboard: ClipboardHandle,
+        io: Option<crossbeam_channel::Sender<IoRequest>>,
+    ) -> Self {
         Self::new(
             default_worker_count(),
             Arc::new(RamBudget::new(crate::budget::DEFAULT_RAM_LIMIT)),
-            Limits::for_system(refx_platform::memory::total_ram()),
+            Limits::for_system(total_ram),
             io,
+            Some(clipboard),
         )
     }
 
@@ -558,17 +597,10 @@ impl Drop for DecodePool {
 }
 
 /// ลูปของ worker หนึ่งตัว
-fn worker_loop(
-    queue: &Queue,
-    stats: &PoolStats,
-    budget: &Arc<RamBudget>,
-    limits: &Limits,
-    tx: &crossbeam_channel::Sender<JobResult>,
-    wake: &WakeHandle,
-    io: Option<&crossbeam_channel::Sender<IoRequest>>,
-) {
+fn worker_loop(queue: &Queue, ctx: &WorkerContext, tx: &crossbeam_channel::Sender<JobResult>) {
+    let stats = &ctx.stats;
     while let Some(job) = queue.pop() {
-        let result = run_job(&job, budget, limits, stats, io);
+        let result = run_job(&job, ctx);
 
         match &result {
             JobResult::Done { .. }
@@ -592,19 +624,14 @@ fn worker_loop(
         // ★ ปลุก UI ให้มาเก็บผล — ถ้าไม่ปลุก event loop จะหลับต่อ
         //   แล้วภาพจะไม่ขึ้นจนกว่าผู้ใช้จะขยับเมาส์
         //   winit รวบ request_redraw หลายครั้งเป็นเฟรมเดียวอยู่แล้ว จึงไม่เปลือง
-        wake.wake();
+        ctx.wake.wake();
     }
 }
 
 /// ทำงานหนึ่งชิ้นจนจบ
-fn run_job(
-    job: &Job,
-    budget: &Arc<RamBudget>,
-    limits: &Limits,
-    stats: &PoolStats,
-    io: Option<&crossbeam_channel::Sender<IoRequest>>,
-) -> JobResult {
+fn run_job(job: &Job, ctx: &WorkerContext) -> JobResult {
     let started = Instant::now();
+    let io = ctx.io.as_ref();
 
     // ★ เช็คธงยกเลิก **ก่อนเริ่ม** — ผู้ใช้ pan ผ่านไปแล้วก็ไม่ต้องเสียแรงเลย
     if job.cancel.load(AtomicOrdering::Relaxed) {
@@ -630,7 +657,7 @@ fn run_job(
     }
 
     // ★ หยิบ pixel เข้ามา — จุดเดียวที่สองแหล่งต่างกัน หลังจากนี้เหมือนกันหมด
-    let (image, _reservation) = match acquire_pixels(job, budget, limits) {
+    let (image, _reservation) = match acquire_pixels(job, ctx) {
         Acquired::Ready { image, reservation } => (image, reservation),
         Acquired::Files(paths) => {
             return JobResult::ClipboardFiles {
@@ -680,7 +707,7 @@ fn run_job(
     // ★ Timeout: ยกเลิก decode กลางคันไม่ได้ในทางปฏิบัติ แต่ต้องไม่ให้ทั้งคิวค้าง
     //   และต้องบอกผู้ใช้ได้ว่าไฟล์ไหนมีปัญหา (docs/06 §3)
     if elapsed > DECODE_TIMEOUT {
-        stats.timed_out.fetch_add(1, AtomicOrdering::Relaxed);
+        ctx.stats.timed_out.fetch_add(1, AtomicOrdering::Relaxed);
         tracing::warn!(file, ?elapsed, "decode took longer than the timeout");
         return JobResult::Failed {
             hash: job.hash,
@@ -737,10 +764,10 @@ enum Acquired {
 ///
 /// ★ นี่คือจุดเดียวที่ไฟล์กับ clipboard เดินคนละทาง หลังจากฟังก์ชันนี้คืนค่า
 /// ทุกอย่าง (orientation ที่ทำไปแล้ว, ย่อ, timeout, cache, การส่งกลับ) เหมือนกันหมด
-fn acquire_pixels(job: &Job, budget: &Arc<RamBudget>, limits: &Limits) -> Acquired {
+fn acquire_pixels(job: &Job, ctx: &WorkerContext) -> Acquired {
     match &job.source {
-        JobSource::File(path) => acquire_from_file(path, job, budget, limits),
-        JobSource::Clipboard => acquire_from_clipboard(job, budget, limits),
+        JobSource::File(path) => acquire_from_file(path, job, &ctx.budget, &ctx.limits),
+        JobSource::Clipboard => acquire_from_clipboard(job, ctx),
     }
 }
 
@@ -796,17 +823,27 @@ fn acquire_from_file(
 /// เราจึงขอโควตาถังกลางได้หลังภาพอยู่ในมือแล้ว (ต่างจากไฟล์ที่ขอก่อน decode)
 /// ผลคือ peak ชั่วคราวของการวางหนึ่งครั้งอยู่นอกถัง — ชั้น UI จึงจำกัดให้
 /// **วางได้ทีละครั้ง** เพื่อไม่ให้ซ้อนกันหลายก้อน
-fn acquire_from_clipboard(job: &Job, budget: &Arc<RamBudget>, limits: &Limits) -> Acquired {
-    let content = match refx_platform::clipboard::read() {
+fn acquire_from_clipboard(job: &Job, ctx: &WorkerContext) -> Acquired {
+    // ★ ไม่มีตัวอ่านเสียบไว้ = ตอบว่า "ใช้ clipboard ไม่ได้" ให้ชัด **ห้ามเงียบ**
+    //   (docs/08 §3.9 ข้อ 2) ถ้าปล่อยให้งานหายไปเฉย ๆ ผู้ใช้จะเห็นแค่ "กด Ctrl+V
+    //   แล้วไม่มีอะไรเกิดขึ้น" ซึ่งแยกไม่ออกจากบั๊กและไม่มีร่องรอยให้ตามด้วย
+    let Some(reader) = ctx.clipboard.as_ref() else {
+        return Acquired::Failed(
+            ClipboardError::Unavailable {
+                reason: "no clipboard reader was wired into this decode pool".to_owned(),
+            }
+            .into(),
+        );
+    };
+
+    let content = match reader.read() {
         Ok(content) => content,
         Err(err) => return Acquired::Failed(err.into()),
     };
 
     let raw = match content {
-        refx_platform::clipboard::ClipboardContent::Files(paths) => {
-            return Acquired::Files(paths);
-        }
-        refx_platform::clipboard::ClipboardContent::Image(image) => image,
+        ClipboardContent::Files(paths) => return Acquired::Files(paths),
+        ClipboardContent::Image(image) => image,
     };
 
     // อ่าน clipboard อาจนาน — ผู้ใช้อาจกดอย่างอื่นไปแล้ว
@@ -816,13 +853,15 @@ fn acquire_from_clipboard(job: &Job, budget: &Arc<RamBudget>, limits: &Limits) -
 
     // ★ ผ่านเกราะ **ก่อน** ขอโควตา — ถ้าขอก่อน ภาพที่ประกาศขนาดโกงจะไปนอนรอ
     //   ถังว่างเปล่า ๆ ทั้งที่สุดท้ายก็โดนปฏิเสธอยู่ดี
-    let image = match accept_rgba_guarded(raw.width, raw.height, raw.rgba, limits) {
+    let image = match accept_rgba_guarded(raw.width, raw.height, raw.rgba, &ctx.limits) {
         Ok(image) => image,
         Err(err) => return Acquired::Failed(err.into()),
     };
 
     // ถือโควตาไว้เท่ากับที่ภาพกินจริง ตลอดช่วงที่ยังถือภาพอยู่ — เกณฑ์เดียวกับไฟล์
-    let reservation = budget.reserve(estimate_decode_bytes(image.width(), image.height()));
+    let reservation = ctx
+        .budget
+        .reserve(estimate_decode_bytes(image.width(), image.height()));
     Acquired::Ready { image, reservation }
 }
 
@@ -966,6 +1005,55 @@ mod tests {
             Arc::new(RamBudget::new(64 << 20)),
             Limits::default(),
             None, // ไม่มี cache ในเทสต์ — วัดเส้นทาง decode ล้วน
+            None, // ไม่มี clipboard — เทสต์ที่ต้องการจะเสียบ FakeClipboard เอง
+        )
+    }
+
+    /// clipboard ปลอมที่ **สั่งได้ว่าจะให้ตอบอะไร**
+    ///
+    /// ★ ทำไมต้องมี: ก่อนแยกชั้น เทสต์ clipboard อ่านของจริงบนเครื่องที่รัน
+    /// ผลจึงขึ้นกับว่าใครก๊อปอะไรค้างไว้ — เทสต์ที่ผ่านเพราะ "clipboard ว่าง"
+    /// ไม่ได้พิสูจน์ว่าเส้นทางภาพหรือเส้นทางไฟล์ทำงาน (docs/08 §3.9 ข้อ 1)
+    /// ตอนนี้ทั้งสามสาขาถูกบังคับให้เดินจริงทุกครั้งที่รันเทสต์
+    ///
+    /// ของจริงยังถูกตรวจอยู่ที่ `refx-platform::clipboard` ซึ่งเป็นที่ที่มันอยู่
+    #[derive(Debug)]
+    struct FakeClipboard(std::sync::Mutex<Option<Result<ClipboardContent, ClipboardError>>>);
+
+    impl FakeClipboard {
+        fn answering(answer: Result<ClipboardContent, ClipboardError>) -> ClipboardHandle {
+            Arc::new(Self(std::sync::Mutex::new(Some(answer))))
+        }
+
+        fn with_image(w: u32, h: u32) -> ClipboardHandle {
+            Self::answering(Ok(ClipboardContent::Image(
+                refx_core::clipboard::ClipboardImage {
+                    width: w,
+                    height: h,
+                    rgba: vec![200; (w as usize) * (h as usize) * 4],
+                },
+            )))
+        }
+    }
+
+    impl ClipboardReader for FakeClipboard {
+        fn read(&self) -> Result<ClipboardContent, ClipboardError> {
+            match self.0.lock() {
+                // อ่านได้ครั้งเดียว — เทสต์ที่เผลอส่งงาน clipboard สองใบจะได้
+                // คำตอบที่ต่างกัน แทนที่จะผ่านไปเงียบ ๆ
+                Ok(mut slot) => slot.take().unwrap_or(Err(ClipboardError::NoImage)),
+                Err(_) => Err(ClipboardError::Busy),
+            }
+        }
+    }
+
+    fn clipboard_pool(reader: ClipboardHandle) -> DecodePool {
+        DecodePool::new(
+            2,
+            Arc::new(RamBudget::new(64 << 20)),
+            Limits::default(),
+            None,
+            Some(reader),
         )
     }
 
@@ -1211,7 +1299,7 @@ mod tests {
     fn ram_stays_under_shared_limit() {
         let path = write_png("ram", "r.png", 512, 512); // ~2 MB หลัง decode (×2 = 4 MB)
         let budget = Arc::new(RamBudget::new(8 << 20)); // 8 MB — พอแค่ ~2 งานพร้อมกัน
-        let pool = DecodePool::new(6, Arc::clone(&budget), Limits::default(), None);
+        let pool = DecodePool::new(6, Arc::clone(&budget), Limits::default(), None, None);
 
         for i in 0..40u32 {
             pool.submit(Job {
@@ -1272,55 +1360,138 @@ mod tests {
         }
     }
 
-    /// ★ วางจาก clipboard ต้องได้คำตอบกลับมาเสมอ และห้ามลากงานอื่นลงไปด้วย
+    /// ★ ภาพดิบใน clipboard ต้องออกมาเป็น thumbnail ที่ใช้ได้จริง
     ///
-    /// เครื่องที่รันเทสต์มีอะไรใน clipboard ก็ได้ — ภาพ, ไฟล์, ข้อความล้วน,
-    /// หรือไม่มี clipboard เลย (CI ที่ไม่มี display) **ทุกกรณีต้องได้ผลหนึ่งชิ้น**
-    /// ไม่ใช่ panic ไม่ใช่ค้าง และไฟล์ปกติที่ตามมาต้องยังเปิดได้ตามเดิม (I-7)
+    /// เดิมเทสต์นี้อ่าน clipboard ของเครื่องที่รัน ผลจึงขึ้นกับว่าใครก๊อปอะไรค้างไว้
+    /// — บน CI ที่ไม่มี display มันเดินสาขา `Failed` ทุกครั้ง แปลว่า **เส้นทางภาพ
+    /// ไม่เคยถูกตรวจบน CI เลย** ตอนนี้บังคับให้เดินสาขาภาพเสมอ
     #[test]
-    fn clipboard_job_always_answers_and_never_kills_the_pool() {
+    fn a_raw_image_from_the_clipboard_becomes_a_thumbnail() {
+        let pool = clipboard_pool(FakeClipboard::with_image(24, 16));
+        pool.submit(clipboard_job(b"clip-image"));
+
+        match pool
+            .results()
+            .recv_timeout(Duration::from_secs(30))
+            .expect("ต้องได้ผลกลับมา")
+        {
+            JobResult::Done { thumb, .. } => {
+                assert_eq!((thumb.source_width, thumb.source_height), (24, 16));
+                assert_eq!(thumb.pixels.len(), EXPECTED_THUMB_BYTES);
+            }
+            other => panic!("ต้องได้ thumbnail แต่ได้ {other:?}"),
+        }
+        assert_eq!(pool.ram_usage().0, 0, "คืนโควตา RAM ครบ");
+    }
+
+    /// ก๊อปไฟล์จาก Explorer แล้ววาง → ต้องได้ **รายชื่อไฟล์** กลับไปให้ UI
+    /// ยัดเข้าเส้นทาง drag & drop ไม่ใช่พยายาม decode เอง
+    #[test]
+    fn a_file_list_from_the_clipboard_is_handed_back_to_the_ui() {
+        let files = vec![PathBuf::from("a.png"), PathBuf::from("b.jpg")];
+        let pool = clipboard_pool(FakeClipboard::answering(Ok(ClipboardContent::Files(
+            files.clone(),
+        ))));
+        pool.submit(clipboard_job(b"clip-files"));
+
+        match pool
+            .results()
+            .recv_timeout(Duration::from_secs(30))
+            .expect("ต้องได้ผลกลับมา")
+        {
+            JobResult::ClipboardFiles { paths, .. } => assert_eq!(paths, files),
+            other => panic!("ต้องได้รายชื่อไฟล์ แต่ได้ {other:?}"),
+        }
+    }
+
+    /// ★ clipboard เปิดไม่ได้ต้องไม่ล้ม pool และงานอื่นต้องเดินต่อได้ (I-7)
+    #[test]
+    fn a_broken_clipboard_fails_that_job_only() {
         let good = write_png("clip", "good.png", 24, 16);
-        let pool = test_pool(2);
-        pool.submit(clipboard_job(b"clip"));
+        let pool = clipboard_pool(FakeClipboard::answering(Err(ClipboardError::Busy)));
+        pool.submit(clipboard_job(b"clip-busy"));
         pool.submit(job(good, 1.0, b"good"));
 
         let mut file_done = false;
-        let mut clipboard_answered = false;
+        let mut clipboard_failed = false;
         for _ in 0..2 {
             let result = pool
                 .results()
                 .recv_timeout(Duration::from_secs(30))
                 .expect("ทุกงานต้องได้คำตอบกลับมา");
-            if result.hash() == crate::hash::hash_bytes(b"clip") {
-                clipboard_answered = true;
-                // ผลเป็นอะไรก็รับได้ ยกเว้น "ไม่มีอะไรกลับมา"
-                // ★ พิมพ์ว่าเดินสาขาไหน เพราะมันขึ้นกับว่าเครื่องที่รันมีอะไรใน
-                //   clipboard — คนที่ตรวจงานด้วยมือต้องรู้ว่าเทสต์นี้ครอบคลุมอะไรจริง
+            if result.hash() == crate::hash::hash_bytes(b"clip-busy") {
                 match result {
-                    JobResult::Done { thumb, .. } => {
-                        println!(
-                            "clipboard มีภาพ {}×{} → ได้ thumbnail แล้ว",
-                            thumb.source_width, thumb.source_height
-                        );
-                        assert!(thumb.source_width > 0 && thumb.source_height > 0);
-                        assert_eq!(thumb.pixels.len(), EXPECTED_THUMB_BYTES);
-                    }
-                    JobResult::ClipboardFiles { paths, .. } => {
-                        println!("clipboard มีไฟล์ {} รายการ", paths.len());
-                    }
-                    JobResult::Cancelled { .. } => println!("งาน clipboard ถูกยกเลิก"),
                     JobResult::Failed { reason, .. } => {
-                        println!("clipboard เปิดไม่ได้: {reason}");
+                        assert!(matches!(
+                            reason,
+                            JobFailure::Clipboard(ClipboardError::Busy)
+                        ));
                         assert!(!reason.to_string().trim().is_empty(), "error ไม่มีข้อความ");
+                        clipboard_failed = true;
                     }
-                    JobResult::Working { .. } => panic!("ขอ thumbnail แต่ได้ working"),
+                    other => panic!("clipboard พังต้องได้ Failed แต่ได้ {other:?}"),
                 }
             } else {
                 file_done = matches!(result, JobResult::Done { .. });
             }
         }
-        assert!(clipboard_answered, "งาน clipboard เงียบหาย");
-        assert!(file_done, "ไฟล์ปกติต้องยังเปิดได้แม้ clipboard จะเป็นอะไรก็ตาม");
+        assert!(clipboard_failed, "งาน clipboard เงียบหาย");
+        assert!(file_done, "ไฟล์ปกติต้องยังเปิดได้แม้ clipboard จะพัง");
+        assert_eq!(pool.ram_usage().0, 0, "คืนโควตา RAM ครบ");
+    }
+
+    /// ★ pool ที่ไม่มีตัวอ่านเสียบไว้ (fuzz / เทสต์) ต้อง **ตอบว่าใช้ไม่ได้**
+    /// ไม่ใช่เงียบหายหรือ panic — ถ้าเงียบ ผู้ใช้จะเห็นแค่ "กด Ctrl+V แล้วไม่มี
+    /// อะไรเกิดขึ้น" ซึ่งแยกไม่ออกจากบั๊ก (docs/08 §3.9 ข้อ 2)
+    #[test]
+    fn a_pool_without_a_clipboard_reader_says_so_instead_of_going_quiet() {
+        let pool = test_pool(1);
+        pool.submit(clipboard_job(b"clip-unwired"));
+
+        match pool
+            .results()
+            .recv_timeout(Duration::from_secs(30))
+            .expect("ต้องได้ผลกลับมา ไม่ใช่เงียบหาย")
+        {
+            JobResult::Failed { reason, .. } => {
+                assert!(matches!(
+                    reason,
+                    JobFailure::Clipboard(ClipboardError::Unavailable { .. })
+                ));
+            }
+            other => panic!("ต้องได้ Failed แต่ได้ {other:?}"),
+        }
+    }
+
+    /// ★ ภาพจาก clipboard ต้องผ่าน **เกราะชุดเดียวกับไฟล์บนดิสก์**
+    ///
+    /// ข้อนี้คือเหตุผลที่ `refx-platform::clipboard` ไม่ตรวจอะไรเลยโดยตั้งใจ —
+    /// ถ้าเกราะมีสองชุด วันหนึ่งจะมีคนแก้ข้างเดียวแล้วเพี้ยนจากกัน
+    #[test]
+    fn a_lying_clipboard_image_is_rejected_by_the_same_guard_as_files() {
+        // ประกาศ 1000×1000 แต่ส่ง byte มาแค่หยิบมือ
+        let pool = clipboard_pool(FakeClipboard::answering(Ok(ClipboardContent::Image(
+            refx_core::clipboard::ClipboardImage {
+                width: 1000,
+                height: 1000,
+                rgba: vec![0; 16],
+            },
+        ))));
+        pool.submit(clipboard_job(b"clip-lie"));
+
+        match pool
+            .results()
+            .recv_timeout(Duration::from_secs(30))
+            .expect("ต้องได้ผลกลับมา")
+        {
+            JobResult::Failed { reason, .. } => {
+                assert!(
+                    matches!(reason, JobFailure::Load(_)),
+                    "ต้องโดนเกราะของ decode ปฏิเสธ ไม่ใช่ error คนละชุด: {reason}"
+                );
+            }
+            other => panic!("ภาพที่โกงขนาดต้องถูกปฏิเสธ แต่ได้ {other:?}"),
+        }
         assert_eq!(pool.ram_usage().0, 0, "คืนโควตา RAM ครบ");
     }
 
@@ -1337,6 +1508,7 @@ mod tests {
             Arc::new(RamBudget::new(64 << 20)),
             Limits::default(),
             Some(io_tx),
+            Some(FakeClipboard::with_image(8, 8)),
         );
 
         pool.submit(clipboard_job(b"no-cache"));

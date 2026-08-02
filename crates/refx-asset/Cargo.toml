@@ -10,8 +10,15 @@ publish.workspace      = true
 workspace = true
 
 [dependencies]
+# !! ห้ามใส่ refx-platform กลับมา (HANDOFF §2.0 — แยกชั้นแล้ว 2 ส.ค. 2026)
+#    ชั้น asset ไม่ควรรู้จัก windowing / dialog / clipboard เลย (ARCHITECTURE §2)
+#    ตอนที่ยังพึ่งอยู่ `fuzz/` ที่ต้องการแค่ decoder ต้องคอมไพล์ winit+rfd+arboard
+#    ทั้งกองด้วย nightly แล้วล้มที่ zbus — เป็นการรั่วของชั้น ไม่ใช่ปัญหาของ fuzz
+#    สิ่งที่เคยเอามาจากที่นั่นถูกกลับทิศแล้ว:
+#      panic_guard → refx-core::panic_guard
+#      clipboard   → refx-core::clipboard (trait) + refx-ui เสียบตัวจริงให้
+#      total_ram   → ผู้เรียกส่งเข้ามาที่ DecodePool::with_defaults
 refx-core.workspace     = true
-refx-platform.workspace = true   # ธง panic_guard (leaf — ARCHITECTURE §2 อนุญาต)
 image.workspace     = true
 fast_image_resize.workspace = true
 kamadak-exif.workspace = true

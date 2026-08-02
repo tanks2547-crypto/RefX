@@ -9,8 +9,10 @@
 
 pub mod arena; // generational arena + ItemId/BoardId/GroupId
 pub mod board; // Board, Item, ItemCanvas, ItemMeta, AssetRef
+pub mod clipboard; // ชนิดข้อมูลกลาง + trait ให้ชั้นบนเสียบตัวอ่านจริง (ไม่มีโค้ด OS)
 pub mod command; // Command trait + History (undo/redo + merge/seal)
 pub mod layout; // layout engines — pure functions, deterministic
+pub mod panic_guard; // ธงบอก panic hook ว่า panic นี้ถูกดักไว้แล้ว (I-7)
 pub mod selection;
 pub mod spatial; // loose uniform grid: culling + hit-test
 pub mod view; // Camera, ViewState, Mode
