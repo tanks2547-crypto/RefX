@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use glam::{UVec2, Vec2};
 
 use crate::arena::{Arena, ArenaKey as _, BoardId, GroupId, ItemId};
+use crate::geom::{Obb, Rect};
 use crate::hash::ContentHash;
 use crate::selection::Selection;
 use crate::view::ViewState;
@@ -317,6 +318,24 @@ impl ItemCanvas {
     #[must_use]
     pub fn is_sane(self) -> bool {
         self == self.sanitized()
+    }
+
+    /// รูปทรงจริงบน canvas (หมุนแล้ว) — **ตัวที่ hit-test ใช้ตัดสิน**
+    ///
+    /// `flip` ไม่มีผลกับรูปทรง มันสลับแค่ทิศการอ่าน texture
+    #[must_use]
+    pub fn obb(self) -> Obb {
+        Obb {
+            center: self.pos,
+            half_size: self.size * 0.5,
+            rotation: self.rotation,
+        }
+    }
+
+    /// กรอบแนวแกนที่คลุมรูปทรงจริง — ด่านหยาบของ culling และคีย์ของ `SpatialIndex`
+    #[must_use]
+    pub fn world_bounds(self) -> Rect {
+        self.obb().aabb()
     }
 }
 
