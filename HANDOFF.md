@@ -21,6 +21,7 @@
 | **P2-1** `Arena`/`Board`/`Item` | ✅ เสร็จ (`43b76d5`) |
 | **P2-2** `Command` + `History` + merge/seal | ✅ เสร็จ (`43b76d5`) — **ผ่านรีวิวแล้ว** |
 | **P2-3** `SpatialIndex` + hit-test | ✅ เสร็จ (`7a81b4e`) |
+| **ย้าย `refx-ui` ไปใช้ `Board`** | ✅ เสร็จ (`0cc1e76`) — เทียบเส้นฐานครบ ไม่มีตัวไหนแย่ลงเกิน 5% |
 | **P2-4** select / rubber-band / multi-select | 🟡 **ครึ่งเดียว** (`dd51d60`, `439f380`) — ตรรกะครบและเทสต์ครบใน `refx-core` แต่ **ยังไม่มีใครเรียก** ดู §2.2 |
 | **`selection` ย้ายออกจาก `Board`** (docs/02 §2.9) | ✅ เสร็จ (`439f380`) — คลิกดูภาพไม่ทำให้เอกสาร dirty อีกต่อไป |
 | P2-5 ขึ้นไป | ยังไม่เริ่ม |
@@ -38,7 +39,7 @@ repo: **`github.com/tanks2547-crypto/RefX` (private)** · branch `main`
 |---|---|---|
 | GPU ที่ใช้ตรวจจริง | **WARP** (Dx12/Cpu) | **lavapipe** (Vulkan/Cpu) |
 | เทสต์ | 381/381 | 381/381 |
-| binary | 15.35 MB | 17.01 MB |
+| binary | 15.52 MB (เครื่องพัฒนา) | — |
 
 **`Fuzz (nightly)` เขียวครั้งแรก 2 ส.ค. 2026** — ทั้งสาม job (`fuzz_decode` ยิงเต็ม 15 นาที ·
 `unwired-targets` · `fuzz-lint`) บน `rustc 1.99.0-nightly (73dc9167f)` ดูเหตุใน §5 ข้อ false green
@@ -159,15 +160,38 @@ repo อยู่ใต้ git แล้ว (branch **`main`**) และ **push
 > `thumb.source_width`) ไม่ได้เก็บไว้ที่ไหนอีก การให้ `RefxApp` ถือ `Board` ไว้เฉย ๆ
 > โดยที่ `quads` ยังคำนวณเองอยู่ = **แหล่งความจริงสองที่** ซึ่งคือปัญหาที่กำลังจะแก้พอดี
 
-1. **(ก้อนเดียว)** `RefxApp` ถือ `Board` + `History` + `SpatialIndex` ·
-   ingest สร้าง `AddItems` เข้า `History` (ตำแหน่งตารางย้ายไปเป็น `ItemCanvas`) ·
-   `quads` สร้างจาก `board.items_in_z_order()` ·
-   `BoardItem` เหลือเฉพาะ *สถานะฝั่ง render* (atlas slot, working key, thumb)
-   เป็น side map ที่คีย์ด้วย `ItemId` — ห้ามเอากลับไปปนกับข้อมูลโดเมน
-   > ⚠️ แตะเส้นทางที่ P1-7/P1-8 ยืนยันด้วยมือ (drag & drop · เติม atlas กลับ ·
-   > เลือก working texture) — **ต้องมีภาพหน้าจอจริงก่อนบอกว่าเสร็จ** (docs/08 §3.9 ข้อ 5)
-2. `allocate_response` + ต่อ `SelectTool` + วาดกรอบเลือก/rubber-band
+1. ✅ **เสร็จแล้ว** (`0cc1e76`) — `Gfx` ถือ `Board`+`History`+`SpatialIndex` ·
+   ingest ผ่าน `AddItems` · `quads` สร้างจาก `items_in_z_order()` ที่ `rebuild_quads`
+   จุดเดียว · `ItemRender` เป็น side map คีย์ด้วย `ItemId`
+   > `Board`/`History` อยู่ใน `Gfx` ซึ่งเป็นบ้านที่ไม่ตรงความหมาย (`Gfx` คือของที่ผูก
+   > กับ device) — ไม่ใช่บั๊กเพราะ `recover_device()` แก้ฟิลด์ทีละตัว ไม่ได้สร้าง `Gfx`
+   > ใหม่ทั้งก้อน แต่ควรย้ายออกตอน P4-7 multi-board
+2. ← **เริ่มที่นี่** `allocate_response` + ต่อ `SelectTool` + วาดกรอบเลือก/rubber-band
 3. ต่อ Ctrl+Z/Ctrl+Y เข้า `History` แล้วเอา id จาก `undo()`/`redo()` ไปตั้ง selection
+
+### 2.2b ★ audit: enum ที่จะถูก serialize (ทำครั้งเดียว 3 ส.ค. 2026)
+
+docs/02 §2.2.5 บังคับว่า **ทุก enum ที่ลง `.refx` หรือ `cache.sqlite` ต้องมี variant สำรอง**
+เจอมาแล้วสองตัวแบบไล่ทีละตัวตอนกำลังเขียนโค้ดทับ — นี่คือการกวาดทั้งหมดพร้อมกัน
+
+**ยังไม่มีตัวไหนถูก serialize จริง** เพราะ `refx-io::dto` ยังเป็นไฟล์ TODO บรรทัดเดียว
+ตัวที่ยังไม่มีคนใช้จึง **ไม่ต้องเขียนล่วงหน้า** (โครงเปล่าที่ docs/08 §3.9 ข้อ 2 ห้าม)
+— บันทึกไว้ว่ารู้แล้วและจะจัดการยังไงตอนถึงคิว (P4-1 file format)
+
+| enum | ลงไฟล์ผ่าน | มีทางออกแล้ว | แผน |
+|---|---|---|---|
+| `ImageFormat` | `AssetRef.format` | ✅ `Unknown` | ทำแล้ว (`0cc1e76`) |
+| `MissingReason` | `ItemKind::Missing.reason` | ✅ `Unknown` | ทำแล้ว (`43b76d5`) |
+| `Flip` | `ItemCanvas.flip` | ❌ | ค่าที่ไม่รู้จัก → `Flip::None` (เสียการพลิก แต่ภาพยังอยู่) **ต้องเพิ่มตอน P4-1** |
+| `ColorLabel` | `ItemMeta.color_label` | ⚠️ `Option` ช่วยได้ครึ่งเดียว | ค่าที่ไม่รู้จักตกเป็น `None` = **ป้ายสีของผู้ใช้หายเงียบ ๆ ตอน round-trip** · ทางที่ถูกคือ DTO เก็บเลขดิบไว้แล้วเขียนกลับตามเดิม ตัดสินตอน P4-1 |
+| `ItemKind` | `Item.kind` | ❌ | ★ **ไม่ต้องมี `Unknown` ของตัวเอง** — kind ที่ไม่รู้จักให้ตกเป็น `Missing { reason: Unknown }` ซึ่งมีอยู่แล้วและถูกต้องตามความหมาย (item ยังอยู่บน board ผู้ใช้เห็นว่ามีของ) |
+| `SortKey` | `ArrangeState.sort` | ❌ | ค่าที่ไม่รู้จัก → `AddedAt` (ค่าเริ่มต้น) ไม่มีข้อมูลผู้ใช้หาย |
+| `Mode` | `ViewState.mode` | ❌ | ค่าที่ไม่รู้จัก → `Canvas` ไม่มีข้อมูลผู้ใช้หาย |
+| `ThumbFormat` | `cache.sqlite` | ✅ (คนละแบบ) | `from_i64` คืน `None` → **นับเป็น cache miss ไม่ใช่ error** ซึ่งถูกต้องกว่ามี variant สำรอง: cache หายไม่ใช่งานหาย |
+
+**ไม่เข้าข่าย** (เป็น error type / runtime เท่านั้น ไม่ลงไฟล์): `ArenaError` `BoardError`
+`CmdError` `ClipboardError` `ClipboardContent` `CanvasButton` `CanvasEvent` `MetaField`
+`Slot<T>` · `ItemFilter` เป็น struct ของ bool/f32 ไม่ใช่ enum จึงไม่มีปัญหานี้
 
 ### 2.3 กับดัก pointer ของ egui — ถึงเวลาแก้ที่ต้นเหตุแล้ว
 
@@ -317,6 +341,7 @@ log บอกตรง ๆ ว่า rustc ที่ถูกเรียกค�
 | ชั้น UI ของการกู้ device ยังไม่มี unit test | `recover_device()` ต้องมีหน้าต่างจริงจึงเรียกในเทสต์ไม่ได้ · ตอนนี้คุมด้วย (ก) `DeviceBound` ที่บังคับตอนคอมไพล์ (ข) `debug_assert` เทียบ generation ของ `WorkingCache` ทุกเฟรม (ค) รันจริงด้วย `--force-device-lost-after-ms` |
 | **ผู้ถือลิขสิทธิ์ใน LICENSE เป็นชื่อผลิตภัณฑ์ ไม่ใช่บุคคล/นิติบุคคล** | `Copyright (c) 2026 RefX` · ตามกฎหมายผู้ถือลิขสิทธิ์ควรเป็นบุคคลหรือนิติบุคคล · ตอนนี้ repo เป็น private และไม่มี contributor คนอื่น จึงยังไม่มีผล → **ทบทวนก่อนเปิด public หรือก่อนรับ contributor คนแรก** |
 | ~~`refx-asset` / `refx-io` / `refx-ui` / `refx-app` ยังไม่เคยคอมไพล์บน Linux~~ | ✅ **ปิดแล้ว 1 ส.ค. 2026** — job `check (ubuntu-latest)` build ครบทุก crate + รันเทสต์ + วัดขนาด binary (17.01 MB) |
+| **คอลัมน์ `format` ใน `cache.sqlite` ไม่เคยมีความหมาย** | `pool.rs` เขียน `0` ตายตัวมาตลอด และ `AssetRef.format` ตอนนี้เป็น `ImageFormat::Unknown` เพราะ cache hit ไม่ได้แตะไบต์ของไฟล์ · งานที่ต้องทำ: ร้อย format จริงจาก `image::guess_format` ผ่าน `decode` → `Thumbnail` → `ThumbEntry` **แล้วตัดสินพร้อมกันว่าจะให้ความหมายคอลัมน์นี้หรือลบทิ้ง** (แตะ schema ของ cache = ต้องถามก่อนตาม CLAUDE.md) |
 | **ชื่อขั้น undo ยังไม่ถูกแปล** | `Command::label()` คืน `&'static str` อังกฤษ (`"Add items"` ฯลฯ) แต่ `refx-ui::text` ยังไม่มีตารางแปลให้ · ต้องทำตอนที่ UI มีเมนู/ปุ่ม undo จริง (P2-4 ขึ้นไป) — อย่าเอา `label()` ไปแสดงตรง ๆ กับผู้ใช้ |
 | **การเลือกเข้า undo stack — ต้องรีวิว UX** | `SelectItems` เป็น `Command` เพราะ `selection` อยู่ใน `Board` และ docs/08 §4 ข้อ 10 บังคับ · ยุบเป็นขั้นเดียวด้วย `merge` แล้ว แต่ผลคือ **กด Ctrl+Z แล้วการเลือกกลับมาด้วย** ซึ่งโปรแกรมส่วนใหญ่ไม่ทำ · ทางเลือกอื่นคือเจาะรูให้แก้ `Board` ได้โดยไม่ผ่าน `Command` ซึ่งทำให้กฎที่คอมไพเลอร์บังคับอยู่กลายเป็นกฎที่ต้องจำเอง — **ยังไม่ตัดสิน รอเห็นของจริงบนจอก่อน** |
 | ข้อความ **CLI** กับ **crash dialog** ยังเป็นภาษาไทย | `tracing::` กวาดเป็นอังกฤษครบแล้ว (84 จุด) แต่ `--help` / error ของ CLI ใน `main.rs` และ `dialog::show_crash_dialog` ยังเป็นไทยล้วน · เป็นผิวที่ผู้ใช้ต่างชาติเจอได้เหมือนกัน แต่เป็นคนละระบบกับ log จึงแยกทำทีหลัง (crash dialog ควรไปอยู่ใต้ `refx-ui::text` ตอนที่ P5-3 ทำระบบภาษาเต็มรูปแบบ) |
