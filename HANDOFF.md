@@ -198,6 +198,27 @@ docs/02 §2.2.5 บังคับว่า **ทุก enum ที่ลง `.r
 `CmdError` `ClipboardError` `ClipboardContent` `CanvasButton` `CanvasEvent` `MetaField`
 `Slot<T>` · `ItemFilter` เป็น struct ของ bool/f32 ไม่ใช่ enum จึงไม่มีปัญหานี้
 
+### 2.2c ✅ กวาดเทสต์ที่ assert เวลานาฬิกา (ทำครั้งเดียว 3 ส.ค. 2026)
+
+`docs/08 §3.9 ข้อ 5b` ห้าม assert เวลานาฬิกาแล้ว — ไล่ทั้ง workspace พร้อมกัน
+แทนที่จะรอให้แดงทีละตัว (เกิดมาแล้วสองครั้ง: `lower_priority_value_runs_first`
+แล้ว `hashes_100mb_file_quickly`)
+
+**ผล: ไม่เหลือ assert เวลาแล้วสักตัว**
+
+| ที่ | สภาพ | ตัดสิน |
+|---|---|---|
+| `hash::…::hashes_100mb_file_quickly` | `assert!(elapsed < 200ms)` | ✅ แก้แล้ว (`bddf863`) → พลิกไบต์กลางไฟล์แล้ว hash ต้องไม่เปลี่ยน |
+| `spatial::…::hit_testing_a_thousand_items…` | นับ `items_examined`/`cells_visited` | ✅ ถูกอยู่แล้ว — พิมพ์เวลาแต่ไม่ assert |
+| `window::…::idle_produces_no_redraw` | นอน 5 วิแล้ว assert **ตัวนับ = 0** | ✅ ถูกอยู่แล้ว — เครื่องช้าแค่ไหนตัวนับก็ไม่ขยับ |
+| `device::…::time_trigger_*` | `Instant::now()` เทียบ deadline 60 วิ / instant ที่ประกอบเอง | ✅ ทดสอบ**ตรรกะ deadline** ไม่ใช่ความเร็ว |
+| `cache::…` `recv_timeout(5s)` ×3 | รอ IO thread ตอบ | ⚠️ → ขยายเป็น 30 วิ พร้อมคอมเมนต์: มันคือตาข่ายจับ**ค้างจริง** ไม่ใช่การวัดความเร็ว ตั้งพอดีเมื่อไหร่กลายเป็น assert เวลาทันที |
+| `pool.rs` `DECODE_TIMEOUT`, `app.rs` bench/wake | โค้ดจริง ไม่ใช่เทสต์ | — |
+
+> เวลารอที่เป็น "ตาข่ายจับค้าง" ให้ตั้ง **หลวม ๆ** เสมอ แล้วปล่อยให้
+> `.config/nextest.toml` (ฆ่าที่ 4 นาที) เป็นเพดานจริง — ตัวเลขที่ตั้งพอดีกับ
+> เครื่องนักพัฒนาคือ flake ที่รอวันเกิดบน runner ที่แชร์ CPU
+
 ### 2.3 กับดัก pointer ของ egui — ถึงเวลาแก้ที่ต้นเหตุแล้ว
 
 `docs/03 §1` บันทึกทางแก้ชั่วคราวที่ใช้อยู่ (`egui_is_using_pointer()` +

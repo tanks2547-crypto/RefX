@@ -930,11 +930,20 @@ mod tests {
         let (reply, rx) = crossbeam_channel::bounded(1);
         tx.send(IoRequest::GetThumb { key, reply }).unwrap();
         let entry = rx
-            .recv_timeout(std::time::Duration::from_secs(5))
+            .recv_timeout(std::time::Duration::from_secs(30))
             .unwrap()
             .expect("ต้องเจอของที่เพิ่งเก็บ");
         assert_eq!(entry.width, 4000);
     }
+
+    // ★ เวลารอในเทสต์กลุ่มนี้ตั้งไว้ **หลวม ๆ โดยตั้งใจ** (docs/08 §3.9)
+    //
+    //   มันไม่ใช่การวัดว่า "IO thread เร็วพอไหม" — ถ้าตั้งพอดีกับเครื่องเรา
+    //   มันจะกลายเป็นการ assert เวลานาฬิกาบน runner ที่แชร์ CPU กับคนอื่น
+    //   แล้วแดงสุ่มโดยไม่มีอะไรพัง (เกิดมาแล้วสองครั้งกับเทสต์อื่น)
+    //
+    //   สิ่งที่ต้องจับคือ **ค้างจริง** ซึ่ง 30 วินาทีก็ยังจับได้ครบ
+    //   และ `.config/nextest.toml` ฆ่าที่ 4 นาทีเป็นตาข่ายอีกชั้น
 
     /// ผู้ขอเลิกสนใจ (ทิ้ง receiver) ต้องไม่ทำให้ IO thread ตาย
     /// เกิดจริงตลอดเวลาเวลาผู้ใช้ pan ผ่านภาพเร็ว ๆ
@@ -953,7 +962,7 @@ mod tests {
         // ต้องยังตอบคำสั่งถัดไปได้ตามปกติ
         let (reply, rx) = crossbeam_channel::bounded(1);
         tx.send(IoRequest::Stats { reply }).unwrap();
-        let stats = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let stats = rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
         assert_eq!(stats.thumb_count, 0);
     }
 
@@ -970,7 +979,7 @@ mod tests {
         }
         let (reply, rx) = crossbeam_channel::bounded(1);
         tx.send(IoRequest::Stats { reply }).unwrap();
-        let stats = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        let stats = rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
         assert_eq!(stats.thumb_count, 3);
         assert!(stats.size_bytes > 0, "ต้องรายงานขนาดจริงให้ status bar");
     }
