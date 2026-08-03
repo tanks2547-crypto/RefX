@@ -23,12 +23,11 @@
 | **P2-3** `SpatialIndex` + hit-test | ✅ เสร็จ (`7a81b4e`) |
 | **ย้าย `refx-ui` ไปใช้ `Board`** | ✅ เสร็จ (`0cc1e76`) — เทียบเส้นฐานครบ ไม่มีตัวไหนแย่ลงเกิน 5% |
 | **P2-4** select / rubber-band / multi-select | ✅ **เสร็จสมบูรณ์** (`dd51d60` · `439f380` · `a6ac127` · `0f6071c`) — รวม Ctrl+Z/Ctrl+Y ยืนยันด้วยภาพหน้าจอ |
-| P2-5 move/scale/rotate + snap | ← **เริ่มที่นี่** |
 | **`selection` ย้ายออกจาก `Board`** (docs/02 §2.9) | ✅ เสร็จ (`439f380`) — คลิกดูภาพไม่ทำให้เอกสาร dirty อีกต่อไป |
-| P2-5 ขึ้นไป | ยังไม่เริ่ม |
+| **P2-5** move / scale (handle) / rotate + snap | ← **เริ่มที่นี่** |
 
 **เกณฑ์คุณภาพล่าสุดที่ผ่าน:** `fmt` / `clippy --all-features -D warnings` (workspace + `fuzz/`) /
-`nextest 383/383` / `deny check` ครบ 4 หมวด / **binary 15.46 MB จากเพดาน 25 MB (บังคับใน CI)**
+`nextest 383/383` / `deny check` ครบ 4 หมวด / **binary 15.57 MB จากเพดาน 25 MB (บังคับใน CI)**
 
 crate ที่มี: `refx-app` `refx-asset` `refx-core` `refx-io` `refx-platform` `refx-render` `refx-ui`
 
@@ -132,9 +131,9 @@ repo อยู่ใต้ git แล้ว (branch **`main`**) และ **push
 5. `affected()` **ไม่มีค่าเริ่มต้น** เช่นกัน — บอกว่าคำสั่งแตะ item ไหน เพื่อให้ชั้น editor
    ตั้ง selection ตามหลัง undo/redo (การเลือกไม่ได้ถูก undo มันตามผลลัพธ์)
 
-### 2.2 ★★ งานถัดไป: ย้าย `refx-ui` มาใช้ `refx_core::Board`
+### 2.2 ✅ ย้าย `refx-ui` มาใช้ `refx_core::Board` (ปิดครบ 3 ส.ค. 2026)
 
-**นี่คือสิ่งที่ขวาง P2-4 ครึ่งหลังอยู่ และไม่มีใครเคยลงมันไว้ใน ROADMAP**
+**เคยเป็นสิ่งที่ขวาง P2-4 ครึ่งหลังอยู่ และไม่มีใครเคยลงมันไว้ใน ROADMAP**
 
 `refx-ui` ยังเก็บสถานะเองเป็น `Vec<QuadInstance>` คู่ขนานกับ `Vec<BoardItem>`
 (`app.rs` — มี TODO เขียนไว้ตั้งแต่ P1 ว่า "P2 จะแทนที่ด้วย `Board`/`Item` ตัวจริง")
