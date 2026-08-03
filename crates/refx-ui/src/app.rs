@@ -12,6 +12,9 @@ use refx_asset::pool::DecodePool;
 use refx_core::arena::ItemId;
 use refx_core::board::{AssetRef, Board, ImageFormat, Item, ItemCanvas, ItemKind};
 use refx_core::command::{AddItems, History};
+use refx_core::geom::Rect as WorldRect;
+use refx_core::interact::{CanvasButton, CanvasContext, CanvasEvent, Modifiers, SelectTool};
+use refx_core::selection::Selection;
 use refx_core::spatial::SpatialIndex;
 use refx_core::view::Camera;
 
@@ -222,6 +225,15 @@ struct Gfx {
     index: SpatialIndex,
     /// สถานะฝั่ง render ต่อ item (atlas slot, thumbnail, ต้นทาง)
     render_state: std::collections::HashMap<ItemId, ItemRender>,
+    /// ★ สิ่งที่ผู้ใช้เลือกอยู่ — **อยู่นอก `Board` โดยตั้งใจ** (docs/02 §2.9)
+    ///
+    /// ไม่ persist ไม่ undo ไม่ทำให้เอกสาร dirty — คลิกดูภาพเฉย ๆ ต้องไม่ทำให้
+    /// ผู้ใช้โดนถาม "บันทึกไหม" ตอนปิด
+    selection: Selection,
+    /// เครื่องสถานะของการเลือก (คลิก · Ctrl+คลิก · ลากกรอบ)
+    select_tool: SelectTool,
+    /// กรอบ rubber-band ที่กำลังลากอยู่ (world) — `None` = ไม่ต้องวาด
+    rubber_band: Option<WorldRect>,
     /// ★ thumbnail ของทุก item บน board เก็บไว้เติม atlas กลับหลังกู้ device
     ///
     /// docs/04 §4: ถ้าไม่เติมกลับ ผู้ใช้จะเห็น **board ว่างเปล่า** หลัง driver อัปเดต
@@ -248,10 +260,6 @@ struct Gfx {
     ///   1. `set_viewport` ของ render pass + กรอบอ้างอิงของกล้องตอนวาด
     ///   2. แปลงพิกัดเคอร์เซอร์ตอน zoom เข้าหาเมาส์ (P0-7)
     canvas: CanvasRect,
-    /// ตำแหน่งเคอร์เซอร์ล่าสุดบนจอ (physical pixel, พิกัดหน้าต่าง)
-    cursor: Vec2,
-    /// กำลังลากเพื่อ pan อยู่หรือไม่
-    panning: bool,
 }
 
 /// แปลงสถิติสะสมของ decode pool เป็นความคืบหน้าของ **งวดปัจจุบัน**
@@ -367,6 +375,152 @@ struct ItemRender {
     flags: u32,
 }
 
+/// สิ่งที่ canvas widget เก็บได้จาก egui ในเฟรมหนึ่ง
+///
+/// ★ **เก็บไว้ก่อน แล้วค่อยเอาไปประมวลผลหลัง `run_ui` จบ** — ระหว่างอยู่ในคลอเชอร์
+/// เรายืม `gfx` แบบอ่านอย่างเดียวเพื่อวาด จึงแก้อะไรไม่ได้ การแยกสองจังหวะแบบนี้
+/// ยังทำให้ตรรกะการเลือกทดสอบแยกได้ด้วย (มันอยู่ใน `refx-core` ทั้งก้อน)
+#[derive(Debug, Clone, Copy)]
+struct CanvasFrameInput {
+    /// กรอบของ widget (หน่วย point)
+    rect: egui::Rect,
+    /// ตำแหน่งเคอร์เซอร์ (point) ถ้าอยู่เหนือ canvas
+    pointer: Option<egui::Pos2>,
+    /// กดปุ่มซ้ายลงในเฟรมนี้
+    primary_pressed: bool,
+    /// ปล่อยปุ่มซ้ายในเฟรมนี้
+    primary_released: bool,
+    /// ปุ่มซ้ายกดค้างอยู่
+    primary_down: bool,
+    /// ระยะที่ลากด้วยปุ่มกลาง (point)
+    pan_delta: egui::Vec2,
+    /// จำนวนคลิกของล้อ
+    scroll: f32,
+    /// Ctrl/Shift ตอนนี้
+    modifiers: Modifiers,
+}
+
+impl Default for CanvasFrameInput {
+    fn default() -> Self {
+        Self {
+            rect: egui::Rect::NOTHING,
+            pointer: None,
+            primary_pressed: false,
+            primary_released: false,
+            primary_down: false,
+            pan_delta: egui::Vec2::ZERO,
+            scroll: 0.0,
+            modifiers: Modifiers::default(),
+        }
+    }
+}
+
+/// สีของกรอบสิ่งที่ถูกเลือกและกรอบ rubber-band
+const SELECT_STROKE: egui::Color32 = egui::Color32::from_rgb(120, 190, 255);
+
+impl RefxApp {
+    /// ★ canvas เป็น **widget จริงของ egui** — ไม่ใช่การเดาว่า pointer เป็นของใคร
+    ///
+    /// docs/03 §1 บันทึกทางแก้ชั่วคราวไว้ (`egui_is_using_pointer()` +
+    /// `canvas.contains(cursor)`) พร้อมบอกว่าทางที่ถูกคือทำแบบนี้ เพราะ
+    /// `CentralPanel` กิน root rect จนหมด `is_pointer_over_egui()` จึงจริงทุกจุด
+    /// บน canvas ทำให้ `consumed` ใช้ตัดสินไม่ได้
+    ///
+    /// พอจองพื้นที่ด้วย `allocate_response` แล้ว **egui เป็นคนจัดลำดับให้เอง**:
+    /// คลิกบน toolbar/inspector จะไม่ตกมาถึงเรา เพราะ widget พวกนั้นกิน response ไปก่อน
+    fn canvas_widget(
+        ui: &mut egui::Ui,
+        board: &Board,
+        selection: &Selection,
+        render_state: &std::collections::HashMap<ItemId, ItemRender>,
+        camera: Camera,
+        rubber_band: Option<WorldRect>,
+    ) -> CanvasFrameInput {
+        let response = ui.allocate_response(ui.available_size(), egui::Sense::click_and_drag());
+        let rect = response.rect;
+
+        // world → point: renderer แปลง world → **physical pixel** ด้วยตัวคูณ `zoom`
+        // การวาดทับด้วย egui อยู่ในหน่วย point จึงต้องหารด้วย pixels_per_point
+        // ไม่งั้นกรอบที่วาดจะเลื่อนจากภาพทันทีที่จอมี DPI ไม่ใช่ 100%
+        let scale = camera.zoom() / ui.ctx().pixels_per_point();
+        let centre = camera.center();
+        let to_point = |world: Vec2| -> egui::Pos2 {
+            let offset = (world - centre) * scale;
+            rect.center() + egui::vec2(offset.x, offset.y)
+        };
+
+        // ---- วาดกรอบของสิ่งที่ถูกเลือก ----
+        let painter = ui.painter_at(rect);
+        for id in selection.iter() {
+            let Some(item) = board.item(id) else {
+                continue;
+            };
+            if !item.canvas.visible || !render_state.contains_key(&id) {
+                continue;
+            }
+            // ใช้สี่มุมจริง (หมุนแล้ว) ไม่ใช่ AABB — ไม่งั้นภาพที่หมุนจะได้กรอบที่
+            // ใหญ่กว่าตัวมันเองอย่างเห็นได้ชัด
+            let corners = item.canvas.obb().corners().map(to_point);
+            painter.add(egui::Shape::closed_line(
+                corners.to_vec(),
+                egui::Stroke::new(2.0, SELECT_STROKE),
+            ));
+        }
+
+        // ---- วาดกรอบ rubber-band ----
+        if let Some(band) = rubber_band {
+            let band = egui::Rect::from_two_pos(to_point(band.min), to_point(band.max));
+            painter.rect_filled(band, 0.0, SELECT_STROKE.gamma_multiply(0.15));
+            painter.rect_stroke(
+                band,
+                0.0,
+                egui::Stroke::new(1.0, SELECT_STROKE),
+                egui::StrokeKind::Inside,
+            );
+        }
+
+        let (scroll, modifiers) = ui.ctx().input(|i| {
+            (
+                i.smooth_scroll_delta.y,
+                Modifiers {
+                    ctrl: i.modifiers.ctrl || i.modifiers.command,
+                    shift: i.modifiers.shift,
+                },
+            )
+        });
+
+        CanvasFrameInput {
+            rect,
+            // `hover_pos` คืน `None` เมื่อ pointer อยู่เหนือ widget อื่นที่ทับอยู่
+            // — นี่คือสิ่งที่ทำให้คลิกบน toolbar ไม่ทะลุมาโดนภาพข้างหลัง
+            pointer: response.hover_pos().or_else(|| {
+                // ระหว่างลากค้าง เคอร์เซอร์ออกนอก widget ได้ ยังต้องตามให้ทัน
+                response
+                    .dragged()
+                    .then(|| ui.ctx().input(|i| i.pointer.latest_pos()))
+                    .flatten()
+            }),
+            primary_pressed: response.drag_started_by(egui::PointerButton::Primary)
+                || ui
+                    .ctx()
+                    .input(|i| i.pointer.button_pressed(egui::PointerButton::Primary))
+                    && response.hovered(),
+            primary_released: response.drag_stopped_by(egui::PointerButton::Primary)
+                || (response.clicked() && !response.dragged()),
+            primary_down: ui
+                .ctx()
+                .input(|i| i.pointer.button_down(egui::PointerButton::Primary)),
+            pan_delta: if response.dragged_by(egui::PointerButton::Middle) {
+                response.drag_delta()
+            } else {
+                egui::Vec2::ZERO
+            },
+            scroll: if response.hovered() { scroll } else { 0.0 },
+            modifiers,
+        }
+    }
+}
+
 /// กรอบของช่อง canvas ในหน่วย physical pixel
 #[derive(Debug, Clone, Copy)]
 struct CanvasRect {
@@ -413,17 +567,6 @@ impl CanvasRect {
             min: Vec2::new(x, y),
             size: Vec2::new(w, h),
         }
-    }
-
-    /// พิกัดเคอร์เซอร์ของหน้าต่าง → พิกัดภายในช่อง canvas
-    fn to_local(self, cursor: Vec2) -> Vec2 {
-        cursor - self.min
-    }
-
-    /// จุดนี้อยู่ในช่อง canvas ไหม (พิกัดหน้าต่าง)
-    fn contains(self, point: Vec2) -> bool {
-        let max = self.min + self.size;
-        point.x >= self.min.x && point.x < max.x && point.y >= self.min.y && point.y < max.y
     }
 }
 
@@ -983,6 +1126,14 @@ impl RefxApp {
         gfx.egui_winit = egui_winit;
         gfx.egui_renderer = egui_renderer;
 
+        // ★★ ห้ามเปลี่ยนตรงนี้ไปเป็น "สร้าง `Gfx` ใหม่ทั้งก้อน"
+        //
+        //   `Gfx` ถือ `board` / `history` / `selection` ซึ่งเป็น **งานของผู้ใช้**
+        //   ไม่ใช่ของที่ผูกกับ device (บ้านที่ผิด — ควรย้ายออกตอน P4-7 multi-board)
+        //   ตอนนี้ปลอดภัยเพราะฟังก์ชันนี้แก้ทีละฟิลด์ ของที่ไม่ได้แตะจึงรอด
+        //   แต่ถ้าวันหนึ่งมีคนเขียนเป็น `*gfx = Gfx::new(...)` **board ของผู้ใช้จะหาย
+        //   ทันทีที่ driver อัปเดต** โดยไม่มี error ที่ไหนเลย = ผิด I-3 เต็ม ๆ
+        //
         // ★ resource ที่ผูกกับ device เดิม **ต้องสร้างใหม่ทั้งชุด** (docs/04 §7 ข้อ 3)
         //   สร้างผ่านจุดเดียวกับตอนเปิดโปรแกรม แล้วรับด้วยการ destructure
         //   เพื่อให้คอมไพเลอร์บังคับว่าห้ามลืมชิ้นไหน (ดู `DeviceBound`)
@@ -1140,6 +1291,86 @@ impl RefxApp {
                 assets.pool.submit(job);
             }
         }
+    }
+
+    /// เอา input ที่ widget เก็บมาไปขยับกล้องและสั่งเครื่องมือเลือก
+    ///
+    /// คืน `true` เมื่อมีอะไรเปลี่ยนจนต้องวาดใหม่ — **I-1: ไม่มีอะไรเปลี่ยนต้องไม่ขอเฟรม**
+    fn apply_canvas_input(gfx: &mut Gfx, input: CanvasFrameInput) -> bool {
+        let mut changed = false;
+        let rect = input.rect;
+        if !rect.is_positive() {
+            return false;
+        }
+
+        // ---- กล้อง: ปุ่มกลางลาก + ล้อซูม ----
+        //
+        // ★ ทำไม pan ใช้ **ปุ่มกลาง** ไม่ใช่ space+ลาก: ปุ่มซ้ายเป็นของการเลือกแล้ว
+        //   ส่วน space จะชนกับ text note (P2-11) ที่ space เป็นตัวอักษรจริง ๆ
+        //   ปุ่มกลางไม่ต้องพึ่งสถานะคีย์บอร์ดเลยจึงไม่มีทางค้าง (เพิ่ม space ทีหลังได้)
+        let ppp = gfx.egui_ctx.pixels_per_point();
+        if input.pan_delta != egui::Vec2::ZERO {
+            // ระยะลากเป็น point — กล้องคิดเป็น physical pixel
+            gfx.camera
+                .pan_by_screen_delta(Vec2::new(input.pan_delta.x, input.pan_delta.y) * ppp);
+            changed = true;
+        }
+        if input.scroll.abs() > f32::EPSILON
+            && let Some(pointer) = input.pointer
+        {
+            // เลขชี้กำลังทำให้ซูมรู้สึกเท่ากันทุกระดับ (เหมือนเดิมก่อนย้าย)
+            let factor = 1.1f32.powf(input.scroll / 50.0);
+            let local = pointer - rect.min;
+            gfx.camera.zoom_at_screen(
+                Vec2::new(local.x, local.y) * ppp,
+                Vec2::new(rect.width(), rect.height()) * ppp,
+                factor,
+            );
+            changed = true;
+        }
+
+        // ---- การเลือก ----
+        let Some(pointer) = input.pointer else {
+            return changed;
+        };
+        let scale = gfx.camera.zoom() / ppp;
+        if scale <= 0.0 {
+            return changed;
+        }
+        let offset = pointer - rect.center();
+        let world = gfx.camera.center() + Vec2::new(offset.x, offset.y) / scale;
+
+        // ระยะเริ่มลากคิดเป็นพิกเซลบนจอเสมอ เพื่อให้รู้สึกเท่ากันทุกระดับซูม
+        let ctx = CanvasContext {
+            board: &gfx.board,
+            index: &gfx.index,
+            drag_threshold: refx_core::interact::DEFAULT_DRAG_THRESHOLD_PX * ppp
+                / gfx.camera.zoom(),
+        };
+
+        let event = if input.primary_pressed {
+            Some(CanvasEvent::Press {
+                button: CanvasButton::Primary,
+                world,
+                modifiers: input.modifiers,
+            })
+        } else if input.primary_released {
+            Some(CanvasEvent::Release {
+                button: CanvasButton::Primary,
+                world,
+            })
+        } else if input.primary_down {
+            Some(CanvasEvent::Move { world })
+        } else {
+            None
+        };
+
+        if let Some(event) = event {
+            let outcome = gfx.select_tool.handle(ctx, &mut gfx.selection, event);
+            gfx.rubber_band = outcome.rubber_band;
+            changed |= outcome.needs_redraw;
+        }
+        changed
     }
 
     /// แปลง item หนึ่งใบเป็น instance ที่ GPU วาดได้
@@ -1324,14 +1555,15 @@ impl AppDelegate for RefxApp {
             history: History::default(),
             index: SpatialIndex::new(refx_core::spatial::DEFAULT_CELL_SIZE),
             render_state: std::collections::HashMap::new(),
+            selection: Selection::new(),
+            select_tool: SelectTool::new(),
+            rubber_band: None,
             working,
             working_pending: std::collections::HashSet::new(),
             working_quads: Vec::new(),
             // เริ่มที่กลาง world ของ demo เพื่อให้เห็นสี่เหลี่ยมทันทีที่เปิด
             camera: Camera::new(Vec2::splat(2000.0), 0.25),
             canvas: CanvasRect::full(size.width, size.height),
-            cursor: Vec2::ZERO,
-            panning: false,
             modifiers: ModifiersState::empty(),
         });
         self.queue_initial_files();
@@ -1424,13 +1656,35 @@ impl AppDelegate for RefxApp {
             shell.cache_bytes = stats.size_bytes;
         }
         let mut canvas_points = egui::Rect::NOTHING;
-        let full_output = gfx.egui_ctx.run_ui(raw_input, |ui| {
-            canvas_points = crate::shell::draw_in_ui(ui, shell, |ui| {
-                // ช่องกลางคือ canvas — ภาพวาดด้วย wgpu ใต้ egui อีกที
-                // ตรงนี้แค่จองพื้นที่ไว้ P2 จะใส่ hit-test/tool overlay
-                ui.allocate_space(ui.available_size());
-            });
-        });
+        let mut canvas_input = CanvasFrameInput::default();
+        // ★ clone `Context` ออกมาก่อน (มันเป็น `Arc` ข้างใน) เพื่อปลดการยืม `gfx`
+        //   คลอเชอร์ข้างล่างจะได้ยืมฟิลด์อื่นของ `gfx` แบบอ่านอย่างเดียวไปวาดกรอบ
+        //   สิ่งที่ถูกเลือกได้ แล้วค่อยแก้สถานะหลัง `run_ui` จบ
+        let egui_ctx = gfx.egui_ctx.clone();
+        let full_output = {
+            let board = &gfx.board;
+            let selection = &gfx.selection;
+            let render_state = &gfx.render_state;
+            let camera = gfx.camera;
+            let rubber_band = gfx.rubber_band;
+            egui_ctx.run_ui(raw_input, |ui| {
+                canvas_points = crate::shell::draw_in_ui(ui, shell, |ui| {
+                    // ช่องกลางคือ canvas — ภาพวาดด้วย wgpu ใต้ egui อีกที
+                    // ★ เป็น widget จริงแล้ว egui จึงจัดลำดับ pointer ให้เอง
+                    canvas_input = Self::canvas_widget(
+                        ui,
+                        board,
+                        selection,
+                        render_state,
+                        camera,
+                        rubber_band,
+                    );
+                });
+            })
+        };
+        if Self::apply_canvas_input(gfx, canvas_input) {
+            gfx.window.request_redraw();
+        }
         gfx.egui_winit
             .handle_platform_output(&gfx.window, full_output.platform_output);
 
@@ -1651,25 +1905,16 @@ impl AppDelegate for RefxApp {
         let response = gfx.egui_winit.on_window_event(&gfx.window, event);
         let mut needs_redraw = response.repaint;
 
-        // ★ ห้ามใช้ `response.consumed` เดี่ยว ๆ เป็นตัวตัดสิน — วัดแล้วว่าไม่ได้
+        // ★ pointer เป็นเรื่องของ egui ทั้งหมดแล้ว (แก้ 3 ส.ค. 2026)
         //
-        //   egui ถือว่า `CentralPanel` เป็นพื้นที่ของตัวเอง และเพราะ panel นั้นกิน
-        //   root rect ที่เหลือจนหมด `is_pointer_over_egui()` จึงเป็น **true ทุกจุด
-        //   บน canvas** → `consumed = true` เสมอ → เดิม pan/zoom ไม่เคยทำงานเลย
-        //   (ยืนยันด้วย log จริง: consumed=true over_egui=true using=false)
+        //   เดิมต้องเดาเองว่า pointer เป็นของใครด้วย `egui_is_using_pointer()` +
+        //   `canvas.contains(cursor)` เพราะ `CentralPanel` กิน root rect จนหมด
+        //   ทำให้ `response.consumed` เป็น true ทุกจุดบน canvas (docs/03 §1)
         //
-        //   แยกสองกรณีที่ต่างกันจริง ๆ แทน:
-        //     * egui **กำลังใช้** pointer อยู่ (กดปุ่ม/ลาก slider) → เป็นของ egui
-        //     * แค่ hover อยู่เหนือช่อง canvas → เป็นของเรา
-        //
-        //   TODO(P2): พอมี tool overlay เป็น widget จริงในช่อง canvas ให้เปลี่ยนไป
-        //   ใช้ `ui.allocate_response(.., Sense::click_and_drag())` แล้วขับกล้อง
-        //   จาก response นั้นแทน เพื่อให้ egui เป็นคนตัดสินให้ทั้งหมด
-        let egui_owns_pointer = gfx.egui_ctx.egui_is_using_pointer()
-            || (response.consumed && !gfx.canvas.contains(gfx.cursor));
-        if egui_owns_pointer {
-            return needs_redraw;
-        }
+        //   ตอนนี้ canvas เป็น widget จริงด้วย `allocate_response` แล้ว egui จึงเป็น
+        //   คนจัดลำดับให้เอง — คลิกบน toolbar/inspector ไม่ตกมาถึง canvas เพราะ
+        //   widget พวกนั้นกิน response ไปก่อน ที่นี่จึงเหลือแค่ event ที่ egui ไม่สนใจ
+        //   (ลากไฟล์เข้ามา, ปุ่มค้าง, Ctrl+V) ส่วนเมาส์ทั้งหมดไปอยู่ `canvas_widget`
 
         match event {
             // ★ ลากไฟล์เข้ามา — เส้นทางหลักที่ผู้ใช้เอาภาพเข้าโปรแกรม (P1-8)
@@ -1694,47 +1939,6 @@ impl AppDelegate for RefxApp {
                 {
                     // อ่าน clipboard ที่นี่ไม่ได้ — บล็อกได้ (I-2) ทำที่ต้นเฟรมถัดไป
                     self.pending_paste = true;
-                    needs_redraw = true;
-                }
-            }
-
-            WindowEvent::CursorMoved { position, .. } => {
-                let next = Vec2::new(position.x as f32, position.y as f32);
-                if gfx.panning {
-                    gfx.camera.pan_by_screen_delta(next - gfx.cursor);
-                    needs_redraw = true;
-                }
-                gfx.cursor = next;
-            }
-
-            WindowEvent::MouseInput { state, button, .. } => {
-                // ลากด้วยปุ่มกลาง หรือปุ่มซ้าย (P2 จะแยกปุ่มซ้ายไปทำ select)
-                if matches!(
-                    button,
-                    winit::event::MouseButton::Middle | winit::event::MouseButton::Left
-                ) {
-                    gfx.panning = state.is_pressed();
-                }
-            }
-
-            WindowEvent::MouseWheel { delta, .. } => {
-                // แปลง delta สองแบบของ winit ให้เป็น "จำนวนคลิกของล้อ"
-                let notches = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(_, y) => *y,
-                    // touchpad ส่งเป็นพิกเซล — หารให้ได้สเกลใกล้เคียงล้อเมาส์
-                    winit::event::MouseScrollDelta::PixelDelta(pos) => pos.y as f32 / 50.0,
-                };
-                if notches.is_finite() && notches != 0.0 {
-                    // เลขชี้กำลังทำให้ซูมรู้สึกเท่ากันทุกระดับ
-                    // (ถ้าบวก/ลบตรง ๆ ตอนซูมเข้ามาก ๆ จะกระโดดแรงจนเวียนหัว)
-                    let factor = 1.1f32.powf(notches);
-                    // ★ ต้องใช้กรอบเดียวกับตอนวาด (ช่อง canvas ไม่ใช่ทั้งหน้าต่าง)
-                    //   ไม่งั้นจุดใต้เคอร์เซอร์จะเลื่อนตอนซูม ซึ่งเป็นข้อกำหนดหลักของ P0-7
-                    gfx.camera.zoom_at_screen(
-                        gfx.canvas.to_local(gfx.cursor),
-                        gfx.canvas.size,
-                        factor,
-                    );
                     needs_redraw = true;
                 }
             }
@@ -1824,21 +2028,67 @@ mod tests {
         }
     }
 
-    /// ★ ตัวตัดสินว่า event ของเมาส์เป็นของ canvas หรือของ egui
+    /// ★ egui เป็นคนตัดสินว่า pointer เป็นของ canvas หรือของ widget อื่น
     ///
-    /// ถ้าข้อนี้ผิด pan/zoom จะไม่ทำงาน (เคยเป็นมาแล้ว) หรือแย่งปุ่มบน UI ไป
+    /// เดิมเราเดาเองด้วย `CanvasRect::contains()` เพราะ `CentralPanel` กิน root rect
+    /// จนหมด ทำให้ `response.consumed` ใช้ไม่ได้ (docs/03 §1) — ตอนนี้ canvas เป็น
+    /// widget จริงแล้ว เทสต์นี้จึงยิงของจริง: วาง pointer บน panel ซ้ายแล้วบน canvas
+    /// แล้วดูว่า widget ตอบต่างกันจริงไหม
+    ///
+    /// ถ้าข้อนี้พัง คลิกปุ่มบน toolbar จะทะลุไปเลือกภาพข้างหลังด้วย
     #[test]
-    fn contains_marks_only_points_inside_the_canvas() {
-        let c = CanvasRect::from_points(rect(200.0, 60.0, 800.0, 700.0), 1.0, 1280, 800);
+    fn the_canvas_widget_only_takes_the_pointer_inside_itself() {
+        fn pointer_seen_at(pos: egui::Pos2) -> bool {
+            let ctx = egui::Context::default();
+            let mut state = crate::shell::ShellState::default();
+            let board = Board::default();
+            let selection = Selection::new();
+            let render_state = std::collections::HashMap::new();
+            let mut seen = false;
 
-        assert!(c.contains(Vec2::new(600.0, 400.0)), "กลาง canvas");
-        assert!(c.contains(Vec2::new(200.0, 60.0)), "มุมซ้ายบนนับเป็นข้างใน");
+            // สองรอบ: egui ใช้ layout ของรอบก่อนหน้า รอบแรกขนาด panel ยังไม่นิ่ง
+            for _ in 0..2 {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1280.0, 800.0),
+                    )),
+                    events: vec![egui::Event::PointerMoved(pos)],
+                    ..Default::default()
+                };
+                let _ = ctx.run_ui(input, |ui| {
+                    let _ = crate::shell::draw_in_ui(ui, &mut state, |ui| {
+                        let got = RefxApp::canvas_widget(
+                            ui,
+                            &board,
+                            &selection,
+                            &render_state,
+                            Camera::default(),
+                            None,
+                        );
+                        seen = got.pointer.is_some();
+                    });
+                });
+            }
+            seen
+        }
 
-        assert!(!c.contains(Vec2::new(100.0, 400.0)), "อยู่บน Library");
-        assert!(!c.contains(Vec2::new(1100.0, 400.0)), "อยู่บน Inspector");
-        assert!(!c.contains(Vec2::new(600.0, 30.0)), "อยู่บน toolbar");
-        assert!(!c.contains(Vec2::new(600.0, 780.0)), "อยู่บน status bar");
-        assert!(!c.contains(Vec2::new(1000.0, 760.0)), "มุมขวาล่างนับเป็นข้างนอก");
+        assert!(
+            pointer_seen_at(egui::pos2(640.0, 400.0)),
+            "กลาง canvas ต้องเป็นของเรา"
+        );
+        assert!(
+            !pointer_seen_at(egui::pos2(60.0, 400.0)),
+            "บน Library ต้องไม่ใช่"
+        );
+        assert!(
+            !pointer_seen_at(egui::pos2(1240.0, 400.0)),
+            "บน Inspector ต้องไม่ใช่"
+        );
+        assert!(
+            !pointer_seen_at(egui::pos2(640.0, 20.0)),
+            "บน toolbar ต้องไม่ใช่"
+        );
     }
 
     // ---------- ตัวนับความคืบหน้า (docs/05 §6 เงื่อนไขข้อ 3) ----------
@@ -1955,16 +2205,15 @@ mod tests {
     ///
     /// นี่คือสิ่งที่ทำให้ "ซูมแล้วจุดใต้เคอร์เซอร์ไม่ขยับ" ยังจริงอยู่
     /// แม้ canvas จะไม่ได้อยู่กลางหน้าต่าง
+    ///
+    /// (พิกัดเคอร์เซอร์มาจาก `response.hover_pos()` ของ egui แล้ว จึงเทียบกับ
+    /// กรอบของ widget ตรง ๆ ไม่ต้องผ่าน `CanvasRect` อีก)
     #[test]
     fn cursor_at_canvas_centre_maps_to_camera_centre() {
         let c = CanvasRect::from_points(rect(200.0, 60.0, 800.0, 700.0), 1.0, 1280, 800);
-        let cursor = c.min + c.size * 0.5;
-        assert_eq!(c.to_local(cursor), c.size * 0.5);
-
-        // จุดกึ่งกลางกล้องต้องตกลงตรงนั้นพอดี
         let camera = Camera::new(Vec2::new(2000.0, 2000.0), 0.25);
         let on_screen = camera.world_to_screen(camera.center(), c.size);
-        assert_eq!(on_screen, c.to_local(cursor));
+        assert_eq!(on_screen, c.size * 0.5);
     }
 
     // ---------- Ctrl+V (P1-8) ----------
