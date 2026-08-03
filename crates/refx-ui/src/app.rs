@@ -173,6 +173,43 @@ impl FrameStats {
 /// อักขระควบคุม `SYN` (U+0016) จึงรับตัวนั้นด้วย
 ///
 /// TODO(P6): macOS ใช้ `Cmd+V` ต้องรับ `super_key()` เพิ่มตอนทำ P6
+/// ผู้ใช้ขออะไรกับประวัติ
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HistoryRequest {
+    /// Ctrl+Z
+    Undo,
+    /// Ctrl+Y หรือ Ctrl+Shift+Z
+    Redo,
+}
+
+/// แปลงปุ่มที่กดเป็นคำขอกับประวัติ
+///
+/// ★ รับ **Ctrl+Shift+Z เป็น redo ด้วย** ไม่ใช่แค่ Ctrl+Y — คนจำนวนมากใช้อันนั้น
+/// (ติดมาจาก Photoshop/Illustrator) ถ้าไม่รับ เขาจะคิดว่า redo ไม่มีในโปรแกรมนี้
+fn history_shortcut(
+    key: &winit::keyboard::Key,
+    modifiers: ModifiersState,
+) -> Option<HistoryRequest> {
+    if !modifiers.control_key() {
+        return None;
+    }
+    let winit::keyboard::Key::Character(text) = key else {
+        return None;
+    };
+    // ปุ่มควบคุมบางระบบส่งมาเป็นอักขระ control (Ctrl+Z = 0x1A, Ctrl+Y = 0x19)
+    if text.eq_ignore_ascii_case("z") || text.as_str() == "\u{1a}" {
+        return Some(if modifiers.shift_key() {
+            HistoryRequest::Redo
+        } else {
+            HistoryRequest::Undo
+        });
+    }
+    if text.eq_ignore_ascii_case("y") || text.as_str() == "\u{19}" {
+        return Some(HistoryRequest::Redo);
+    }
+    None
+}
+
 fn is_paste(key: &winit::keyboard::Key, modifiers: ModifiersState) -> bool {
     if !modifiers.control_key() {
         return false;
@@ -611,6 +648,11 @@ pub struct RefxApp {
     pending_paste: bool,
     /// งานวางที่ส่งไปแล้วแต่ยังไม่ได้ผลกลับ
     ///
+    /// คำขอ undo/redo ที่รอทำต้นเฟรมถัดไป
+    ///
+    /// เป็น `Option` จึงรวบการกดค้างให้เหลือครั้งเดียวต่อเฟรมโดยอัตโนมัติ —
+    /// กด Ctrl+Z ค้างแล้วย้อนเรื่อย ๆ ได้ตามที่คนคาดหวัง แต่ไม่ถล่มทั้งสแตกในเฟรมเดียว
+    pending_history: Option<HistoryRequest>,
     /// ★ กันการกด `Ctrl+V` รัว ๆ ให้เหลือทีละครั้ง — ภาพจาก clipboard ใหญ่ได้
     /// ระดับ 6000×4000 (96 MB) และ `arboard` จอง RAM ก้อนนั้นก่อนที่เพดานของเรา
     /// จะได้ตรวจ ถ้าปล่อยให้ซ้อนกันสิบใบคือแย่ง RAM กับ Photoshop ตรง ๆ
@@ -672,6 +714,7 @@ impl RefxApp {
             drop_reported: true,
             pending_drops: Vec::new(),
             pending_paste: false,
+            pending_history: None,
             paste_in_flight: None,
             paste_count: 0,
             batch_from_clipboard: false,
@@ -1373,6 +1416,101 @@ impl RefxApp {
         changed
     }
 
+    /// ทำ undo/redo แล้วทำให้ผู้ใช้ **เห็นว่าเกิดอะไรขึ้น**
+    fn apply_history_request(&mut self, request: HistoryRequest) {
+        let lang = self.shell.lang;
+        let Some(gfx) = self.gfx.as_mut() else {
+            return;
+        };
+        let outcome = match request {
+            HistoryRequest::Undo => gfx.history.undo(&mut gfx.board),
+            HistoryRequest::Redo => gfx.history.redo(&mut gfx.board),
+        };
+
+        let affected = match outcome {
+            Ok(Some(affected)) => affected,
+            Ok(None) => {
+                // ★ ไม่มีอะไรให้ย้อนแล้ว **ต้องบอก** ไม่ใช่เงียบ
+                //   ความเงียบอ่านได้ว่า "โปรแกรมไม่ตอบสนอง" แล้วผู้ใช้จะกดซ้ำ ๆ
+                self.shell.status = text::t(
+                    lang,
+                    match request {
+                        HistoryRequest::Undo => Key::NothingToUndo,
+                        HistoryRequest::Redo => Key::NothingToRedo,
+                    },
+                )
+                .to_owned();
+                return;
+            }
+            Err(err) => {
+                // ย้อนไม่ได้ = มีคนแก้ board นอกเส้นทาง Command (ผิด I-3)
+                tracing::error!(%err, ?request, "history operation failed");
+                return;
+            }
+        };
+
+        // index กับ quad ต้องตามสถานะใหม่ของ board ทันที
+        gfx.index.rebuild(&gfx.board);
+        Self::rebuild_quads(gfx);
+
+        // ★ เลือกของที่เพิ่งเปลี่ยนให้ผู้ใช้ (docs/02 §2.9)
+        //   การเลือกไม่ได้ถูก undo — มันตามผลลัพธ์ที่คำสั่งรายงานกลับมา
+        //   id ที่หายไปแล้ว (undo ของการเพิ่ม) ต้องกรองทิ้ง ไม่งั้น selection ถือของว่าง
+        let live: Vec<ItemId> = affected
+            .into_iter()
+            .filter(|id| gfx.board.item(*id).is_some())
+            .collect();
+        gfx.selection.restore(live.clone(), live.last().copied());
+        // การลากที่ค้างอยู่ (ถ้ามี) ใช้ไม่ได้แล้วเพราะ board เปลี่ยนไปใต้มือ
+        gfx.select_tool.cancel();
+        gfx.rubber_band = None;
+
+        Self::look_at_if_offscreen(gfx, &live);
+        gfx.window.request_redraw();
+    }
+
+    /// เลื่อนกล้องไปหาสิ่งที่เพิ่งเปลี่ยน **ถ้ามันมองไม่เห็นเลย**
+    ///
+    /// ★ รายละเอียดที่ทำให้ undo รู้สึกเชื่อถือได้: ถ้าของที่ถูกย้อนอยู่นอกจอ
+    /// ผู้ใช้จะเห็นว่า "กด Ctrl+Z แล้วไม่มีอะไรเกิดขึ้น" ซึ่งอ่านได้ว่าโปรแกรมพัง
+    /// แล้วเขาจะกดซ้ำ ๆ จน **ย้อนเลยจุดที่ตั้งใจ** — งานหายโดยที่กลไกกันงานหาย
+    /// ทำงานถูกต้องทุกขั้นตอน
+    ///
+    /// เลื่อนเฉพาะตอน **มองไม่เห็นเลย** ไม่ใช่ตอนโผล่ไม่ครบ — การกระตุกกล้อง
+    /// ทั้งที่ผู้ใช้เห็นของอยู่แล้วน่ารำคาญกว่าประโยชน์ที่ได้
+    ///
+    /// ไม่มี animation โดยตั้งใจ: I-1 บังคับว่า idle ต้อง 0% CPU การเลื่อนแบบ
+    /// ค่อย ๆ ไถลต้องวาดต่อเนื่องหลายเฟรม ซึ่งแลกไม่คุ้มกับความสวยตรงนี้
+    fn look_at_if_offscreen(gfx: &mut Gfx, ids: &[ItemId]) {
+        let mut bounds = WorldRect::EMPTY;
+        for id in ids {
+            if let Some(item) = gfx.board.item(*id) {
+                bounds = bounds.union(item.canvas.world_bounds());
+            }
+        }
+        // ไม่มีของให้ดู (เช่น undo ของการเพิ่ม หรือ ReorderZ ที่ไม่ได้แตะใคร)
+        if bounds.is_empty() || !bounds.is_finite() {
+            return;
+        }
+
+        let zoom = gfx.camera.zoom();
+        if zoom <= 0.0 {
+            return;
+        }
+        let half = gfx.canvas.size * 0.5 / zoom;
+        let centre = gfx.camera.center();
+        let view = WorldRect {
+            min: centre - half,
+            max: centre + half,
+        };
+        if view.intersects(bounds) {
+            return; // เห็นอยู่แล้วอย่างน้อยบางส่วน — อย่าไปกระตุกกล้อง
+        }
+
+        tracing::info!("moving the camera to show what the history change affected");
+        gfx.camera.set_center(bounds.center());
+    }
+
     /// แปลง item หนึ่งใบเป็น instance ที่ GPU วาดได้
     ///
     /// ★ **จุดเดียวที่เรขาคณิตของ `Board` กลายเป็น `QuadInstance`**
@@ -1589,6 +1727,11 @@ impl AppDelegate for RefxApp {
         // ★ Ctrl+V ที่กดไปเมื่อกี้ — งานอ่าน clipboard เกิดบน worker ทั้งหมด (I-2)
         if std::mem::take(&mut self.pending_paste) {
             self.submit_paste();
+        }
+
+        // Ctrl+Z / Ctrl+Y ที่กดไปเมื่อกี้
+        if let Some(request) = self.pending_history.take() {
+            self.apply_history_request(request);
         }
 
         // เก็บผล decode ที่เสร็จแล้วก่อนวาด (ไม่บล็อก)
@@ -1941,6 +2084,15 @@ impl AppDelegate for RefxApp {
                     self.pending_paste = true;
                     needs_redraw = true;
                 }
+                // ★ undo/redo **ยอมให้กดค้างซ้ำได้** ต่างจาก Ctrl+V โดยตั้งใจ
+                //   กด Ctrl+Z ค้างแล้วย้อนเรื่อย ๆ เป็นสิ่งที่ทุกคนคาดหวัง
+                //   ส่วนการวางซ้ำ ๆ ไม่ใช่ (แถมภาพจาก clipboard ใหญ่ได้เป็นร้อย MB)
+                if event.state.is_pressed()
+                    && let Some(request) = history_shortcut(&event.logical_key, gfx.modifiers)
+                {
+                    self.pending_history = Some(request);
+                    needs_redraw = true;
+                }
             }
 
             _ => {}
@@ -2089,6 +2241,76 @@ mod tests {
             !pointer_seen_at(egui::pos2(640.0, 20.0)),
             "บน toolbar ต้องไม่ใช่"
         );
+    }
+
+    // ---------- undo/redo (P2-4 ขั้นที่ 3) ----------
+
+    fn key(text: &str) -> winit::keyboard::Key {
+        winit::keyboard::Key::Character(text.into())
+    }
+
+    /// ★ Ctrl+Shift+Z ต้องเป็น redo ไม่ใช่ undo
+    ///
+    /// คนจำนวนมากใช้อันนี้แทน Ctrl+Y (ติดมาจาก Photoshop/Illustrator)
+    /// ถ้าไม่รับ เขาจะสรุปว่าโปรแกรมนี้ไม่มี redo
+    #[test]
+    fn history_shortcuts_cover_what_people_actually_press() {
+        let ctrl = ModifiersState::CONTROL;
+        let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
+
+        assert_eq!(
+            history_shortcut(&key("z"), ctrl),
+            Some(HistoryRequest::Undo)
+        );
+        assert_eq!(
+            history_shortcut(&key("Z"), ctrl),
+            Some(HistoryRequest::Undo),
+            "ตัวพิมพ์ใหญ่ก็ต้องได้ (บาง layout ส่งมาแบบนั้น)"
+        );
+        assert_eq!(
+            history_shortcut(&key("z"), ctrl_shift),
+            Some(HistoryRequest::Redo),
+            "Ctrl+Shift+Z คือ redo ของคนจำนวนมาก"
+        );
+        assert_eq!(
+            history_shortcut(&key("y"), ctrl),
+            Some(HistoryRequest::Redo)
+        );
+
+        // ไม่กด Ctrl = พิมพ์ตัวอักษรธรรมดา ห้ามไปย้อนงานของผู้ใช้
+        assert_eq!(history_shortcut(&key("z"), ModifiersState::empty()), None);
+        assert_eq!(history_shortcut(&key("a"), ctrl), None);
+    }
+
+    /// ★ กติกาการเลื่อนกล้องหลัง undo — ทดสอบเป็นคณิตศาสตร์ล้วน ไม่ต้องเปิดหน้าต่าง
+    ///
+    /// เลื่อนเฉพาะตอนของที่เปลี่ยน **มองไม่เห็นเลย** ถ้ายังโผล่อยู่บางส่วน
+    /// การกระตุกกล้องน่ารำคาญกว่าประโยชน์
+    #[test]
+    fn the_camera_only_chases_things_that_are_completely_offscreen() {
+        // กรอบที่กล้องเห็นอยู่ (world) — ตรงกับสูตรใน look_at_if_offscreen
+        fn visible(camera: &Camera, canvas: Vec2) -> refx_core::geom::Rect {
+            let half = canvas * 0.5 / camera.zoom();
+            refx_core::geom::Rect {
+                min: camera.center() - half,
+                max: camera.center() + half,
+            }
+        }
+
+        let camera = Camera::new(Vec2::ZERO, 1.0);
+        let canvas = Vec2::new(800.0, 600.0);
+        let view = visible(&camera, canvas);
+
+        let on_screen = refx_core::geom::Rect::from_center_size(Vec2::ZERO, Vec2::splat(50.0));
+        assert!(view.intersects(on_screen), "อยู่กลางจอ ไม่ต้องเลื่อน");
+
+        let edge =
+            refx_core::geom::Rect::from_center_size(Vec2::new(390.0, 0.0), Vec2::splat(50.0));
+        assert!(view.intersects(edge), "โผล่แค่บางส่วนก็ยังไม่ต้องเลื่อน");
+
+        let far =
+            refx_core::geom::Rect::from_center_size(Vec2::new(5_000.0, 5_000.0), Vec2::splat(50.0));
+        assert!(!view.intersects(far), "อยู่ไกลจนมองไม่เห็น ต้องเลื่อนไปหา");
     }
 
     // ---------- ตัวนับความคืบหน้า (docs/05 §6 เงื่อนไขข้อ 3) ----------

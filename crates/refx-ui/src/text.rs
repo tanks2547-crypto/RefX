@@ -106,6 +106,10 @@ pub enum Key {
     ToolSendToCanvas,
     /// กำลังอ่าน clipboard หลังผู้ใช้กด Ctrl+V (P1-8)
     ReadingClipboard,
+    /// กด Ctrl+Z แล้วไม่มีอะไรให้ย้อน
+    NothingToUndo,
+    /// กด Ctrl+Y แล้วไม่มีอะไรให้ทำซ้ำ
+    NothingToRedo,
 }
 
 /// ข้อความภาษาอังกฤษ — **ต้องมีครบทุก key เสมอ** (เป็นตัวสำรองสุดท้าย)
@@ -132,6 +136,8 @@ fn en(key: Key) -> &'static str {
         Key::ToolTag => "Tag",
         Key::ToolSendToCanvas => "Send to Canvas",
         Key::ReadingClipboard => "Reading the clipboard…",
+        Key::NothingToUndo => "Nothing left to undo",
+        Key::NothingToRedo => "Nothing left to redo",
     }
 }
 
@@ -159,6 +165,8 @@ fn th(key: Key) -> Option<&'static str> {
         Key::ToolTag => "ติดแท็ก",
         Key::ToolSendToCanvas => "ส่งเข้า Canvas",
         Key::ReadingClipboard => "กำลังอ่าน clipboard…",
+        Key::NothingToUndo => "ไม่มีอะไรให้ย้อนกลับแล้ว",
+        Key::NothingToRedo => "ไม่มีอะไรให้ทำซ้ำแล้ว",
     })
 }
 
@@ -586,6 +594,8 @@ mod tests {
         Key::ToolTag,
         Key::ToolSendToCanvas,
         Key::ReadingClipboard,
+        Key::NothingToUndo,
+        Key::NothingToRedo,
     ];
 
     const ALL_TEMPLATES: &[Template] = &[
