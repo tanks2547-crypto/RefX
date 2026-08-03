@@ -21,11 +21,12 @@
 | **P2-1** `Arena`/`Board`/`Item` | ✅ เสร็จ (`43b76d5`) |
 | **P2-2** `Command` + `History` + merge/seal | ✅ เสร็จ (`43b76d5`) — **ผ่านรีวิวแล้ว** |
 | **P2-3** `SpatialIndex` + hit-test | ✅ เสร็จ (`7a81b4e`) |
-| **P2-4** select / rubber-band / multi-select | 🟡 **ครึ่งเดียว** (`dd51d60`) — ตรรกะครบและเทสต์ครบใน `refx-core` แต่ **ยังไม่มีใครเรียก** ดู §2.2 |
+| **P2-4** select / rubber-band / multi-select | 🟡 **ครึ่งเดียว** (`dd51d60`, `439f380`) — ตรรกะครบและเทสต์ครบใน `refx-core` แต่ **ยังไม่มีใครเรียก** ดู §2.2 |
+| **`selection` ย้ายออกจาก `Board`** (docs/02 §2.9) | ✅ เสร็จ (`439f380`) — คลิกดูภาพไม่ทำให้เอกสาร dirty อีกต่อไป |
 | P2-5 ขึ้นไป | ยังไม่เริ่ม |
 
 **เกณฑ์คุณภาพล่าสุดที่ผ่าน:** `fmt` / `clippy --all-features -D warnings` (workspace + `fuzz/`) /
-`nextest 380/380` / `deny check` ครบ 4 หมวด / **binary 15.46 MB จากเพดาน 25 MB (บังคับใน CI)**
+`nextest 381/381` / `deny check` ครบ 4 หมวด / **binary 15.46 MB จากเพดาน 25 MB (บังคับใน CI)**
 
 crate ที่มี: `refx-app` `refx-asset` `refx-core` `refx-io` `refx-platform` `refx-render` `refx-ui`
 
@@ -36,7 +37,7 @@ repo: **`github.com/tanks2547-crypto/RefX` (private)** · branch `main`
 | | windows-latest | ubuntu-latest |
 |---|---|---|
 | GPU ที่ใช้ตรวจจริง | **WARP** (Dx12/Cpu) | **lavapipe** (Vulkan/Cpu) |
-| เทสต์ | 380/380 | 380/380 |
+| เทสต์ | 381/381 | 381/381 |
 | binary | 15.35 MB | 17.01 MB |
 
 **`Fuzz (nightly)` เขียวครั้งแรก 2 ส.ค. 2026** — ทั้งสาม job (`fuzz_decode` ยิงเต็ม 15 นาที ·
@@ -122,10 +123,12 @@ repo อยู่ใต้ git แล้ว (branch **`main`**) และ **push
 **สิ่งที่ต้องรู้ก่อนเขียน `Command` ตัวใหม่** (รายละเอียดอยู่ใน doc comment ของ `command.rs`):
 
 1. `apply` ที่คืน `Err` **ต้องไม่แตะ board เลย** — คำสั่งที่แตะหลาย item ย้อนสิ่งที่ทำไปแล้วคืนก่อน
-2. `undo` คืนสภาพ **เป๊ะ**: `ItemId` เดิม · ชั้น z เดิม · selection เดิม · anchor เดิม · ธง `dirty` เดิม
+2. `undo` คืนสภาพ **เป๊ะ**: `ItemId` เดิม · ชั้น z เดิม · ธง `dirty` เดิม (`selection` ไม่อยู่ใน `Board` แล้ว — docs/02 §2.9)
 3. **redo ต้องได้ `ItemId` ชุดเดิม** ไม่งั้นคำสั่งถัดไปในสาย redo ชี้ไปที่ว่าง
    (นี่คือเหตุผลที่ `Arena::insert_at` มีอยู่ และเหตุผลที่ไม่ใช้ `slotmap`)
 4. `heap_size()` **ไม่มีค่าเริ่มต้น** — ต้องเขียนเองทุกตัว ไม่งั้นเพดาน 64 MB ไม่นับคำสั่งใหม่
+5. `affected()` **ไม่มีค่าเริ่มต้น** เช่นกัน — บอกว่าคำสั่งแตะ item ไหน เพื่อให้ชั้น editor
+   ตั้ง selection ตามหลัง undo/redo (การเลือกไม่ได้ถูก undo มันตามผลลัพธ์)
 
 ### 2.2 ★★ งานถัดไป: ย้าย `refx-ui` มาใช้ `refx_core::Board`
 
@@ -141,20 +144,30 @@ repo อยู่ใต้ git แล้ว (branch **`main`**) และ **push
 |---|---|---|
 | `Board` / `Item` / `Command` / `History` | `refx-core` | `RefxApp` แทน `board_items` + `quads` |
 | `SpatialIndex` | `refx_core::spatial` | culling ต่อเฟรม + hit-test |
-| `SelectTool` / `SelectItems` | `refx_core::interact` | ตัวแปลง pointer ของ egui |
+| `SelectTool` (+ `Selection` ที่ editor ถือเอง) | `refx_core::interact` | ตัวแปลง pointer ของ egui |
 
 > ⚠️ **ของที่เทสต์ครบแต่ไม่มีใครเรียก คือสภาพเดียวกับที่ทำให้ `fuzz_decode`
 > เป็น stub อยู่ 5 session** ต่างกันแค่ตรงนี้ไม่ได้ *โกหก* ว่าทำงานอยู่
 > ถ้ารอบหน้าไม่ได้ต่อให้ครบ ต้องเขียนไว้ตรงนี้ว่าทำไม อย่าปล่อยเงียบ
 
-**ลำดับที่แนะนำ** (แต่ละข้อจบแล้ว build ผ่านและเทสต์ผ่านก่อนขึ้นข้อถัดไป):
+**ลำดับที่แนะนำ** — ★ **แก้ 2 ส.ค. 2026 หลังไปดูโค้ดจริง:**
 
-1. `RefxApp` ถือ `Board` + `History` + `SpatialIndex` · `BoardItem` เหลือเฉพาะ
-   *สถานะฝั่ง render* (atlas slot, working key) แยกเป็น side map ที่คีย์ด้วย `ItemId`
-   — ห้ามเอากลับไปปนกับข้อมูลโดเมน
-2. drag & drop / paste สร้าง `AddItems` แล้วส่งเข้า `History` แทนการ `push` ตรง ๆ
-3. สร้าง `quads` จาก `board.items_in_z_order()` (ลำดับ render = ลำดับใน `Vec` อยู่แล้ว)
-4. **แล้วค่อย** ทำ `allocate_response` + ต่อ `SelectTool` + วาดกรอบเลือก/rubber-band
+> ข้อ 1–3 ที่เคยเขียนไว้ว่าแยกกันได้ **แยกไม่ได้จริง** ต้องลงพร้อมกันเป็นก้อนเดียว
+>
+> เหตุผล: ตอนนี้ `quads` **เป็นแหล่งความจริงของเรขาคณิตอยู่คนเดียว** — ตำแหน่ง/ขนาด
+> ถูกคำนวณสด ๆ ตอน ingest (`app.rs` ราวบรรทัด 767: ตาราง 16 คอลัมน์ + สเกลจาก
+> `thumb.source_width`) ไม่ได้เก็บไว้ที่ไหนอีก การให้ `RefxApp` ถือ `Board` ไว้เฉย ๆ
+> โดยที่ `quads` ยังคำนวณเองอยู่ = **แหล่งความจริงสองที่** ซึ่งคือปัญหาที่กำลังจะแก้พอดี
+
+1. **(ก้อนเดียว)** `RefxApp` ถือ `Board` + `History` + `SpatialIndex` ·
+   ingest สร้าง `AddItems` เข้า `History` (ตำแหน่งตารางย้ายไปเป็น `ItemCanvas`) ·
+   `quads` สร้างจาก `board.items_in_z_order()` ·
+   `BoardItem` เหลือเฉพาะ *สถานะฝั่ง render* (atlas slot, working key, thumb)
+   เป็น side map ที่คีย์ด้วย `ItemId` — ห้ามเอากลับไปปนกับข้อมูลโดเมน
+   > ⚠️ แตะเส้นทางที่ P1-7/P1-8 ยืนยันด้วยมือ (drag & drop · เติม atlas กลับ ·
+   > เลือก working texture) — **ต้องมีภาพหน้าจอจริงก่อนบอกว่าเสร็จ** (docs/08 §3.9 ข้อ 5)
+2. `allocate_response` + ต่อ `SelectTool` + วาดกรอบเลือก/rubber-band
+3. ต่อ Ctrl+Z/Ctrl+Y เข้า `History` แล้วเอา id จาก `undo()`/`redo()` ไปตั้ง selection
 
 ### 2.3 กับดัก pointer ของ egui — ถึงเวลาแก้ที่ต้นเหตุแล้ว
 
