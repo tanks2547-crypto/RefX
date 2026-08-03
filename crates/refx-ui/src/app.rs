@@ -9,6 +9,10 @@ use std::sync::Arc;
 use glam::Vec2;
 use refx_asset::cache::{CacheStats, IoRequest, IoThread};
 use refx_asset::pool::DecodePool;
+use refx_core::arena::ItemId;
+use refx_core::board::{AssetRef, Board, ImageFormat, Item, ItemCanvas, ItemKind};
+use refx_core::command::{AddItems, History};
+use refx_core::spatial::SpatialIndex;
 use refx_core::view::Camera;
 
 use crate::shell::LoadProgress;
@@ -204,16 +208,25 @@ struct Gfx {
     ///
     /// `None` = ไม่มีอะไรค้าง หลับยาวได้
     egui_wake: Option<std::time::Instant>,
-    /// สี่เหลี่ยมทดสอบ (P0-6/P0-7) — ว่างเปล่าตอนใช้งานจริง
+    /// ★ instance ที่ส่งให้ GPU — **ผลลัพธ์ที่คำนวณจาก `board` ล้วน ๆ**
+    ///
+    /// ไม่ใช่แหล่งความจริงอีกต่อไป: ทุกอย่างที่เขียนลงนี้ต้องมาจาก
+    /// [`RefxApp::rebuild_quads`] เท่านั้น ห้ามมีใครแก้ตรง ๆ
+    /// (เดิมตำแหน่งภาพถูกคำนวณสด ๆ ตอน ingest แล้วเก็บไว้ที่นี่ที่เดียว)
     quads: Vec<QuadInstance>,
+    /// ★ เอกสารของผู้ใช้ — แหล่งความจริงเดียวของเรขาคณิตและลำดับชั้น
+    board: Board,
+    /// undo/redo — ทุกการแก้ `board` ผ่านที่นี่ (I-3)
+    history: History,
+    /// index สำหรับ hit-test/culling — ตามหลัง `board` เสมอ
+    index: SpatialIndex,
+    /// สถานะฝั่ง render ต่อ item (atlas slot, thumbnail, ต้นทาง)
+    render_state: std::collections::HashMap<ItemId, ItemRender>,
     /// ★ thumbnail ของทุก item บน board เก็บไว้เติม atlas กลับหลังกู้ device
     ///
     /// docs/04 §4: ถ้าไม่เติมกลับ ผู้ใช้จะเห็น **board ว่างเปล่า** หลัง driver อัปเดต
     /// ซึ่งจากมุมเขาแยกไม่ออกจาก "งานหาย" แล้วงานที่ P0-5 ทำมาทั้งหมดเสียเปล่า
     ///
-    /// เก็บ pixel ไว้ใน RAM เลยเพราะ 128×128×4 = 64 KB ต่อภาพ
-    /// (1000 ภาพ = 64 MB ซึ่งยังอยู่ในงบ) และเร็วกว่าอ่านกลับจาก sqlite มาก
-    board_items: Vec<BoardItem>,
     /// ★ working texture ชั้น B — texture แยกต่อภาพตอนซูมเข้า (docs/04 §4)
     ///
     /// ครึ่งบนของงบ VRAM · อีกครึ่งเป็นของ atlas
@@ -323,10 +336,13 @@ impl DeviceBound {
     }
 }
 
-/// หนึ่งภาพบน board — ทุกอย่างที่ต้องรู้เพื่อวาดและเพื่อขอภาพคมกว่าเดิม
+/// สถานะ **ฝั่ง render** ของ item หนึ่งใบ — คีย์ด้วย `ItemId` ของ `Board`
 ///
-/// P2 จะแทนที่ด้วย `Board`/`Item` ตัวจริงจาก `refx-core` ตอนนี้เก็บเท่าที่ P1-7 ต้องใช้
-struct BoardItem {
+/// ★ **ห้ามเอาเรขาคณิตกลับมาไว้ที่นี่** (ย้ายแล้ว 3 ส.ค. 2026) ตำแหน่ง/ขนาด/หมุน
+/// เป็นของ `ItemCanvas` ใน `Board` ที่เดียว ส่วนที่นี่เก็บเฉพาะของที่ผูกกับ GPU
+/// หรือกับการ decode — ถ้าเก็บสองที่ วันหนึ่งจะเพี้ยนจากกันแล้วภาพจะไปอยู่คนละที่
+/// กับที่ hit-test คิดว่ามันอยู่
+struct ItemRender {
     /// ภาพนี้มาจากไหน
     ///
     /// ★ ต้องเก็บไว้เพราะ working texture ต้อง decode ใหม่จาก **ไฟล์จริง**
@@ -337,7 +353,18 @@ struct BoardItem {
     /// คีย์ของภาพ (ใช้เป็นคีย์ของ working cache ด้วย)
     hash: refx_asset::hash::ContentHash,
     /// ภาพย่อ 128 px — เก็บไว้เติม atlas กลับหลังกู้ device หรือหลังขยาย atlas
+    ///
+    /// เก็บ pixel ไว้ใน RAM เลยเพราะ 128×128×4 = 64 KB ต่อภาพ
+    /// (1000 ภาพ = 64 MB ซึ่งยังอยู่ในงบ) และเร็วกว่าอ่านกลับจาก sqlite มาก
     thumb: refx_asset::thumb::Thumbnail,
+    /// ช่องใน atlas ที่ thumbnail ตัวนี้อยู่
+    uv_rect: [f32; 4],
+    /// ชั้นใน texture array
+    layer: u32,
+    /// สีคูณ — เป็นสีเด่นของภาพตอนยังเป็น placeholder
+    tint: [f32; 4],
+    /// ธงของ quad (PLACEHOLDER ฯลฯ)
+    flags: u32,
 }
 
 /// กรอบของช่อง canvas ในหน่วย physical pixel
@@ -764,32 +791,65 @@ impl RefxApp {
                 match Self::upload_thumb(gfx, &thumb.pixels) {
                     Ok(slot) => {
                         // จัดเป็นตารางง่าย ๆ ไปก่อน — layout จริงมาใน P2/P3
-                        let n = gfx.quads.len() as u32;
+                        // ★ ตำแหน่งไปอยู่ใน `ItemCanvas` แล้ว ไม่ได้คำนวณลง quad ตรง ๆ
+                        let n = u32::try_from(gfx.board.len()).unwrap_or(u32::MAX);
                         let (col, row) = (n % 16, n / 16);
                         let cell = 160.0;
                         // คงอัตราส่วนภาพเดิมไว้ ไม่บีบให้เป็นจัตุรัส
                         let (sw, sh) = (thumb.source_width.max(1), thumb.source_height.max(1));
                         let scale =
                             128.0 / f32::from(u16::try_from(sw.max(sh)).unwrap_or(u16::MAX));
-                        gfx.quads.push(QuadInstance {
-                            transform: [
-                                sw as f32 * scale,
-                                0.0,
-                                0.0,
-                                sh as f32 * scale,
-                                2000.0 + col as f32 * cell,
-                                2000.0 + row as f32 * cell,
-                            ],
-                            uv_rect: slot.uv_rect(),
-                            tint: [1.0, 1.0, 1.0, 1.0],
-                            layer: slot.layer,
-                            flags: 0, // มี texture จริงแล้ว ไม่ใช่ placeholder
-                        });
-                        gfx.board_items.push(BoardItem {
-                            source,
+                        let size = Vec2::new(sw as f32 * scale, sh as f32 * scale);
+                        // ★ `transform` ของ quad ใช้ **มุมซ้ายบน** ส่วน `ItemCanvas::pos`
+                        //   คือ **จุดกึ่งกลาง** (docs/02 §2.1) — บวกครึ่งขนาดตอนแปลง
+                        //   ถ้าลืมข้อนี้ ภาพทุกใบจะเลื่อนไปครึ่งตัวจากที่เคยเป็น
+                        let top_left =
+                            Vec2::new(2000.0 + col as f32 * cell, 2000.0 + row as f32 * cell);
+
+                        let item = Item::new(ItemKind::Image(AssetRef {
                             hash,
-                            thumb: *thumb,
-                        });
+                            path: source
+                                .file()
+                                .map(std::path::Path::to_path_buf)
+                                .unwrap_or_default(),
+                            px_size: glam::UVec2::new(sw, sh),
+                            // ★ ยังไม่รู้ format จริงตรงนี้ — cache hit ไม่ได้แตะไบต์ของไฟล์เลย
+                            //   เขียน `Unknown` ตรง ๆ ดีกว่าเดาจากนามสกุล (docs/02 §2.2.5 ข้อ 2)
+                            //   งานที่จะร้อย format จริงผ่าน decode → Thumbnail → ThumbEntry
+                            //   ถูกแยกไว้เป็นงานของตัวเอง (HANDOFF §6)
+                            format: ImageFormat::Unknown,
+                            embedded: false,
+                        }))
+                        .at(top_left + size * 0.5, size);
+
+                        // ★ ทุกการเพิ่มภาพผ่าน `AddItems` เข้า `History` → ลากไฟล์เข้ามาแล้ว undo ได้
+                        let Ok(command) = AddItems::new(vec![item]) else {
+                            continue;
+                        };
+                        if let Err(err) = gfx.history.apply(&mut gfx.board, Box::new(command)) {
+                            tracing::error!(%err, "cannot add the dropped image to the board");
+                            continue;
+                        }
+                        // `insert_item` ต่อท้าย z-order เสมอ ตัวที่เพิ่งเพิ่มจึงอยู่ท้ายสุด
+                        let Some(id) = gfx.board.z_order().last().copied() else {
+                            continue;
+                        };
+
+                        if let Some(item) = gfx.board.item(id) {
+                            gfx.index.insert(id, &item.canvas);
+                        }
+                        gfx.render_state.insert(
+                            id,
+                            ItemRender {
+                                source,
+                                hash,
+                                thumb: *thumb,
+                                uv_rect: slot.uv_rect(),
+                                tint: [1.0, 1.0, 1.0, 1.0],
+                                layer: slot.layer,
+                                flags: 0, // มี texture จริงแล้ว ไม่ใช่ placeholder
+                            },
+                        );
                         self.drop_shown += 1;
                     }
                     Err(err) => {
@@ -798,6 +858,9 @@ impl RefxApp {
                     }
                 }
             }
+            // ★ instance ที่ส่งให้ GPU สร้างใหม่จาก board **หลังจบชุด** ไม่ใช่ทีละใบ
+            //   (ลากเข้ามา 100 ไฟล์ = สร้างครั้งเดียว ไม่ใช่ 100 ครั้ง)
+            Self::rebuild_quads(gfx);
 
             // ★ เวลาจริงที่ผู้ใช้รู้สึก: ลากเข้ามา → ภาพขึ้นจอ
             if !self.drop_reported
@@ -818,6 +881,9 @@ impl RefxApp {
                     tracing::info!(
                         files = self.drop_expected,
                         ms,
+                        // ★ หลักฐานว่าการเพิ่มภาพเดินผ่าน `AddItems` เข้า `History` จริง
+                        //   ไม่ใช่ push เข้า Vec ตรง ๆ เหมือนก่อนย้าย — undo ได้ทุกใบ
+                        undo_depth = self.gfx.as_ref().map_or(0, |g| g.history.undo_depth()),
                         "drag & drop → every image on screen"
                     );
                     println!("ลากไฟล์ {} ไฟล์ → ขึ้นจอครบใน {ms:.1} ms", self.drop_expected);
@@ -992,7 +1058,7 @@ impl RefxApp {
             gfx.render.generation(),
             "working texture cache ยังเป็นของ device รุ่นเก่า — ลืมสร้างใหม่ตอนกู้ device"
         );
-        if gfx.board_items.is_empty() {
+        if gfx.board.is_empty() {
             return;
         }
 
@@ -1000,19 +1066,22 @@ impl RefxApp {
         let viewport = gfx.canvas.size;
         let centre = gfx.camera.center();
         let mut requests: Vec<refx_asset::pool::Job> = Vec::new();
+        // เก็บไว้ก่อนแล้วค่อยแปลงเป็น quad หลังจบลูป — ระหว่างลูปยังยืม `gfx.board` อยู่
+        let mut working_hits: Vec<(WorkingKey, ItemId)> = Vec::new();
 
-        for (index, item) in gfx.board_items.iter().enumerate() {
-            let Some(quad) = gfx.quads.get(index) else {
-                break;
+        for (id, board_item) in gfx.board.items_in_z_order() {
+            let Some(item) = gfx.render_state.get(&id) else {
+                continue;
             };
+            let canvas = &board_item.canvas;
             // ★ ภาพที่วางมาจาก clipboard ไม่มีไฟล์ให้กลับไป decode ใหม่ จึงคมได้แค่
             //   ระดับ thumbnail ถ้าไม่ข้ามตรงนี้ ทุกครั้งที่ซูมจะได้งานที่ล้มเหลว
             //   แน่นอนหนึ่งใบ พร้อมข้อความ error ที่ผู้ใช้ทำอะไรกับมันไม่ได้
             if item.source.file().is_none() {
                 continue;
             }
-            // ขนาดบนจอ = ขนาดใน world × ซูม (transform[0] และ [3] คือสเกล)
-            let world_side = quad.transform[0].abs().max(quad.transform[3].abs());
+            // ขนาดบนจอ = ขนาดใน world × ซูม — อ่านจาก `ItemCanvas` ไม่ใช่จาก quad แล้ว
+            let world_side = canvas.size.x.abs().max(canvas.size.y.abs());
             let on_screen = world_side * zoom;
 
             let source_side = item.thumb.source_width.max(item.thumb.source_height);
@@ -1022,11 +1091,8 @@ impl RefxApp {
 
             // ★ นอกจอไม่ต้องขอ — เกณฑ์เดียวกับ culling คือกึ่งกลาง item เทียบ viewport
             //   ถ้าไม่กรอง การซูมเข้าลึก ๆ จะสั่ง decode ทั้ง board ทั้งที่เห็นไม่กี่ใบ
-            let item_centre = glam::Vec2::new(
-                quad.transform[4] + quad.transform[0] * 0.5,
-                quad.transform[5] + quad.transform[3] * 0.5,
-            );
-            let offset = (item_centre - centre) * zoom;
+            //   `ItemCanvas::pos` คือจุดกึ่งกลางอยู่แล้ว ไม่ต้องบวกครึ่งขนาดเหมือนเดิม
+            let offset = (canvas.pos - centre) * zoom;
             let margin = viewport * 0.5 + glam::Vec2::splat(world_side * zoom);
             if offset.x.abs() > margin.x || offset.y.abs() > margin.y {
                 continue;
@@ -1037,7 +1103,7 @@ impl RefxApp {
                 size,
             };
             if gfx.working.contains(key) {
-                gfx.working_quads.push((key, *quad));
+                working_hits.push((key, id));
                 continue;
             }
             if gfx.working_pending.insert(key) {
@@ -1052,6 +1118,19 @@ impl RefxApp {
             }
         }
 
+        // ★ quad ของภาพคมสร้างจาก `Board` เหมือนกัน — ไม่ได้ก๊อปมาจาก `quads`
+        //   ที่อาจเป็นของเฟรมก่อน (แหล่งความจริงเดียวคือ `board`)
+        for (key, id) in working_hits {
+            let Some(item) = gfx.board.item(id) else {
+                continue;
+            };
+            let Some(state) = gfx.render_state.get(&id) else {
+                continue;
+            };
+            gfx.working_quads
+                .push((key, Self::quad_for(&item.canvas, state)));
+        }
+
         if requests.is_empty() {
             return;
         }
@@ -1059,6 +1138,42 @@ impl RefxApp {
             tracing::debug!(count = requests.len(), "queued working texture decodes");
             for job in requests {
                 assets.pool.submit(job);
+            }
+        }
+    }
+
+    /// แปลง item หนึ่งใบเป็น instance ที่ GPU วาดได้
+    ///
+    /// ★ **จุดเดียวที่เรขาคณิตของ `Board` กลายเป็น `QuadInstance`**
+    /// `transform` ใช้มุมซ้ายบน (unit quad คือ 0..1) ส่วน `ItemCanvas::pos` คือจุดกึ่งกลาง
+    /// จึงต้องลบครึ่งขนาดออก — ถ้าทำผิดตรงนี้ภาพทุกใบจะเลื่อนไปครึ่งตัว
+    fn quad_for(canvas: &ItemCanvas, state: &ItemRender) -> QuadInstance {
+        let half = canvas.size * 0.5;
+        QuadInstance {
+            transform: [
+                canvas.size.x,
+                0.0,
+                0.0,
+                canvas.size.y,
+                canvas.pos.x - half.x,
+                canvas.pos.y - half.y,
+            ],
+            uv_rect: state.uv_rect,
+            tint: state.tint,
+            layer: state.layer,
+            flags: state.flags,
+        }
+    }
+
+    /// สร้าง `quads` ใหม่ทั้งชุดจาก `board`
+    ///
+    /// ★ **ประตูเดียวที่เขียน `gfx.quads` ได้** — `quads` เป็นผลลัพธ์ ไม่ใช่แหล่งความจริง
+    /// ลำดับ render = ลำดับใน `z_order` อยู่แล้ว จึงไม่ต้อง sort (docs/02 §2.1)
+    fn rebuild_quads(gfx: &mut Gfx) {
+        gfx.quads.clear();
+        for (id, item) in gfx.board.items_in_z_order() {
+            if let Some(state) = gfx.render_state.get(&id) {
+                gfx.quads.push(Self::quad_for(&item.canvas, state));
             }
         }
     }
@@ -1071,7 +1186,7 @@ impl RefxApp {
     /// ระหว่างที่ยังเติมไม่ครบ item ที่เหลือถูกทำเป็น **placeholder สีเด่น**
     /// ไม่ใช่ช่องว่าง (docs/04 §4, §8) — ผู้ใช้ต้องเห็นว่า layout ยังอยู่ครบ
     fn refill_atlas(gfx: &mut Gfx) {
-        if gfx.board_items.is_empty() {
+        if gfx.board.is_empty() {
             return;
         }
         let started = std::time::Instant::now();
@@ -1085,7 +1200,7 @@ impl RefxApp {
         //   ถ้าไม่ทำขั้นนี้ ภาพ **ทุกใบ** กลายเป็น placeholder หลังกู้ device
         //   (เจอจริง 29 ก.ค. 2026: restored=0 total=8) ซึ่งคือ "board ว่างเปล่า"
         //   ที่ docs/04 §4 สั่งห้ามไว้ตรง ๆ
-        let needed = refx_render::atlas::layers_needed(gfx.board_items.len());
+        let needed = refx_render::atlas::layers_needed(gfx.board.len());
         if gfx.atlas.layers_allocated() < needed
             && let Err(err) = gfx.atlas.resize(gfx.render.device(), needed)
         {
@@ -1093,38 +1208,53 @@ impl RefxApp {
             tracing::warn!(%err, needed, "cannot grow the atlas before refilling it");
         }
 
-        for (index, item) in gfx.board_items.iter().enumerate() {
-            let thumb = &item.thumb;
-            let Some(quad) = gfx.quads.get_mut(index) else {
-                break;
+        // ★ ไล่ตามลำดับ z ของ board — `render_state` เป็นแผนที่ ไม่ใช่รายการคู่ขนาน
+        //   แล้วเขียนผลลง `render_state` ไม่ใช่ลง `quads` โดยตรง
+        //   (`quads` ถูกสร้างใหม่จาก board ทีหลัง — ดู `rebuild_quads`)
+        let order: Vec<ItemId> = gfx.board.z_order().to_vec();
+        // ★ แยกการยืมทีละฟิลด์ **ห้าม clone pixel** — thumbnail ใบละ 64 KB
+        //   ที่ 100 ภาพคือก๊อป 6.4 MB ทุกครั้งที่กู้ device (วัดแล้วช้าลง 30%)
+        //   ทางที่ถูกคือ destructure ให้ atlas/render/render_state ยืมคนละฟิลด์กัน
+        let Gfx {
+            atlas,
+            render,
+            render_state,
+            ..
+        } = gfx;
+        for id in order {
+            let Some(state) = render_state.get_mut(&id) else {
+                continue;
             };
+            let dominant = state.thumb.dominant;
             // ★ ใช้ upload ตรง ๆ ห้ามผ่าน upload_thumb — ไม่งั้นจะเรียก refill ซ้อนตัวเอง
-            match gfx.atlas.upload(gfx.render.queue(), &thumb.pixels) {
+            let uploaded = atlas.upload(render.queue(), &state.thumb.pixels);
+            match uploaded {
                 Ok(slot) => {
-                    quad.uv_rect = slot.uv_rect();
-                    quad.layer = slot.layer;
-                    quad.tint = [1.0, 1.0, 1.0, 1.0];
-                    quad.flags &= !refx_render::instance::flags::PLACEHOLDER;
+                    state.uv_rect = slot.uv_rect();
+                    state.layer = slot.layer;
+                    state.tint = [1.0, 1.0, 1.0, 1.0];
+                    state.flags &= !refx_render::instance::flags::PLACEHOLDER;
                     restored += 1;
                 }
                 Err(err) => {
                     // atlas เต็ม — ที่เหลือขึ้นเป็นสี่เหลี่ยมสีเด่นแทนช่องว่าง
-                    tracing::warn!(%err, index, "atlas refill incomplete — the rest fall back to placeholders");
-                    let [a, r, g, b] = thumb.dominant.to_be_bytes();
-                    quad.tint = [
+                    tracing::warn!(%err, ?id, "atlas refill incomplete — the rest fall back to placeholders");
+                    let [a, r, g, b] = dominant.to_be_bytes();
+                    state.tint = [
                         f32::from(r) / 255.0,
                         f32::from(g) / 255.0,
                         f32::from(b) / 255.0,
                         f32::from(a) / 255.0,
                     ];
-                    quad.flags |= refx_render::instance::flags::PLACEHOLDER;
+                    state.flags |= refx_render::instance::flags::PLACEHOLDER;
                 }
             }
         }
+        Self::rebuild_quads(gfx);
 
         tracing::info!(
             restored,
-            total = gfx.board_items.len(),
+            total = gfx.board.len(),
             ms = started.elapsed().as_secs_f64() * 1000.0,
             "refilled thumbnails into the new atlas"
         );
@@ -1190,7 +1320,10 @@ impl AppDelegate for RefxApp {
             device_generation,
             egui_wake: None,
             quads,
-            board_items: Vec::new(),
+            board: Board::default(),
+            history: History::default(),
+            index: SpatialIndex::new(refx_core::spatial::DEFAULT_CELL_SIZE),
+            render_state: std::collections::HashMap::new(),
             working,
             working_pending: std::collections::HashSet::new(),
             working_quads: Vec::new(),
@@ -1266,7 +1399,7 @@ impl AppDelegate for RefxApp {
 
         // ---- UI pass ----
         let raw_input = gfx.egui_winit.take_egui_input(&gfx.window);
-        shell.item_count = gfx.quads.len();
+        shell.item_count = gfx.board.len();
         shell.zoom = gfx.camera.zoom();
         shell.vram_used = gfx.textures.budget().used();
         shell.working_used = gfx.working.used();
