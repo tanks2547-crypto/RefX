@@ -6,8 +6,8 @@
 //! 1. **`apply` ที่คืน `Err` ต้องไม่แตะ board เลย** — ไม่ใช่ "แตะไปครึ่งหนึ่งแล้วบอกว่าพัง"
 //!    board ที่ค้างครึ่ง ๆ กลาง ๆ คือข้อมูลผู้ใช้ที่เพี้ยนโดยไม่มีทางกู้ (I-3)
 //!    คำสั่งที่แตะหลาย item จึงต้อง **ย้อนสิ่งที่ทำไปแล้วคืน** ก่อนคืน `Err`
-//! 2. **`undo` ต้องคืนสภาพ *เป๊ะ*** ไม่ใช่ "ดูเหมือนเดิม" — รวมถึง `ItemId` ตัวเดิม,
-//!    ชั้น z เดิม, สิ่งที่เลือกไว้ และ anchor ของมัน
+//! 2. **`undo` ต้องคืนสภาพ *เป๊ะ*** ไม่ใช่ "ดูเหมือนเดิม" — รวมถึง `ItemId` ตัวเดิม
+//!    และชั้น z เดิม (`selection` **ไม่อยู่ใน `Board`** แล้ว — docs/02 §2.9)
 //! 3. **redo ต้องได้ `ItemId` ชุดเดิม** ไม่งั้นคำสั่งถัดไปใน redo stack ที่อ้าง id
 //!    เหล่านั้นจะชี้ไปที่ว่าง (นี่คือเหตุผลที่ `Arena::insert_at` มีอยู่)
 //!
@@ -72,6 +72,17 @@ pub trait Command: Send + std::fmt::Debug + Any {
     fn merge(&mut self, _next: &dyn Command) -> bool {
         false
     }
+
+    /// item ที่คำสั่งนี้แตะ — ชั้น editor เอาไปตั้ง selection หลัง undo/redo
+    ///
+    /// ★ **การเลือกไม่ใช่สิ่งที่ถูก undo มันแค่ตามผลลัพธ์** (docs/02 §2.9):
+    /// `selection` ไม่อยู่ใน `Board` แล้ว แต่ผู้ใช้ที่กด Ctrl+Z หลังลบภาพ 5 ใบ
+    /// ยังต้องได้ภาพนั้นกลับมา **พร้อมถูกเลือกอยู่** คำสั่งจึงบอกได้ว่าตัวเองแตะอะไร
+    ///
+    /// §2.9 เขียนว่าให้ `undo` เป็นคนคืนค่านี้ — ทำเป็นเมธอดแยกแทนเพราะ **redo
+    /// ต้องการค่าเดียวกัน** และ redo เดินผ่าน `apply` ถ้าผูกไว้กับ `undo` อย่างเดียว
+    /// การ redo จะไม่มีทางตั้ง selection ได้ กลไกเดียวใช้ได้ทั้งสองทาง
+    fn affected(&self) -> Vec<ItemId>;
 
     /// ชื่อที่แสดงในเมนู undo (อังกฤษ — `refx-ui` แปลจากค่านี้)
     fn label(&self) -> &'static str;
@@ -190,6 +201,10 @@ impl Command for AddItems {
         Ok(())
     }
 
+    fn affected(&self) -> Vec<ItemId> {
+        self.ids()
+    }
+
     fn label(&self) -> &'static str {
         "Add items"
     }
@@ -210,17 +225,14 @@ impl Command for AddItems {
 
 /// ลบ item ออกจาก board — เก็บตัวที่ลบไว้ในคำสั่งเพื่อ undo (docs/02 §3)
 ///
-/// ★ เก็บ **สิ่งที่เลือกไว้ก่อนลบ** ด้วย: `Board::remove_item` เอา id ออกจาก
-/// selection ให้อัตโนมัติ ถ้าไม่จำของเดิมไว้ undo จะคืนภาพมาแต่การเลือกหาย
-/// ซึ่งไม่ใช่ "คืนสภาพเป๊ะ"
+/// ★ การเลือกไม่ได้ถูกเก็บไว้ที่นี่ — `selection` ไม่อยู่ใน `Board` แล้ว (docs/02 §2.9)
+/// แต่ [`Command::affected`] บอกได้ว่าลบอะไรไป ชั้น editor จึงเลือกของที่กลับมาให้เองได้
 #[derive(Debug)]
 pub struct RemoveItems {
     /// id ที่สั่งลบ
     targets: Vec<ItemId>,
     /// ของที่ถอดออกมา (id, item, ชั้น z) เรียงจากชั้นล่างขึ้นบน
     removed: Vec<(ItemId, Item, usize)>,
-    /// สิ่งที่เลือกไว้ก่อนลบ พร้อม anchor
-    selection_before: Option<(Vec<ItemId>, Option<ItemId>)>,
 }
 
 impl RemoveItems {
@@ -235,18 +247,12 @@ impl RemoveItems {
         Ok(Self {
             targets,
             removed: Vec::new(),
-            selection_before: None,
         })
     }
 }
 
 impl Command for RemoveItems {
     fn apply(&mut self, board: &mut Board) -> Result<(), CmdError> {
-        let selection = (
-            board.selection().iter().collect::<Vec<_>>(),
-            board.selection().anchor(),
-        );
-
         let mut taken: Vec<(ItemId, Item, usize)> = Vec::with_capacity(self.targets.len());
         for &id in &self.targets {
             let Some((item, z)) = board.remove_item(id) else {
@@ -256,7 +262,6 @@ impl Command for RemoveItems {
                 for (id, item, z) in taken {
                     let _ = board.restore_item(id, item, z);
                 }
-                board.selection_mut().restore(selection.0, selection.1);
                 return Err(CmdError::Board(BoardError::NoSuchItem { id }));
             };
             taken.push((id, item, z));
@@ -264,7 +269,6 @@ impl Command for RemoveItems {
 
         taken.sort_by_key(|&(_, _, z)| z);
         self.removed = taken;
-        self.selection_before = Some(selection);
         Ok(())
     }
 
@@ -282,11 +286,13 @@ impl Command for RemoveItems {
             }
             restored.push(*id);
         }
-
-        if let Some((items, anchor)) = self.selection_before.take() {
-            board.selection_mut().restore(items, anchor);
-        }
         Ok(())
+    }
+
+    /// ★ id ที่ถูกลบ — ชั้น editor เอาไปตั้ง selection หลัง undo
+    /// ผู้ใช้ที่ลบ 5 ภาพแล้วกด Ctrl+Z ต้องได้ 5 ภาพนั้นกลับมา **พร้อมถูกเลือกอยู่**
+    fn affected(&self) -> Vec<ItemId> {
+        self.targets.clone()
     }
 
     fn label(&self) -> &'static str {
@@ -412,6 +418,10 @@ impl Command for TransformItems {
         true
     }
 
+    fn affected(&self) -> Vec<ItemId> {
+        self.changes.iter().map(|change| change.id).collect()
+    }
+
     fn label(&self) -> &'static str {
         "Transform items"
     }
@@ -481,6 +491,11 @@ impl Command for ReorderZ {
             board.set_z_order(previous);
         }
         Ok(())
+    }
+
+    fn affected(&self) -> Vec<ItemId> {
+        // การเรียงชั้นไม่ได้ "แตะ" ตัวไหนเป็นพิเศษ — ปล่อยให้ selection เดิมอยู่ต่อ
+        Vec::new()
     }
 
     fn label(&self) -> &'static str {
@@ -614,6 +629,10 @@ impl Command for EditMeta {
         true
     }
 
+    fn affected(&self) -> Vec<ItemId> {
+        self.changes.iter().map(|change| change.id).collect()
+    }
+
     fn label(&self) -> &'static str {
         "Edit metadata"
     }
@@ -627,110 +646,6 @@ impl Command for EditMeta {
                     + change.before.as_ref().map_or(0, |meta| meta.note.len())
             })
             .sum()
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
-// ---------------------------------------------------------------------------
-// SelectItems
-// ---------------------------------------------------------------------------
-
-/// เปลี่ยนสิ่งที่ถูกเลือก
-///
-/// ★ **ทำไมการเลือกถึงเป็น `Command`:** docs/08 §4 ข้อ 10 บังคับว่าทุก mutation ของ
-/// `Board` ต้องผ่าน `Command` และ `selection` เป็นฟิลด์ของ `Board` การเปิดช่องพิเศษ
-/// ให้แก้ตรง ๆ จะทำให้กฎนี้ไม่ใช่กฎอีกต่อไป (คอมไพเลอร์บังคับไม่ได้แล้ว)
-///
-/// ★ **แล้วทำไม undo stack ถึงไม่เต็มไปด้วยการคลิก:** [`SelectItems::merge`] รับ
-/// `SelectItems` ตัวถัดไป **เสมอ** ดังนั้นการเลือกติด ๆ กันจะยุบเป็นขั้นเดียว
-/// ตราบใดที่ชั้น UI **ไม่เรียก [`History::seal`] หลังการเลือกล้วน ๆ**
-/// (เรียกเฉพาะหลังการแก้ของจริง) ผลคือระหว่างการแก้สองครั้งมีขั้นของการเลือก
-/// อย่างมากหนึ่งขั้น — undo stack จึงยังใช้กู้งานได้จริง ไม่ถูกกลบด้วยเสียงรบกวน
-#[derive(Debug)]
-pub struct SelectItems {
-    after: Vec<ItemId>,
-    after_anchor: Option<ItemId>,
-    /// สิ่งที่เลือกอยู่ก่อนหน้า — เติมตอน `apply` ครั้งแรก
-    before: Option<(Vec<ItemId>, Option<ItemId>)>,
-}
-
-impl SelectItems {
-    /// เลือกตามลำดับที่ให้มา — anchor เป็นตัวท้าย
-    ///
-    /// รายการว่าง = ล้างการเลือก ซึ่งเป็นการกระทำที่ถูกต้อง จึงไม่คืน `Empty`
-    #[must_use]
-    pub fn new(items: Vec<ItemId>) -> Self {
-        let anchor = items.last().copied();
-        Self::with_anchor(items, anchor)
-    }
-
-    /// เลือกพร้อมระบุ anchor เอง (ใช้ตอน toggle ที่ตัวสุดท้ายไม่ใช่ตัวที่เพิ่งคลิก)
-    #[must_use]
-    pub fn with_anchor(items: Vec<ItemId>, anchor: Option<ItemId>) -> Self {
-        Self {
-            after: items,
-            after_anchor: anchor,
-            before: None,
-        }
-    }
-
-    /// คำสั่งนี้จะเปลี่ยนอะไรจริงไหม — ใช้กันไม่ให้คลิกที่ว่างซ้ำ ๆ สร้างขั้นเปล่า
-    #[must_use]
-    pub fn changes_anything(&self, board: &Board) -> bool {
-        let selection = board.selection();
-        selection.anchor() != self.after_anchor || !selection.iter().eq(self.after.iter().copied())
-    }
-}
-
-impl Command for SelectItems {
-    fn apply(&mut self, board: &mut Board) -> Result<(), CmdError> {
-        let previous = (
-            board.selection().iter().collect::<Vec<_>>(),
-            board.selection().anchor(),
-        );
-        // id ที่ตายไปแล้วต้องไม่เข้าไปอยู่ใน selection — ไม่งั้น align จะอ้างของว่าง
-        let live: Vec<ItemId> = self
-            .after
-            .iter()
-            .copied()
-            .filter(|id| board.item(*id).is_some())
-            .collect();
-        let anchor = self.after_anchor.filter(|id| live.contains(id));
-
-        board.selection_mut().restore(live, anchor);
-        if self.before.is_none() {
-            self.before = Some(previous);
-        }
-        Ok(())
-    }
-
-    fn undo(&mut self, board: &mut Board) -> Result<(), CmdError> {
-        if let Some((items, anchor)) = self.before.clone() {
-            board.selection_mut().restore(items, anchor);
-        }
-        Ok(())
-    }
-
-    /// รับตัวถัดไปเสมอ — ดูเหตุผลที่หัว struct
-    fn merge(&mut self, next: &dyn Command) -> bool {
-        let Some(next) = next.as_any().downcast_ref::<Self>() else {
-            return false;
-        };
-        self.after.clone_from(&next.after);
-        self.after_anchor = next.after_anchor;
-        true
-    }
-
-    fn label(&self) -> &'static str {
-        "Select"
-    }
-
-    fn heap_size(&self) -> usize {
-        let before = self.before.as_ref().map_or(0, |(items, _)| items.len());
-        (self.after.len() + before) * std::mem::size_of::<ItemId>()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -831,45 +746,52 @@ impl History {
         self.sealed = true;
     }
 
-    /// ย้อนหนึ่งขั้น — `false` ถ้าไม่มีอะไรให้ย้อน
+    /// ย้อนหนึ่งขั้น — `None` ถ้าไม่มีอะไรให้ย้อน
+    ///
+    /// คืน **id ที่คำสั่งนั้นแตะ** ให้ชั้น editor เอาไปตั้ง selection (docs/02 §2.9)
+    /// — การเลือกไม่ได้ถูก undo มันแค่ตามผลลัพธ์
     ///
     /// # Errors
     /// คืน [`CmdError`] ถ้าคำสั่งย้อนไม่ได้ — คำสั่งนั้นถูกเก็บไว้ในประวัติตามเดิม
     /// เพื่อให้ยังเห็นว่ามีอะไรค้างอยู่ ไม่ใช่หายไปเงียบ ๆ
-    pub fn undo(&mut self, board: &mut Board) -> Result<bool, CmdError> {
+    pub fn undo(&mut self, board: &mut Board) -> Result<Option<Vec<ItemId>>, CmdError> {
         let Some(mut command) = self.undo.pop_back() else {
-            return Ok(false);
+            return Ok(None);
         };
         if let Err(err) = command.undo(board) {
             self.undo.push_back(command);
             return Err(err);
         }
+        let affected = command.affected();
         self.bytes = self.bytes.saturating_sub(command.heap_size());
         self.redo.push(command);
         // ย้อนแล้วต้องไม่มีการ merge ข้ามการย้อน
         self.sealed = true;
         self.sync_dirty(board);
-        Ok(true)
+        Ok(Some(affected))
     }
 
-    /// ทำซ้ำหนึ่งขั้น — `false` ถ้าไม่มีอะไรให้ทำซ้ำ
+    /// ทำซ้ำหนึ่งขั้น — `None` ถ้าไม่มีอะไรให้ทำซ้ำ
+    ///
+    /// คืน id ที่แตะเหมือน [`History::undo`] เพื่อให้ selection ตามผลลัพธ์ทั้งสองทาง
     ///
     /// # Errors
     /// คืน [`CmdError`] ถ้าคำสั่งทำซ้ำไม่ได้ — คำสั่งนั้นยังอยู่ในสาย redo ตามเดิม
-    pub fn redo(&mut self, board: &mut Board) -> Result<bool, CmdError> {
+    pub fn redo(&mut self, board: &mut Board) -> Result<Option<Vec<ItemId>>, CmdError> {
         let Some(mut command) = self.redo.pop() else {
-            return Ok(false);
+            return Ok(None);
         };
         if let Err(err) = command.apply(board) {
             self.redo.push(command);
             return Err(err);
         }
+        let affected = command.affected();
         self.bytes += command.heap_size();
         self.undo.push_back(command);
         self.sealed = true;
         self.trim();
         self.sync_dirty(board);
-        Ok(true)
+        Ok(Some(affected))
     }
 
     /// บันทึกแล้ว — จำความลึกปัจจุบันไว้เป็นจุดอ้างอิงของธง `dirty`
@@ -994,7 +916,7 @@ mod tests {
         assert_eq!(board.len(), 3);
         assert!(board.is_dirty());
 
-        assert!(history.undo(&mut board).unwrap());
+        assert!(history.undo(&mut board).unwrap().is_some());
         assert_eq!(board, before, "undo ต้องคืนสภาพเป๊ะ รวมถึงธง dirty");
         assert!(board.z_order_is_consistent());
     }
@@ -1031,19 +953,10 @@ mod tests {
         assert_eq!(board, after_apply);
     }
 
-    /// ★ undo ของการลบต้องคืนภาพ **พร้อมชั้น z และสิ่งที่เลือกไว้**
+    /// ★ undo ของการลบต้องคืนภาพ **พร้อมชั้น z เดิม**
     #[test]
-    fn undoing_a_remove_restores_depth_and_selection() {
+    fn undoing_a_remove_restores_the_item_at_its_old_depth() {
         let (mut board, ids) = board_with(3);
-        board.selection_mut().select(ids[0]);
-        board.selection_mut().add(ids[1]);
-        board.selection_mut().add(ids[2]);
-        // ให้ anchor เป็นตัวกลาง เพื่อพิสูจน์ว่าไม่ได้เดาเป็นตัวท้าย
-        board.selection_mut().remove(ids[2]);
-        board.selection_mut().add(ids[2]);
-        board
-            .selection_mut()
-            .restore([ids[0], ids[1], ids[2]], Some(ids[1]));
         let before = board.clone();
 
         let mut history = History::default();
@@ -1054,11 +967,13 @@ mod tests {
             )
             .unwrap();
         assert_eq!(board.len(), 2);
-        assert!(!board.selection().contains(ids[1]));
 
-        history.undo(&mut board).unwrap();
-        assert_eq!(board, before, "ทั้ง z-order, selection และ anchor ต้องกลับมา");
-        assert_eq!(board.selection().anchor(), Some(ids[1]));
+        let affected = history.undo(&mut board).unwrap().expect("ต้องมีอะไรให้ย้อน");
+        assert_eq!(board, before, "z-order กับ id ต้องกลับมาเป๊ะ");
+
+        // ★ คำสั่งต้องบอกได้ว่าแตะอะไร เพื่อให้ชั้น editor เลือกของที่กลับมาให้ผู้ใช้
+        //   (การเลือกไม่ได้ถูก undo — มันตามผลลัพธ์ ดู docs/02 §2.9)
+        assert_eq!(affected, vec![ids[1]]);
     }
 
     // ---------- merge / seal ----------
@@ -1420,7 +1335,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(history.redo_depth(), 0);
-        assert!(!history.redo(&mut board).unwrap());
+        assert!(history.redo(&mut board).unwrap().is_none());
     }
 
     #[test]
@@ -1429,8 +1344,8 @@ mod tests {
         let before = board.clone();
         let mut history = History::default();
 
-        assert!(!history.undo(&mut board).unwrap());
-        assert!(!history.redo(&mut board).unwrap());
+        assert!(history.undo(&mut board).unwrap().is_none());
+        assert!(history.redo(&mut board).unwrap().is_none());
         assert_eq!(board, before);
         assert_eq!(history.undo_label(), None);
     }
@@ -1563,11 +1478,10 @@ mod tests {
         /// ★★ `undo_restores_exactly` — หัวใจของ I-3 (ROADMAP P2-2, docs/08 §1)
         ///
         /// ทำคำสั่งมั่ว ๆ กี่ตัวก็ได้ แล้วย้อนให้หมด สถานะต้องกลับมา **เท่ากันเป๊ะ**
-        /// รวมถึงรุ่นของทุกช่องใน arena, ลำดับ z, สิ่งที่เลือก, anchor และธง dirty
+        /// รวมถึงรุ่นของทุกช่องใน arena, ลำดับ z และธง dirty
         #[test]
         fn undo_restores_exactly(commands in prop::collection::vec(any_command(), 0..40)) {
-            let (mut board, ids) = board_with(4);
-            board.selection_mut().restore([ids[0], ids[2]], Some(ids[0]));
+            let (mut board, _ids) = board_with(4);
             let before = board.clone();
 
             let mut history = History::default();
@@ -1581,7 +1495,7 @@ mod tests {
                 prop_assert!(board.z_order_is_consistent());
             }
 
-            while history.undo(&mut board)? {}
+            while history.undo(&mut board)?.is_some() {}
             prop_assert_eq!(&board, &before, "ย้อนหมดแล้วไม่กลับมาเท่าเดิม");
         }
 
@@ -1598,8 +1512,8 @@ mod tests {
             }
             let settled = board.clone();
 
-            while history.undo(&mut board)? {}
-            while history.redo(&mut board)? {}
+            while history.undo(&mut board)?.is_some() {}
+            while history.redo(&mut board)?.is_some() {}
             prop_assert_eq!(&board, &settled);
         }
     }

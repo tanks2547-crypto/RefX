@@ -21,7 +21,6 @@ use glam::{UVec2, Vec2};
 use crate::arena::{Arena, ArenaKey as _, BoardId, GroupId, ItemId};
 use crate::geom::{Obb, Rect};
 use crate::hash::ContentHash;
-use crate::selection::Selection;
 use crate::view::ViewState;
 
 /// เพดานพิกัด world ทั้งสองแกน (docs/02 §6)
@@ -546,7 +545,14 @@ pub struct Board {
     /// ล่างสุด → บนสุด **source of truth ของ z**
     pub(crate) z_order: Vec<ItemId>,
     pub(crate) groups: Arena<GroupId, Group>,
-    pub(crate) selection: Selection,
+    /// ★ **`selection` ไม่อยู่ที่นี่โดยตั้งใจ** (docs/02 §2.9) — มันเป็นสถานะชั่วคราว
+    /// ของ editor ไม่ใช่ของเอกสาร ถ้าอยู่ใน `Board` การคลิกดูภาพเฉย ๆ จะทำให้
+    /// เอกสาร dirty แล้วผู้ใช้จะโดนถาม "บันทึกไหม" ทั้งที่ไม่ได้แก้อะไร
+    ///
+    /// `view` **อยู่** ที่นี่และ persist ลงไฟล์ (เปิดมาแล้วกลับมุมมองเดิม)
+    /// แต่เป็น **ข้อยกเว้นที่ตั้งใจ**: ไม่ผ่าน `Command` และไม่ทำให้ `dirty`
+    /// — ลาก pan 200 เฟรมแล้วกด Ctrl+Z ต้องย้อนการแก้ครั้งล่าสุด ไม่ใช่ย้อนกล้อง
+    /// (docs/08 §4 — มีข้อยกเว้นสองข้อนี้เท่านั้น เจอข้อที่สามให้หยุดถาม)
     pub(crate) view: ViewState,
     pub(crate) arrange: ArrangeState,
     pub(crate) settings: BoardSettings,
@@ -569,7 +575,6 @@ impl Board {
             items: Arena::new(),
             z_order: Vec::new(),
             groups: Arena::new(),
-            selection: Selection::default(),
             view: ViewState::default(),
             arrange: ArrangeState::default(),
             settings: BoardSettings::default(),
@@ -614,12 +619,6 @@ impl Board {
     #[must_use]
     pub fn z_order(&self) -> &[ItemId] {
         &self.z_order
-    }
-
-    /// สิ่งที่ถูกเลือกอยู่
-    #[must_use]
-    pub fn selection(&self) -> &Selection {
-        &self.selection
     }
 
     /// กล้องของแต่ละโหมด
@@ -705,7 +704,6 @@ impl Board {
         let z_index = self.z_order.iter().position(|&other| other == id)?;
         let item = self.items.remove(id)?;
         self.z_order.remove(z_index);
-        self.selection.remove(id);
         Some((item, z_index))
     }
 
@@ -742,11 +740,6 @@ impl Board {
     /// เก็บทั้งชุดแทน diff ตามที่ docs/02 §3 กำหนด — ถูกกว่าและไม่มีบั๊ก
     pub(crate) fn set_z_order(&mut self, order: Vec<ItemId>) -> Vec<ItemId> {
         std::mem::replace(&mut self.z_order, order)
-    }
-
-    /// แก้สิ่งที่ถูกเลือก (เจ้าของคือ `Command` เท่านั้น)
-    pub(crate) fn selection_mut(&mut self) -> &mut Selection {
-        &mut self.selection
     }
 
     /// ทำเครื่องหมายว่ามีการแก้ที่ยังไม่ได้บันทึก
@@ -788,23 +781,20 @@ pub(crate) mod tests {
         assert_eq!(board.len(), 2);
     }
 
-    /// ★ ลบแล้ว z-order กับ selection ต้องตามไปด้วย ไม่ทิ้ง id ตายค้างไว้
+    /// ★ ลบแล้ว z-order ต้องตามไปด้วย ไม่ทิ้ง id ตายค้างไว้
+    ///
+    /// (`selection` ไม่อยู่ใน `Board` แล้ว — ชั้น editor เป็นคนล้าง id ที่ตาย
+    /// ออกจากการเลือกเอง ดู docs/02 §2.9)
     #[test]
-    fn removing_cleans_up_z_order_and_selection() {
+    fn removing_cleans_up_the_z_order() {
         let mut board = Board::default();
         let a = board.insert_item(image_item(1));
         let b = board.insert_item(image_item(2));
-        board.selection_mut().select(a);
-        board.selection_mut().add(b);
 
         let (item, z_index) = board.remove_item(a).unwrap();
         assert_eq!(item.id, a);
         assert_eq!(z_index, 0);
         assert_eq!(board.z_order(), &[b]);
-        assert!(
-            !board.selection().contains(a),
-            "id ที่ตายแล้วห้ามค้างใน selection"
-        );
         assert!(board.z_order_is_consistent());
     }
 
