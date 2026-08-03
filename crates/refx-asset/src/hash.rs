@@ -260,10 +260,25 @@ mod tests {
         assert_ne!(hash_file(&pa).unwrap(), hash_file(&pb).unwrap());
     }
 
-    /// ★ ข้อกำหนด P1-2: ไฟล์ 100 MB ต้องเสร็จใน < 200 ms
+    /// ★ ไฟล์ใหญ่ต้อง **ไม่ถูก hash ทั้งไฟล์** — วัดด้วยคุณสมบัติ ไม่ใช่ด้วยนาฬิกา
+    ///
+    /// เดิมเทสต์นี้ยืนยันว่า "ไฟล์ 100 MB ต้องเสร็จใน 200 ms" ซึ่งขึ้นกับความเร็ว
+    /// ของเครื่องที่รัน — **แดงสุ่มบน CI** (เกิดจริง 3 ส.ค. 2026 บน ubuntu runner
+    /// แล้วรอบถัดมาเขียวทั้งที่โค้ดเหมือนเดิมเป๊ะ) นี่คือกับดักเดียวกับที่เคย
+    /// ต้องย้ายเทสต์คิวออกจากการวัดเวลามาแล้วครั้งหนึ่ง
+    ///
+    /// สิ่งที่ต้องคุมจริง ๆ คือ **ไฟล์ใหญ่เดิน fast path** ซึ่งเป็นคุณสมบัติเชิง
+    /// อัลกอริทึม: ถ้าอ่านแค่หัว/ท้าย/ขนาด การแก้เนื้อ *ตรงกลาง* จะไม่ทำให้ hash เปลี่ยน
+    /// ข้อนี้เท่ากันทุกเครื่องและจะแดงทันทีถ้าใครดัน `FULL_HASH_LIMIT` ขึ้นไป
+    /// จนไฟล์ขนาดนี้กลายเป็น full hash (ซึ่งคือสิ่งที่ทำให้ช้าจริง)
     #[test]
-    fn hashes_100mb_file_quickly() {
+    fn a_file_over_the_limit_never_gets_hashed_in_full() {
         let size = 100 * (1 << 20);
+        assert!(
+            size as u64 > FULL_HASH_LIMIT,
+            "เทสต์นี้จะไร้ความหมายถ้าไฟล์ไม่เกินเพดาน fast path"
+        );
+
         let data = pattern(size, 67);
         let path = write_temp("speed", "100mb.bin", &data);
 
@@ -271,10 +286,21 @@ mod tests {
         let hash = hash_file(&path).unwrap();
         let elapsed = start.elapsed();
 
-        assert_eq!(hash, hash_file(&path).unwrap());
-        assert!(
-            elapsed < std::time::Duration::from_millis(200),
-            "hash ไฟล์ 100 MB ใช้ {elapsed:?} เกินเพดาน 200 ms"
+        assert_eq!(hash, hash_file(&path).unwrap(), "ต้อง deterministic");
+
+        // แก้ไบต์ตรงกลาง (นอกช่วงหัว/ท้ายที่ fast path อ่าน) แล้ว hash ต้องไม่เปลี่ยน
+        // — เป็นไปได้ก็ต่อเมื่อมันไม่ได้อ่านทั้ง 100 MB
+        let mut middled = data;
+        let middle = size / 2;
+        middled[middle] ^= 0xff;
+        let other = write_temp("speed", "100mb-middle.bin", &middled);
+        assert_eq!(
+            hash,
+            hash_file(&other).unwrap(),
+            "แก้กลางไฟล์แล้ว hash เปลี่ยน = อ่านทั้งไฟล์ ไม่ได้เดิน fast path"
         );
+
+        // ตัวเลขไว้เทียบรุ่นต่อไป — **ไม่ assert** ดูเหตุผลข้างบน
+        println!("hash ไฟล์ 100 MB (fast path): {elapsed:?}");
     }
 }
