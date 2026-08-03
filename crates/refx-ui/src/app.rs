@@ -1408,10 +1408,38 @@ impl RefxApp {
             None
         };
 
-        if let Some(event) = event {
-            let outcome = gfx.select_tool.handle(ctx, &mut gfx.selection, event);
-            gfx.rubber_band = outcome.rubber_band;
-            changed |= outcome.needs_redraw;
+        let Some(event) = event else {
+            return changed;
+        };
+
+        // ตัวที่กำลังถูกลากคือชุดที่เลือกอยู่ **ก่อน** ส่ง event เข้าไป
+        let moved: Vec<ItemId> = gfx.selection.iter().collect();
+        let outcome = gfx.select_tool.handle(ctx, &mut gfx.selection, event);
+        gfx.rubber_band = outcome.rubber_band;
+        changed |= outcome.needs_redraw;
+
+        let has_commands = !outcome.commands.is_empty();
+        for command in outcome.commands {
+            if let Err(err) = gfx.history.apply(&mut gfx.board, command) {
+                tracing::error!(%err, "cannot apply a canvas edit");
+            }
+        }
+        if outcome.seal {
+            // ปล่อยเมาส์ = ปิดหน้าต่าง merge · การลากครั้งถัดไปเป็น undo ขั้นใหม่
+            gfx.history.seal();
+        }
+
+        if has_commands {
+            // ★ index ต้องตามตำแหน่งใหม่ทันที ไม่งั้นการกดครั้งถัดไปจะ hit-test
+            //   กับตำแหน่ง **เก่า** แล้วคลิกไม่โดนภาพที่เพิ่งย้ายไป
+            //   (เจอตอนเขียนเทสต์ใน refx-core — ที่นั่นก็ต้องทำเหมือนกันเป๊ะ)
+            for id in moved {
+                if let Some(item) = gfx.board.item(id) {
+                    gfx.index.insert(id, &item.canvas);
+                }
+            }
+            Self::rebuild_quads(gfx);
+            changed = true;
         }
         changed
     }

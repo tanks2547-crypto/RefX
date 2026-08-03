@@ -21,6 +21,8 @@ use glam::Vec2;
 
 use crate::arena::ItemId;
 use crate::board::Board;
+use crate::board::ItemCanvas;
+use crate::command::{Command, TransformItems};
 use crate::geom::Rect;
 use crate::selection::Selection;
 use crate::spatial::SpatialIndex;
@@ -78,12 +80,33 @@ pub enum CanvasEvent {
 }
 
 /// สิ่งที่ชั้น UI ต้องเอาไปทำต่อหลังส่ง event เข้ามาหนึ่งตัว
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Default)]
 pub struct Interaction {
     /// กรอบ rubber-band ที่กำลังลากอยู่ (world space) — `None` = ไม่ต้องวาด
     pub rubber_band: Option<Rect>,
     /// มีอะไรเปลี่ยนที่ต้องวาดใหม่ไหม (I-1 — ไม่มีอะไรเปลี่ยนต้องไม่ขอเฟรม)
     pub needs_redraw: bool,
+    /// ★ คำสั่งที่ต้องส่งเข้า `History`
+    ///
+    /// **การย้ายภาพคือการแก้ `Board`** จึงต้องผ่าน `Command` (ต่างจากการเลือก
+    /// ที่ไม่ได้อยู่ใน `Board` — docs/02 §2.9) `TransformItems` merge ได้ การลาก
+    /// ค้างทั้งครั้งจึงยุบเป็น undo ขั้นเดียว
+    pub commands: Vec<Box<dyn Command>>,
+    /// ★ ต้องเรียก `History::seal()` หรือไม่ — **จริงตอนปล่อยเมาส์**
+    ///
+    /// ถ้าไม่ seal การลากสองครั้งติดกันจะกลายเป็น undo เดียว ผู้ใช้จะงง (docs/02 §3)
+    pub seal: bool,
+}
+
+impl std::fmt::Debug for Interaction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Interaction")
+            .field("rubber_band", &self.rubber_band)
+            .field("needs_redraw", &self.needs_redraw)
+            .field("commands", &self.commands.len())
+            .field("seal", &self.seal)
+            .finish()
+    }
 }
 
 /// ของที่เครื่องสถานะต้องรู้เพื่อตัดสินใจ
@@ -114,6 +137,13 @@ struct Press {
     on_item: Option<ItemId>,
     /// สิ่งที่เลือกอยู่ก่อนเริ่มกด — rubber-band แบบเพิ่มต้องบวกจากชุดนี้
     base: Vec<ItemId>,
+    /// ★ สภาพของ item ที่กำลังจะถูกย้าย **ณ ตอนเริ่มกด**
+    ///
+    /// คำนวณเป้าหมายจาก "ตอนเริ่ม + ระยะรวม" ไม่ใช่บวกทีละเฟรม — ถ้าบวกสะสม
+    /// ความคลาดเคลื่อนของ f32 จะพอกขึ้นเรื่อย ๆ ระหว่างลากยาว ๆ แล้วภาพจะไม่ตรง
+    /// กับเคอร์เซอร์ · และมันทำให้ `TransformItems` ที่ merge กันแล้วยังย้อนกลับ
+    /// ไปจุดเริ่มลากได้เป๊ะ
+    moving: Vec<(ItemId, ItemCanvas)>,
 }
 
 /// เครื่องสถานะของการเลือก
@@ -190,6 +220,7 @@ impl SelectTool {
             dragging: false,
             on_item: hit,
             base: base.clone(),
+            moving: Vec::new(),
         });
 
         let mut out = Interaction::default();
@@ -216,6 +247,19 @@ impl SelectTool {
             // (ล้างตอนปล่อยแทน ดู `on_release`)
             None => {}
         }
+
+        // กดโดนภาพ = การลากต่อจากนี้คือ **การย้ายทั้งชุดที่เลือก** ไม่ใช่ rubber-band
+        // เก็บสภาพตอนเริ่มไว้ก่อน (หลังการเลือกถูกตัดสินแล้ว จึงได้ชุดที่ถูกต้อง)
+        if hit.is_some()
+            && let Some(press) = self.press.as_mut()
+        {
+            press.moving = selection
+                .iter()
+                .filter_map(|id| ctx.board.item(id).map(|item| (id, item.canvas)))
+                // ★ ภาพที่ล็อกไว้ต้องไม่ขยับ — นั่นคือความหมายทั้งหมดของการล็อก
+                .filter(|(_, canvas)| !canvas.locked)
+                .collect();
+        }
         out
     }
 
@@ -229,22 +273,40 @@ impl SelectTool {
             return Interaction::default();
         };
 
-        // ★ กดโดนภาพแล้วลาก = การย้าย ซึ่งเป็นงานของ P2-5 ไม่ใช่ rubber-band
-        //   ตรงนี้จึงไม่ทำอะไร แต่ก็ต้องไม่ไปเริ่มลากกรอบทับด้วย
+        // ★ กดโดนภาพแล้วลาก = **การย้าย** ไม่ใช่ rubber-band
         if press.on_item.is_some() {
-            return Interaction::default();
+            if !started_dragging(press, ctx.drag_threshold, world) {
+                return Interaction::default();
+            }
+            let delta = world - press.origin;
+            let changes: Vec<(ItemId, ItemCanvas)> = press
+                .moving
+                .iter()
+                .map(|(id, start)| {
+                    (
+                        *id,
+                        ItemCanvas {
+                            pos: start.pos + delta,
+                            ..*start
+                        },
+                    )
+                })
+                .collect();
+            if changes.is_empty() {
+                return Interaction::default();
+            }
+            let mut out = Interaction {
+                needs_redraw: true,
+                ..Interaction::default()
+            };
+            if let Ok(command) = TransformItems::new(changes) {
+                out.commands.push(Box::new(command));
+            }
+            return out;
         }
 
-        if !press.dragging {
-            let threshold = if ctx.drag_threshold.is_finite() {
-                ctx.drag_threshold.max(0.0)
-            } else {
-                0.0
-            };
-            if (world - press.origin).length() < threshold {
-                return Interaction::default(); // ยังนับเป็นคลิก ไม่ใช่ลาก
-            }
-            press.dragging = true;
+        if !started_dragging(press, ctx.drag_threshold, world) {
+            return Interaction::default(); // ยังนับเป็นคลิก ไม่ใช่ลาก
         }
 
         let rect = Rect::from_corners(press.origin, world);
@@ -254,6 +316,7 @@ impl SelectTool {
         let mut out = Interaction {
             rubber_band: Some(rect),
             needs_redraw: true,
+            ..Interaction::default()
         };
         apply_selection(&mut out, selection, items, anchor);
         out
@@ -274,6 +337,12 @@ impl SelectTool {
             ..Interaction::default()
         };
 
+        // จบการย้าย — **seal เพื่อให้การลากครั้งถัดไปเป็น undo ขั้นใหม่**
+        if press.on_item.is_some() {
+            out.seal = press.dragging;
+            return out;
+        }
+
         if press.dragging {
             // จบการลากกรอบ — ยืนยันชุดสุดท้ายอีกครั้งด้วยกรอบตอนปล่อย
             let rect = Rect::from_corners(press.origin, world);
@@ -291,6 +360,26 @@ impl SelectTool {
         }
         out
     }
+}
+
+/// ขยับเกินระยะจนนับเป็น "การลาก" แล้วหรือยัง — จำสถานะไว้ใน `press`
+///
+/// ระยะนี้กันมือสั่น: คลิกแล้วเมาส์ขยับสองพิกเซลต้องยังเป็นคลิก ไม่ใช่การลาก
+/// ที่ย้ายภาพของผู้ใช้ไปโดยไม่ตั้งใจ
+fn started_dragging(press: &mut Press, threshold: f32, world: Vec2) -> bool {
+    if press.dragging {
+        return true;
+    }
+    let threshold = if threshold.is_finite() {
+        threshold.max(0.0)
+    } else {
+        0.0
+    };
+    if (world - press.origin).length() < threshold {
+        return false;
+    }
+    press.dragging = true;
+    true
 }
 
 /// รวมชุดเดิมกับสิ่งที่อยู่ในกรอบ ตามปุ่มดัดแปลง
@@ -333,7 +422,14 @@ fn apply_selection(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    // เทียบ float ตรง ๆ ได้: ค่าที่ assert คือผลของการบวกเวกเตอร์ครั้งเดียว
+    // จากค่าคงที่ ไม่ใช่ผลสะสมจากการคำนวณทศนิยมหลายรอบ
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::float_cmp
+    )]
 
     use super::*;
     use crate::board::ItemCanvas;
@@ -393,6 +489,26 @@ mod tests {
             };
             let outcome = self.tool.handle(ctx, &mut self.selection, event);
             self.last = outcome.rubber_band;
+            let moved: Vec<ItemId> = self.selection.iter().collect();
+            for command in outcome.commands {
+                self.history.apply(&mut self.board, command).unwrap();
+            }
+            // ★ index ต้องตามตำแหน่งใหม่ทันที ไม่งั้นการกดครั้งถัดไปจะ hit-test
+            //   กับตำแหน่ง *เก่า* แล้วคลิกไม่โดนภาพที่เพิ่งย้ายไป
+            //   (เทสต์ `sealing_on_release_keeps_two_drags_separate` จับข้อนี้ได้
+            //    ตอนเขียนครั้งแรก — ชั้น UI ต้องทำเหมือนกันเป๊ะ)
+            for id in moved {
+                if let Some(item) = self.board.item(id) {
+                    self.index.insert(id, &item.canvas);
+                }
+            }
+            if outcome.seal {
+                self.history.seal();
+            }
+        }
+
+        fn canvas_of(&self, id: ItemId) -> ItemCanvas {
+            self.board.item(id).unwrap().canvas
         }
 
         fn press(&mut self, at: Vec2, modifiers: Modifiers) {
@@ -652,6 +768,149 @@ mod tests {
         assert_eq!(h.selected(), vec![ids[0]]);
         h.release(Vec2::new(400.0, 0.0));
         assert_eq!(h.selected(), vec![ids[0]]);
+    }
+
+    // ---------- ย้ายภาพ (P2-5) ----------
+
+    /// ★ เกณฑ์ของ ROADMAP: **ลากค้าง = 1 undo · ปล่อยแล้ว seal**
+    ///
+    /// ลาก 200 เฟรมแล้ว undo ครั้งเดียวต้องกลับไปจุดเริ่มลากเป๊ะ — ไม่ใช่ถอย
+    /// ทีละเฟรม (ซึ่งจะกิน undo stack ทั้งก้อนแล้วผู้ใช้ย้อนงานจริงไม่ถึง)
+    #[test]
+    fn a_long_drag_is_one_undo_that_lands_exactly_where_it_started() {
+        let (mut h, ids) = Harness::new(3);
+        h.click(Vec2::ZERO);
+        let start = h.canvas_of(ids[0]);
+
+        h.press(Vec2::ZERO, Modifiers::default());
+        for step in 1..=200 {
+            h.drag_to(Vec2::new(step as f32 * 2.0, step as f32));
+        }
+        h.release(Vec2::new(400.0, 200.0));
+
+        assert_eq!(h.canvas_of(ids[0]).pos, Vec2::new(400.0, 200.0));
+        assert_eq!(h.history.undo_depth(), 1, "ลากค้างต้องเป็นขั้นเดียว");
+
+        h.history.undo(&mut h.board).unwrap();
+        assert_eq!(
+            h.canvas_of(ids[0]),
+            start,
+            "ย้อนครั้งเดียวต้องกลับไปจุดเริ่มลาก ไม่ใช่เฟรมก่อนหน้า"
+        );
+    }
+
+    /// ปล่อยแล้วลากใหม่ = **สองขั้น** — ถ้าไม่ seal ผู้ใช้จะย้อนทีเดียวแล้วภาพ
+    /// กระโดดข้ามไปสองที่ ซึ่งงงมาก
+    #[test]
+    fn sealing_on_release_keeps_two_drags_separate() {
+        let (mut h, ids) = Harness::new(2);
+        h.click(Vec2::ZERO);
+
+        h.press(Vec2::ZERO, Modifiers::default());
+        h.drag_to(Vec2::new(100.0, 0.0));
+        h.release(Vec2::new(100.0, 0.0));
+
+        h.press(Vec2::new(100.0, 0.0), Modifiers::default());
+        h.drag_to(Vec2::new(100.0, 80.0));
+        h.release(Vec2::new(100.0, 80.0));
+
+        assert_eq!(h.history.undo_depth(), 2);
+        h.history.undo(&mut h.board).unwrap();
+        assert_eq!(h.canvas_of(ids[0]).pos, Vec2::new(100.0, 0.0));
+    }
+
+    /// ★ ลากภาพที่เลือกไว้หลายใบ = ย้ายทั้งชุดพร้อมกัน โดยระยะห่างระหว่างกันคงเดิม
+    #[test]
+    fn dragging_one_of_many_moves_the_whole_selection_rigidly() {
+        let (mut h, ids) = Harness::new(3);
+        h.press(Vec2::ZERO, CTRL);
+        h.release(Vec2::ZERO);
+        h.press(Vec2::new(200.0, 0.0), CTRL);
+        h.release(Vec2::new(200.0, 0.0));
+        let gap = h.canvas_of(ids[1]).pos - h.canvas_of(ids[0]).pos;
+
+        h.press(Vec2::ZERO, Modifiers::default());
+        h.drag_to(Vec2::new(50.0, 90.0));
+        h.release(Vec2::new(50.0, 90.0));
+
+        assert_eq!(h.canvas_of(ids[0]).pos, Vec2::new(50.0, 90.0));
+        assert_eq!(
+            h.canvas_of(ids[1]).pos - h.canvas_of(ids[0]).pos,
+            gap,
+            "ระยะห่างระหว่างภาพในชุดต้องไม่เปลี่ยน"
+        );
+        assert_eq!(h.canvas_of(ids[2]).pos.x, 400.0, "ตัวที่ไม่ได้เลือกต้องอยู่นิ่ง");
+        assert_eq!(h.history.undo_depth(), 1);
+    }
+
+    /// ★ ภาพที่ล็อกไว้ต้องไม่ขยับ — นั่นคือความหมายทั้งหมดของการล็อก
+    #[test]
+    fn a_locked_item_never_moves() {
+        let (mut h, ids) = Harness::new(2);
+        let mut canvas = h.canvas_of(ids[0]);
+        canvas.locked = true;
+        h.board.set_canvas(ids[0], canvas).unwrap();
+        h.board.mark_dirty(false);
+
+        h.click(Vec2::ZERO);
+        h.press(Vec2::ZERO, Modifiers::default());
+        h.drag_to(Vec2::new(300.0, 300.0));
+        h.release(Vec2::new(300.0, 300.0));
+
+        assert_eq!(h.canvas_of(ids[0]).pos, Vec2::ZERO, "ล็อกแล้วต้องไม่ขยับ");
+        assert_eq!(h.history.undo_depth(), 0, "ไม่มีอะไรเปลี่ยน = ไม่ควรมีขั้น undo");
+    }
+
+    /// ตำแหน่งคำนวณจาก **จุดเริ่ม + ระยะรวม** ไม่ใช่บวกทีละเฟรม
+    ///
+    /// ถ้าบวกสะสม ความคลาดเคลื่อนจะพอกขึ้นระหว่างลากยาว ๆ แล้วภาพจะไม่ตรงเคอร์เซอร์
+    #[test]
+    fn the_target_is_absolute_so_a_wobbly_drag_still_lands_exactly() {
+        let (mut h, ids) = Harness::new(2);
+        h.click(Vec2::ZERO);
+
+        h.press(Vec2::ZERO, Modifiers::default());
+        // ลากส่าย ๆ ไปมาแล้วจบที่จุดเดิมพอดี
+        for step in 0..50 {
+            let wobble = (step as f32 * 0.7).sin() * 40.0;
+            h.drag_to(Vec2::new(120.0 + wobble, wobble));
+        }
+        h.drag_to(Vec2::new(120.0, 0.0));
+        h.release(Vec2::new(120.0, 0.0));
+
+        assert_eq!(h.canvas_of(ids[0]).pos, Vec2::new(120.0, 0.0));
+    }
+
+    /// มือสั่นตอนคลิกบนภาพต้องไม่กลายเป็นการย้าย
+    #[test]
+    fn a_wobble_on_an_item_does_not_move_it() {
+        let (mut h, ids) = Harness::new(2);
+        h.click(Vec2::ZERO);
+
+        h.press(Vec2::ZERO, Modifiers::default());
+        h.drag_to(Vec2::new(1.5, 1.0)); // ต่ำกว่าระยะ 4.0
+        h.release(Vec2::new(1.5, 1.0));
+
+        assert_eq!(h.canvas_of(ids[0]).pos, Vec2::ZERO);
+        assert_eq!(h.history.undo_depth(), 0);
+        assert!(!h.board.is_dirty());
+    }
+
+    /// ย้ายแล้ว hit-test ต้องตามไปที่ตำแหน่งใหม่ (index ต้องถูก rebuild โดยผู้เรียก)
+    #[test]
+    fn hit_testing_follows_the_item_after_a_move() {
+        let (mut h, ids) = Harness::new(2);
+        h.click(Vec2::ZERO);
+        h.press(Vec2::ZERO, Modifiers::default());
+        h.drag_to(Vec2::new(600.0, 0.0));
+        h.release(Vec2::new(600.0, 0.0));
+
+        h.index.rebuild(&h.board);
+        assert_eq!(
+            h.index.hit_test(&h.board, Vec2::new(600.0, 0.0)),
+            Some(ids[0])
+        );
+        assert_eq!(h.index.hit_test(&h.board, Vec2::ZERO), None);
     }
 
     // ---------- I-1 / ความทนทาน ----------
