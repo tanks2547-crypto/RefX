@@ -1357,8 +1357,9 @@ impl RefxApp {
             let Some(state) = gfx.render_state.get(&id) else {
                 continue;
             };
-            gfx.working_quads
-                .push((key, Self::quad_for(&item.canvas, state)));
+            if let Some(quad) = Self::quad_for(&item.canvas, state) {
+                gfx.working_quads.push((key, quad));
+            }
         }
 
         if requests.is_empty() {
@@ -1594,19 +1595,28 @@ impl RefxApp {
     /// `(a, b)` คือภาพของแกน x ของ unit quad, `(c, d)` คือภาพของแกน y
     /// ซึ่งตรงกับ `Obb::axes()` พอดี — hit-test กับสิ่งที่วาดจึงใช้นิยามเดียวกัน
     /// (ถ้าสองที่นี้ไม่ตรงกัน ภาพที่หมุนจะกดไม่โดนที่ที่ตาเห็น)
-    fn quad_for(canvas: &ItemCanvas, state: &ItemRender) -> QuadInstance {
+    /// ★ คืน `None` = **ไม่วาดใบนี้** — `visible` เป็นฟิลด์เดียวที่ตัดสินแบบนั้น
+    ///
+    /// เดิม `visible` ถูกเคารพที่ hit-test (`spatial.rs`) และที่กรอบเลือก
+    /// แต่ **ไม่ถูกเคารพตอนวาด quad** — ภาพที่ซ่อนไว้จะยังขึ้นจอโดยกดไม่โดน
+    /// ยังไม่มีใครตั้ง `visible = false` ได้ในวันนี้ แต่ `.refx` จะพามันมาตอน P4-1
+    /// (พบตอนกวาด audit ฟิลด์ → shader 4 ส.ค. 2026)
+    fn quad_for(canvas: &ItemCanvas, state: &ItemRender) -> Option<QuadInstance> {
+        if !canvas.visible {
+            return None;
+        }
         let [x_axis, y_axis] = canvas.obb().axes();
         let (a, b) = (x_axis * canvas.size.x).into();
         let (c, d) = (y_axis * canvas.size.y).into();
         // จุดกึ่งกลาง → มุมซ้ายบนของ quad **หลังหมุนแล้ว**
         let origin = canvas.pos - (Vec2::new(a, b) + Vec2::new(c, d)) * 0.5;
-        QuadInstance {
+        Some(QuadInstance {
             transform: [a, b, c, d, origin.x, origin.y],
             uv_rect: state.uv_rect,
             tint: state.tint,
             layer: state.layer,
             flags: state.flags,
-        }
+        })
     }
 
     /// สร้าง `quads` ใหม่ทั้งชุดจาก `board`
@@ -1616,8 +1626,10 @@ impl RefxApp {
     fn rebuild_quads(gfx: &mut Gfx) {
         gfx.quads.clear();
         for (id, item) in gfx.board.items_in_z_order() {
-            if let Some(state) = gfx.render_state.get(&id) {
-                gfx.quads.push(Self::quad_for(&item.canvas, state));
+            if let Some(state) = gfx.render_state.get(&id)
+                && let Some(quad) = Self::quad_for(&item.canvas, state)
+            {
+                gfx.quads.push(quad);
             }
         }
     }
@@ -2462,7 +2474,7 @@ mod tests {
                 rotation,
                 ..ItemCanvas::default()
             };
-            let quad = RefxApp::quad_for(&canvas, &state);
+            let quad = RefxApp::quad_for(&canvas, &state).expect("ภาพที่มองเห็นต้องได้ quad");
             let [a, b, c, d, tx, ty] = quad.transform;
             // unit quad (0,0) (1,0) (1,1) (0,1) → world (ตามลำดับของ Obb::corners)
             let mapped = |u: Vec2| Vec2::new(a * u.x + c * u.y + tx, b * u.x + d * u.y + ty);
@@ -2481,6 +2493,157 @@ mod tests {
         }
     }
 
+    /// ★★ ประตูที่ทำให้ฟิลด์ของ `ItemCanvas` **ส่งเสียงเอง** ว่าถึง GPU แล้วหรือยัง
+    ///
+    /// `rotation` เงียบอยู่ตั้งแต่ P0 ถึง P2-5 เพราะไม่มีอะไรบังคับให้ใครไปดูว่ามัน
+    /// ถึง shader หรือยัง — เจอเพราะบังเอิญมีคนไปทำฟีเจอร์ที่ต้องใช้มันพอดี
+    /// นี่คือรูปแบบเดิมที่โปรเจกต์นี้โดนมาแล้วหลายครั้ง: **มีที่ว่างรอไว้
+    /// ไม่มีใครเติม ไม่มีอะไรส่งเสียง**
+    ///
+    /// เทสต์นี้ปิดช่องนั้นสองชั้น:
+    ///
+    /// 1. **destructure ครบทุกฟิลด์ ไม่มี `..`** → เพิ่มฟิลด์ใหม่ใน `ItemCanvas`
+    ///    เมื่อไหร่ ตรงนี้ **คอมไพล์ไม่ผ่าน** จนกว่าจะมีคนตัดสินว่ามันถึง GPU ไหม
+    ///    (หลักการเดียวกับ `DeviceBound::build` — HANDOFF §4 ข้อ 16)
+    /// 2. **เทียบพฤติกรรมจริง ไม่ใช่เจตนา** → ฟิลด์ที่ตารางบอกว่า "ยังไม่ถึง"
+    ///    แล้ววันหนึ่งมีคนต่อให้ถึง (crop = P2-7 · flip/opacity/filter = P2-8)
+    ///    เทสต์จะแดงทันที บังคับให้มาแก้ตารางนี้ ไม่ใช่ปล่อยให้โค้ดกับความเข้าใจ
+    ///    แยกทางกันเงียบ ๆ อีกรอบ
+    ///
+    /// **ตัวที่ยังไม่ถึงไม่ใช่บั๊ก** — มันมีคิวของมันอยู่แล้ว ข้อนี้แค่ทำให้
+    /// "ยังไม่ถึง" เป็นสิ่งที่มีใครสักคนเซ็นรับรองไว้ ไม่ใช่สิ่งที่ไม่มีใครรู้
+    #[test]
+    fn no_item_canvas_field_reaches_the_gpu_without_us_knowing() {
+        use refx_core::board::{CropRect, Flip, ItemFilter};
+
+        let state = bare_render_state();
+        let base = ItemCanvas {
+            size: Vec2::splat(100.0),
+            ..ItemCanvas::default()
+        }
+        .sanitized();
+        let baseline = RefxApp::quad_for(&base, &state);
+        assert!(baseline.is_some(), "ภาพปกติต้องได้ quad");
+
+        // ★ ไม่มี `..` โดยตั้งใจ — ฟิลด์ใหม่ทำให้บรรทัดนี้คอมไพล์ไม่ผ่าน
+        let ItemCanvas {
+            pos: _,
+            size: _,
+            rotation: _,
+            flip: _,
+            opacity: _,
+            crop: _,
+            locked: _,
+            visible: _,
+            filter: _,
+        } = base;
+
+        // ฟิลด์ · ค่าที่ต่างจากค่าเริ่มต้น · เปลี่ยนสิ่งที่ GPU ได้รับไหม · เหตุผล
+        let cases: [(&str, ItemCanvas, bool, &str); 9] = [
+            (
+                "pos",
+                ItemCanvas {
+                    pos: Vec2::new(7.0, -3.0),
+                    ..base
+                },
+                true,
+                "transform",
+            ),
+            (
+                "size",
+                ItemCanvas {
+                    size: Vec2::new(50.0, 20.0),
+                    ..base
+                },
+                true,
+                "transform",
+            ),
+            (
+                "rotation",
+                ItemCanvas {
+                    rotation: 0.6,
+                    ..base
+                },
+                true,
+                "transform (ต่อแล้วตอน P2-5)",
+            ),
+            (
+                "visible",
+                ItemCanvas {
+                    visible: false,
+                    ..base
+                },
+                true,
+                "ไม่วาดเลย (ต่อแล้วตอน audit นี้)",
+            ),
+            (
+                "flip",
+                ItemCanvas {
+                    flip: Flip::Horizontal,
+                    ..base
+                },
+                false,
+                "ยังไม่ถึง — สลับ uv ใน shader คือ P2-8",
+            ),
+            (
+                "opacity",
+                ItemCanvas {
+                    opacity: 0.25,
+                    ..base
+                },
+                false,
+                "ยังไม่ถึง — ต้องเขียนลง tint[3] คือ P2-8",
+            ),
+            (
+                "filter",
+                ItemCanvas {
+                    filter: ItemFilter {
+                        grayscale: true,
+                        ..base.filter
+                    },
+                    ..base
+                },
+                false,
+                "ยังไม่ถึง — shader มี FLAG_GRAYSCALE/INVERT รออยู่แล้ว แต่ไม่มีใครเซ็ต · brightness/contrast ยังไม่มีแม้แต่โค้ดใน shader · ทั้งหมดคือ P2-8",
+            ),
+            (
+                "crop",
+                ItemCanvas {
+                    crop: CropRect {
+                        min: Vec2::splat(0.25),
+                        max: Vec2::splat(0.75),
+                    },
+                    ..base
+                },
+                false,
+                "ยังไม่ถึง — ต้องหด uv_rect คือ P2-7",
+            ),
+            (
+                "locked",
+                ItemCanvas {
+                    locked: true,
+                    ..base
+                },
+                false,
+                "ไม่ใช่เรื่องของการวาดโดยตั้งใจ — คุมแค่การแก้ไข",
+            ),
+        ];
+
+        for (name, mutated, reaches_gpu, why) in cases {
+            let changed = RefxApp::quad_for(&mutated.sanitized(), &state) != baseline;
+            assert_eq!(
+                changed,
+                reaches_gpu,
+                "`{name}` {} ({why}) — แก้ตารางในเทสต์นี้ให้ตรงความจริง",
+                if changed {
+                    "ถึง GPU แล้ว แต่ตารางบอกว่ายัง"
+                } else {
+                    "ยังไม่ถึง GPU แต่ตารางบอกว่าถึงแล้ว"
+                }
+            );
+        }
+    }
+
     /// negative control ของข้อบน: ถ้าลืมใส่การหมุนเข้า transform ค่าจะเท่ากับภาพที่ไม่หมุน
     #[test]
     fn rotation_actually_reaches_the_gpu_transform() {
@@ -2494,8 +2657,8 @@ mod tests {
             ..plain
         };
         assert_ne!(
-            RefxApp::quad_for(&plain, &state).transform,
-            RefxApp::quad_for(&spun, &state).transform,
+            RefxApp::quad_for(&plain, &state).map(|q| q.transform),
+            RefxApp::quad_for(&spun, &state).map(|q| q.transform),
             "หมุนแล้ว transform ต้องเปลี่ยน ไม่งั้นการหมุนไม่มีผลบนจอเลย"
         );
     }
