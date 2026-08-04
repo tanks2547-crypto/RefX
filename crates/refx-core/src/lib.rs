@@ -19,3 +19,4 @@ pub mod panic_guard; // ธงบอก panic hook ว่า panic นี้ถ�
 pub mod selection;
 pub mod spatial; // loose uniform grid: culling + hit-test
 pub mod view; // Camera, ViewState, Mode
+pub mod zorder; // ย้ายชั้น (`[` `]`) — pure function คืนลำดับใหม่ ไม่แตะ board

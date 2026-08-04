@@ -11,12 +11,13 @@ use refx_asset::cache::{CacheStats, IoRequest, IoThread};
 use refx_asset::pool::DecodePool;
 use refx_core::arena::ItemId;
 use refx_core::board::{AssetRef, Board, ImageFormat, Item, ItemCanvas, ItemKind};
-use refx_core::command::{AddItems, History};
+use refx_core::command::{AddItems, History, RemoveItems, ReorderZ};
 use refx_core::geom::Rect as WorldRect;
 use refx_core::interact::{CanvasButton, CanvasContext, CanvasEvent, Modifiers, SelectTool};
 use refx_core::selection::Selection;
 use refx_core::spatial::SpatialIndex;
 use refx_core::view::Camera;
+use refx_core::zorder::ZMove;
 
 use crate::shell::LoadProgress;
 use crate::text::{self, Key, Lang, Template};
@@ -208,6 +209,45 @@ fn history_shortcut(
         return Some(HistoryRequest::Redo);
     }
     None
+}
+
+/// แปลงปุ่มที่กดเป็นคำสั่งย้ายชั้น (P2-6)
+///
+/// `docs/03 §5` ระบุแค่ `[` `]` = ส่งไปหลัง / นำมาหน้า **ไม่ได้ระบุปุ่มของสุดหัว-สุดท้าย**
+/// เลือก `Shift+[` / `Shift+]` เพราะอยู่ตระกูลเดียวกันและไม่ชนกับอะไรใน keymap
+/// (ไม่ใช้ `Ctrl+[` เพราะ Ctrl ถูกจองไว้ให้คำสั่งระดับเอกสารทั้งหมดแล้ว)
+///
+/// ★ ต้องรับ `{` `}` ด้วย: บนคีย์บอร์ดส่วนใหญ่ Shift+`[` **ส่งอักขระ `{` มาเลย**
+/// ไม่ได้ส่ง `[` พร้อมธง shift — ถ้าดูแต่ธง ปุ่มสุดหัว-สุดท้ายจะไม่ทำงานเลย
+fn zorder_shortcut(key: &winit::keyboard::Key, modifiers: ModifiersState) -> Option<ZMove> {
+    if modifiers.control_key() || modifiers.alt_key() {
+        return None;
+    }
+    let winit::keyboard::Key::Character(text) = key else {
+        return None;
+    };
+    let all_the_way = modifiers.shift_key();
+    match text.as_str() {
+        "[" if all_the_way => Some(ZMove::ToBack),
+        "]" if all_the_way => Some(ZMove::ToFront),
+        "[" => Some(ZMove::Backward),
+        "]" => Some(ZMove::Forward),
+        "{" => Some(ZMove::ToBack),
+        "}" => Some(ZMove::ToFront),
+        _ => None,
+    }
+}
+
+/// `Delete` / `Backspace` = ลบสิ่งที่เลือก (docs/03 §5)
+///
+/// รับ `Backspace` ด้วยเพราะบนแล็ปท็อปหลายรุ่นไม่มีปุ่ม `Delete` แยก
+fn is_delete(key: &winit::keyboard::Key) -> bool {
+    matches!(
+        key,
+        winit::keyboard::Key::Named(
+            winit::keyboard::NamedKey::Delete | winit::keyboard::NamedKey::Backspace
+        )
+    )
 }
 
 fn is_paste(key: &winit::keyboard::Key, modifiers: ModifiersState) -> bool {
@@ -402,14 +442,18 @@ struct ItemRender {
     /// เก็บ pixel ไว้ใน RAM เลยเพราะ 128×128×4 = 64 KB ต่อภาพ
     /// (1000 ภาพ = 64 MB ซึ่งยังอยู่ในงบ) และเร็วกว่าอ่านกลับจาก sqlite มาก
     thumb: refx_asset::thumb::Thumbnail,
-    /// ช่องใน atlas ที่ thumbnail ตัวนี้อยู่
-    uv_rect: [f32; 4],
-    /// ชั้นใน texture array
-    layer: u32,
-    /// สีคูณ — เป็นสีเด่นของภาพตอนยังเป็น placeholder
+    /// ★ ช่องใน atlas — `None` = **ไม่ได้อยู่บน GPU ตอนนี้** วาดเป็น placeholder แทน
+    ///
+    /// เก็บ `AtlasSlot` ทั้งก้อนแทน `uv_rect`+`layer` ที่แตกออกมาแล้ว เพราะ
+    /// `Atlas::free()` ต้องการช่องเดิมกลับไป — ถ้าเก็บแต่ผลลัพธ์ที่คำนวณมาจากมัน
+    /// เราจะ**คืนช่องไม่ได้เลย** แล้ว VRAM ของภาพที่ลบไปแล้วจะค้างจนปิดโปรแกรม
+    /// (P2-6) · `uv_rect`/`layer`/ธง `PLACEHOLDER` เป็นของที่ *ได้มาจาก* ฟิลด์นี้
+    /// จึงคำนวณสดใน `quad_for` แทนการเก็บคู่ขนานไว้ให้เพี้ยนจากกัน
+    slot: Option<refx_render::atlas::AtlasSlot>,
+    /// สีเด่นของภาพ — ใช้ตอนยังไม่มี (หรือไม่มีแล้ว) ช่องใน atlas
+    ///
+    /// เป็นคุณสมบัติของ *ภาพ* ไม่ใช่ของสถานะการอยู่บน GPU จึงถูกต้องเสมอ
     tint: [f32; 4],
-    /// ธงของ quad (PLACEHOLDER ฯลฯ)
-    flags: u32,
 }
 
 /// สิ่งที่ canvas widget เก็บได้จาก egui ในเฟรมหนึ่ง
@@ -450,6 +494,19 @@ impl Default for CanvasFrameInput {
             modifiers: Modifiers::default(),
         }
     }
+}
+
+/// สีเด่นของภาพ (ARGB จาก `Thumbnail`) → tint ของ quad
+///
+/// ใช้ตอนภาพยังไม่มีช่องใน atlas — วาดสี่เหลี่ยมสีนี้แทนช่องว่าง (docs/04 §8)
+fn dominant_rgba(dominant: u32) -> [f32; 4] {
+    let [a, r, g, b] = dominant.to_be_bytes();
+    [
+        f32::from(r) / 255.0,
+        f32::from(g) / 255.0,
+        f32::from(b) / 255.0,
+        f32::from(a) / 255.0,
+    ]
 }
 
 /// สีของกรอบสิ่งที่ถูกเลือกและกรอบ rubber-band
@@ -689,6 +746,10 @@ pub struct RefxApp {
     /// เป็น `Option` จึงรวบการกดค้างให้เหลือครั้งเดียวต่อเฟรมโดยอัตโนมัติ —
     /// กด Ctrl+Z ค้างแล้วย้อนเรื่อย ๆ ได้ตามที่คนคาดหวัง แต่ไม่ถล่มทั้งสแตกในเฟรมเดียว
     pending_history: Option<HistoryRequest>,
+    /// คำสั่งย้ายชั้นที่รอทำต้นเฟรมถัดไป — รวบการกดค้างเหมือน `pending_history`
+    pending_zorder: Option<ZMove>,
+    /// ผู้ใช้กด `Delete` ในรอบ event ที่ผ่านมา
+    pending_delete: bool,
     /// ★ กันการกด `Ctrl+V` รัว ๆ ให้เหลือทีละครั้ง — ภาพจาก clipboard ใหญ่ได้
     /// ระดับ 6000×4000 (96 MB) และ `arboard` จอง RAM ก้อนนั้นก่อนที่เพดานของเรา
     /// จะได้ตรวจ ถ้าปล่อยให้ซ้อนกันสิบใบคือแย่ง RAM กับ Photoshop ตรง ๆ
@@ -751,6 +812,8 @@ impl RefxApp {
             pending_drops: Vec::new(),
             pending_paste: false,
             pending_history: None,
+            pending_zorder: None,
+            pending_delete: false,
             paste_in_flight: None,
             paste_count: 0,
             batch_from_clipboard: false,
@@ -1065,11 +1128,11 @@ impl RefxApp {
                             ItemRender {
                                 source,
                                 hash,
+                                // สีเด่นเก็บไว้ตลอดชีวิตของ item ไม่ใช่เฉพาะตอนเป็น
+                                // placeholder — ช่อง atlas หลุดเมื่อไหร่ก็หยิบมาใช้ได้ทันที
+                                tint: dominant_rgba(thumb.dominant),
                                 thumb: *thumb,
-                                uv_rect: slot.uv_rect(),
-                                tint: [1.0, 1.0, 1.0, 1.0],
-                                layer: slot.layer,
-                                flags: 0, // มี texture จริงแล้ว ไม่ใช่ placeholder
+                                slot: Some(slot),
                             },
                         );
                         self.drop_shown += 1;
@@ -1484,10 +1547,162 @@ impl RefxApp {
                     gfx.index.insert(id, &item.canvas);
                 }
             }
+            // การแก้ครั้งใหม่ล้างสาย redo — ภาพที่คำสั่งในสายนั้นถือไว้ตายตรงนี้
+            Self::collect_forgotten(gfx);
             Self::rebuild_quads(gfx);
             changed = true;
         }
         changed
+    }
+
+    /// ★★ ทำให้ "ใครอยู่บน GPU" ตรงกับ "ใครอยู่บน board" — เรียกหลังคำสั่งที่เพิ่ม/ลบ item
+    ///
+    /// เรียกเฉพาะ id ที่เพิ่งเปลี่ยน (`affected()`) ไม่ใช่ไล่ทั้ง `render_state` —
+    /// ที่ 1000 ภาพการไล่ทั้งแผนที่ทุกครั้งคือการเผา CPU ฟรีระหว่างลากเมาส์
+    ///
+    /// **ไม่ทิ้ง pixel ใน RAM ตรงนี้เด็ดขาด** — คืนแค่ช่องใน atlas (VRAM)
+    /// ตราบใดที่ยัง undo ได้ ภาพต้องกลับขึ้นจอได้โดย**ไม่ decode ใหม่**
+    /// (ถ้าต้อง decode ใหม่ แล้วผู้ใช้ลบไฟล์ต้นทางไปแล้ว undo จะล้มถาวร = ผิด I-3)
+    /// คนทิ้ง RAM คือ [`RefxApp::collect_forgotten`] ซึ่งฟัง `History` อีกที
+    fn sync_residency(gfx: &mut Gfx, ids: &[ItemId]) {
+        let Gfx {
+            atlas,
+            render,
+            render_state,
+            board,
+            ..
+        } = gfx;
+        for id in ids {
+            let Some(state) = render_state.get_mut(id) else {
+                continue;
+            };
+            match (board.item(*id).is_some(), state.slot) {
+                // หลุดจาก board แล้ว — คืนช่องทันที VRAM ว่างตรงนี้
+                (false, Some(slot)) => {
+                    atlas.free(slot);
+                    state.slot = None;
+                }
+                // กลับมาอยู่บน board แล้ว (undo ของการลบ) — เติมจาก RAM ไม่ต้อง decode
+                (true, None) => {
+                    state.slot = atlas
+                        .upload(render.queue(), &state.thumb.pixels)
+                        .inspect_err(|err| {
+                            // atlas เต็ม — ขึ้นเป็นสี่เหลี่ยมสีเด่นแทนช่องว่าง (docs/04 §8)
+                            tracing::warn!(%err, ?id, "no atlas slot for the restored image");
+                        })
+                        .ok();
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// ★ ทิ้ง thumbnail ของภาพที่ **กลับมาไม่ได้อีกแล้ว** — คำตอบของ "ใครเป็นเจ้าของ
+    /// อายุของ thumbnail" คือ `History` เป็นคนถือ (HANDOFF §6 ค้างไว้ตั้งแต่ P2-4)
+    ///
+    /// เดิม `render_state` **ไม่เคยถูกล้างเลย** — โตตามจำนวนภาพที่เคยเพิ่มในเซสชัน
+    /// ใบละ 64 KB · ตอนนี้มันตายพร้อมคำสั่งที่ถือมันไว้
+    ///
+    /// id ที่ถูกลืมแต่ **ยังอยู่บน board** ต้องไม่ถูกแตะ (เช่น `AddItems` ที่ถูกตัด
+    /// ตามเพดานทั้งที่ภาพยังอยู่บนจอ) — ไม่งั้นภาพที่ผู้ใช้เห็นจะกลายเป็นสี่เหลี่ยมสี
+    fn collect_forgotten(gfx: &mut Gfx) {
+        let forgotten = gfx.history.take_forgotten();
+        if forgotten.is_empty() {
+            return;
+        }
+        let mut dropped = 0usize;
+        for id in forgotten {
+            if gfx.board.item(id).is_some() {
+                continue;
+            }
+            if let Some(state) = gfx.render_state.remove(&id) {
+                if let Some(slot) = state.slot {
+                    gfx.atlas.free(slot);
+                }
+                dropped += 1;
+            }
+        }
+        if dropped > 0 {
+            tracing::debug!(
+                dropped,
+                "released thumbnails the history can no longer restore"
+            );
+        }
+    }
+
+    /// ย้ายชั้นของสิ่งที่เลือกไว้ (P2-6)
+    fn apply_zorder(&mut self, movement: ZMove) {
+        let Some(gfx) = self.gfx.as_mut() else {
+            return;
+        };
+        let selected: Vec<ItemId> = gfx.selection.iter().collect();
+        let Some(order) = refx_core::zorder::reordered(gfx.board.z_order(), &selected, movement)
+        else {
+            // ★ อยู่สุดขอบแล้ว / ไม่ได้เลือกอะไร — **ไม่สร้างคำสั่งและไม่ขอเฟรม** (I-1)
+            //   ถ้าสร้าง undo stack จะเต็มไปด้วยขั้นที่กดแล้วไม่มีอะไรเกิดขึ้น
+            return;
+        };
+        let Ok(command) = ReorderZ::new(order) else {
+            return;
+        };
+        if let Err(err) = gfx.history.apply(&mut gfx.board, Box::new(command)) {
+            tracing::error!(%err, "cannot reorder the z stack");
+            return;
+        }
+        // เรขาคณิตไม่เปลี่ยน → `index` ไม่ต้องแตะ · `affected()` ว่าง → การเลือกอยู่เหมือนเดิม
+        Self::collect_forgotten(gfx);
+        Self::rebuild_quads(gfx);
+        gfx.window.request_redraw();
+    }
+
+    /// ลบสิ่งที่เลือกไว้ (P2-6)
+    ///
+    /// ★ **ภาพที่ล็อกไว้ไม่ถูกลบ** — ล็อกมีไว้กันการแก้โดยไม่ตั้งใจ และการลบคือ
+    /// การแก้ที่ย้อนยากที่สุดในสายตาผู้ใช้ ถ้าล็อกกันการลากได้แต่กันการลบไม่ได้
+    /// คำว่า "ล็อก" จะแปลว่าอะไรก็ไม่รู้ (ทางเดียวกับ `SelectTool`)
+    fn apply_delete(&mut self) {
+        let lang = self.shell.lang;
+        let Some(gfx) = self.gfx.as_mut() else {
+            return;
+        };
+        let targets: Vec<ItemId> = gfx
+            .selection
+            .iter()
+            .filter(|id| gfx.board.item(*id).is_some_and(|item| !item.canvas.locked))
+            .collect();
+        if targets.is_empty() {
+            // ★ กดแล้วไม่มีอะไรเกิดขึ้น **ต้องบอก** ไม่ใช่เงียบ
+            self.shell.status = text::t(lang, Key::NothingToDelete).to_owned();
+            return;
+        }
+        let Ok(command) = RemoveItems::new(targets.clone()) else {
+            return;
+        };
+        if let Err(err) = gfx.history.apply(&mut gfx.board, Box::new(command)) {
+            tracing::error!(%err, "cannot delete the selected images");
+            return;
+        }
+
+        for id in &targets {
+            gfx.index.remove(*id);
+        }
+        // ★ ของที่ถูกลบไปแล้วจะยังถูกเลือกอยู่ไม่ได้ — แต่ตัวที่ **รอด** (ล็อกไว้)
+        //   ต้องยังถูกเลือกอยู่ ไม่งั้นผู้ใช้ที่เลือก 5 ใบแล้วลบ จะเสียการเลือก
+        //   ของใบที่ล็อกไว้ไปด้วยทั้งที่มันไม่ได้ถูกแตะเลย
+        let survivors: Vec<ItemId> = gfx
+            .selection
+            .iter()
+            .filter(|id| !targets.contains(id))
+            .collect();
+        gfx.selection
+            .restore(survivors.clone(), survivors.last().copied());
+        gfx.select_tool.cancel();
+        gfx.rubber_band = None;
+        Self::sync_residency(gfx, &targets);
+        Self::collect_forgotten(gfx);
+        Self::rebuild_quads(gfx);
+        tracing::info!(count = targets.len(), "deleted images from the board");
+        gfx.window.request_redraw();
     }
 
     /// ทำ undo/redo แล้วทำให้ผู้ใช้ **เห็นว่าเกิดอะไรขึ้น**
@@ -1522,6 +1737,11 @@ impl RefxApp {
                 return;
             }
         };
+
+        // ★ ภาพที่เพิ่งกลับมา/เพิ่งหายไปต้องคืนหรือคืนช่อง atlas ตาม **ก่อน** สร้าง quad
+        //   undo ของการลบเติมกลับจาก RAM ที่มีอยู่แล้ว — ไม่ decode ใหม่สักใบ
+        Self::sync_residency(gfx, &affected);
+        Self::collect_forgotten(gfx);
 
         // index กับ quad ต้องตามสถานะใหม่ของ board ทันที
         gfx.index.rebuild(&gfx.board);
@@ -1610,12 +1830,23 @@ impl RefxApp {
         let (c, d) = (y_axis * canvas.size.y).into();
         // จุดกึ่งกลาง → มุมซ้ายบนของ quad **หลังหมุนแล้ว**
         let origin = canvas.pos - (Vec2::new(a, b) + Vec2::new(c, d)) * 0.5;
+        // ★ ไม่มีช่องใน atlas = วาดสี่เหลี่ยมสีเด่นแทน **ห้ามข้ามไม่วาด** (docs/04 §8)
+        //   ผู้ใช้ต้องเห็นว่า layout ยังอยู่ครบ ไม่ใช่ช่องว่างที่อ่านได้ว่า "ภาพหาย"
+        let (uv_rect, layer, tint, flags) = match state.slot {
+            Some(slot) => (slot.uv_rect(), slot.layer, [1.0; 4], 0),
+            None => (
+                [0.0, 0.0, 1.0, 1.0],
+                0,
+                state.tint,
+                refx_render::instance::flags::PLACEHOLDER,
+            ),
+        };
         Some(QuadInstance {
             transform: [a, b, c, d, origin.x, origin.y],
-            uv_rect: state.uv_rect,
-            tint: state.tint,
-            layer: state.layer,
-            flags: state.flags,
+            uv_rect,
+            tint,
+            layer,
+            flags,
         })
     }
 
@@ -1681,28 +1912,16 @@ impl RefxApp {
             let Some(state) = render_state.get_mut(&id) else {
                 continue;
             };
-            let dominant = state.thumb.dominant;
             // ★ ใช้ upload ตรง ๆ ห้ามผ่าน upload_thumb — ไม่งั้นจะเรียก refill ซ้อนตัวเอง
-            let uploaded = atlas.upload(render.queue(), &state.thumb.pixels);
-            match uploaded {
+            match atlas.upload(render.queue(), &state.thumb.pixels) {
                 Ok(slot) => {
-                    state.uv_rect = slot.uv_rect();
-                    state.layer = slot.layer;
-                    state.tint = [1.0, 1.0, 1.0, 1.0];
-                    state.flags &= !refx_render::instance::flags::PLACEHOLDER;
+                    state.slot = Some(slot);
                     restored += 1;
                 }
                 Err(err) => {
                     // atlas เต็ม — ที่เหลือขึ้นเป็นสี่เหลี่ยมสีเด่นแทนช่องว่าง
                     tracing::warn!(%err, ?id, "atlas refill incomplete — the rest fall back to placeholders");
-                    let [a, r, g, b] = dominant.to_be_bytes();
-                    state.tint = [
-                        f32::from(r) / 255.0,
-                        f32::from(g) / 255.0,
-                        f32::from(b) / 255.0,
-                        f32::from(a) / 255.0,
-                    ];
-                    state.flags |= refx_render::instance::flags::PLACEHOLDER;
+                    state.slot = None;
                 }
             }
         }
@@ -1819,6 +2038,16 @@ impl AppDelegate for RefxApp {
         // Ctrl+Z / Ctrl+Y ที่กดไปเมื่อกี้
         if let Some(request) = self.pending_history.take() {
             self.apply_history_request(request);
+        }
+
+        // `[` `]` ที่กดไปเมื่อกี้ (P2-6)
+        if let Some(movement) = self.pending_zorder.take() {
+            self.apply_zorder(movement);
+        }
+
+        // `Delete` ที่กดไปเมื่อกี้ (P2-6)
+        if std::mem::take(&mut self.pending_delete) {
+            self.apply_delete();
         }
 
         // เก็บผล decode ที่เสร็จแล้วก่อนวาด (ไม่บล็อก)
@@ -2180,6 +2409,21 @@ impl AppDelegate for RefxApp {
                     self.pending_history = Some(request);
                     needs_redraw = true;
                 }
+                // ★ ย้ายชั้น — กดค้างซ้ำได้เหมือน undo (กด `]` รัว ๆ จนถึงบนสุดคือท่าปกติ)
+                //   ตัวที่ถึงสุดขอบแล้วจะไม่สร้างคำสั่งเอง (`zorder::reordered` คืน `None`)
+                if event.state.is_pressed()
+                    && let Some(movement) = zorder_shortcut(&event.logical_key, gfx.modifiers)
+                {
+                    self.pending_zorder = Some(movement);
+                    needs_redraw = true;
+                }
+                // ★ ลบ — **ห้ามซ้ำตอนกดค้าง** ต่างจากย้ายชั้นโดยตั้งใจ
+                //   กดค้างหนึ่งวินาทีแล้วลบทีละชุดจนหมด board คือหายนะที่ undo
+                //   ต้องกดกลับหลายสิบครั้ง ทั้งที่ผู้ใช้ตั้งใจกดครั้งเดียว
+                if event.state.is_pressed() && !event.repeat && is_delete(&event.logical_key) {
+                    self.pending_delete = true;
+                    needs_redraw = true;
+                }
             }
 
             _ => {}
@@ -2413,10 +2657,8 @@ mod tests {
                 source_height: 100,
                 dominant: 0,
             },
-            uv_rect: [0.0, 0.0, 1.0, 1.0],
+            slot: Some(refx_render::atlas::AtlasSlot { layer: 0, index: 0 }),
             tint: [1.0; 4],
-            layer: 0,
-            flags: 0,
         }
     }
 
@@ -2792,6 +3034,44 @@ mod tests {
                 "handle ไปเกาะมุมของ AABB ที่ {corner:?} — ผู้ใช้จะกดที่ที่เห็นแล้วไม่โดน"
             );
         }
+    }
+
+    // ---------- z-order + delete (P2-6) ----------
+
+    /// ★ `Shift+[` บนคีย์บอร์ดส่วนใหญ่ส่งอักขระ `{` มาเลย ไม่ได้ส่ง `[` พร้อมธง shift
+    ///
+    /// ถ้าดูแต่ธง shift ปุ่ม "ส่งหลังสุด/หน้าสุด" จะไม่ทำงานบนเครื่องส่วนใหญ่ —
+    /// และเป็นความล้มเหลวแบบเงียบ: ไม่มี error ไม่มี log ผู้ใช้แค่กดแล้วไม่เกิดอะไร
+    #[test]
+    fn the_z_order_keys_cover_both_ways_a_keyboard_reports_shift() {
+        let none = ModifiersState::empty();
+        let shift = ModifiersState::SHIFT;
+
+        assert_eq!(zorder_shortcut(&key("]"), none), Some(ZMove::Forward));
+        assert_eq!(zorder_shortcut(&key("["), none), Some(ZMove::Backward));
+
+        // ทางที่หนึ่ง: ธง shift มาพร้อมอักขระเดิม
+        assert_eq!(zorder_shortcut(&key("]"), shift), Some(ZMove::ToFront));
+        assert_eq!(zorder_shortcut(&key("["), shift), Some(ZMove::ToBack));
+        // ทางที่สอง: อักขระเปลี่ยนไปเลย (พบบ่อยกว่า)
+        assert_eq!(zorder_shortcut(&key("}"), shift), Some(ZMove::ToFront));
+        assert_eq!(zorder_shortcut(&key("{"), shift), Some(ZMove::ToBack));
+        assert_eq!(zorder_shortcut(&key("}"), none), Some(ZMove::ToFront));
+
+        // Ctrl/Alt เป็นของคำสั่งอื่น ต้องไม่ถูกจับเป็นการย้ายชั้น
+        assert_eq!(zorder_shortcut(&key("]"), ModifiersState::CONTROL), None);
+        assert_eq!(zorder_shortcut(&key("]"), ModifiersState::ALT), None);
+        assert_eq!(zorder_shortcut(&key("z"), none), None);
+    }
+
+    /// แล็ปท็อปหลายรุ่นไม่มีปุ่ม `Delete` แยก — ต้องรับ `Backspace` ด้วย
+    #[test]
+    fn delete_accepts_the_key_that_laptops_actually_have() {
+        use winit::keyboard::{Key as WKey, NamedKey};
+        assert!(is_delete(&WKey::Named(NamedKey::Delete)));
+        assert!(is_delete(&WKey::Named(NamedKey::Backspace)));
+        assert!(!is_delete(&key("d")));
+        assert!(!is_delete(&WKey::Named(NamedKey::Enter)));
     }
 
     // ---------- undo/redo (P2-4 ขั้นที่ 3) ----------

@@ -110,6 +110,8 @@ pub enum Key {
     NothingToUndo,
     /// กด Ctrl+Y แล้วไม่มีอะไรให้ทำซ้ำ
     NothingToRedo,
+    /// กด Delete แต่ไม่มีอะไรที่ลบได้ (ไม่ได้เลือก หรือเลือกแต่ภาพที่ล็อกไว้)
+    NothingToDelete,
 }
 
 /// ข้อความภาษาอังกฤษ — **ต้องมีครบทุก key เสมอ** (เป็นตัวสำรองสุดท้าย)
@@ -138,6 +140,7 @@ fn en(key: Key) -> &'static str {
         Key::ReadingClipboard => "Reading the clipboard…",
         Key::NothingToUndo => "Nothing left to undo",
         Key::NothingToRedo => "Nothing left to redo",
+        Key::NothingToDelete => "Nothing to delete — select an unlocked image first",
     }
 }
 
@@ -167,6 +170,7 @@ fn th(key: Key) -> Option<&'static str> {
         Key::ReadingClipboard => "กำลังอ่าน clipboard…",
         Key::NothingToUndo => "ไม่มีอะไรให้ย้อนกลับแล้ว",
         Key::NothingToRedo => "ไม่มีอะไรให้ทำซ้ำแล้ว",
+        Key::NothingToDelete => "ไม่มีอะไรให้ลบ — เลือกภาพที่ไม่ได้ล็อกไว้ก่อน",
     })
 }
 
@@ -596,6 +600,7 @@ mod tests {
         Key::ReadingClipboard,
         Key::NothingToUndo,
         Key::NothingToRedo,
+        Key::NothingToDelete,
     ];
 
     const ALL_TEMPLATES: &[Template] = &[

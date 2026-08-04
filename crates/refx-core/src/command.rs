@@ -677,6 +677,11 @@ pub struct History {
     sealed: bool,
     /// ความลึกของ stack ตอนบันทึกล่าสุด — `None` = กลับไปสถานะ "บันทึกแล้ว" ไม่ได้อีก
     saved_depth: Option<usize>,
+    /// ★ id ที่หลุดออกจากประวัติ **ถาวร** แล้ว รอผู้เรียกมาเก็บกวาด
+    ///
+    /// ดู [`History::take_forgotten`] — มีไว้เพื่อให้ทรัพยากรที่ผูกกับ item
+    /// (thumbnail ใน RAM, ช่องใน atlas) มีวันตาย ไม่ใช่ค้างจนปิดโปรแกรม
+    forgotten: Vec<ItemId>,
 }
 
 impl Default for History {
@@ -697,7 +702,70 @@ impl History {
             bytes: 0,
             sealed: true,
             saved_depth: Some(0),
+            forgotten: Vec::new(),
         }
+    }
+
+    /// ★ id ที่ประวัติ **ลืมถาวรแล้ว** — เอาไปแล้วรายการในนี้ถูกล้าง
+    ///
+    /// ตราบใดที่คำสั่งยังอยู่ในสาย undo/redo item ที่มันถือไว้ยัง**กลับมาได้**
+    /// ทรัพยากรของ item นั้น (thumbnail ใน RAM) จึงต้องไม่ถูกทิ้ง ไม่งั้น undo
+    /// ของการลบจะต้อง decode ใหม่ ซึ่งช้าและอาจล้มถ้าไฟล์ต้นทางหายไปแล้ว
+    ///
+    /// พอคำสั่งหลุดออกจากประวัติ (ถูกตัดตามเพดาน หรือสาย redo ถูกล้างเพราะทำอะไรใหม่)
+    /// item ของมันกลับมาไม่ได้อีกแล้ว **ตรงนั้นคือจุดตายที่ชัดเจน** — คำตอบของคำถาม
+    /// "ใครเป็นเจ้าของอายุของ thumbnail" คือ **`History` เป็นคนถือ** (P2-6)
+    ///
+    /// ★★ **กรองตั้งแต่ตอนลืม ไม่ใช่ตอนเอาไปใช้** — id ในรายการนี้คือตัวที่
+    /// "ไม่อยู่บน board **แล้ว ณ วินาทีที่คำสั่งตาย**" ซึ่งแปลว่ากลับมาไม่ได้อีกจริง ๆ
+    ///
+    /// เคยเป็นบั๊กจริง (พบ 4 ส.ค. 2026 ตอนรันของจริง 400 ภาพ): เดิมรายงานทุก id
+    /// แล้วให้ผู้เรียกไปเช็คเอง — แต่ผู้เรียกเช็ค**ทีหลัง** พอถึงตอนนั้นภาพชุดนั้น
+    /// ถูกลบไปพอดี (ชั่วคราว ยัง undo ได้) จึงถูกตัดสินว่าตายแล้ว → thumbnail ถูกทิ้ง
+    /// → **กด Ctrl+Z แล้วภาพกลับมาใน board แต่ไม่ขึ้นจอเลย** ทั้งที่ทุกอย่าง
+    /// "ทำงานถูก" ตามตัวอักษรของสัญญา
+    ///
+    /// บทเรียน: สัญญาที่ถูกต้องเฉพาะ "ถ้าเรียกทันที" คือกับดัก — ทำให้มันถูกต้อง
+    /// โดยไม่ขึ้นกับเวลาที่เรียกดีกว่า `History` มี `board` อยู่ในมือตอนนั้นพอดี
+    pub fn take_forgotten(&mut self) -> Vec<ItemId> {
+        std::mem::take(&mut self.forgotten)
+    }
+
+    /// จดว่าคำสั่งที่เพิ่งตายทำให้ item ตัวไหน "กลับมาไม่ได้อีก"
+    ///
+    /// ★★ เงื่อนไขที่ถูกต้องมี **สองข้อ** ทั้งคู่ต้องจริงพร้อมกัน:
+    ///
+    /// 1. ไม่อยู่บน board แล้ว — ถ้ายังอยู่ ผู้ใช้เห็นมันอยู่บนจอ ทรัพยากรต้องอยู่ต่อ
+    /// 2. **ไม่มีคำสั่งไหนที่เหลืออยู่พามันกลับมาได้** — ข้อนี้คือข้อที่พลาดง่ายที่สุด
+    ///
+    /// เคสที่ข้อ 2 มีไว้ดัก: `AddItems(X)` ถูกตัดตามเพดาน **หลัง** `X` ถูกลบไปแล้ว
+    /// ด้วย `RemoveItems(X)` ที่ยังอยู่ในสแตก — ข้อ 1 จริง (X ไม่อยู่บน board)
+    /// แต่ผู้ใช้ยังกด Ctrl+Z เอา X กลับมาได้อยู่ ถ้าทิ้ง thumbnail ตรงนี้
+    /// **ภาพจะกลับมาใน board แต่ไม่ขึ้นจอ** ซึ่งผู้ใช้อ่านว่า "งานหาย"
+    ///
+    /// ต้องเรียก **หลัง** คำสั่งนั้นถูกถอดออกจาก `undo`/`redo` แล้ว
+    /// ไม่งั้นมันจะเจอตัวเองแล้วสรุปว่ายังกลับมาได้
+    fn forget(&mut self, board: &Board, dropped: &dyn Command) {
+        for id in dropped.affected() {
+            if board.item(id).is_some() || self.forgotten.contains(&id) {
+                continue;
+            }
+            if self.can_still_restore(id) {
+                continue;
+            }
+            self.forgotten.push(id);
+        }
+    }
+
+    /// ยังมีคำสั่งที่เหลืออยู่ตัวไหนพา item นี้กลับมาได้ไหม
+    ///
+    /// สแกนทั้งสองสาย — เพดาน 200 ขั้นทำให้ต้นทุนคงที่ และสแกนเฉพาะตอนเจอ id
+    /// ที่หลุดจาก board แล้วเท่านั้น การเพิ่มภาพตามปกติจึงไม่จ่ายค่านี้เลย
+    fn can_still_restore(&self, id: ItemId) -> bool {
+        self.undo
+            .iter()
+            .chain(self.redo.iter())
+            .any(|command| command.affected().contains(&id))
     }
 
     /// ทำคำสั่งแล้วเก็บลงประวัติ
@@ -715,7 +783,11 @@ impl History {
         command.apply(board)?;
 
         // ทำอะไรใหม่ = เส้นทาง redo เดิมใช้ไม่ได้อีกแล้ว
-        self.redo.clear();
+        // ★ item ที่คำสั่งพวกนั้นถือไว้กลับมาไม่ได้อีกแล้ว — จดไว้ให้ผู้เรียกเก็บกวาด
+        let dropped: Vec<Box<dyn Command>> = self.redo.drain(..).collect();
+        for command in &dropped {
+            self.forget(board, command.as_ref());
+        }
 
         if !self.sealed
             && let Some(previous) = self.undo.back_mut()
@@ -723,7 +795,7 @@ impl History {
             let before = previous.heap_size();
             if previous.merge(command.as_ref()) {
                 self.bytes = self.bytes + previous.heap_size() - before;
-                self.trim();
+                self.trim(board);
                 self.sync_dirty(board);
                 return Ok(());
             }
@@ -733,7 +805,7 @@ impl History {
         self.undo.push_back(command);
         // หน้าต่าง merge เปิดขึ้นอีกครั้งหลังมีขั้นใหม่ — ปิดด้วย `seal()` ตอนปล่อยเมาส์
         self.sealed = false;
-        self.trim();
+        self.trim(board);
         self.sync_dirty(board);
         Ok(())
     }
@@ -789,7 +861,7 @@ impl History {
         self.bytes += command.heap_size();
         self.undo.push_back(command);
         self.sealed = true;
-        self.trim();
+        self.trim(board);
         self.sync_dirty(board);
         Ok(Some(affected))
     }
@@ -841,7 +913,7 @@ impl History {
     /// ★ **เหลือไว้อย่างน้อยหนึ่งขั้นเสมอ** ถึงขั้นนั้นจะใหญ่กว่าเพดานก็ตาม —
     /// คำสั่งเดียวที่กินเกิน 64 MB (เช่นลบภาพ 5000 ใบ) ต้องยังย้อนได้
     /// ไม่งั้นเพดานที่ตั้งไว้กันหน่วยความจำจะกลายเป็นตัวทำให้ **งานหาย** เสียเอง
-    fn trim(&mut self) {
+    fn trim(&mut self, board: &Board) {
         while self.undo.len() > 1
             && (self.undo.len() > self.max_entries || self.bytes > self.max_bytes)
         {
@@ -849,6 +921,8 @@ impl History {
                 break;
             };
             self.bytes = self.bytes.saturating_sub(dropped.heap_size());
+            // ย้อนไปไกลกว่านี้ไม่ได้แล้ว — จดตัวที่ไม่มีใครพากลับมาได้อีก
+            self.forget(board, dropped.as_ref());
             match self.saved_depth {
                 // จุดที่บันทึกไว้เพิ่งถูกตัดทิ้ง — กลับไปหาไม่ได้อีกแล้ว
                 Some(0) => self.saved_depth = None,
@@ -1220,6 +1294,221 @@ mod tests {
         assert_eq!(board.z_order(), &[ids[2], ids[0], ids[1]]);
         history.undo(&mut board).unwrap();
         assert_eq!(board, before);
+    }
+
+    // ---------- ★ ใครเป็นเจ้าของอายุของทรัพยากรที่ผูกกับ item (P2-6) ----------
+
+    /// ★★ ตราบใดที่ยัง undo ได้ item ที่ถูกลบ **ยังกลับมาได้** ห้ามรายงานว่าลืมแล้ว
+    ///
+    /// ชั้น UI ใช้ค่านี้ตัดสินว่าจะทิ้ง thumbnail ใน RAM ได้เมื่อไหร่ ถ้ารายงานเร็วไป
+    /// undo ของการลบจะต้อง decode ใหม่ — ช้า และ **ล้มถาวรถ้าไฟล์ต้นทางหายไปแล้ว**
+    /// (ผู้ใช้ลบภาพในโปรแกรม แล้วลบไฟล์ใน Explorer แล้วค่อยกด Ctrl+Z) = ผิด I-3
+    #[test]
+    fn nothing_is_forgotten_while_it_can_still_come_back() {
+        let (mut board, ids) = board_with(3);
+        let mut history = History::default();
+
+        history
+            .apply(
+                &mut board,
+                Box::new(RemoveItems::new(vec![ids[1]]).unwrap()),
+            )
+            .unwrap();
+        assert!(history.take_forgotten().is_empty(), "ลบแล้วยังย้อนได้ = ยังไม่ลืม");
+
+        history.undo(&mut board).unwrap();
+        assert!(history.take_forgotten().is_empty(), "ย้อนกลับมาแล้วยิ่งไม่ลืม");
+
+        history.redo(&mut board).unwrap();
+        assert!(history.take_forgotten().is_empty());
+        assert_eq!(board.len(), 2);
+    }
+
+    /// ตัดตามเพดานแล้ว = ย้อนไปถึงไม่ได้อีก → ต้องรายงานว่าลืม
+    #[test]
+    fn trimming_past_the_cap_reports_what_can_never_return() {
+        let (mut board, ids) = board_with(4);
+        let mut history = History::new(2, DEFAULT_MAX_BYTES);
+
+        for id in &ids[..3] {
+            history.seal();
+            history
+                .apply(&mut board, Box::new(RemoveItems::new(vec![*id]).unwrap()))
+                .unwrap();
+        }
+
+        let forgotten = history.take_forgotten();
+        assert_eq!(history.undo_depth(), 2, "เพดาน 2 ขั้น");
+        assert_eq!(forgotten, vec![ids[0]], "ตัวที่ถูกตัดออกคือตัวแรกเท่านั้น");
+        assert!(board.item(ids[0]).is_none(), "และมันไม่ได้อยู่บน board แล้วจริง ๆ");
+        assert!(history.take_forgotten().is_empty(), "เอาไปแล้วต้องไม่ซ้ำ");
+    }
+
+    /// ★ ทำอะไรใหม่ทับสาย redo = คำสั่งในสายนั้นตายถาวร
+    ///
+    /// แต่ **`RemoveItems` ที่ถูก undo ไว้แล้วโดนล้าง ไม่ได้แปลว่าภาพตาย** —
+    /// ตรงกันข้าม ภาพกลับมาอยู่บน board ถาวรเลย เพราะไม่มีใครลบมันได้อีก
+    /// (เทสต์นี้เคยเขียนกลับด้าน แล้วมันคือบั๊กจริง — ดู regression ด้านล่าง)
+    #[test]
+    fn clearing_the_redo_path_does_not_kill_images_that_came_back() {
+        let (mut board, ids) = board_with(3);
+        let mut history = History::default();
+
+        history
+            .apply(
+                &mut board,
+                Box::new(RemoveItems::new(vec![ids[2]]).unwrap()),
+            )
+            .unwrap();
+        history.undo(&mut board).unwrap();
+        assert_eq!(board.len(), 3, "ภาพกลับมาแล้ว");
+        let _ = history.take_forgotten();
+
+        // ทำอย่างอื่นทับ — สาย redo (ที่ถือ RemoveItems อยู่) ตายตรงนี้
+        history.seal();
+        history
+            .apply(
+                &mut board,
+                Box::new(TransformItems::new(vec![(ids[0], moved_to(5.0, 5.0))]).unwrap()),
+            )
+            .unwrap();
+
+        assert!(
+            history.take_forgotten().is_empty(),
+            "ภาพยังอยู่บนจอ ห้ามบอกให้ไปทิ้งทรัพยากรของมัน"
+        );
+        assert!(board.item(ids[2]).is_some());
+    }
+
+    /// สาย redo ที่ถือ **`AddItems`** ต่างหากที่ตายจริง — ภาพนั้นกลับมาไม่ได้อีก
+    #[test]
+    fn clearing_the_redo_path_reports_adds_that_can_never_replay() {
+        let (mut board, ids) = board_with(1);
+        let mut history = History::default();
+
+        history
+            .apply(
+                &mut board,
+                Box::new(AddItems::new(vec![image_item(7)]).unwrap()),
+            )
+            .unwrap();
+        let added = *board.z_order().last().unwrap();
+        history.undo(&mut board).unwrap(); // ภาพหายจาก board แต่ redo ยังพากลับมาได้
+        assert!(history.take_forgotten().is_empty(), "ยัง redo ได้ = ยังไม่ตาย");
+
+        history.seal();
+        history
+            .apply(
+                &mut board,
+                Box::new(TransformItems::new(vec![(ids[0], moved_to(5.0, 5.0))]).unwrap()),
+            )
+            .unwrap();
+
+        assert_eq!(history.take_forgotten(), vec![added]);
+        assert!(board.item(added).is_none());
+    }
+
+    /// ★ id ที่ยังอยู่บน board ต้อง **ไม่ถูกรายงาน** แม้คำสั่งที่เพิ่มมันจะถูกตัดทิ้ง
+    ///
+    /// เคสจริง: ลากภาพ 400 ใบเข้ามา = 400 `AddItems` แต่เพดานคือ 200 ขั้น
+    /// → 200 ตัวแรกถูกตัดทันทีตั้งแต่ยังไม่มีใครแตะอะไร ทั้งที่ภาพทั้ง 400 อยู่บนจอครบ
+    #[test]
+    fn an_id_that_is_still_on_the_board_is_never_reported() {
+        let (mut board, _) = board_with(1);
+        let mut history = History::new(1, DEFAULT_MAX_BYTES);
+
+        history
+            .apply(
+                &mut board,
+                Box::new(AddItems::new(vec![image_item(7)]).unwrap()),
+            )
+            .unwrap();
+        let added = *board.z_order().last().unwrap();
+
+        history.seal();
+        history
+            .apply(
+                &mut board,
+                Box::new(AddItems::new(vec![image_item(8)]).unwrap()),
+            )
+            .unwrap();
+
+        assert!(
+            history.take_forgotten().is_empty(),
+            "ภาพยังอยู่บนจอ — ทิ้ง thumbnail แล้วมันจะกลายเป็นสี่เหลี่ยมสีทันที"
+        );
+        assert!(board.item(added).is_some());
+    }
+
+    /// ★★★ regression ของบั๊กที่เจอตอนรันจริงด้วย 400 ภาพ (4 ส.ค. 2026)
+    ///
+    /// ลำดับเหตุการณ์: `AddItems(X)` ถูกตัดตามเพดาน **หลัง** `X` ถูกลบไปแล้ว
+    /// ด้วย `RemoveItems(X)` ที่ยังอยู่ในสแตก
+    ///
+    /// ตอนนั้น `X` ไม่อยู่บน board จริง (เงื่อนไข "ไม่อยู่บน board" ผ่าน)
+    /// **แต่ผู้ใช้ยังกด Ctrl+Z เอามันกลับมาได้อยู่** ถ้ารายงานว่าลืมแล้ว
+    /// ชั้น UI จะทิ้ง thumbnail → **กด Ctrl+Z แล้วภาพกลับเข้า board แต่ไม่ขึ้นจอเลย**
+    /// ซึ่งผู้ใช้แยกไม่ออกจาก "งานหาย" (ผิด I-3)
+    ///
+    /// ★ เทสต์ชุดแรกจับไม่ได้เพราะมันเรียก `take_forgotten` **ทันที** ส่วนของจริง
+    /// เรียกทีหลัง — **สัญญาที่ถูกเฉพาะเมื่อเรียกทันทีคือกับดัก** เงื่อนไขที่ถูกจริง
+    /// คือ "ไม่มีคำสั่งไหนที่เหลืออยู่พามันกลับมาได้" ซึ่งไม่ขึ้นกับเวลาที่เรียก
+    #[test]
+    fn an_item_a_pending_undo_can_restore_is_never_forgotten() {
+        let (mut board, ids) = board_with(2);
+        let mut history = History::new(2, DEFAULT_MAX_BYTES);
+
+        // 1) เพิ่มภาพ
+        history
+            .apply(
+                &mut board,
+                Box::new(AddItems::new(vec![image_item(7)]).unwrap()),
+            )
+            .unwrap();
+        let added = *board.z_order().last().unwrap();
+
+        // 2) ลบมัน — คำสั่งลบยังอยู่ในสแตก ผู้ใช้ยัง Ctrl+Z ได้
+        history.seal();
+        history
+            .apply(&mut board, Box::new(RemoveItems::new(vec![added]).unwrap()))
+            .unwrap();
+        assert!(board.item(added).is_none());
+
+        // 3) ทำอย่างอื่นจน `AddItems` ตัวแรกถูกตัดออกตามเพดาน
+        history.seal();
+        history
+            .apply(
+                &mut board,
+                Box::new(TransformItems::new(vec![(ids[0], moved_to(1.0, 1.0))]).unwrap()),
+            )
+            .unwrap();
+
+        assert!(
+            history.take_forgotten().is_empty(),
+            "ยัง undo เอาภาพกลับมาได้ ห้ามบอกให้ทิ้ง thumbnail"
+        );
+
+        // และพิสูจน์ว่ามันกลับมาได้จริง
+        history.undo(&mut board).unwrap();
+        history.undo(&mut board).unwrap();
+        assert!(board.item(added).is_some(), "ภาพต้องกลับมาได้");
+    }
+    /// `ReorderZ::affected()` ว่างโดยตั้งใจ → ถูกตัดทิ้งก็ไม่มีอะไรให้ลืม
+    #[test]
+    fn reordering_never_forgets_anything() {
+        let (mut board, ids) = board_with(3);
+        let mut history = History::new(1, DEFAULT_MAX_BYTES);
+        let flipped: Vec<ItemId> = ids.iter().rev().copied().collect();
+
+        history
+            .apply(&mut board, Box::new(ReorderZ::new(flipped).unwrap()))
+            .unwrap();
+        history.seal();
+        history
+            .apply(&mut board, Box::new(ReorderZ::new(ids).unwrap()))
+            .unwrap();
+
+        assert!(history.take_forgotten().is_empty());
     }
 
     // ---------- เพดาน (I-6) ----------
