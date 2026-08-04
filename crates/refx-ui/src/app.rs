@@ -455,6 +455,9 @@ impl Default for CanvasFrameInput {
 /// สีของกรอบสิ่งที่ถูกเลือกและกรอบ rubber-band
 const SELECT_STROKE: egui::Color32 = egui::Color32::from_rgb(120, 190, 255);
 
+/// สีพื้นของ handle มุม — ทึบเพื่อให้เห็นบนภาพสีอะไรก็ได้
+const HANDLE_FILL: egui::Color32 = egui::Color32::from_rgb(250, 250, 252);
+
 impl RefxApp {
     /// ★ canvas เป็น **widget จริงของ egui** — ไม่ใช่การเดาว่า pointer เป็นของใคร
     ///
@@ -504,6 +507,31 @@ impl RefxApp {
             ));
         }
 
+        // ---- วาด handle ของ scale/rotate (P2-5) ----
+        //
+        // ★ ขนาดคงที่ **บนจอ** ไม่ใช่ใน world — วาดในหน่วย point ตรง ๆ จึงได้ผลนั้นฟรี
+        //   ส่วนพิกัดของมุมมาจาก `Obb::corners()` จึงหมุนตามภาพที่หมุนแล้ว
+        //   (ระยะกดอยู่ที่ `refx-core` และ **กว้างกว่ารูปที่วาด** โดยตั้งใจ)
+        if let Some(frame) = refx_core::interact::selection_frame(board, selection) {
+            let corners = frame.corners().map(to_point);
+            // กรอบรวม — บอกว่า handle เป็นของกลุ่มไหน (ใบเดียวจะทับกับกรอบเลือกพอดี)
+            painter.add(egui::Shape::closed_line(
+                corners.to_vec(),
+                egui::Stroke::new(1.0, SELECT_STROKE),
+            ));
+            let side = egui::Vec2::splat(refx_core::interact::HANDLE_DRAW_PX);
+            for corner in corners {
+                let square = egui::Rect::from_center_size(corner, side);
+                painter.rect_filled(square, 1.0, HANDLE_FILL);
+                painter.rect_stroke(
+                    square,
+                    1.0,
+                    egui::Stroke::new(1.0, SELECT_STROKE),
+                    egui::StrokeKind::Middle,
+                );
+            }
+        }
+
         // ---- วาดกรอบ rubber-band ----
         if let Some(band) = rubber_band {
             let band = egui::Rect::from_two_pos(to_point(band.min), to_point(band.max));
@@ -522,6 +550,7 @@ impl RefxApp {
                 Modifiers {
                     ctrl: i.modifiers.ctrl || i.modifiers.command,
                     shift: i.modifiers.shift,
+                    alt: i.modifiers.alt,
                 },
             )
         });
@@ -537,11 +566,18 @@ impl RefxApp {
                     .then(|| ui.ctx().input(|i| i.pointer.latest_pos()))
                     .flatten()
             }),
-            primary_pressed: response.drag_started_by(egui::PointerButton::Primary)
-                || ui
-                    .ctx()
-                    .input(|i| i.pointer.button_pressed(egui::PointerButton::Primary))
-                    && response.hovered(),
+            // ★★ **ปุ่มลงจริงเท่านั้น** ห้ามนับ `drag_started_by` เป็นการกดด้วย
+            //
+            //    egui รายงาน `drag_started` ในเฟรม *หลัง* เคอร์เซอร์ขยับพ้นระยะของมันเอง
+            //    ถ้านับทั้งสองอย่าง การกดจริงหนึ่งครั้งจะกลายเป็น `Press` **สองครั้ง**
+            //    ครั้งที่สองอยู่ห่างจากจุดที่ผู้ใช้กดไปหลายพิกเซล แล้วมันจะไปทับ
+            //    สถานะการกดเดิม → จับ handle ค้างไว้แล้วขยับ กลายเป็นลากกรอบเลือกแทน
+            //    (เจอตอนทำ P2-5 ส่วน handle — การย้ายบังคับอาการนี้ไม่ออกเพราะจุดที่สอง
+            //    ยังอยู่บนภาพเดิม จึงยังได้ `Move` เหมือนเดิม ต่างแค่เลื่อนไปนิดเดียว)
+            primary_pressed: ui
+                .ctx()
+                .input(|i| i.pointer.button_pressed(egui::PointerButton::Primary))
+                && response.hovered(),
             primary_released: response.drag_stopped_by(egui::PointerButton::Primary)
                 || (response.clicked() && !response.dragged()),
             primary_down: ui
@@ -1383,12 +1419,16 @@ impl RefxApp {
         let offset = pointer - rect.center();
         let world = gfx.camera.center() + Vec2::new(offset.x, offset.y) / scale;
 
-        // ระยะเริ่มลากคิดเป็นพิกเซลบนจอเสมอ เพื่อให้รู้สึกเท่ากันทุกระดับซูม
+        // ★ ระยะทุกตัวคิดเป็น **พิกเซลบนจอ ÷ zoom** เสมอ เพื่อให้รู้สึกเท่ากันทุกระดับซูม
+        //   handle ที่มีขนาดคงที่ใน world จะเล็กจนจับไม่โดนทันทีที่ซูมออก
+        //   (และใหญ่จนกลืนทั้งภาพเมื่อซูมเข้า) — HANDOFF §2.4
+        let world_per_point = ppp / gfx.camera.zoom();
         let ctx = CanvasContext {
             board: &gfx.board,
             index: &gfx.index,
-            drag_threshold: refx_core::interact::DEFAULT_DRAG_THRESHOLD_PX * ppp
-                / gfx.camera.zoom(),
+            drag_threshold: refx_core::interact::DEFAULT_DRAG_THRESHOLD_PX * world_per_point,
+            handle_reach: refx_core::interact::DEFAULT_HANDLE_PX * world_per_point,
+            rotate_reach: refx_core::interact::DEFAULT_ROTATE_PX * world_per_point,
         };
 
         let event = if input.primary_pressed {
@@ -1403,7 +1443,12 @@ impl RefxApp {
                 world,
             })
         } else if input.primary_down {
-            Some(CanvasEvent::Move { world })
+            // ★ ส่งปุ่มดัดแปลง **ของเฟรมนี้** ไม่ใช่ตอนกด — Shift/Alt ที่กดกลางการลาก
+            //   ต้องมีผลทันที ไม่งั้นผู้ใช้จะสรุปว่า "คงสัดส่วนไม่ทำงาน"
+            Some(CanvasEvent::Move {
+                world,
+                modifiers: input.modifiers,
+            })
         } else {
             None
         };
@@ -1544,17 +1589,19 @@ impl RefxApp {
     /// ★ **จุดเดียวที่เรขาคณิตของ `Board` กลายเป็น `QuadInstance`**
     /// `transform` ใช้มุมซ้ายบน (unit quad คือ 0..1) ส่วน `ItemCanvas::pos` คือจุดกึ่งกลาง
     /// จึงต้องลบครึ่งขนาดออก — ถ้าทำผิดตรงนี้ภาพทุกใบจะเลื่อนไปครึ่งตัว
+    ///
+    /// affine เก็บแบบ **column-major** ตาม `apply_affine` ใน `quad.wgsl`:
+    /// `(a, b)` คือภาพของแกน x ของ unit quad, `(c, d)` คือภาพของแกน y
+    /// ซึ่งตรงกับ `Obb::axes()` พอดี — hit-test กับสิ่งที่วาดจึงใช้นิยามเดียวกัน
+    /// (ถ้าสองที่นี้ไม่ตรงกัน ภาพที่หมุนจะกดไม่โดนที่ที่ตาเห็น)
     fn quad_for(canvas: &ItemCanvas, state: &ItemRender) -> QuadInstance {
-        let half = canvas.size * 0.5;
+        let [x_axis, y_axis] = canvas.obb().axes();
+        let (a, b) = (x_axis * canvas.size.x).into();
+        let (c, d) = (y_axis * canvas.size.y).into();
+        // จุดกึ่งกลาง → มุมซ้ายบนของ quad **หลังหมุนแล้ว**
+        let origin = canvas.pos - (Vec2::new(a, b) + Vec2::new(c, d)) * 0.5;
         QuadInstance {
-            transform: [
-                canvas.size.x,
-                0.0,
-                0.0,
-                canvas.size.y,
-                canvas.pos.x - half.x,
-                canvas.pos.y - half.y,
-            ],
+            transform: [a, b, c, d, origin.x, origin.y],
             uv_rect: state.uv_rect,
             tint: state.tint,
             layer: state.layer,
@@ -2269,6 +2316,319 @@ mod tests {
             !pointer_seen_at(egui::pos2(640.0, 20.0)),
             "บน toolbar ต้องไม่ใช่"
         );
+    }
+
+    // ---------- pointer: การกดหนึ่งครั้งต้องเป็น Press หนึ่งครั้ง ----------
+
+    /// ★★ การกดจริงหนึ่งครั้งต้องได้ `Press` **ครั้งเดียว** และต้องอยู่ที่ที่ผู้ใช้กด
+    ///
+    /// egui รายงาน `drag_started` ในเฟรมหลังเคอร์เซอร์ขยับพ้นระยะของมันเอง
+    /// ถ้านับอันนั้นเป็นการกดด้วย จะได้ `Press` ครั้งที่สองที่ตำแหน่ง **หลังขยับแล้ว**
+    /// ซึ่งไปทับสถานะการกดเดิม อาการที่ผู้ใช้เห็นคือ **จับ handle แล้วลาก กลายเป็น
+    /// ลากกรอบเลือก** และของที่เลือกไว้หายไปด้วย (เจอจริงตอนทำ P2-5 ส่วน handle)
+    #[test]
+    fn one_physical_press_delivers_exactly_one_press_event() {
+        let ctx = egui::Context::default();
+        let mut state = crate::shell::ShellState::default();
+        let board = Board::default();
+        let selection = Selection::new();
+        let render_state = std::collections::HashMap::new();
+        let start = egui::pos2(640.0, 400.0);
+
+        // เฟรมที่ 0–1 ให้ layout นิ่งก่อน · 2 = กดลง · 3–4 = ลากออกไปไกล
+        let frames = [
+            vec![egui::Event::PointerMoved(start)],
+            vec![egui::Event::PointerMoved(start)],
+            vec![egui::Event::PointerButton {
+                pos: start,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::default(),
+            }],
+            vec![egui::Event::PointerMoved(start + egui::vec2(40.0, 30.0))],
+            vec![egui::Event::PointerMoved(start + egui::vec2(90.0, 70.0))],
+        ];
+
+        let mut pressed_at = Vec::new();
+        for events in frames {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 800.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| {
+                let _ = crate::shell::draw_in_ui(ui, &mut state, |ui| {
+                    let got = RefxApp::canvas_widget(
+                        ui,
+                        &board,
+                        &selection,
+                        &render_state,
+                        Camera::default(),
+                        None,
+                    );
+                    if got.primary_pressed {
+                        pressed_at.push(got.pointer);
+                    }
+                });
+            });
+        }
+
+        assert_eq!(
+            pressed_at.len(),
+            1,
+            "กดหนึ่งครั้งต้องได้ Press หนึ่งครั้ง แต่ได้ที่ {pressed_at:?}"
+        );
+        assert_eq!(
+            pressed_at[0],
+            Some(start),
+            "Press ต้องอยู่ที่ที่ผู้ใช้กด ไม่ใช่ที่ที่เคอร์เซอร์ไปถึงทีหลัง"
+        );
+    }
+
+    // ---------- scale/rotate handle (P2-5) ----------
+
+    /// สถานะการวาดที่ว่างที่สุดเท่าที่ `quad_for` ต้องใช้
+    fn bare_render_state() -> ItemRender {
+        ItemRender {
+            source: refx_asset::pool::JobSource::Clipboard,
+            hash: refx_asset::hash::ContentHash::from_bytes([0u8; 32]),
+            thumb: refx_asset::thumb::Thumbnail {
+                pixels: Vec::new(),
+                source_width: 100,
+                source_height: 100,
+                dominant: 0,
+            },
+            uv_rect: [0.0, 0.0, 1.0, 1.0],
+            tint: [1.0; 4],
+            layer: 0,
+            flags: 0,
+        }
+    }
+
+    /// board ที่มีภาพเดียวขนาด 100×100 อยู่ที่จุดกำเนิด พร้อมเลือกไว้แล้ว
+    ///
+    /// ทุกอย่างผ่าน `Command` เหมือนของจริง — `insert_item`/`set_canvas`
+    /// เป็น `pub(crate)` ของ `refx-core` โดยตั้งใจ (docs/08 §4 ข้อ 10)
+    fn one_selected_item(rotation: f32) -> (Board, Selection) {
+        let mut board = Board::default();
+        let mut history = refx_core::command::History::default();
+        let item = refx_core::board::Item::new(refx_core::board::ItemKind::Image(AssetRef {
+            hash: refx_asset::hash::ContentHash::from_bytes([0u8; 32]),
+            path: std::path::PathBuf::new(),
+            px_size: glam::UVec2::new(100, 100),
+            format: ImageFormat::Unknown,
+            embedded: false,
+        }))
+        .at(Vec2::ZERO, Vec2::splat(100.0));
+        history
+            .apply(
+                &mut board,
+                Box::new(refx_core::command::AddItems::new(vec![item]).unwrap()),
+            )
+            .unwrap();
+        let id = board.z_order()[0];
+
+        let canvas = ItemCanvas {
+            rotation,
+            ..board.item(id).unwrap().canvas
+        };
+        history
+            .apply(
+                &mut board,
+                Box::new(refx_core::command::TransformItems::new(vec![(id, canvas)]).unwrap()),
+            )
+            .unwrap();
+
+        let mut selection = Selection::new();
+        selection.select(id);
+        (board, selection)
+    }
+
+    /// ★ สิ่งที่ **วาด** ต้องอยู่ที่เดียวกับสิ่งที่ **hit-test** ตัดสิน
+    ///
+    /// affine ของ `QuadInstance` เก็บแบบ column-major ส่วน hit-test ใช้ `Obb::axes()`
+    /// ถ้าสองที่นี้ไม่ตรงกัน ภาพที่หมุนจะถูกวาดที่หนึ่งแต่กดโดนอีกที่หนึ่ง
+    /// ซึ่งเป็นอาการ "โปรแกรมจับผิดตัว" ที่กัดกร่อนความเชื่อถือเร็วที่สุด
+    #[test]
+    fn a_rotated_quad_is_drawn_exactly_where_its_obb_says() {
+        let state = bare_render_state();
+        for rotation in [0.0, 0.4, std::f32::consts::FRAC_PI_4, 2.9] {
+            let canvas = ItemCanvas {
+                pos: Vec2::new(30.0, -20.0),
+                size: Vec2::new(120.0, 80.0),
+                rotation,
+                ..ItemCanvas::default()
+            };
+            let quad = RefxApp::quad_for(&canvas, &state);
+            let [a, b, c, d, tx, ty] = quad.transform;
+            // unit quad (0,0) (1,0) (1,1) (0,1) → world (ตามลำดับของ Obb::corners)
+            let mapped = |u: Vec2| Vec2::new(a * u.x + c * u.y + tx, b * u.x + d * u.y + ty);
+            let corners = canvas.obb().corners();
+            for (i, unit) in [Vec2::ZERO, Vec2::X, Vec2::ONE, Vec2::Y]
+                .into_iter()
+                .enumerate()
+            {
+                assert!(
+                    (mapped(unit) - corners[i]).length() < 1e-3,
+                    "rot={rotation} มุมที่ {i}: วาดที่ {:?} แต่ hit-test ใช้ {:?}",
+                    mapped(unit),
+                    corners[i]
+                );
+            }
+        }
+    }
+
+    /// negative control ของข้อบน: ถ้าลืมใส่การหมุนเข้า transform ค่าจะเท่ากับภาพที่ไม่หมุน
+    #[test]
+    fn rotation_actually_reaches_the_gpu_transform() {
+        let state = bare_render_state();
+        let plain = ItemCanvas {
+            size: Vec2::splat(100.0),
+            ..ItemCanvas::default()
+        };
+        let spun = ItemCanvas {
+            rotation: std::f32::consts::FRAC_PI_4,
+            ..plain
+        };
+        assert_ne!(
+            RefxApp::quad_for(&plain, &state).transform,
+            RefxApp::quad_for(&spun, &state).transform,
+            "หมุนแล้ว transform ต้องเปลี่ยน ไม่งั้นการหมุนไม่มีผลบนจอเลย"
+        );
+    }
+
+    /// รูปสี่เหลี่ยมทึบสี handle ที่ shell วาดออกมาจริง ๆ ในหนึ่งเฟรม
+    fn painted_handles(board: &Board, selection: &Selection, camera: Camera) -> Vec<egui::Rect> {
+        let ctx = egui::Context::default();
+        let mut state = crate::shell::ShellState::default();
+        let render_state = std::collections::HashMap::new();
+        let mut found = Vec::new();
+
+        // สองรอบ: egui ใช้ layout ของรอบก่อนหน้า รอบแรกขนาด panel ยังไม่นิ่ง
+        for _ in 0..2 {
+            found.clear();
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                let _ = crate::shell::draw_in_ui(ui, &mut state, |ui| {
+                    let _ =
+                        RefxApp::canvas_widget(ui, board, selection, &render_state, camera, None);
+                });
+            });
+            for clipped in &output.shapes {
+                if let egui::Shape::Rect(shape) = &clipped.shape
+                    && shape.fill == HANDLE_FILL
+                {
+                    found.push(shape.rect);
+                }
+            }
+        }
+        found
+    }
+
+    /// ★ docs/08 §3.9 ข้อ 5: งานที่ผู้ใช้เห็นต้องมีเทสต์ที่รัน shell จริงแล้วไล่ดูรูปทรง
+    ///
+    /// ถ้าข้อนี้พัง ผู้ใช้จะเห็นภาพถูกเลือกแต่ไม่มีอะไรให้จับสเกล
+    #[test]
+    fn selecting_an_item_paints_four_corner_handles() {
+        let (board, selection) = one_selected_item(0.0);
+        let handles = painted_handles(&board, &selection, Camera::default());
+        assert_eq!(handles.len(), 4, "ต้องมี handle ครบสี่มุม");
+
+        let (board, empty) = (board, Selection::new());
+        assert!(
+            painted_handles(&board, &empty, Camera::default()).is_empty(),
+            "ไม่ได้เลือกอะไรต้องไม่มี handle"
+        );
+    }
+
+    /// ★★ handle ต้องมีขนาดคงที่ **บนจอ** ไม่ใช่ใน world (HANDOFF §2.4)
+    ///
+    /// ถ้าขนาดผูกกับ world ซูมออกแล้ว handle จะเล็กลงจนจับไม่โดน ซึ่งคือ
+    /// "เครื่องมือที่มีอยู่แต่ใช้ไม่ได้" — แย่กว่าไม่มีเพราะผู้ใช้เห็นมันอยู่
+    #[test]
+    fn handles_keep_their_screen_size_at_every_zoom() {
+        let (board, selection) = one_selected_item(0.0);
+        let side = refx_core::interact::HANDLE_DRAW_PX;
+
+        let mut spans = Vec::new();
+        for zoom in [0.05_f32, 1.0, 8.0] {
+            let handles = painted_handles(&board, &selection, Camera::new(Vec2::ZERO, zoom));
+            assert_eq!(handles.len(), 4, "zoom {zoom}");
+            for handle in &handles {
+                assert!(
+                    (handle.width() - side).abs() < 1e-3 && (handle.height() - side).abs() < 1e-3,
+                    "zoom {zoom}: handle ขนาด {:?} ต้องเป็น {side} point เสมอ",
+                    handle.size()
+                );
+            }
+            // ระยะระหว่าง handle ต่างหากที่ต้องเปลี่ยนตามซูม
+            let left = handles
+                .iter()
+                .map(|h| h.center().x)
+                .fold(f32::MAX, f32::min);
+            let right = handles
+                .iter()
+                .map(|h| h.center().x)
+                .fold(f32::MIN, f32::max);
+            spans.push(right - left);
+        }
+        assert!(
+            spans[0] < spans[1] && spans[1] < spans[2],
+            "ระยะระหว่าง handle ต้องโตตามซูม: {spans:?}"
+        );
+    }
+
+    /// ★ ภาพที่หมุนแล้ว handle ต้องหมุนตาม ไม่ใช่ค้างอยู่ที่มุมของ AABB
+    ///
+    /// ไม่งั้นผู้ใช้จะกดตรงที่ *เห็น* handle แล้วไม่โดน — `refx-core` จะจับที่มุมจริง
+    #[test]
+    fn handles_rotate_together_with_the_item() {
+        // ★ 30° ไม่ใช่ 45° โดยตั้งใจ: ที่ 45° มุมของ AABB กับมุมของ OBB มีระยะ
+        //   จากกึ่งกลางเท่ากันพอดี เทสต์ที่วัดแค่ระยะจึงแยกสองอย่างนี้ไม่ออก
+        let canvas = ItemCanvas {
+            size: Vec2::splat(100.0),
+            rotation: 30.0_f32.to_radians(),
+            ..ItemCanvas::default()
+        };
+        let (board, selection) = one_selected_item(canvas.rotation);
+        let handles = painted_handles(&board, &selection, Camera::default());
+        assert_eq!(handles.len(), 4);
+
+        // camera zoom 1 กับ pixels_per_point 1 → ระยะ world = ระยะ point ตรง ๆ
+        let centre = handles
+            .iter()
+            .fold(egui::Vec2::ZERO, |sum, h| sum + h.center().to_vec2())
+            / 4.0;
+        let offset_of = |h: &egui::Rect| h.center().to_vec2() - centre;
+
+        for corner in canvas.obb().corners() {
+            assert!(
+                handles
+                    .iter()
+                    .any(|h| (offset_of(h) - egui::vec2(corner.x, corner.y)).length() < 0.5),
+                "ไม่มี handle ที่มุม {corner:?} ของภาพที่หมุนแล้ว"
+            );
+        }
+
+        // และต้อง **ไม่ใช่** มุมของ AABB ซึ่งเป็นสิ่งที่จะได้ถ้าลืมใช้ OBB
+        let aabb = canvas.world_bounds();
+        for corner in [aabb.min, aabb.max] {
+            assert!(
+                !handles
+                    .iter()
+                    .any(|h| (offset_of(h) - egui::vec2(corner.x, corner.y)).length() < 5.0),
+                "handle ไปเกาะมุมของ AABB ที่ {corner:?} — ผู้ใช้จะกดที่ที่เห็นแล้วไม่โดน"
+            );
+        }
     }
 
     // ---------- undo/redo (P2-4 ขั้นที่ 3) ----------

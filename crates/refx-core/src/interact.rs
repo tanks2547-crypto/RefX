@@ -23,7 +23,7 @@ use crate::arena::ItemId;
 use crate::board::Board;
 use crate::board::ItemCanvas;
 use crate::command::{Command, TransformItems};
-use crate::geom::Rect;
+use crate::geom::{Obb, Rect};
 use crate::selection::Selection;
 use crate::spatial::SpatialIndex;
 
@@ -36,13 +36,15 @@ pub enum CanvasButton {
     Middle,
 }
 
-/// ปุ่มดัดแปลงที่มีผลกับการเลือก
+/// ปุ่มดัดแปลงที่มีผลกับการเลือกและกับ handle
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Modifiers {
     /// เพิ่ม/ถอดทีละตัว
     pub ctrl: bool,
-    /// เพิ่มเข้าไปในชุดเดิม
+    /// เพิ่มเข้าไปในชุดเดิม · ตอนสเกล = คงสัดส่วน · ตอนหมุน = สแนป 15° (docs/03 §2)
     pub shift: bool,
+    /// ตอนสเกล = ยืดจากจุดกึ่งกลางแทนมุมตรงข้าม (docs/03 §2)
+    pub alt: bool,
 }
 
 impl Modifiers {
@@ -69,6 +71,13 @@ pub enum CanvasEvent {
     Move {
         /// ตำแหน่งใน world
         world: Vec2,
+        /// ★ ปุ่มดัดแปลง **ณ เฟรมนี้** ไม่ใช่ตอนกด
+        ///
+        /// `Shift`/`Alt` ของ handle ต้องมีผลทันทีที่กดระหว่างลาก — คนกด Shift
+        /// หลังเริ่มลากเป็นเรื่องปกติ ถ้าอ่านค่าแค่ตอนกดปุ่มเมาส์ ผู้ใช้จะสรุปว่า
+        /// "คงสัดส่วนไม่ทำงาน" · การเลือก/rubber-band ยังใช้ค่าตอนกดเหมือนเดิม
+        /// (เปลี่ยนกลางคันจะทำให้ชุดที่เลือกไว้กระโดด)
+        modifiers: Modifiers,
     },
     /// ปล่อยปุ่ม
     Release {
@@ -121,10 +130,145 @@ pub struct CanvasContext<'a> {
     /// ชั้น UI คำนวณจาก **พิกเซลบนจอ ÷ zoom** เพื่อให้ความรู้สึกเท่ากันทุกระดับซูม
     /// ถ้าใช้ค่าคงที่ใน world ตอนซูมออกมาก ๆ ผู้ใช้จะลากกรอบไม่ได้เลย
     pub drag_threshold: f32,
+    /// ครึ่งหนึ่งของ handle มุม ในหน่วย world
+    ///
+    /// ★ คิดจาก **พิกเซลบนจอ ÷ zoom** เหมือน `drag_threshold` — handle ที่มีขนาด
+    /// คงที่ใน world จะเล็กจนจับไม่โดนทันทีที่ซูมออก (HANDOFF §2.4)
+    pub handle_reach: f32,
+    /// ระยะจากมุมที่ยังนับว่าเป็นวงหมุน ในหน่วย world (ต้องมากกว่า `handle_reach`)
+    pub rotate_reach: f32,
 }
 
 /// ระยะเริ่มลากเริ่มต้น (พิกเซลบนจอ) — กันมือสั่นตอนคลิก
 pub const DEFAULT_DRAG_THRESHOLD_PX: f32 = 4.0;
+
+/// ครึ่งหนึ่งของพื้นที่กด handle มุม (พิกเซลบนจอ)
+///
+/// **ใหญ่กว่ารูปที่วาด** ([`HANDLE_DRAW_PX`]) โดยตั้งใจ — พลาดแล้วกลายเป็นย้ายภาพ
+/// เจ็บกว่ากดโดนตอนไม่ได้ตั้งใจ
+pub const DEFAULT_HANDLE_PX: f32 = 7.0;
+
+/// ความยาวด้านของ handle ที่ **วาด** (พิกเซลบนจอ) — ชั้น UI ใช้ค่านี้
+pub const HANDLE_DRAW_PX: f32 = 9.0;
+
+/// ระยะจากมุมที่ยังนับว่าเป็นวงหมุน (พิกเซลบนจอ)
+pub const DEFAULT_ROTATE_PX: f32 = 22.0;
+
+/// สแนปการหมุนเมื่อกด `Shift` — 15° ตาม docs/03 §2
+const ROTATE_SNAP: f32 = std::f32::consts::TAU / 24.0;
+
+/// ตัวคูณสเกลที่เล็กที่สุดที่ยอมรับ
+///
+/// ★ **ลากผ่านจุดยึดแล้วต้องไม่กลับด้าน** — `ItemCanvas::sanitized()` clamp `size`
+/// ให้ ≥ `MIN_ITEM_SIZE` อยู่แล้ว ค่าติดลบจึงไม่ได้กลายเป็นภาพกลับด้าน
+/// แต่กลายเป็นภาพที่ยุบเหลือจุดเดียว **แบบเงียบ ๆ** ซึ่งอ่านได้ว่า "ภาพหาย"
+/// การกลับด้านเป็นหน้าที่ของ `Flip` (ปุ่ม `H`) ซึ่งผู้ใช้สั่งอย่างจงใจ
+const MIN_SCALE: f32 = 1e-3;
+
+/// ค่าที่เอามาใช้เป็นระยะได้จริง (I-4 — ตัวเลขจากไฟล์เสียต้องไม่ทำให้ hit-test มั่ว)
+fn sane_reach(value: f32) -> f32 {
+    if value.is_finite() {
+        value.max(0.0)
+    } else {
+        0.0
+    }
+}
+
+/// กรอบที่ handle เกาะอยู่ — `None` เมื่อไม่มีอะไรที่ขยับได้ถูกเลือก
+///
+/// * **ใบเดียว** → กรอบเอียงตามภาพ (`ItemCanvas::obb`) handle จึงหมุนตามภาพไปด้วย
+///   ซึ่งเป็นสิ่งเดียวที่ทำให้สเกลภาพที่หมุนแล้วยังยืดไปตามแกนของตัวมันเอง
+/// * **หลายใบ** → กรอบรวมแนวแกน (HANDOFF §2.4: สเกลกับ*กรอบรวม* ไม่ใช่ทีละใบ)
+///
+/// ★ **ภาพที่ล็อกไว้ไม่นับ** — handle ที่ลากแล้วไม่มีอะไรเกิดขึ้นแย่กว่าไม่มี handle
+/// ผู้ใช้จะสรุปว่าโปรแกรมค้าง ไม่ใช่ว่าภาพถูกล็อก (กรอบเลือกยังวาดตามปกติ
+/// การเลือกกับการแก้ได้เป็นคนละเรื่องกัน)
+#[must_use]
+pub fn selection_frame(board: &Board, selection: &Selection) -> Option<Obb> {
+    let mut first: Option<ItemCanvas> = None;
+    let mut count = 0usize;
+    let mut bounds = Rect::EMPTY;
+    for id in selection.iter() {
+        let Some(item) = board.item(id) else { continue };
+        if item.canvas.locked {
+            continue;
+        }
+        count += 1;
+        first.get_or_insert(item.canvas);
+        bounds = bounds.union(item.canvas.world_bounds());
+    }
+    match count {
+        0 => None,
+        1 => first.map(ItemCanvas::obb),
+        _ => {
+            if !bounds.is_finite() || bounds.is_empty() {
+                return None;
+            }
+            Some(Obb {
+                center: bounds.center(),
+                half_size: bounds.size() * 0.5,
+                rotation: 0.0,
+            })
+        }
+    }
+}
+
+/// ส่วนของกรอบที่เคอร์เซอร์จับอยู่
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Handle {
+    /// handle มุม (เลขมุมตามลำดับของ [`Obb::corners`]) = สเกล
+    Scale(usize),
+    /// นอก handle มุมแต่ยังใกล้มุม = หมุน
+    Rotate,
+}
+
+/// handle ที่จุดนี้แตะอยู่ — **ต้องเรียกก่อน hit-test ของภาพเสมอ**
+///
+/// ไม่งั้นการลาก handle จะกลายเป็นการย้ายภาพ เพราะ handle มุมคร่อมตัวภาพอยู่ครึ่งหนึ่ง
+/// (HANDOFF §2.4)
+fn handle_at(frame: Obb, world: Vec2, handle_reach: f32, rotate_reach: f32) -> Option<Handle> {
+    if !world.is_finite() || !frame.center.is_finite() {
+        return None;
+    }
+    let handle_reach = sane_reach(handle_reach);
+    let rotate_reach = sane_reach(rotate_reach).max(handle_reach);
+    let [ax, ay] = frame.axes();
+    let corners = frame.corners();
+    let near = |corner: Vec2, reach: f32| {
+        let offset = world - corner;
+        offset.dot(ax).abs() <= reach && offset.dot(ay).abs() <= reach
+    };
+
+    // ★ handle มุมมาก่อนวงหมุน — วงหมุนคลุมมุมอยู่ ถ้าตรวจวงก่อนจะสเกลไม่ได้เลย
+    if let Some(corner) = corners
+        .iter()
+        .position(|corner| near(*corner, handle_reach))
+    {
+        return Some(Handle::Scale(corner));
+    }
+    // ★ วงหมุนอยู่ **นอก** กรอบเท่านั้น — ไม่งั้นกดมุมด้านในภาพจะกลายเป็นหมุน
+    //   ทั้งที่ผู้ใช้ตั้งใจจะย้าย
+    if !frame.contains_point(world) && corners.iter().any(|corner| near(*corner, rotate_reach)) {
+        return Some(Handle::Rotate);
+    }
+    None
+}
+
+/// สิ่งที่การกดครั้งนี้ "จับ" ไว้ — ตัดสินตอนกดครั้งเดียว ห้ามเปลี่ยนกลางคัน
+///
+/// ★ ตัดสินตอนกดเพราะระหว่างลาก ภาพเคลื่อนตามเคอร์เซอร์อยู่แล้ว ถ้าประเมินใหม่
+/// ทุกเฟรมเคอร์เซอร์จะหลุดเข้า/ออก handle ของตัวเองแล้วสลับโหมดไปมา
+#[derive(Debug, Clone, Copy)]
+enum Grab {
+    /// กดที่ว่าง — จะกลายเป็นกรอบเลือก
+    Band,
+    /// กดบนภาพ — จะกลายเป็นการย้าย
+    Move,
+    /// จับ handle มุม — สเกล (กรอบ ณ ตอนเริ่มกด)
+    Scale { corner: usize, frame: Obb },
+    /// จับนอก handle มุม — หมุน (กรอบ + มุมของเคอร์เซอร์ ณ ตอนเริ่มกด)
+    Rotate { frame: Obb, start_angle: f32 },
+}
 
 /// สถานะของการกดค้างหนึ่งครั้ง
 #[derive(Debug, Clone)]
@@ -133,16 +277,18 @@ struct Press {
     modifiers: Modifiers,
     /// ขยับเกินระยะจนถือว่าเป็นการลากแล้วหรือยัง
     dragging: bool,
-    /// item ที่อยู่ใต้จุดที่กด (`None` = กดที่ว่าง)
-    on_item: Option<ItemId>,
+    /// สิ่งที่การกดครั้งนี้จับไว้
+    grab: Grab,
     /// สิ่งที่เลือกอยู่ก่อนเริ่มกด — rubber-band แบบเพิ่มต้องบวกจากชุดนี้
     base: Vec<ItemId>,
-    /// ★ สภาพของ item ที่กำลังจะถูกย้าย **ณ ตอนเริ่มกด**
+    /// ★ สภาพของ item ที่กำลังจะถูกแปลง **ณ ตอนเริ่มกด**
     ///
     /// คำนวณเป้าหมายจาก "ตอนเริ่ม + ระยะรวม" ไม่ใช่บวกทีละเฟรม — ถ้าบวกสะสม
     /// ความคลาดเคลื่อนของ f32 จะพอกขึ้นเรื่อย ๆ ระหว่างลากยาว ๆ แล้วภาพจะไม่ตรง
     /// กับเคอร์เซอร์ · และมันทำให้ `TransformItems` ที่ merge กันแล้วยังย้อนกลับ
     /// ไปจุดเริ่มลากได้เป๊ะ
+    ///
+    /// การหมุนยิ่งสำคัญ: มุมสะสมทีละเฟรมจะดริฟต์จนภาพเอียงไม่ตรงที่ปล่อย
     moving: Vec<(ItemId, ItemCanvas)>,
 }
 
@@ -187,7 +333,9 @@ impl SelectTool {
                 world,
                 modifiers,
             } => self.on_press(ctx, selection, world, modifiers),
-            CanvasEvent::Move { world } => self.on_move(ctx, selection, world),
+            CanvasEvent::Move { world, modifiers } => {
+                self.on_move(ctx, selection, world, modifiers)
+            }
             CanvasEvent::Release {
                 button: CanvasButton::Primary,
                 world,
@@ -211,55 +359,61 @@ impl SelectTool {
         world: Vec2,
         modifiers: Modifiers,
     ) -> Interaction {
-        let hit = ctx.index.hit_test(ctx.board, world);
         let base: Vec<ItemId> = selection.iter().collect();
+        let mut out = Interaction::default();
+
+        // ★★ hit-test ของ handle มาก่อน hit-test ของภาพเสมอ (HANDOFF §2.4)
+        //    handle มุมคร่อมตัวภาพอยู่ครึ่งหนึ่ง ถ้าถามภาพก่อนจะไม่มีวันจับ handle ติด
+        //    การกด handle ยัง **ไม่แตะการเลือก** ด้วย — มันคือการแก้ของที่เลือกไว้แล้ว
+        let grab = match grab_handle(ctx, selection, world) {
+            Some(grab) => grab,
+            None => match ctx.index.hit_test(ctx.board, world) {
+                Some(id) if modifiers.is_additive() => {
+                    // Ctrl+คลิก = สลับสถานะทีละตัว
+                    let mut next = base.clone();
+                    let anchor = if let Some(at) = next.iter().position(|other| *other == id) {
+                        next.remove(at);
+                        next.last().copied()
+                    } else {
+                        next.push(id);
+                        Some(id)
+                    };
+                    apply_selection(&mut out, selection, next, anchor);
+                    Grab::Move
+                }
+                Some(id) => {
+                    // คลิกบนภาพที่เลือกอยู่แล้ว = ไม่เปลี่ยนอะไร (จะได้ลากทั้งชุดต่อได้)
+                    if !selection.contains(id) {
+                        apply_selection(&mut out, selection, vec![id], Some(id));
+                    }
+                    Grab::Move
+                }
+                // กดที่ว่าง — ยังไม่ล้างทันที รอดูว่าจะกลายเป็นการลากกรอบไหม
+                // (ล้างตอนปล่อยแทน ดู `on_release`)
+                None => Grab::Band,
+            },
+        };
+
+        // เก็บสภาพตอนเริ่มไว้ **หลัง**การเลือกถูกตัดสินแล้ว จึงได้ชุดที่ถูกต้อง
+        let moving = if matches!(grab, Grab::Band) {
+            Vec::new()
+        } else {
+            selection
+                .iter()
+                .filter_map(|id| ctx.board.item(id).map(|item| (id, item.canvas)))
+                // ★ ภาพที่ล็อกไว้ต้องไม่ขยับ — นั่นคือความหมายทั้งหมดของการล็อก
+                .filter(|(_, canvas)| !canvas.locked)
+                .collect()
+        };
 
         self.press = Some(Press {
             origin: world,
             modifiers,
             dragging: false,
-            on_item: hit,
-            base: base.clone(),
-            moving: Vec::new(),
+            grab,
+            base,
+            moving,
         });
-
-        let mut out = Interaction::default();
-        match hit {
-            Some(id) if modifiers.is_additive() => {
-                // Ctrl+คลิก = สลับสถานะทีละตัว
-                let mut next = base;
-                let anchor = if let Some(at) = next.iter().position(|other| *other == id) {
-                    next.remove(at);
-                    next.last().copied()
-                } else {
-                    next.push(id);
-                    Some(id)
-                };
-                apply_selection(&mut out, selection, next, anchor);
-            }
-            Some(id) => {
-                // คลิกบนภาพที่เลือกอยู่แล้ว = ไม่เปลี่ยนอะไร (จะได้ลากทั้งชุดต่อได้ — P2-5)
-                if !selection.contains(id) {
-                    apply_selection(&mut out, selection, vec![id], Some(id));
-                }
-            }
-            // กดที่ว่าง — ยังไม่ล้างทันที รอดูว่าจะกลายเป็นการลากกรอบไหม
-            // (ล้างตอนปล่อยแทน ดู `on_release`)
-            None => {}
-        }
-
-        // กดโดนภาพ = การลากต่อจากนี้คือ **การย้ายทั้งชุดที่เลือก** ไม่ใช่ rubber-band
-        // เก็บสภาพตอนเริ่มไว้ก่อน (หลังการเลือกถูกตัดสินแล้ว จึงได้ชุดที่ถูกต้อง)
-        if hit.is_some()
-            && let Some(press) = self.press.as_mut()
-        {
-            press.moving = selection
-                .iter()
-                .filter_map(|id| ctx.board.item(id).map(|item| (id, item.canvas)))
-                // ★ ภาพที่ล็อกไว้ต้องไม่ขยับ — นั่นคือความหมายทั้งหมดของการล็อก
-                .filter(|(_, canvas)| !canvas.locked)
-                .collect();
-        }
         out
     }
 
@@ -268,41 +422,34 @@ impl SelectTool {
         ctx: CanvasContext<'_>,
         selection: &mut Selection,
         world: Vec2,
+        modifiers: Modifiers,
     ) -> Interaction {
         let Some(press) = self.press.as_mut() else {
             return Interaction::default();
         };
 
-        // ★ กดโดนภาพแล้วลาก = **การย้าย** ไม่ใช่ rubber-band
-        if press.on_item.is_some() {
+        // ★ ทุกอย่างที่ไม่ใช่ `Band` คือการแก้ `Board` → ต้องผ่าน `Command`
+        let grab = press.grab;
+        if !matches!(grab, Grab::Band) {
             if !started_dragging(press, ctx.drag_threshold, world) {
                 return Interaction::default();
             }
-            let delta = world - press.origin;
-            let changes: Vec<(ItemId, ItemCanvas)> = press
-                .moving
-                .iter()
-                .map(|(id, start)| {
-                    (
-                        *id,
-                        ItemCanvas {
-                            pos: start.pos + delta,
-                            ..*start
-                        },
-                    )
-                })
-                .collect();
-            if changes.is_empty() {
-                return Interaction::default();
-            }
-            let mut out = Interaction {
-                needs_redraw: true,
-                ..Interaction::default()
+            let changes = match grab {
+                Grab::Move => move_changes(&press.moving, world - press.origin),
+                Grab::Scale { corner, frame } => {
+                    scale_changes(&press.moving, frame, corner, world, modifiers)
+                }
+                Grab::Rotate { frame, start_angle } => rotate_changes(
+                    &press.moving,
+                    frame,
+                    start_angle,
+                    world,
+                    modifiers,
+                    ctx.drag_threshold,
+                ),
+                Grab::Band => Vec::new(),
             };
-            if let Ok(command) = TransformItems::new(changes) {
-                out.commands.push(Box::new(command));
-            }
-            return out;
+            return transform(changes);
         }
 
         if !started_dragging(press, ctx.drag_threshold, world) {
@@ -337,8 +484,8 @@ impl SelectTool {
             ..Interaction::default()
         };
 
-        // จบการย้าย — **seal เพื่อให้การลากครั้งถัดไปเป็น undo ขั้นใหม่**
-        if press.on_item.is_some() {
+        // จบการย้าย/สเกล/หมุน — **seal เพื่อให้การลากครั้งถัดไปเป็น undo ขั้นใหม่**
+        if !matches!(press.grab, Grab::Band) {
             out.seal = press.dragging;
             return out;
         }
@@ -355,11 +502,188 @@ impl SelectTool {
         // คลิกเปล่า ๆ ที่ว่าง (ไม่ได้ลาก) = ล้างการเลือก
         // ★ ล้างตอน **ปล่อย** ไม่ใช่ตอนกด: ถ้าล้างตอนกด ผู้ใช้ที่เริ่มลากกรอบ
         //   จะเห็นสิ่งที่เลือกไว้กะพริบหายไปหนึ่งเฟรมก่อนกรอบจะขึ้น
-        if press.on_item.is_none() && !press.modifiers.is_additive() {
+        if !press.modifiers.is_additive() {
             apply_selection(&mut out, selection, Vec::new(), None);
         }
         out
     }
+}
+
+/// handle ที่จุดนี้จับอยู่ พร้อมข้อมูลที่การลากต้องใช้ตลอดทาง
+fn grab_handle(ctx: CanvasContext<'_>, selection: &Selection, world: Vec2) -> Option<Grab> {
+    let frame = selection_frame(ctx.board, selection)?;
+    match handle_at(frame, world, ctx.handle_reach, ctx.rotate_reach)? {
+        Handle::Scale(corner) => Some(Grab::Scale { corner, frame }),
+        Handle::Rotate => {
+            let offset = world - frame.center;
+            // ★ ใกล้จุดหมุนเกินไป มุมจาก atan2 จะกระโดดจากการขยับหนึ่งพิกเซล
+            //   ปล่อยผ่านไปจะได้ภาพที่หมุนสุ่มทันทีที่แตะ — ไม่รับดีกว่า
+            if !offset.is_finite() || offset.length() <= sane_reach(ctx.drag_threshold) {
+                return None;
+            }
+            Some(Grab::Rotate {
+                frame,
+                start_angle: offset.y.atan2(offset.x),
+            })
+        }
+    }
+}
+
+/// ห่อรายการที่เปลี่ยนให้เป็นคำสั่งหนึ่งตัว — รายการว่าง = ไม่มีอะไรเกิดขึ้น
+///
+/// I-1: ไม่มีอะไรเปลี่ยนต้องไม่ขอเฟรมใหม่
+fn transform(changes: Vec<(ItemId, ItemCanvas)>) -> Interaction {
+    if changes.is_empty() {
+        return Interaction::default();
+    }
+    let mut out = Interaction {
+        needs_redraw: true,
+        ..Interaction::default()
+    };
+    if let Ok(command) = TransformItems::new(changes) {
+        out.commands.push(Box::new(command));
+    }
+    out
+}
+
+/// ย้ายทั้งชุดอย่างแข็ง — ระยะห่างระหว่างภาพในชุดต้องไม่เปลี่ยน
+fn move_changes(moving: &[(ItemId, ItemCanvas)], delta: Vec2) -> Vec<(ItemId, ItemCanvas)> {
+    if !delta.is_finite() {
+        return Vec::new();
+    }
+    moving
+        .iter()
+        .map(|(id, start)| {
+            (
+                *id,
+                ItemCanvas {
+                    pos: start.pos + delta,
+                    ..*start
+                },
+            )
+        })
+        .collect()
+}
+
+/// สเกลจากมุมตรงข้าม (หรือจากกึ่งกลางเมื่อกด `Alt`) — docs/03 §2
+///
+/// ★ **หลายใบพร้อมกันบังคับเป็นสัดส่วนเดิมเสมอ** ไม่ว่าจะกด `Shift` หรือไม่:
+/// กรอบรวมเป็นแนวแกน แต่ภาพข้างในหมุนได้ การยืดแกนเดียวของกรอบแนวแกนจึงต้องการ
+/// **การเฉือน (shear)** ซึ่ง `ItemCanvas` ไม่มีที่เก็บ (มีแค่ pos/size/rotation)
+/// ถ้าฝืนทำจะได้ภาพที่ผิดรูปจากที่ผู้ใช้เห็นตอนลาก
+fn scale_changes(
+    moving: &[(ItemId, ItemCanvas)],
+    frame: Obb,
+    corner: usize,
+    world: Vec2,
+    modifiers: Modifiers,
+) -> Vec<(ItemId, ItemCanvas)> {
+    let corners = frame.corners();
+    let Some(&grabbed) = corners.get(corner) else {
+        return Vec::new();
+    };
+    let anchor = if modifiers.alt {
+        frame.center
+    } else {
+        corners[(corner + 2) % 4]
+    };
+    let [ax, ay] = frame.axes();
+    let to_local = |point: Vec2| {
+        let offset = point - anchor;
+        Vec2::new(offset.dot(ax), offset.dot(ay))
+    };
+    let from_local = |local: Vec2| anchor + ax * local.x + ay * local.y;
+
+    let base = to_local(grabbed);
+    let now = to_local(world);
+    if !base.is_finite() || !now.is_finite() {
+        return Vec::new();
+    }
+
+    let uniform = modifiers.shift || moving.len() > 1;
+    let (sx, sy) = if uniform {
+        // ฉายลงบนทิศของมุมเดิม — ได้ค่าที่ลื่นและไม่กระโดดเวลาลากเฉียง
+        // (การหยิบ max ของสองแกนจะสะบัดทุกครั้งที่แกนไหนแกนหนึ่งชนะสลับกัน)
+        let denominator = base.length_squared();
+        let scale = if denominator > 0.0 {
+            (now.dot(base) / denominator).max(MIN_SCALE)
+        } else {
+            1.0
+        };
+        (scale, scale)
+    } else {
+        (ratio(now.x, base.x), ratio(now.y, base.y))
+    };
+    if !sx.is_finite() || !sy.is_finite() {
+        return Vec::new();
+    }
+
+    moving
+        .iter()
+        .map(|(id, start)| {
+            let local = to_local(start.pos);
+            (
+                *id,
+                ItemCanvas {
+                    pos: from_local(Vec2::new(local.x * sx, local.y * sy)),
+                    size: Vec2::new(start.size.x * sx, start.size.y * sy),
+                    ..*start
+                },
+            )
+        })
+        .collect()
+}
+
+/// ตัวคูณของแกนหนึ่ง — มุมที่ทับกับจุดยึดพอดีจะไม่มีทิศให้ยืด จึงคงค่าไว้
+fn ratio(now: f32, base: f32) -> f32 {
+    if !now.is_finite() || base.abs() <= f32::EPSILON {
+        return 1.0;
+    }
+    (now / base).max(MIN_SCALE)
+}
+
+/// หมุนรอบจุดกึ่งกลางของกรอบ — `Shift` = สแนป 15° (docs/03 §2)
+///
+/// ทั้ง**ตำแหน่ง**และ**มุม**ของทุกใบต้องหมุนตาม ไม่งั้นการหมุนหลายใบจะกลายเป็น
+/// "ภาพแต่ละใบหมุนอยู่กับที่" ซึ่งไม่ใช่สิ่งที่ผู้ใช้เห็นตอนลาก
+fn rotate_changes(
+    moving: &[(ItemId, ItemCanvas)],
+    frame: Obb,
+    start_angle: f32,
+    world: Vec2,
+    modifiers: Modifiers,
+    dead_zone: f32,
+) -> Vec<(ItemId, ItemCanvas)> {
+    let offset = world - frame.center;
+    if !offset.is_finite() || offset.length() <= sane_reach(dead_zone) {
+        return Vec::new();
+    }
+    let mut delta = offset.y.atan2(offset.x) - start_angle;
+    if modifiers.shift {
+        // สแนป **มุมสุดท้าย** ไม่ใช่ระยะที่หมุน — ภาพที่เอียง 3° อยู่แล้วต้องลงที่
+        // 0°/15°/30° ไม่ใช่ 3°/18°/33° (กรอบรวมหลายใบมี rotation = 0 สูตรเดียวใช้ได้ทั้งคู่)
+        let total = frame.rotation + delta;
+        delta = (total / ROTATE_SNAP).round() * ROTATE_SNAP - frame.rotation;
+    }
+    if !delta.is_finite() {
+        return Vec::new();
+    }
+    let (sin, cos) = delta.sin_cos();
+    moving
+        .iter()
+        .map(|(id, start)| {
+            let arm = start.pos - frame.center;
+            (
+                *id,
+                ItemCanvas {
+                    pos: frame.center
+                        + Vec2::new(arm.x * cos - arm.y * sin, arm.x * sin + arm.y * cos),
+                    rotation: start.rotation + delta,
+                    ..*start
+                },
+            )
+        })
+        .collect()
 }
 
 /// ขยับเกินระยะจนนับเป็น "การลาก" แล้วหรือยัง — จำสถานะไว้ใน `press`
@@ -463,6 +787,8 @@ mod tests {
         history: History,
         tool: SelectTool,
         last: Option<Rect>,
+        handle_reach: f32,
+        rotate_reach: f32,
     }
 
     impl Harness {
@@ -476,6 +802,8 @@ mod tests {
                     history: History::default(),
                     tool: SelectTool::new(),
                     last: None,
+                    handle_reach: HANDLE_REACH,
+                    rotate_reach: ROTATE_REACH,
                 },
                 ids,
             )
@@ -486,6 +814,8 @@ mod tests {
                 board: &self.board,
                 index: &self.index,
                 drag_threshold: 4.0,
+                handle_reach: self.handle_reach,
+                rotate_reach: self.rotate_reach,
             };
             let outcome = self.tool.handle(ctx, &mut self.selection, event);
             self.last = outcome.rubber_band;
@@ -520,7 +850,14 @@ mod tests {
         }
 
         fn drag_to(&mut self, at: Vec2) {
-            self.feed(CanvasEvent::Move { world: at });
+            self.drag_to_with(at, Modifiers::default());
+        }
+
+        fn drag_to_with(&mut self, at: Vec2, modifiers: Modifiers) {
+            self.feed(CanvasEvent::Move {
+                world: at,
+                modifiers,
+            });
         }
 
         fn release(&mut self, at: Vec2) {
@@ -540,9 +877,27 @@ mod tests {
         }
     }
 
+    /// ระยะของ handle ที่ใช้ในเทสต์ — เล็กกว่าครึ่งภาพ 100×100 มาก
+    /// จึงไม่มีทางกลืนการคลิกกลางภาพไปโดยบังเอิญ
+    const HANDLE_REACH: f32 = 6.0;
+    const ROTATE_REACH: f32 = 20.0;
+
     const CTRL: Modifiers = Modifiers {
         ctrl: true,
         shift: false,
+        alt: false,
+    };
+
+    const SHIFT: Modifiers = Modifiers {
+        ctrl: false,
+        shift: true,
+        alt: false,
+    };
+
+    const ALT: Modifiers = Modifiers {
+        ctrl: false,
+        shift: false,
+        alt: true,
     };
 
     // ---------- ★ docs/02 §2.9: การเลือกต้องไม่แตะเอกสาร ----------
@@ -913,6 +1268,517 @@ mod tests {
         assert_eq!(h.index.hit_test(&h.board, Vec2::ZERO), None);
     }
 
+    // ---------- handle: scale · rotate (P2-5) ----------
+
+    /// สี่มุมของกรอบที่ handle เกาะอยู่ (ลำดับเดียวกับ `Obb::corners`)
+    fn frame_corners(h: &Harness) -> [Vec2; 4] {
+        selection_frame(&h.board, &h.selection)
+            .expect("ต้องมีกรอบให้จับ")
+            .corners()
+    }
+
+    /// จุดที่ใช้ "ลาก**นอก** handle มุม" — เลยมุมออกไปตามแนวทแยงของกรอบ
+    ///
+    /// คำนวณจากกรอบจริงเสมอ เพราะกรอบเอียงตามภาพที่หมุนแล้ว การเขียนพิกัดตายตัว
+    /// จะหลุดออกนอกวงหมุนทันทีที่ภาพเอียงไปนิดเดียว
+    fn outside_corner(h: &Harness, corner: usize) -> Vec2 {
+        let frame = selection_frame(&h.board, &h.selection).expect("ต้องมีกรอบให้จับ");
+        let point = frame.corners()[corner];
+        point + (point - frame.center).normalize_or_zero() * 12.0
+    }
+
+    /// ★★ กฎข้อแรกของ handle: **hit-test ของ handle มาก่อน hit-test ของภาพ**
+    ///
+    /// handle มุมคร่อมตัวภาพอยู่ครึ่งหนึ่ง — ถ้าถามภาพก่อน การลาก handle จะกลายเป็น
+    /// การย้ายภาพทุกครั้ง แล้วจะไม่มีทางสเกลอะไรได้เลย (HANDOFF §2.4)
+    #[test]
+    fn a_corner_handle_wins_over_the_image_underneath_it() {
+        let (mut h, ids) = Harness::new(2);
+        h.click(Vec2::ZERO);
+        let start = h.canvas_of(ids[0]);
+        // จุดนี้อยู่ **ในภาพ** (ภาพกิน -50..50) และเป็นมุมของ handle พอดี
+        let corner = frame_corners(&h)[2];
+        assert!(start.obb().contains_point(corner - Vec2::splat(0.5)));
+
+        h.press(corner, Modifiers::default());
+        h.drag_to(corner + Vec2::splat(50.0));
+        h.release(corner + Vec2::splat(50.0));
+
+        assert_ne!(
+            h.canvas_of(ids[0]).size,
+            start.size,
+            "ลาก handle แล้วขนาดต้องเปลี่ยน — ถ้าเท่าเดิมแปลว่ากลายเป็นการย้าย"
+        );
+    }
+
+    /// ลากมุมล่างขวา = ยืดจากมุมบนซ้าย (จุดยึดต้องอยู่นิ่งเป๊ะ)
+    #[test]
+    fn scaling_a_corner_keeps_the_opposite_corner_pinned() {
+        let (mut h, ids) = Harness::new(2);
+        h.click(Vec2::ZERO);
+        let anchor = frame_corners(&h)[0];
+        let grabbed = frame_corners(&h)[2];
+
+        h.press(grabbed, Modifiers::default());
+        h.drag_to(Vec2::new(150.0, 150.0));
+        h.release(Vec2::new(150.0, 150.0));
+
+        let canvas = h.canvas_of(ids[0]);
+        assert_eq!(canvas.size, Vec2::splat(200.0), "ยืดสองเท่าทั้งสองแกน");
+        assert_eq!(canvas.pos, Vec2::new(50.0, 50.0));
+        assert_eq!(
+            canvas.obb().corners()[0],
+            anchor,
+            "มุมตรงข้ามคือจุดยึด ต้องไม่ขยับเลย"
+        );
+    }
+
+    /// ลากเฉียง ๆ ต้องยืดคนละอัตราสองแกนได้ (ไม่งั้นครอปภาพให้พอดีกรอบไม่ได้)
+    #[test]
+    fn scaling_without_shift_stretches_each_axis_on_its_own() {
+        let (mut h, ids) = Harness::new(2);
+        h.click(Vec2::ZERO);
+        let grabbed = frame_corners(&h)[2];
+
+        h.press(grabbed, Modifiers::default());
+        h.drag_to(Vec2::new(150.0, 50.0));
+        h.release(Vec2::new(150.0, 50.0));
+
+        assert_eq!(h.canvas_of(ids[0]).size, Vec2::new(200.0, 100.0));
+    }
+
+    /// docs/03 §2: `Shift` ตอนสเกล = คงสัดส่วน
+    #[test]
+    fn shift_while_scaling_keeps_the_aspect_ratio() {
+        let (mut h, ids) = Harness::new(2);
+        h.click(Vec2::ZERO);
+        let grabbed = frame_corners(&h)[2];
+        let before = h.canvas_of(ids[0]).size;
+
+        h.press(grabbed, Modifiers::default());
+        h.drag_to_with(Vec2::new(150.0, 50.0), SHIFT);
+        h.release(Vec2::new(150.0, 50.0));
+
+        let after = h.canvas_of(ids[0]).size;
+        assert!(after.x > before.x, "ต้องโตขึ้นจริง ไม่ใช่ค้างที่เดิม");
+        assert!(
+            (after.x / after.y - before.x / before.y).abs() < 1e-4,
+            "สัดส่วนต้องเท่าเดิม: {before:?} → {after:?}"
+        );
+    }
+
+    /// ★ `Shift` ต้องมีผลแม้กดกลางคัน — คนกด Shift หลังเริ่มลากเป็นเรื่องปกติ
+    #[test]
+    fn shift_pressed_mid_drag_still_locks_the_aspect() {
+        let (mut h, ids) = Harness::new(2);
+        h.click(Vec2::ZERO);
+        let grabbed = frame_corners(&h)[2];
+
+        h.press(grabbed, Modifiers::default());
+        h.drag_to(Vec2::new(150.0, 50.0)); // ยังไม่กด — ยืดไม่เท่ากัน
+        assert_eq!(h.canvas_of(ids[0]).size, Vec2::new(200.0, 100.0));
+
+        h.drag_to_with(Vec2::new(150.0, 50.0), SHIFT);
+        let after = h.canvas_of(ids[0]).size;
+        assert!(
+            (after.x - after.y).abs() < 1e-4,
+            "กด Shift แล้วต้องพอดีทันที: {after:?}"
+        );
+    }
+
+    /// docs/03 §2: `Alt` ตอนสเกล = ยืดจากจุดกึ่งกลาง (กึ่งกลางต้องไม่ขยับ)
+    #[test]
+    fn alt_while_scaling_grows_from_the_centre() {
+        let (mut h, ids) = Harness::new(2);
+        h.click(Vec2::ZERO);
+        let grabbed = frame_corners(&h)[2];
+
+        h.press(grabbed, Modifiers::default());
+        h.drag_to_with(Vec2::new(100.0, 100.0), ALT);
+        h.release(Vec2::new(100.0, 100.0));
+
+        let canvas = h.canvas_of(ids[0]);
+        assert_eq!(canvas.pos, Vec2::ZERO, "ยืดจากกึ่งกลาง กึ่งกลางต้องอยู่นิ่ง");
+        assert_eq!(canvas.size, Vec2::splat(200.0));
+    }
+
+    /// ★ ลากผ่านจุดยึดไปอีกฝั่ง **ต้องไม่กลับด้านและต้องไม่ยุบหาย**
+    ///
+    /// `sanitized()` clamp `size` ให้เป็นบวกอยู่แล้ว ค่าติดลบจึงไม่ได้กลายเป็นภาพ
+    /// กลับด้าน แต่กลายเป็นภาพที่เล็กจนมองไม่เห็น — ซึ่งผู้ใช้อ่านว่า "ภาพหาย"
+    /// การกลับด้านเป็นหน้าที่ของ `Flip` ที่ผู้ใช้สั่งอย่างจงใจ
+    #[test]
+    fn dragging_past_the_anchor_never_mirrors_the_image() {
+        let (mut h, ids) = Harness::new(2);
+        h.click(Vec2::ZERO);
+        let grabbed = frame_corners(&h)[2];
+
+        h.press(grabbed, Modifiers::default());
+        h.drag_to(Vec2::new(-400.0, -400.0)); // เลยจุดยึดไปไกล
+        h.release(Vec2::new(-400.0, -400.0));
+
+        let canvas = h.canvas_of(ids[0]);
+        assert!(canvas.size.x > 0.0 && canvas.size.y > 0.0, "{canvas:?}");
+        assert!(canvas.is_sane());
+    }
+
+    /// เกณฑ์ ROADMAP ข้อเดียวกับการย้าย: **ลากค้าง = 1 undo กลับที่เดิมเป๊ะ**
+    #[test]
+    fn a_long_scale_drag_is_one_undo_that_restores_exactly() {
+        let (mut h, ids) = Harness::new(2);
+        h.click(Vec2::ZERO);
+        let start = h.canvas_of(ids[0]);
+        let grabbed = frame_corners(&h)[2];
+
+        h.press(grabbed, Modifiers::default());
+        for step in 1..=200 {
+            h.drag_to(grabbed + Vec2::splat(step as f32 * 0.5));
+        }
+        h.release(grabbed + Vec2::splat(100.0));
+
+        assert_eq!(h.history.undo_depth(), 1, "ลากค้างต้องเป็นขั้นเดียว");
+        h.history.undo(&mut h.board).unwrap();
+        assert_eq!(h.canvas_of(ids[0]), start, "ย้อนครั้งเดียวต้องคืนสภาพเป๊ะ");
+    }
+
+    /// ปล่อยแล้วลากใหม่ = สองขั้น (seal ทำงานกับ handle เหมือนกับการย้าย)
+    #[test]
+    fn releasing_a_handle_seals_the_step() {
+        let (mut h, _) = Harness::new(2);
+        h.click(Vec2::ZERO);
+
+        for _ in 0..2 {
+            let grabbed = frame_corners(&h)[2];
+            h.press(grabbed, Modifiers::default());
+            h.drag_to(grabbed + Vec2::splat(20.0));
+            h.release(grabbed + Vec2::splat(20.0));
+        }
+        assert_eq!(h.history.undo_depth(), 2, "สองครั้งต้องย้อนได้สองขั้น");
+    }
+
+    /// ★ handle ต้องมีขนาดคงที่ **บนจอ** — ชั้น UI ส่ง `พิกเซล ÷ zoom` เข้ามา
+    ///
+    /// ข้อนี้พิสูจน์ว่าระยะจับมาจากพารามิเตอร์จริง ไม่ใช่ค่าคงที่ที่ฝังใน world
+    /// (ถ้าฝังไว้ ซูมออกแล้ว handle จะเล็กลงบนจอจนจับไม่โดน)
+    #[test]
+    fn the_handle_reach_follows_the_zoom_it_is_given() {
+        let grabbed = Vec2::new(50.0, 50.0);
+        let nearby = grabbed + Vec2::splat(9.0);
+
+        // ซูมเข้า: 9 หน่วย world ห่างเกิน handle → ตกไปเป็นการย้าย
+        let (mut zoomed_in, ids) = Harness::new(2);
+        zoomed_in.click(Vec2::ZERO);
+        zoomed_in.press(nearby, Modifiers::default());
+        zoomed_in.drag_to(nearby + Vec2::splat(40.0));
+        zoomed_in.release(nearby + Vec2::splat(40.0));
+        assert_eq!(
+            zoomed_in.canvas_of(ids[0]).size,
+            Vec2::splat(100.0),
+            "นอกระยะ handle ต้องไม่สเกล"
+        );
+
+        // ซูมออก: พิกเซลเท่าเดิมบนจอ = ระยะ world กว้างขึ้น → จุดเดิมกลายเป็น handle
+        let (mut zoomed_out, ids) = Harness::new(2);
+        zoomed_out.handle_reach = HANDLE_REACH * 4.0;
+        zoomed_out.rotate_reach = ROTATE_REACH * 4.0;
+        zoomed_out.click(Vec2::ZERO);
+        zoomed_out.press(nearby, Modifiers::default());
+        zoomed_out.drag_to(nearby + Vec2::splat(40.0));
+        zoomed_out.release(nearby + Vec2::splat(40.0));
+        assert_ne!(
+            zoomed_out.canvas_of(ids[0]).size,
+            Vec2::splat(100.0),
+            "ซูมออกแล้วต้องยังจับ handle ได้"
+        );
+    }
+
+    /// docs/03 §2: ลาก **นอก** handle มุม = หมุน
+    #[test]
+    fn dragging_outside_a_corner_rotates_the_item() {
+        let (mut h, ids) = Harness::new(2);
+        h.click(Vec2::ZERO);
+        let outside = Vec2::new(60.0, -60.0); // นอกภาพ ใกล้มุมขวาบน
+
+        h.press(outside, Modifiers::default());
+        h.drag_to(Vec2::new(60.0, 60.0)); // หมุนไปอีก 90°
+        h.release(Vec2::new(60.0, 60.0));
+
+        let canvas = h.canvas_of(ids[0]);
+        assert!(
+            (canvas.rotation - std::f32::consts::FRAC_PI_2).abs() < 1e-3,
+            "ต้องหมุน 90°: ได้ {} rad",
+            canvas.rotation
+        );
+        assert_eq!(canvas.size, Vec2::splat(100.0), "หมุนต้องไม่เปลี่ยนขนาด");
+    }
+
+    /// docs/03 §2: `Shift` ตอนหมุน = สแนป 15°
+    #[test]
+    fn shift_while_rotating_snaps_to_fifteen_degrees() {
+        let step = std::f32::consts::TAU / 24.0;
+        let (mut h, ids) = Harness::new(2);
+        h.click(Vec2::ZERO);
+        let outside = Vec2::new(60.0, -60.0);
+        let start_angle = outside.y.atan2(outside.x);
+
+        // ขยับไป 20° — ต้องลงที่ 15° ไม่ใช่ 20°
+        let target = Vec2::from_angle(start_angle + 20.0_f32.to_radians()) * 85.0;
+        h.press(outside, Modifiers::default());
+        h.drag_to_with(target, SHIFT);
+        h.release(target);
+
+        let rotation = h.canvas_of(ids[0]).rotation;
+        assert!(
+            (rotation - step).abs() < 1e-3,
+            "ต้องสแนปไปที่ 15° (={step} rad) ได้ {rotation} rad"
+        );
+    }
+
+    /// ★ สแนปต้องลงที่**มุมสุดท้าย** ที่หารด้วย 15° ลงตัว ไม่ใช่ "เดิม + 15°"
+    ///
+    /// ภาพที่เอียง 4° อยู่ก่อน แล้วผู้ใช้กด Shift หมุนไปอีก 8° ต้องได้ **15° พอดี**
+    /// (12° ปัดเข้าช่องที่ใกล้ที่สุด) ถ้าสแนประยะที่หมุนแทน จะได้ 4° หรือ 19°
+    /// ซึ่งแปลว่า Shift ไม่ได้ช่วยจัดภาพให้ตรงเลย
+    #[test]
+    fn snapping_lands_on_absolute_angles_not_relative_ones() {
+        let step = std::f32::consts::TAU / 24.0;
+        let (mut h, ids) = Harness::new(2);
+        let mut canvas = h.canvas_of(ids[0]);
+        canvas.rotation = 4.0_f32.to_radians();
+        h.board.set_canvas(ids[0], canvas).unwrap();
+        h.board.mark_dirty(false);
+        h.index.rebuild(&h.board);
+
+        h.click(Vec2::ZERO);
+        let outside = outside_corner(&h, 1);
+        let start_angle = outside.y.atan2(outside.x);
+        let target = Vec2::from_angle(start_angle + 8.0_f32.to_radians()) * outside.length();
+
+        h.press(outside, Modifiers::default());
+        h.drag_to_with(target, SHIFT);
+        h.release(target);
+
+        let rotation = h.canvas_of(ids[0]).rotation;
+        assert!(
+            (rotation - step).abs() < 1e-3,
+            "4° + 8° ต้องลงที่ 15° พอดี ได้ {} °",
+            rotation.to_degrees()
+        );
+    }
+
+    /// ★ ภาพที่หมุนแล้ว handle ต้องหมุนตาม แล้ว hit-test ยังตรง (P2-3 ใช้ OBB)
+    ///
+    /// ถ้า handle ยังอยู่ที่มุมของ AABB ผู้ใช้จะกดที่ที่ *เห็น* handle แล้วไม่โดน
+    #[test]
+    fn handles_follow_a_rotated_item_instead_of_its_aabb() {
+        let (mut h, ids) = Harness::new(2);
+        let mut canvas = h.canvas_of(ids[0]);
+        canvas.rotation = std::f32::consts::FRAC_PI_4; // 45°
+        h.board.set_canvas(ids[0], canvas).unwrap();
+        h.board.mark_dirty(false);
+        h.index.rebuild(&h.board);
+        h.click(Vec2::ZERO);
+
+        let corners = frame_corners(&h);
+        let aabb = h.canvas_of(ids[0]).world_bounds();
+        assert!(
+            corners.iter().all(|c| (c.length() - 70.71).abs() < 0.1),
+            "มุมต้องอยู่บนตัวภาพที่หมุนแล้ว: {corners:?}"
+        );
+        assert!(
+            !corners.iter().any(|c| (*c - aabb.max).length() < 1.0),
+            "ต้องไม่ใช่มุมของ AABB"
+        );
+
+        // จับมุมที่หมุนแล้วจริง ๆ แล้วยืดออกตามแนวแกนของภาพ
+        let grabbed = corners[2];
+        let anchor = corners[0];
+        h.press(grabbed, Modifiers::default());
+        h.drag_to(grabbed * 2.0);
+        h.release(grabbed * 2.0);
+
+        let after = h.canvas_of(ids[0]);
+        assert!(
+            (after.size - Vec2::splat(150.0)).length() < 1e-2,
+            "ต้องยืดตามแกนของภาพเอง 1.5 เท่า: {:?}",
+            after.size
+        );
+        assert!(
+            (after.obb().corners()[0] - anchor).length() < 1e-2,
+            "จุดยึดของภาพที่หมุนต้องยังอยู่ที่เดิม"
+        );
+        assert!(
+            (after.rotation - std::f32::consts::FRAC_PI_4).abs() < 1e-4,
+            "สเกลต้องไม่แตะมุมหมุน"
+        );
+    }
+
+    /// ★ เลือกหลายใบแล้วสเกล = ทำกับ **กรอบรวม** ไม่ใช่ทีละใบ (HANDOFF §2.4)
+    ///
+    /// และบังคับสัดส่วนเดิมเสมอ: `ItemCanvas` ไม่มีที่เก็บการเฉือน การยืดแกนเดียว
+    /// ของกรอบแนวแกนกับภาพที่หมุนอยู่ข้างในจึงแทนค่าไม่ได้
+    #[test]
+    fn scaling_a_multi_selection_works_on_the_group_box() {
+        let (mut h, ids) = Harness::new(3);
+        h.press(Vec2::ZERO, CTRL);
+        h.release(Vec2::ZERO);
+        h.press(Vec2::new(200.0, 0.0), CTRL);
+        h.release(Vec2::new(200.0, 0.0));
+
+        let corners = frame_corners(&h);
+        assert_eq!(corners[0], Vec2::new(-50.0, -50.0), "กรอบรวมของสองใบ");
+        assert_eq!(corners[2], Vec2::new(250.0, 50.0));
+
+        let anchor = corners[0];
+        h.press(corners[2], Modifiers::default());
+        // ลากเฉียงแบบไม่เท่ากันสองแกน — ผลต้องยังคงสัดส่วน
+        h.drag_to(Vec2::new(550.0, 50.0));
+        h.release(Vec2::new(550.0, 50.0));
+
+        let first = h.canvas_of(ids[0]);
+        let second = h.canvas_of(ids[1]);
+        assert!(
+            (first.size.x - first.size.y).abs() < 1e-3,
+            "หลายใบต้องคงสัดส่วนเสมอ: {:?}",
+            first.size
+        );
+        assert!(first.size.x > 100.0, "ต้องโตขึ้นจริง");
+        assert!(
+            (first.obb().corners()[0] - anchor).length() < 1e-3,
+            "มุมยึดของกรอบรวมต้องอยู่นิ่ง"
+        );
+        assert!(
+            (second.pos - first.pos).length() > 200.0,
+            "ระยะห่างต้องขยายตามกรอบรวม ไม่ใช่ต่างคนต่างโต"
+        );
+        assert_eq!(
+            h.canvas_of(ids[2]).size,
+            Vec2::splat(100.0),
+            "ตัวที่ไม่ได้เลือกต้องนิ่ง"
+        );
+    }
+
+    /// หมุนหลายใบ = **ตำแหน่ง**ของทุกใบต้องโคจรรอบกึ่งกลางกรอบรวมด้วย
+    /// ไม่ใช่ต่างคนต่างหมุนอยู่กับที่
+    #[test]
+    fn rotating_a_multi_selection_swings_every_item_around_the_group_centre() {
+        let (mut h, ids) = Harness::new(3);
+        h.press(Vec2::ZERO, CTRL);
+        h.release(Vec2::ZERO);
+        h.press(Vec2::new(200.0, 0.0), CTRL);
+        h.release(Vec2::new(200.0, 0.0));
+
+        let centre = Vec2::new(100.0, 0.0);
+        let outside = Vec2::new(260.0, -60.0);
+        let arm = outside - centre;
+        let start_angle = arm.y.atan2(arm.x);
+        let target =
+            centre + Vec2::from_angle(start_angle + std::f32::consts::FRAC_PI_2) * arm.length();
+
+        h.press(outside, Modifiers::default());
+        h.drag_to(target);
+        h.release(target);
+
+        let first = h.canvas_of(ids[0]);
+        assert!(
+            (first.pos - Vec2::new(100.0, -100.0)).length() < 1e-2,
+            "ต้องโคจรรอบกึ่งกลางกรอบรวม: {:?}",
+            first.pos
+        );
+        assert!((first.rotation - std::f32::consts::FRAC_PI_2).abs() < 1e-3);
+        assert!(
+            (h.canvas_of(ids[1]).pos - Vec2::new(100.0, 100.0)).length() < 1e-2,
+            "ใบที่สองต้องไปอยู่ฝั่งตรงข้าม"
+        );
+        assert_eq!(h.history.undo_depth(), 1, "หมุนทั้งกลุ่มคือขั้นเดียว");
+    }
+
+    /// ภาพที่ล็อกไว้ต้องไม่มี handle เลย — handle ที่ลากแล้วไม่มีอะไรเกิดขึ้น
+    /// ผู้ใช้จะอ่านว่าโปรแกรมค้าง ไม่ใช่ว่าภาพถูกล็อก
+    #[test]
+    fn a_locked_item_shows_no_handles_at_all() {
+        let (mut h, ids) = Harness::new(2);
+        let mut canvas = h.canvas_of(ids[0]);
+        canvas.locked = true;
+        h.board.set_canvas(ids[0], canvas).unwrap();
+        h.board.mark_dirty(false);
+
+        h.click(Vec2::ZERO);
+        assert!(selection_frame(&h.board, &h.selection).is_none());
+
+        h.press(Vec2::new(50.0, 50.0), Modifiers::default());
+        h.drag_to(Vec2::new(200.0, 200.0));
+        h.release(Vec2::new(200.0, 200.0));
+        assert_eq!(h.canvas_of(ids[0]), canvas, "ล็อกแล้วต้องไม่ถูกแตะเลย");
+        assert_eq!(h.history.undo_depth(), 0);
+    }
+
+    /// ยังไม่ได้เลือกอะไร = ไม่มีกรอบ = ทุกอย่างเป็นการเลือกตามเดิม
+    #[test]
+    fn nothing_selected_means_no_frame_and_no_handles() {
+        let (h, _) = Harness::new(3);
+        assert!(selection_frame(&h.board, &h.selection).is_none());
+    }
+
+    /// กด handle เฉย ๆ (ไม่ลาก) ต้องไม่แตะทั้งการเลือกและเอกสาร
+    #[test]
+    fn tapping_a_handle_changes_nothing() {
+        let (mut h, ids) = Harness::new(2);
+        h.click(Vec2::ZERO);
+        h.board.mark_dirty(false);
+        let before = h.board.clone();
+        let grabbed = frame_corners(&h)[2];
+
+        h.press(grabbed, Modifiers::default());
+        h.drag_to(grabbed + Vec2::splat(1.0)); // ต่ำกว่าระยะเริ่มลาก
+        h.release(grabbed + Vec2::splat(1.0));
+
+        assert_eq!(h.selected(), vec![ids[0]], "ต้องไม่ล้างการเลือก");
+        assert_eq!(h.board, before);
+        assert_eq!(h.history.undo_depth(), 0);
+    }
+
+    /// ลาก handle แล้ว hit-test ต้องตามขนาดใหม่ (index ถูกอัปเดตโดยผู้เรียก)
+    ///
+    /// ★ เคยพลาดมาแล้วตอนทำการย้าย — อาการคือลากได้ครั้งเดียวแล้วไม่ตอบสนอง
+    #[test]
+    fn hit_testing_follows_the_new_size_after_a_scale() {
+        let (mut h, ids) = Harness::new(2);
+        h.click(Vec2::ZERO);
+        let far = Vec2::new(120.0, 120.0);
+        assert_eq!(h.index.hit_test(&h.board, far), None, "ยังไม่โตต้องไม่โดน");
+
+        let grabbed = frame_corners(&h)[2];
+        h.press(grabbed, Modifiers::default());
+        h.drag_to(Vec2::new(150.0, 150.0));
+        h.release(Vec2::new(150.0, 150.0));
+
+        assert_eq!(
+            h.index.hit_test(&h.board, far),
+            Some(ids[0]),
+            "ขยายแล้วต้องคลิกโดนพื้นที่ใหม่ทันที"
+        );
+    }
+
+    /// I-4: พิกัดพังระหว่างลาก handle ต้องไม่ทำให้ item กลายเป็นค่าที่ไม่ใช่ตัวเลข
+    #[test]
+    fn non_finite_input_never_corrupts_a_handle_drag() {
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let (mut h, ids) = Harness::new(2);
+            h.click(Vec2::ZERO);
+            let grabbed = frame_corners(&h)[2];
+
+            h.press(grabbed, Modifiers::default());
+            h.drag_to(Vec2::new(bad, 30.0));
+            h.drag_to(Vec2::new(30.0, bad));
+            h.release(Vec2::new(bad, bad));
+
+            let canvas = h.canvas_of(ids[0]);
+            assert!(canvas.is_sane(), "{bad}: {canvas:?}");
+            assert!(canvas.pos.is_finite() && canvas.size.is_finite());
+        }
+    }
+
     // ---------- I-1 / ความทนทาน ----------
 
     /// ★ I-1: event ที่ไม่ได้เปลี่ยนอะไรต้องไม่ขอวาดเฟรมใหม่
@@ -925,9 +1791,18 @@ mod tests {
             board: &board,
             index: &index,
             drag_threshold: 4.0,
+            handle_reach: HANDLE_REACH,
+            rotate_reach: ROTATE_REACH,
         };
 
-        let outcome = tool.handle(ctx, &mut selection, CanvasEvent::Move { world: Vec2::ZERO });
+        let outcome = tool.handle(
+            ctx,
+            &mut selection,
+            CanvasEvent::Move {
+                world: Vec2::ZERO,
+                modifiers: Modifiers::default(),
+            },
+        );
         assert!(!outcome.needs_redraw);
 
         let outcome = tool.handle(
