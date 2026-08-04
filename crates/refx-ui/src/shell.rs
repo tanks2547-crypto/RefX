@@ -22,6 +22,17 @@ use crate::text::{self, Key, Lang, Template};
 pub struct ShellState {
     /// mode ปัจจุบัน
     pub mode: Mode,
+    /// เครื่องมือที่เลือกอยู่ — **อ่านอย่างเดียว** ชั้นแอปเขียนค่านี้ทุกเฟรม
+    ///
+    /// ★ เจ้าของจริงคือ `Gfx::tool` ที่เดียว ที่นี่เป็นแค่สำเนาไว้วาดปุ่มให้ถูก
+    pub tool: refx_core::interact::Tool,
+    /// ★ ผู้ใช้กดปุ่มเครื่องมือบน toolbar — ชั้นแอปมาเก็บไปแล้วล้างทิ้ง
+    ///
+    /// แยกจาก `tool` โดยตั้งใจ: ถ้าให้ปุ่มเขียน `tool` ตรง ๆ จะมีสองแหล่งความจริง
+    /// แล้วต้องพึ่ง**ลำดับ**ว่าใครเขียนก่อน — เคยพลาดมาแล้วตอนทำ P2-7 คือคีย์ลัด
+    /// เขียน `Gfx::tool` แล้วโดนค่าเก่าจาก `ShellState` เขียนทับกลับทุกเฟรม
+    /// อาการคือ **กด `C` แล้วไม่มีอะไรเกิดขึ้น ส่วนกดปุ่มได้ปกติ** (docs/08 §3.9 ข้อ 8.1)
+    pub tool_request: Option<refx_core::interact::Tool>,
     /// ★ ภาษาของ UI — ทุกข้อความที่ผู้ใช้เห็นต้องผ่าน `text::t`/`text::fill` ด้วยค่านี้
     ///
     /// อ่านจาก locale ของ OS ครั้งเดียวตอนเปิดโปรแกรม (docs/03 §0 ข้อ 3)
@@ -128,6 +139,8 @@ impl Default for ShellState {
     fn default() -> Self {
         Self {
             mode: Mode::default(),
+            tool: refx_core::interact::Tool::default(),
+            tool_request: None,
             lang: Lang::default(),
             status: text::t(Lang::default(), Key::Ready).to_owned(),
             item_count: 0,
@@ -371,21 +384,33 @@ pub fn draw_in_ui(
 
 /// ปุ่มเครื่องมือของ Canvas mode
 fn canvas_tools(ui: &mut egui::Ui, state: &mut ShellState) {
+    use refx_core::interact::Tool;
+
     let lang = state.lang;
-    for (key, when) in [
-        (Key::ToolSelect, "P2-4"),
-        (Key::ToolMove, "P2-5"),
-        (Key::ToolCrop, "P2-7"),
-        (Key::ToolGrayscale, "P2-8"),
+    // ★ เครื่องมือจริงเป็นปุ่มสลับที่ชี้ `state.tool` ตัวเดียวกับคีย์ลัด
+    //   (`ToolMove` ไม่ได้อยู่ที่นี่แล้ว — docs/03 §2 ระบุว่าการย้ายเป็นส่วนหนึ่งของ
+    //   Select/Move ปุ่ม `V` ตัวเดียว การมีปุ่มแยกทำให้เข้าใจผิดว่าเป็นคนละโหมด)
+    for (tool, key, hint) in [
+        (Tool::Select, Key::ToolSelect, "V"),
+        (Tool::Crop, Key::ToolCrop, "C"),
     ] {
         let label = text::t(lang, key);
-        if ui.button(label).on_hover_text(when).clicked() {
-            state.status = text::fill(
-                lang,
-                Template::NotImplemented,
-                &[("what", label), ("when", when)],
-            );
+        if ui
+            .selectable_label(state.tool == tool, label)
+            .on_hover_text(hint)
+            .clicked()
+        {
+            state.tool_request = Some(tool);
         }
+    }
+    // ที่ยังไม่ได้ทำ — บอกตรง ๆ ว่ารออยู่เฟสไหน ไม่ใช่ปุ่มที่กดแล้วเงียบ
+    let label = text::t(lang, Key::ToolGrayscale);
+    if ui.button(label).on_hover_text("P2-8").clicked() {
+        state.status = text::fill(
+            lang,
+            Template::NotImplemented,
+            &[("what", label), ("when", "P2-8")],
+        );
     }
 }
 

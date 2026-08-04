@@ -436,6 +436,74 @@ impl Command for TransformItems {
 }
 
 // ---------------------------------------------------------------------------
+// SetCrop
+// ---------------------------------------------------------------------------
+
+/// ครอปภาพแบบไม่ทำลายต้นฉบับ (P2-7) — **merge ได้** เหมือนการลากอื่น ๆ
+///
+/// ★ **ทำไมไม่ใช้ `TransformItems` ไปเลย ทั้งที่แก้ `ItemCanvas` เหมือนกัน:**
+///
+/// 1. `docs/02 §3` กำหนดให้ `SetCrop` เป็นคำสั่งของตัวเอง
+/// 2. **ชื่อในเมนู undo ต้องบอกว่าผู้ใช้ทำอะไร** — "Crop" ไม่ใช่ "Transform items"
+/// 3. ★ **merge ต้องแยกตามชนิด** — ครอปเสร็จแล้วลากย้ายต่อโดยไม่ปล่อยเมาส์
+///    (เปลี่ยนเครื่องมือกลางคัน) ต้องเป็นคนละขั้น ถ้าใช้คำสั่งเดียวกันมันจะกลืนกัน
+///    แล้วกด Ctrl+Z ทีเดียวจะย้อนทั้งการครอปและการย้าย ซึ่งผู้ใช้ไม่ได้ขอ
+///
+/// ตัวเนื้อในยืม [`TransformItems`] ทั้งดุ้น เพราะการครอปคือการเขียน `ItemCanvas`
+/// ชุดใหม่จริง ๆ (`crop` + `pos` + `size` เปลี่ยนพร้อมกันเสมอ — ดู `refx-core::interact`)
+/// การก๊อปตรรกะ apply/undo มาไว้สองที่มีแต่จะทำให้มันเพี้ยนจากกันวันหนึ่ง
+#[derive(Debug)]
+pub struct SetCrop {
+    inner: TransformItems,
+}
+
+impl SetCrop {
+    /// ตั้ง `ItemCanvas` ชุดใหม่ที่มีทั้งกรอบ crop และเรขาคณิตที่หดตามแล้ว
+    ///
+    /// # Errors
+    /// [`CmdError::Empty`] ถ้ารายการว่าง
+    pub fn new(changes: Vec<(ItemId, ItemCanvas)>) -> Result<Self, CmdError> {
+        Ok(Self {
+            inner: TransformItems::new(changes)?,
+        })
+    }
+}
+
+impl Command for SetCrop {
+    fn apply(&mut self, board: &mut Board) -> Result<(), CmdError> {
+        self.inner.apply(board)
+    }
+
+    fn undo(&mut self, board: &mut Board) -> Result<(), CmdError> {
+        self.inner.undo(board)
+    }
+
+    /// รวมได้เฉพาะกับ `SetCrop` ด้วยกัน — ดูเหตุผลข้อ 3 ที่หัวโครงสร้าง
+    fn merge(&mut self, next: &dyn Command) -> bool {
+        let Some(next) = next.as_any().downcast_ref::<Self>() else {
+            return false;
+        };
+        self.inner.merge(&next.inner)
+    }
+
+    fn affected(&self) -> Vec<ItemId> {
+        self.inner.affected()
+    }
+
+    fn label(&self) -> &'static str {
+        "Crop"
+    }
+
+    fn heap_size(&self) -> usize {
+        self.inner.heap_size()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ReorderZ
 // ---------------------------------------------------------------------------
 
@@ -1493,6 +1561,48 @@ mod tests {
         history.undo(&mut board).unwrap();
         assert!(board.item(added).is_some(), "ภาพต้องกลับมาได้");
     }
+    /// ★★ `docs/08 §3.9` ข้อ 8.2 — **เทสต์ที่ drain แบบเลื่อนออกไปตามที่ของจริงทำ**
+    ///
+    /// เทสต์อื่นในไฟล์นี้เรียก `take_forgotten()` ทันทีหลังทุกคำสั่ง ซึ่ง
+    /// **ไม่ใช่สิ่งที่ของจริงทำ**: ingest ภาพเป็นร้อยใบไม่ได้ drain เลยสักครั้ง
+    /// แล้วค่อยไป drain ตอนผู้ใช้ลบ — ตรงนั้นคือจุดที่บั๊กเกิด
+    ///
+    /// รูปร่างนี้คือเคสจริงย่อส่วน: เพิ่มเกินเพดาน → ลบทั้งหมด → drain ครั้งเดียว
+    /// ทุกใบยัง undo กลับมาได้ จึงต้อง**ไม่มีใครถูกรายงานว่าลืม**
+    #[test]
+    fn draining_late_like_the_real_app_does_reports_nothing_that_can_return() {
+        let mut board = Board::default();
+        let mut history = History::new(3, DEFAULT_MAX_BYTES);
+
+        // เพิ่ม 6 ใบทีละคำสั่ง (เพดาน 3 → ครึ่งหนึ่งถูกตัดทันที) **ไม่ drain เลย**
+        for i in 0..6u8 {
+            history.seal();
+            history
+                .apply(
+                    &mut board,
+                    Box::new(AddItems::new(vec![image_item(i)]).unwrap()),
+                )
+                .unwrap();
+        }
+        let all: Vec<ItemId> = board.z_order().to_vec();
+        assert_eq!(all.len(), 6);
+
+        // ลบทั้งหมดในคำสั่งเดียว — ตอนนี้ทุกใบหลุดจาก board แต่ยัง undo ได้
+        history.seal();
+        history
+            .apply(&mut board, Box::new(RemoveItems::new(all.clone()).unwrap()))
+            .unwrap();
+
+        // แล้วค่อย drain ทีเดียวตอนนี้ เหมือนที่ชั้น UI ทำ
+        assert!(
+            history.take_forgotten().is_empty(),
+            "ทุกใบยังกด Ctrl+Z กลับมาได้ ห้ามบอกให้ทิ้ง thumbnail"
+        );
+
+        history.undo(&mut board).unwrap();
+        assert_eq!(board.len(), 6, "ต้องกลับมาครบทุกใบ");
+    }
+
     /// `ReorderZ::affected()` ว่างโดยตั้งใจ → ถูกตัดทิ้งก็ไม่มีอะไรให้ลืม
     #[test]
     fn reordering_never_forgets_anything() {

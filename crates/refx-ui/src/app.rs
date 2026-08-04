@@ -13,6 +13,7 @@ use refx_core::arena::ItemId;
 use refx_core::board::{AssetRef, Board, ImageFormat, Item, ItemCanvas, ItemKind};
 use refx_core::command::{AddItems, History, RemoveItems, ReorderZ};
 use refx_core::geom::Rect as WorldRect;
+use refx_core::interact::Tool;
 use refx_core::interact::{CanvasButton, CanvasContext, CanvasEvent, Modifiers, SelectTool};
 use refx_core::selection::Selection;
 use refx_core::spatial::SpatialIndex;
@@ -238,6 +239,23 @@ fn zorder_shortcut(key: &winit::keyboard::Key, modifiers: ModifiersState) -> Opt
     }
 }
 
+/// แปลงปุ่มที่กดเป็นการสลับเครื่องมือ (docs/03 §2: `V` = Select/Move · `C` = Crop)
+fn tool_shortcut(key: &winit::keyboard::Key, modifiers: ModifiersState) -> Option<Tool> {
+    if modifiers.control_key() || modifiers.alt_key() {
+        return None;
+    }
+    let winit::keyboard::Key::Character(text) = key else {
+        return None;
+    };
+    if text.eq_ignore_ascii_case("v") {
+        return Some(Tool::Select);
+    }
+    if text.eq_ignore_ascii_case("c") {
+        return Some(Tool::Crop);
+    }
+    None
+}
+
 /// `Delete` / `Backspace` = ลบสิ่งที่เลือก (docs/03 §5)
 ///
 /// รับ `Backspace` ด้วยเพราะบนแล็ปท็อปหลายรุ่นไม่มีปุ่ม `Delete` แยก
@@ -309,6 +327,8 @@ struct Gfx {
     selection: Selection,
     /// เครื่องสถานะของการเลือก (คลิก · Ctrl+คลิก · ลากกรอบ)
     select_tool: SelectTool,
+    /// เครื่องมือที่ผู้ใช้เลือกอยู่ (`V` เลือก · `C` ครอป — docs/03 §2)
+    tool: Tool,
     /// กรอบ rubber-band ที่กำลังลากอยู่ (world) — `None` = ไม่ต้องวาด
     rubber_band: Option<WorldRect>,
     /// ★ thumbnail ของทุก item บน board เก็บไว้เติม atlas กลับหลังกู้ device
@@ -473,6 +493,11 @@ struct CanvasFrameInput {
     primary_released: bool,
     /// ปุ่มซ้ายกดค้างอยู่
     primary_down: bool,
+    /// ดับเบิลคลิกด้วยปุ่มซ้าย — เครื่องมือครอปใช้รีเซ็ตกรอบ (docs/03 §2)
+    ///
+    /// ให้ egui เป็นคนรวมคลิกสองครั้งให้ (มันรู้ค่าที่ระบบตั้งไว้) `refx-core`
+    /// รับมาเป็น `CanvasEvent::DoubleClick` ตรง ๆ ไม่ต้องเดาเวลาเอง
+    primary_double: bool,
     /// ระยะที่ลากด้วยปุ่มกลาง (point)
     pan_delta: egui::Vec2,
     /// จำนวนคลิกของล้อ
@@ -489,11 +514,28 @@ impl Default for CanvasFrameInput {
             primary_pressed: false,
             primary_released: false,
             primary_down: false,
+            primary_double: false,
             pan_delta: egui::Vec2::ZERO,
             scroll: 0.0,
             modifiers: Modifiers::default(),
         }
     }
+}
+
+/// หด uv ของช่องใน atlas ลงตามกรอบ crop (P2-7)
+///
+/// ★ `crop` เป็นสัดส่วน **ของภาพต้นฉบับ** (docs/02 §2.1) ส่วน `slot` คือช่องที่ภาพนั้น
+/// อยู่ใน atlas — จึงต้อง lerp กรอบ crop ลงในช่วงของช่อง ไม่ใช่เอาไปใช้ตรง ๆ
+/// ถ้าใช้ตรง ๆ ภาพทุกใบจะไปสุ่มหยิบ pixel ของภาพอื่นในชั้นเดียวกันมาแสดง
+fn crop_uv(slot: [f32; 4], crop: refx_core::board::CropRect) -> [f32; 4] {
+    let [u0, v0, u1, v1] = slot;
+    let crop = crop.sanitized();
+    [
+        u0 + (u1 - u0) * crop.min.x,
+        v0 + (v1 - v0) * crop.min.y,
+        u0 + (u1 - u0) * crop.max.x,
+        v0 + (v1 - v0) * crop.max.y,
+    ]
 }
 
 /// สีเด่นของภาพ (ARGB จาก `Thumbnail`) → tint ของ quad
@@ -515,6 +557,10 @@ const SELECT_STROKE: egui::Color32 = egui::Color32::from_rgb(120, 190, 255);
 /// สีพื้นของ handle มุม — ทึบเพื่อให้เห็นบนภาพสีอะไรก็ได้
 const HANDLE_FILL: egui::Color32 = egui::Color32::from_rgb(250, 250, 252);
 
+/// สีขอบของ handle ตอนอยู่ในเครื่องมือครอป — ★ ต้องต่างจากตอนเลือกด้วย **สี**
+/// ไม่ใช่แค่จำนวน handle ผู้ใช้ต้องรู้ได้ทันทีว่าลากแล้วจะครอปหรือจะสเกล
+const CROP_STROKE: egui::Color32 = egui::Color32::from_rgb(255, 196, 92);
+
 impl RefxApp {
     /// ★ canvas เป็น **widget จริงของ egui** — ไม่ใช่การเดาว่า pointer เป็นของใคร
     ///
@@ -532,6 +578,7 @@ impl RefxApp {
         render_state: &std::collections::HashMap<ItemId, ItemRender>,
         camera: Camera,
         rubber_band: Option<WorldRect>,
+        tool: Tool,
     ) -> CanvasFrameInput {
         let response = ui.allocate_response(ui.available_size(), egui::Sense::click_and_drag());
         let rect = response.rect;
@@ -576,14 +623,21 @@ impl RefxApp {
                 corners.to_vec(),
                 egui::Stroke::new(1.0, SELECT_STROKE),
             ));
+            // ★ วาด handle ชุดเดียวกับที่ `refx-core` ยอมให้จับ — เครื่องมือครอปมีกลางด้าน
+            //   ด้วย ถ้าวาดไม่ตรงกัน ผู้ใช้จะเห็นจุดที่กดไม่ได้ หรือกดได้จุดที่ไม่เห็น
+            let stroke = if tool == Tool::Crop {
+                CROP_STROKE
+            } else {
+                SELECT_STROKE
+            };
             let side = egui::Vec2::splat(refx_core::interact::HANDLE_DRAW_PX);
-            for corner in corners {
-                let square = egui::Rect::from_center_size(corner, side);
+            for dir in refx_core::interact::handles_for(tool) {
+                let square = egui::Rect::from_center_size(to_point(dir.point_on(frame)), side);
                 painter.rect_filled(square, 1.0, HANDLE_FILL);
                 painter.rect_stroke(
                     square,
                     1.0,
-                    egui::Stroke::new(1.0, SELECT_STROKE),
+                    egui::Stroke::new(1.0, stroke),
                     egui::StrokeKind::Middle,
                 );
             }
@@ -640,6 +694,7 @@ impl RefxApp {
             primary_down: ui
                 .ctx()
                 .input(|i| i.pointer.button_down(egui::PointerButton::Primary)),
+            primary_double: response.double_clicked_by(egui::PointerButton::Primary),
             pan_delta: if response.dragged_by(egui::PointerButton::Middle) {
                 response.drag_delta()
             } else {
@@ -1420,7 +1475,13 @@ impl RefxApp {
             let Some(state) = gfx.render_state.get(&id) else {
                 continue;
             };
-            if let Some(quad) = Self::quad_for(&item.canvas, state) {
+            if let Some(mut quad) = Self::quad_for(&item.canvas, state) {
+                // ★ working texture ถือภาพเดียวเต็มใบที่ layer 0 — uv ของมันจึงเป็น
+                //   **กรอบ crop ตรง ๆ** ไม่ต้อง lerp ลงในช่องแบบทาง atlas
+                //   (คำนวณที่นี่จุดเดียว ไม่ใช่ตอนวาด เพื่อให้มีที่เดียวที่ตัดสินเรื่อง uv)
+                let crop = item.canvas.crop.sanitized();
+                quad.uv_rect = [crop.min.x, crop.min.y, crop.max.x, crop.max.y];
+                quad.layer = 0;
                 gfx.working_quads.push((key, quad));
             }
         }
@@ -1493,9 +1554,14 @@ impl RefxApp {
             drag_threshold: refx_core::interact::DEFAULT_DRAG_THRESHOLD_PX * world_per_point,
             handle_reach: refx_core::interact::DEFAULT_HANDLE_PX * world_per_point,
             rotate_reach: refx_core::interact::DEFAULT_ROTATE_PX * world_per_point,
+            tool: gfx.tool,
         };
 
-        let event = if input.primary_pressed {
+        // ★ ดับเบิลคลิกมาก่อน press/release ของรอบเดียวกัน — ไม่งั้นคลิกที่สองจะถูก
+        //   ตีความเป็นการกดใหม่แล้วรีเซ็ตไม่เกิดขึ้นเลย
+        let event = if input.primary_double {
+            Some(CanvasEvent::DoubleClick { world })
+        } else if input.primary_pressed {
             Some(CanvasEvent::Press {
                 button: CanvasButton::Primary,
                 world,
@@ -1833,7 +1899,12 @@ impl RefxApp {
         // ★ ไม่มีช่องใน atlas = วาดสี่เหลี่ยมสีเด่นแทน **ห้ามข้ามไม่วาด** (docs/04 §8)
         //   ผู้ใช้ต้องเห็นว่า layout ยังอยู่ครบ ไม่ใช่ช่องว่างที่อ่านได้ว่า "ภาพหาย"
         let (uv_rect, layer, tint, flags) = match state.slot {
-            Some(slot) => (slot.uv_rect(), slot.layer, [1.0; 4], 0),
+            Some(slot) => (
+                crop_uv(slot.uv_rect(), canvas.crop),
+                slot.layer,
+                [1.0; 4],
+                0,
+            ),
             None => (
                 [0.0, 0.0, 1.0, 1.0],
                 0,
@@ -2001,6 +2072,7 @@ impl AppDelegate for RefxApp {
             render_state: std::collections::HashMap::new(),
             selection: Selection::new(),
             select_tool: SelectTool::new(),
+            tool: Tool::default(),
             rubber_band: None,
             working,
             working_pending: std::collections::HashSet::new(),
@@ -2092,6 +2164,8 @@ impl AppDelegate for RefxApp {
         let raw_input = gfx.egui_winit.take_egui_input(&gfx.window);
         shell.item_count = gfx.board.len();
         shell.zoom = gfx.camera.zoom();
+        // ★ ปุ่มบน toolbar เป็นภาพสะท้อนของ `gfx.tool` เท่านั้น — เจ้าของมีคนเดียว
+        shell.tool = gfx.tool;
         shell.vram_used = gfx.textures.budget().used();
         shell.working_used = gfx.working.used();
         shell.working_limit = gfx.working.limit();
@@ -2126,6 +2200,7 @@ impl AppDelegate for RefxApp {
             let render_state = &gfx.render_state;
             let camera = gfx.camera;
             let rubber_band = gfx.rubber_band;
+            let tool = gfx.tool;
             egui_ctx.run_ui(raw_input, |ui| {
                 canvas_points = crate::shell::draw_in_ui(ui, shell, |ui| {
                     // ช่องกลางคือ canvas — ภาพวาดด้วย wgpu ใต้ egui อีกที
@@ -2137,6 +2212,7 @@ impl AppDelegate for RefxApp {
                         render_state,
                         camera,
                         rubber_band,
+                        tool,
                     );
                 });
             })
@@ -2146,6 +2222,15 @@ impl AppDelegate for RefxApp {
         }
         gfx.egui_winit
             .handle_platform_output(&gfx.window, full_output.platform_output);
+
+        // ผู้ใช้กดปุ่มเครื่องมือบน toolbar — คำขอ ไม่ใช่สถานะ (ดู `ShellState::tool_request`)
+        if let Some(tool) = shell.tool_request.take()
+            && gfx.tool != tool
+        {
+            gfx.tool = tool;
+            gfx.select_tool.cancel();
+            gfx.rubber_band = None;
+        }
 
         let (width, height) = {
             let config = gfx.render.config();
@@ -2235,14 +2320,8 @@ impl AppDelegate for RefxApp {
                 let sharp: Vec<QuadInstance> = gfx
                     .working_quads
                     .iter()
-                    .map(|(_, quad)| {
-                        // working texture มีภาพเดียวเต็มใบ layer 0
-                        QuadInstance {
-                            uv_rect: [0.0, 0.0, 1.0, 1.0],
-                            layer: 0,
-                            ..*quad
-                        }
-                    })
+                    // uv/layer ถูกตั้งไว้ตั้งแต่ `plan_working_textures` แล้ว (รวมกรอบ crop)
+                    .map(|(_, quad)| *quad)
                     .collect();
                 // อัปเดต LRU ก่อน แล้วค่อยเก็บ reference ไปวาด — ยืมคนละแบบ
                 for (key, _) in &gfx.working_quads {
@@ -2424,6 +2503,17 @@ impl AppDelegate for RefxApp {
                     self.pending_delete = true;
                     needs_redraw = true;
                 }
+                // ★ สลับเครื่องมือ (P2-7) — กดค้างซ้ำไม่มีผลอยู่แล้วเพราะตั้งค่าเดิมซ้ำ
+                if event.state.is_pressed()
+                    && let Some(tool) = tool_shortcut(&event.logical_key, gfx.modifiers)
+                    && gfx.tool != tool
+                {
+                    gfx.tool = tool;
+                    // การกดค้างที่ยังอยู่เป็นของเครื่องมือเดิม ใช้ต่อไม่ได้
+                    gfx.select_tool.cancel();
+                    gfx.rubber_band = None;
+                    needs_redraw = true;
+                }
             }
 
             _ => {}
@@ -2548,6 +2638,7 @@ mod tests {
                             &render_state,
                             Camera::default(),
                             None,
+                            Tool::Select,
                         );
                         seen = got.pointer.is_some();
                     });
@@ -2624,6 +2715,7 @@ mod tests {
                         &render_state,
                         Camera::default(),
                         None,
+                        Tool::Select,
                     );
                     if got.primary_pressed {
                         pressed_at.push(got.pointer);
@@ -2857,8 +2949,8 @@ mod tests {
                     },
                     ..base
                 },
-                false,
-                "ยังไม่ถึง — ต้องหด uv_rect คือ P2-7",
+                true,
+                "หด uv_rect ลงในช่องของ atlas (ต่อแล้วตอน P2-7)",
             ),
             (
                 "locked",
@@ -2906,7 +2998,12 @@ mod tests {
     }
 
     /// รูปสี่เหลี่ยมทึบสี handle ที่ shell วาดออกมาจริง ๆ ในหนึ่งเฟรม
-    fn painted_handles(board: &Board, selection: &Selection, camera: Camera) -> Vec<egui::Rect> {
+    fn painted_handles(
+        board: &Board,
+        selection: &Selection,
+        camera: Camera,
+        tool: Tool,
+    ) -> Vec<egui::Rect> {
         let ctx = egui::Context::default();
         let mut state = crate::shell::ShellState::default();
         let render_state = std::collections::HashMap::new();
@@ -2924,8 +3021,15 @@ mod tests {
             };
             let output = ctx.run_ui(input, |ui| {
                 let _ = crate::shell::draw_in_ui(ui, &mut state, |ui| {
-                    let _ =
-                        RefxApp::canvas_widget(ui, board, selection, &render_state, camera, None);
+                    let _ = RefxApp::canvas_widget(
+                        ui,
+                        board,
+                        selection,
+                        &render_state,
+                        camera,
+                        None,
+                        tool,
+                    );
                 });
             });
             for clipped in &output.shapes {
@@ -2945,12 +3049,12 @@ mod tests {
     #[test]
     fn selecting_an_item_paints_four_corner_handles() {
         let (board, selection) = one_selected_item(0.0);
-        let handles = painted_handles(&board, &selection, Camera::default());
+        let handles = painted_handles(&board, &selection, Camera::default(), Tool::Select);
         assert_eq!(handles.len(), 4, "ต้องมี handle ครบสี่มุม");
 
         let (board, empty) = (board, Selection::new());
         assert!(
-            painted_handles(&board, &empty, Camera::default()).is_empty(),
+            painted_handles(&board, &empty, Camera::default(), Tool::Select).is_empty(),
             "ไม่ได้เลือกอะไรต้องไม่มี handle"
         );
     }
@@ -2966,7 +3070,12 @@ mod tests {
 
         let mut spans = Vec::new();
         for zoom in [0.05_f32, 1.0, 8.0] {
-            let handles = painted_handles(&board, &selection, Camera::new(Vec2::ZERO, zoom));
+            let handles = painted_handles(
+                &board,
+                &selection,
+                Camera::new(Vec2::ZERO, zoom),
+                Tool::Select,
+            );
             assert_eq!(handles.len(), 4, "zoom {zoom}");
             for handle in &handles {
                 assert!(
@@ -3005,7 +3114,7 @@ mod tests {
             ..ItemCanvas::default()
         };
         let (board, selection) = one_selected_item(canvas.rotation);
-        let handles = painted_handles(&board, &selection, Camera::default());
+        let handles = painted_handles(&board, &selection, Camera::default(), Tool::Select);
         assert_eq!(handles.len(), 4);
 
         // camera zoom 1 กับ pixels_per_point 1 → ระยะ world = ระยะ point ตรง ๆ
@@ -3072,6 +3181,117 @@ mod tests {
         assert!(is_delete(&WKey::Named(NamedKey::Backspace)));
         assert!(!is_delete(&key("d")));
         assert!(!is_delete(&WKey::Named(NamedKey::Enter)));
+    }
+
+    // ---------- crop (P2-7) ----------
+
+    /// docs/03 §2: `V` = Select/Move · `C` = Crop — และ Ctrl+C/Ctrl+V ต้องไม่โดนจับ
+    #[test]
+    fn the_tool_keys_do_not_steal_the_clipboard_shortcuts() {
+        let none = ModifiersState::empty();
+        assert_eq!(tool_shortcut(&key("v"), none), Some(Tool::Select));
+        assert_eq!(tool_shortcut(&key("c"), none), Some(Tool::Crop));
+        assert_eq!(tool_shortcut(&key("C"), none), Some(Tool::Crop));
+
+        // ★ Ctrl+V คือวางจาก clipboard · Ctrl+C คือคัดลอก — ห้ามกลายเป็นสลับเครื่องมือ
+        assert_eq!(tool_shortcut(&key("v"), ModifiersState::CONTROL), None);
+        assert_eq!(tool_shortcut(&key("c"), ModifiersState::CONTROL), None);
+        assert_eq!(tool_shortcut(&key("x"), none), None);
+    }
+
+    /// ★★ toolbar เป็น **ภาพสะท้อน** ของเครื่องมือจริง ไม่ใช่แหล่งความจริงคู่ขนาน
+    ///
+    /// เคยพลาดจริงตอนทำ P2-7: `ShellState` ถือ `tool` เป็นสถานะของตัวเอง แล้วชั้นแอป
+    /// เขียนกลับด้วย `if shell.tool != gfx.tool { gfx.tool = shell.tool }` ทุกเฟรม
+    /// ผลคือคีย์ลัดที่เขียน `gfx.tool` โดนค่าเก่าของ `shell` **เขียนทับกลับทันที**
+    /// อาการที่เห็น: **กด `C` แล้วไม่มีอะไรเกิดขึ้น แต่กดปุ่มบน toolbar ได้ปกติ**
+    ///
+    /// แก้โดยแยก "สิ่งที่แสดง" (`tool`) ออกจาก "สิ่งที่ผู้ใช้ขอ" (`tool_request`)
+    /// เจ้าของค่าจริงจึงมีคนเดียวและไม่ต้องพึ่งลำดับการเขียน (docs/08 §3.9 ข้อ 8.1)
+    #[test]
+    fn the_toolbar_reports_a_request_instead_of_owning_the_tool() {
+        // ชั้นแอปเขียนสำเนาไว้วาดปุ่ม
+        let mut state = crate::shell::ShellState {
+            tool: Tool::Crop,
+            ..Default::default()
+        };
+        assert!(
+            state.tool_request.is_none(),
+            "การแสดงผลต้องไม่กลายเป็นคำขอเอง — ไม่งั้นมันจะเขียนทับของจริงทุกเฟรม"
+        );
+
+        // ผู้ใช้กดปุ่มจริงถึงจะเป็นคำขอ แล้วชั้นแอปมาเก็บไปครั้งเดียว
+        state.tool_request = Some(Tool::Select);
+        assert_eq!(state.tool_request.take(), Some(Tool::Select));
+        assert!(state.tool_request.is_none(), "เก็บไปแล้วต้องไม่ค้าง");
+    }
+
+    /// ★ เครื่องมือครอปต้องวาด handle **แปดตัว** ไม่ใช่สี่
+    ///
+    /// ชั้น UI วาดจากรายการเดียวกับที่ `refx-core` ยอมให้จับ ถ้าหลุดจากกัน
+    /// ผู้ใช้จะเห็นจุดที่กดไม่ได้ หรือมีจุดที่กดได้แต่มองไม่เห็น
+    #[test]
+    fn the_crop_tool_paints_eight_handles_not_four() {
+        let (board, selection) = one_selected_item(0.0);
+        let select = painted_handles(&board, &selection, Camera::default(), Tool::Select);
+        let crop = painted_handles(&board, &selection, Camera::default(), Tool::Crop);
+
+        assert_eq!(select.len(), 4, "เครื่องมือเลือกมีแค่มุม");
+        assert_eq!(crop.len(), 8, "เครื่องมือครอปมีกลางด้านด้วย");
+        assert_eq!(
+            crop.len(),
+            refx_core::interact::handles_for(Tool::Crop).len(),
+            "จำนวนที่วาดต้องเท่ากับจำนวนที่ core ยอมให้จับเป๊ะ"
+        );
+    }
+
+    /// ★ กรอบ crop ต้องหด uv **ลงในช่องของ atlas** ไม่ใช่เอาไปใช้เป็น uv ตรง ๆ
+    ///
+    /// ถ้าใช้ตรง ๆ ภาพที่ถูกครอปจะไปหยิบ pixel ของภาพอื่นในชั้นเดียวกันมาแสดง
+    /// ซึ่งเป็นอาการที่หาสาเหตุยากมาก เพราะดูเหมือน "ภาพสลับกันเอง"
+    #[test]
+    fn cropping_narrows_the_uv_inside_its_own_atlas_slot() {
+        let slot = refx_render::atlas::AtlasSlot { layer: 0, index: 5 };
+        let full = slot.uv_rect();
+        let half = crop_uv(
+            full,
+            refx_core::board::CropRect {
+                min: Vec2::ZERO,
+                max: Vec2::new(0.5, 1.0),
+            },
+        );
+
+        assert_eq!(half[0], full[0], "ขอบซ้ายไม่ขยับ");
+        assert_eq!(half[1], full[1]);
+        assert!(
+            (half[2] - (full[0] + (full[2] - full[0]) * 0.5)).abs() < 1e-6,
+            "ขอบขวาต้องอยู่กลางช่อง ไม่ใช่กลาง texture ทั้งใบ: {half:?} ใน {full:?}"
+        );
+        assert_eq!(half[3], full[3]);
+        // และต้องไม่หลุดออกนอกช่องของตัวเองไม่ว่าค่าจะเป็นอะไร
+        for u in half {
+            assert!((full[0]..=full[2]).contains(&u) || (full[1]..=full[3]).contains(&u));
+        }
+    }
+
+    /// กรอบ crop ที่พังจากไฟล์เสียต้องไม่ทำให้ uv หลุดออกนอกช่อง (I-4)
+    #[test]
+    fn a_broken_crop_never_escapes_its_slot() {
+        let slot = refx_render::atlas::AtlasSlot {
+            layer: 3,
+            index: 200,
+        };
+        let full = slot.uv_rect();
+        for (min, max) in [
+            (Vec2::splat(f32::NAN), Vec2::splat(2.0)),
+            (Vec2::splat(-5.0), Vec2::splat(f32::INFINITY)),
+            (Vec2::splat(0.9), Vec2::splat(0.1)),
+        ] {
+            let uv = crop_uv(full, refx_core::board::CropRect { min, max });
+            assert!(uv.iter().all(|v| v.is_finite()), "{uv:?}");
+            assert!(uv[0] >= full[0] - 1e-6 && uv[2] <= full[2] + 1e-6, "{uv:?}");
+            assert!(uv[1] >= full[1] - 1e-6 && uv[3] <= full[3] + 1e-6, "{uv:?}");
+        }
     }
 
     // ---------- undo/redo (P2-4 ขั้นที่ 3) ----------

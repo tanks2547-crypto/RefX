@@ -21,8 +21,8 @@ use glam::Vec2;
 
 use crate::arena::ItemId;
 use crate::board::Board;
-use crate::board::ItemCanvas;
-use crate::command::{Command, TransformItems};
+use crate::board::{CropRect, ItemCanvas};
+use crate::command::{Command, SetCrop, TransformItems};
 use crate::geom::{Obb, Rect};
 use crate::selection::Selection;
 use crate::spatial::SpatialIndex;
@@ -86,6 +86,14 @@ pub enum CanvasEvent {
         /// ตำแหน่งใน world
         world: Vec2,
     },
+    /// ★ ดับเบิลคลิก — ตอนอยู่ในเครื่องมือครอปแปลว่า **รีเซ็ตกรอบ crop** (docs/03 §2)
+    ///
+    /// มาเป็น event ของตัวเองเพราะการรวมคลิกสองครั้งเป็นเรื่องของ OS/ชั้น UI
+    /// (ระยะเวลาและระยะทางที่ยอมรับได้ต่างกันไปตามระบบ) `refx-core` ไม่ควรเดาเอง
+    DoubleClick {
+        /// ตำแหน่งใน world
+        world: Vec2,
+    },
 }
 
 /// สิ่งที่ชั้น UI ต้องเอาไปทำต่อหลังส่ง event เข้ามาหนึ่งตัว
@@ -137,6 +145,8 @@ pub struct CanvasContext<'a> {
     pub handle_reach: f32,
     /// ระยะจากมุมที่ยังนับว่าเป็นวงหมุน ในหน่วย world (ต้องมากกว่า `handle_reach`)
     pub rotate_reach: f32,
+    /// เครื่องมือที่ผู้ใช้เลือกอยู่ — ตัดสินว่า handle ทำอะไรและมีกี่ตัว
+    pub tool: Tool,
 }
 
 /// ระยะเริ่มลากเริ่มต้น (พิกเซลบนจอ) — กันมือสั่นตอนคลิก
@@ -213,42 +223,126 @@ pub fn selection_frame(board: &Board, selection: &Selection) -> Option<Obb> {
     }
 }
 
+/// เครื่องมือที่ผู้ใช้เลือกอยู่ (docs/03 §2)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tool {
+    /// `V` — เลือก / ย้าย / สเกล / หมุน
+    #[default]
+    Select,
+    /// `C` — ครอปแบบไม่ทำลายต้นฉบับ · ดับเบิลคลิกรีเซ็ต
+    Crop,
+}
+
 /// ส่วนของกรอบที่เคอร์เซอร์จับอยู่
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Handle {
-    /// handle มุม (เลขมุมตามลำดับของ [`Obb::corners`]) = สเกล
-    Scale(usize),
+    /// handle บนกรอบ — สเกล (เครื่องมือเลือก) หรือครอป (เครื่องมือครอป)
+    Edge(HandleDir),
     /// นอก handle มุมแต่ยังใกล้มุม = หมุน
     Rotate,
 }
+
+/// ทิศของ handle ในพิกัดท้องถิ่นของกรอบ — แต่ละแกนเป็น `-1`, `0` หรือ `1`
+///
+/// ★ นิยามเดียวใช้ได้ทั้งมุมและกลางด้าน: มุม = สองแกนไม่เป็นศูนย์ · กลางด้าน =
+/// แกนหนึ่งเป็นศูนย์ · ค่านี้บอกตรง ๆ ว่า **ขอบไหนบ้างที่ handle นี้ขยับ**
+/// ซึ่งเป็นสิ่งที่การครอปต้องรู้ (สเกลใช้แค่มุม ครอปใช้ครบทั้งแปดตัว)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HandleDir {
+    /// -1 = ขอบซ้าย · 1 = ขอบขวา · 0 = ไม่แตะแกนนี้
+    pub x: i8,
+    /// -1 = ขอบบน · 1 = ขอบล่าง · 0 = ไม่แตะแกนนี้
+    pub y: i8,
+}
+
+impl HandleDir {
+    /// สี่มุม เรียงตรงกับลำดับของ[`Obb::corners`]
+    pub const CORNERS: [Self; 4] = [
+        Self { x: -1, y: -1 },
+        Self { x: 1, y: -1 },
+        Self { x: 1, y: 1 },
+        Self { x: -1, y: 1 },
+    ];
+    /// กลางด้านสี่ตัว — ใช้เฉพาะตอนครอป
+    pub const EDGES: [Self; 4] = [
+        Self { x: 0, y: -1 },
+        Self { x: 1, y: 0 },
+        Self { x: 0, y: 1 },
+        Self { x: -1, y: 0 },
+    ];
+
+    /// ตำแหน่งของ handle ตัวนี้บนกรอบ
+    #[must_use]
+    pub fn point_on(self, frame: Obb) -> Vec2 {
+        let [ax, ay] = frame.axes();
+        frame.center
+            + ax * (frame.half_size.x * f32::from(self.x))
+            + ay * (frame.half_size.y * f32::from(self.y))
+    }
+}
+
+/// handle ทุกตัวที่เครื่องมือนี้ให้จับ — ชั้น UI ใช้วาด และ hit-test ใช้ไล่ตรวจ
+///
+/// สเกลให้จับได้แค่มุม (docs/03 §2) ส่วนครอปต้องมีกลางด้านด้วย ไม่งั้น "ตัดขอบบน
+/// ออกนิดเดียว" ต้องไปลากมุมแล้วอีกแกนหนึ่งเปลี่ยนตามไปโดยไม่ได้ตั้งใจ
+#[must_use]
+pub fn handles_for(tool: Tool) -> &'static [HandleDir] {
+    match tool {
+        Tool::Select => &HandleDir::CORNERS,
+        Tool::Crop => &ALL_HANDLES,
+    }
+}
+
+/// มุมสี่ + กลางด้านสี่ (มุมมาก่อนเสมอ — ดู [`handle_at`])
+const ALL_HANDLES: [HandleDir; 8] = [
+    HandleDir::CORNERS[0],
+    HandleDir::CORNERS[1],
+    HandleDir::CORNERS[2],
+    HandleDir::CORNERS[3],
+    HandleDir::EDGES[0],
+    HandleDir::EDGES[1],
+    HandleDir::EDGES[2],
+    HandleDir::EDGES[3],
+];
 
 /// handle ที่จุดนี้แตะอยู่ — **ต้องเรียกก่อน hit-test ของภาพเสมอ**
 ///
 /// ไม่งั้นการลาก handle จะกลายเป็นการย้ายภาพ เพราะ handle มุมคร่อมตัวภาพอยู่ครึ่งหนึ่ง
 /// (HANDOFF §2.4)
-fn handle_at(frame: Obb, world: Vec2, handle_reach: f32, rotate_reach: f32) -> Option<Handle> {
+fn handle_at(
+    tool: Tool,
+    frame: Obb,
+    world: Vec2,
+    handle_reach: f32,
+    rotate_reach: f32,
+) -> Option<Handle> {
     if !world.is_finite() || !frame.center.is_finite() {
         return None;
     }
     let handle_reach = sane_reach(handle_reach);
     let rotate_reach = sane_reach(rotate_reach).max(handle_reach);
     let [ax, ay] = frame.axes();
-    let corners = frame.corners();
-    let near = |corner: Vec2, reach: f32| {
-        let offset = world - corner;
+    let near = |point: Vec2, reach: f32| {
+        let offset = world - point;
         offset.dot(ax).abs() <= reach && offset.dot(ay).abs() <= reach
     };
 
-    // ★ handle มุมมาก่อนวงหมุน — วงหมุนคลุมมุมอยู่ ถ้าตรวจวงก่อนจะสเกลไม่ได้เลย
-    if let Some(corner) = corners
+    // ★ handle มาก่อนวงหมุน — วงหมุนคลุมมุมอยู่ ถ้าตรวจวงก่อนจะจับ handle ไม่ได้เลย
+    //   (มุมมาก่อนกลางด้านด้วย เพราะที่มุมของกรอบแคบ ๆ สองอันซ้อนกันได้)
+    if let Some(dir) = handles_for(tool)
         .iter()
-        .position(|corner| near(*corner, handle_reach))
+        .find(|dir| near(dir.point_on(frame), handle_reach))
     {
-        return Some(Handle::Scale(corner));
+        return Some(Handle::Edge(*dir));
     }
     // ★ วงหมุนอยู่ **นอก** กรอบเท่านั้น — ไม่งั้นกดมุมด้านในภาพจะกลายเป็นหมุน
-    //   ทั้งที่ผู้ใช้ตั้งใจจะย้าย
-    if !frame.contains_point(world) && corners.iter().any(|corner| near(*corner, rotate_reach)) {
+    //   ทั้งที่ผู้ใช้ตั้งใจจะย้าย · ครอปไม่มีการหมุน (เครื่องมือคนละตัว)
+    if tool == Tool::Select
+        && !frame.contains_point(world)
+        && HandleDir::CORNERS
+            .iter()
+            .any(|dir| near(dir.point_on(frame), rotate_reach))
+    {
         return Some(Handle::Rotate);
     }
     None
@@ -264,8 +358,16 @@ enum Grab {
     Band,
     /// กดบนภาพ — จะกลายเป็นการย้าย
     Move,
+    /// ★ กดบนภาพ **ตอนอยู่ในเครื่องมือครอป** — เลือกได้ แต่ลากแล้วไม่มีอะไรเกิดขึ้น
+    ///
+    /// การย้ายเป็นหน้าที่ของเครื่องมือเลือก (docs/03 §2) ถ้าเครื่องมือครอปย้ายภาพได้ด้วย
+    /// ผู้ใช้ที่ตั้งใจลากขอบแล้วพลาดไปโดนกลางภาพจะย้ายภาพโดยไม่รู้ตัว
+    /// — ยังต้องเลือกภาพได้อยู่ ไม่งั้นสลับไปครอปภาพอื่นไม่ได้เลย
+    Inert,
     /// จับ handle มุม — สเกล (กรอบ ณ ตอนเริ่มกด)
-    Scale { corner: usize, frame: Obb },
+    Scale { dir: HandleDir, frame: Obb },
+    /// จับ handle — ครอป (กรอบ + สภาพ item ณ ตอนเริ่มกด)
+    Crop { dir: HandleDir, frame: Obb },
     /// จับนอก handle มุม — หมุน (กรอบ + มุมของเคอร์เซอร์ ณ ตอนเริ่มกด)
     Rotate { frame: Obb, start_angle: f32 },
 }
@@ -336,6 +438,7 @@ impl SelectTool {
             CanvasEvent::Move { world, modifiers } => {
                 self.on_move(ctx, selection, world, modifiers)
             }
+            CanvasEvent::DoubleClick { world } => self.on_double_click(ctx, selection, world),
             CanvasEvent::Release {
                 button: CanvasButton::Primary,
                 world,
@@ -379,14 +482,14 @@ impl SelectTool {
                         Some(id)
                     };
                     apply_selection(&mut out, selection, next, anchor);
-                    Grab::Move
+                    on_image(ctx.tool)
                 }
                 Some(id) => {
                     // คลิกบนภาพที่เลือกอยู่แล้ว = ไม่เปลี่ยนอะไร (จะได้ลากทั้งชุดต่อได้)
                     if !selection.contains(id) {
                         apply_selection(&mut out, selection, vec![id], Some(id));
                     }
-                    Grab::Move
+                    on_image(ctx.tool)
                 }
                 // กดที่ว่าง — ยังไม่ล้างทันที รอดูว่าจะกลายเป็นการลากกรอบไหม
                 // (ล้างตอนปล่อยแทน ดู `on_release`)
@@ -436,8 +539,24 @@ impl SelectTool {
             }
             let changes = match grab {
                 Grab::Move => move_changes(&press.moving, world - press.origin),
-                Grab::Scale { corner, frame } => {
-                    scale_changes(&press.moving, frame, corner, world, modifiers)
+                Grab::Scale { dir, frame } => {
+                    scale_changes(&press.moving, frame, dir, world, modifiers)
+                }
+                Grab::Crop { dir, frame } => {
+                    // ★ ครอปเป็น `SetCrop` ไม่ใช่ `TransformItems` — ชื่อในเมนู undo
+                    //   ต้องบอกว่าผู้ใช้ทำอะไร และมันต้องไม่ merge ข้ามชนิดกับการย้าย
+                    let changes = crop_changes(&press.moving, frame, dir, world);
+                    if changes.is_empty() {
+                        return Interaction::default();
+                    }
+                    let mut out = Interaction {
+                        needs_redraw: true,
+                        ..Interaction::default()
+                    };
+                    if let Ok(command) = SetCrop::new(changes) {
+                        out.commands.push(Box::new(command));
+                    }
+                    return out;
                 }
                 Grab::Rotate { frame, start_angle } => rotate_changes(
                     &press.moving,
@@ -447,7 +566,7 @@ impl SelectTool {
                     modifiers,
                     ctx.drag_threshold,
                 ),
-                Grab::Band => Vec::new(),
+                Grab::Band | Grab::Inert => Vec::new(),
             };
             return transform(changes);
         }
@@ -509,11 +628,106 @@ impl SelectTool {
     }
 }
 
+impl SelectTool {
+    /// ดับเบิลคลิกในเครื่องมือครอป = **รีเซ็ตกรอบ crop กลับเป็นภาพเต็ม** (docs/03 §2)
+    ///
+    /// ★ คืนเรขาคณิตให้ตรงกับภาพเต็มด้วย ไม่ใช่แค่ตั้ง `crop` กลับเป็น 0..1 —
+    /// ถ้าคืนแต่ `crop` ภาพเต็มจะถูกบีบให้อยู่ในกรอบเล็กที่เหลือจากการครอป
+    /// ซึ่งผู้ใช้เห็นเป็น "ภาพหดลง" ไม่ใช่ "ขอบที่ตัดไปกลับมา"
+    ///
+    /// ★★ **ส่วนที่ยังเห็นอยู่ต้องไม่ขยับเลย** ขอบที่ถูกตัดไปงอกกลับออกมา
+    /// **เฉพาะด้านที่มันถูกตัด** — ตัดขอบขวาไป ขอบขวาก็กลับมาทางขวา
+    /// (ถ้าคืนโดยยึดจุดกึ่งกลาง ภาพทั้งใบจะเลื่อนไปครึ่งหนึ่งของส่วนที่งอก
+    /// ซึ่งผู้ใช้เห็นเป็น "ภาพกระโดด" ทั้งที่เขาแค่กดเลิกครอป — พบตอนดูภาพหน้าจอจริง)
+    fn on_double_click(
+        &mut self,
+        ctx: CanvasContext<'_>,
+        selection: &Selection,
+        world: Vec2,
+    ) -> Interaction {
+        // การกดค้างที่ค้างอยู่ใช้ไม่ได้แล้ว — ดับเบิลคลิกจบด้วยการปล่อยเสมอ
+        self.press = None;
+        if ctx.tool != Tool::Crop {
+            return Interaction::default();
+        }
+        let Some(id) = sole_movable(ctx.board, selection) else {
+            return Interaction::default();
+        };
+        let Some(item) = ctx.board.item(id) else {
+            return Interaction::default();
+        };
+        let start = item.canvas;
+        // ต้องดับเบิลคลิก **บนภาพนั้นจริง ๆ** ไม่ใช่ที่ว่างข้าง ๆ
+        if !start.obb().contains_point(world) {
+            return Interaction::default();
+        }
+        let crop = start.crop.sanitized();
+        let window = crop.max - crop.min;
+        if window.x <= f32::EPSILON || window.y <= f32::EPSILON {
+            return Interaction::default();
+        }
+        let full = Vec2::new(start.size.x / window.x, start.size.y / window.y);
+        // มุมซ้ายบนของภาพเต็ม ในพิกัดท้องถิ่นเทียบกึ่งกลางปัจจุบัน:
+        // ส่วนที่เห็นเริ่มที่ `-size/2` และมันคือช่วง `crop.min` ของภาพเต็ม
+        let [ax, ay] = start.obb().axes();
+        let centre_local = -start.size * 0.5 - crop.min * full + full * 0.5;
+        let restored = ItemCanvas {
+            pos: start.pos + ax * centre_local.x + ay * centre_local.y,
+            size: full,
+            crop: CropRect::default(),
+            ..start
+        };
+        // ไม่มีอะไรให้รีเซ็ต = ไม่สร้างคำสั่งและไม่ขอเฟรม (I-1)
+        if restored == start {
+            return Interaction::default();
+        }
+        let mut out = Interaction {
+            needs_redraw: true,
+            // ★ รีเซ็ตเป็นขั้นเดี่ยวเสมอ ห้ามให้การลากครั้งถัดไปกลืนมันเข้าไป
+            seal: true,
+            ..Interaction::default()
+        };
+        if let Ok(command) = SetCrop::new(vec![(id, restored)]) {
+            out.commands.push(Box::new(command));
+        }
+        out
+    }
+}
+
+/// การลากที่เริ่มจากบนตัวภาพหมายถึงอะไร — ขึ้นกับเครื่องมือที่เลือกอยู่
+fn on_image(tool: Tool) -> Grab {
+    match tool {
+        Tool::Select => Grab::Move,
+        Tool::Crop => Grab::Inert,
+    }
+}
+
+/// item ตัวเดียวที่แก้ได้ในชุดที่เลือก — `None` ถ้าไม่มีหรือมีมากกว่าหนึ่ง
+fn sole_movable(board: &Board, selection: &Selection) -> Option<ItemId> {
+    let mut only = None;
+    for id in selection.iter() {
+        let Some(item) = board.item(id) else { continue };
+        if item.canvas.locked {
+            continue;
+        }
+        if only.replace(id).is_some() {
+            return None; // มากกว่าหนึ่ง
+        }
+    }
+    only
+}
+
 /// handle ที่จุดนี้จับอยู่ พร้อมข้อมูลที่การลากต้องใช้ตลอดทาง
 fn grab_handle(ctx: CanvasContext<'_>, selection: &Selection, world: Vec2) -> Option<Grab> {
     let frame = selection_frame(ctx.board, selection)?;
-    match handle_at(frame, world, ctx.handle_reach, ctx.rotate_reach)? {
-        Handle::Scale(corner) => Some(Grab::Scale { corner, frame }),
+    match handle_at(ctx.tool, frame, world, ctx.handle_reach, ctx.rotate_reach)? {
+        // ★ ครอปทำได้ **ทีละใบ** — กรอบรวมของหลายใบเป็นแค่กล่องแนวแกน ไม่ได้ผูกกับ
+        //   pixel ของภาพไหนเลย การลากขอบมันจึงไม่มีความหมายในหน่วยของภาพต้นฉบับ
+        Handle::Edge(dir) if ctx.tool == Tool::Crop => {
+            sole_movable(ctx.board, selection)?;
+            Some(Grab::Crop { dir, frame })
+        }
+        Handle::Edge(dir) => Some(Grab::Scale { dir, frame }),
         Handle::Rotate => {
             let offset = world - frame.center;
             // ★ ใกล้จุดหมุนเกินไป มุมจาก atan2 จะกระโดดจากการขยับหนึ่งพิกเซล
@@ -574,18 +788,20 @@ fn move_changes(moving: &[(ItemId, ItemCanvas)], delta: Vec2) -> Vec<(ItemId, It
 fn scale_changes(
     moving: &[(ItemId, ItemCanvas)],
     frame: Obb,
-    corner: usize,
+    dir: HandleDir,
     world: Vec2,
     modifiers: Modifiers,
 ) -> Vec<(ItemId, ItemCanvas)> {
-    let corners = frame.corners();
-    let Some(&grabbed) = corners.get(corner) else {
-        return Vec::new();
-    };
+    let grabbed = dir.point_on(frame);
     let anchor = if modifiers.alt {
         frame.center
     } else {
-        corners[(corner + 2) % 4]
+        // มุมตรงข้าม = กลับทิศทั้งสองแกน
+        HandleDir {
+            x: -dir.x,
+            y: -dir.y,
+        }
+        .point_on(frame)
     };
     let [ax, ay] = frame.axes();
     let to_local = |point: Vec2| {
@@ -633,6 +849,109 @@ fn scale_changes(
         })
         .collect()
 }
+
+/// ครอปแบบไม่ทำลายต้นฉบับ — ลาก handle แล้ว **ขอบที่ handle นั้นคุมขยับเข้า/ออก**
+///
+/// ★ หัวใจของ "ไม่ทำลายต้นฉบับ": ไม่แตะไฟล์และไม่แตะ pixel เลย เก็บเป็น
+/// `CropRect` สัดส่วน 0..1 ของภาพต้นฉบับ (docs/02 §2.1) ซึ่งยังถูกต้องแม้ผู้ใช้
+/// relink ไปหาไฟล์ที่ความละเอียดต่างออกไป
+///
+/// ★ `crop` กับ `pos`/`size` **ต้องเปลี่ยนพร้อมกันเสมอ** — ถ้าแก้แต่ `crop`
+/// ส่วนที่เหลือจะถูกยืดให้เต็มขนาดเดิม ผู้ใช้จะเห็นภาพ*ซูมเข้า*แทนที่จะเห็นภาพ*ถูกตัดขอบ*
+/// สิ่งที่ถูกคือ pixel ที่ยังเหลืออยู่ต้องอยู่ที่เดิมเป๊ะบนจอ หายไปแค่ส่วนที่ถูกตัด
+///
+/// ★ ลากกลับออกได้จนสุดขอบภาพต้นฉบับ (ไม่ใช่แค่เข้าอย่างเดียว) — คนที่ตัดเกินไป
+/// นิดเดียวต้องดึงกลับได้ทันทีโดยไม่ต้องรีเซ็ตทั้งหมดแล้วเริ่มใหม่
+fn crop_changes(
+    moving: &[(ItemId, ItemCanvas)],
+    frame: Obb,
+    dir: HandleDir,
+    world: Vec2,
+) -> Vec<(ItemId, ItemCanvas)> {
+    let [(id, start)] = moving else {
+        return Vec::new(); // ครอปทีละใบเท่านั้น
+    };
+    let (id, start) = (*id, *start);
+    let [ax, ay] = frame.axes();
+    let offset = world - frame.center;
+    if !offset.is_finite() {
+        return Vec::new();
+    }
+    let pointer = Vec2::new(offset.dot(ax), offset.dot(ay));
+    let half = frame.half_size.abs();
+    let crop = start.crop.sanitized();
+
+    // ขอบปัจจุบันในพิกัดท้องถิ่น (เทียบจุดกึ่งกลางของกรอบตอนเริ่มกด)
+    let mut low = -half;
+    let mut high = half;
+    // ★ ขอบของ **ภาพเต็ม** ในพิกัดเดียวกัน — เพดานของการลากกลับออก
+    //   `span` = ระยะที่ภาพเต็มกินบนจอ ณ สเกลปัจจุบัน
+    let axis_limits = |visible: f32, from: f32, to: f32| -> (f32, f32) {
+        let window = to - from;
+        if window <= f32::EPSILON {
+            return (-visible, visible);
+        }
+        let span = (visible * 2.0) / window;
+        (-visible - from * span, -visible + (1.0 - from) * span)
+    };
+    let (min_x, max_x) = axis_limits(half.x, crop.min.x, crop.max.x);
+    let (min_y, max_y) = axis_limits(half.y, crop.min.y, crop.max.y);
+
+    // ขอบที่เล็กที่สุดที่ยอมให้เหลือ — กันภาพยุบจนหายและกัน crop ที่กว้างเป็นศูนย์
+    let gap = MIN_CROP_SPAN;
+    match dir.x {
+        -1 => low.x = pointer.x.clamp(min_x, high.x - gap),
+        1 => high.x = pointer.x.clamp(low.x + gap, max_x),
+        _ => {}
+    }
+    match dir.y {
+        -1 => low.y = pointer.y.clamp(min_y, high.y - gap),
+        1 => high.y = pointer.y.clamp(low.y + gap, max_y),
+        _ => {}
+    }
+    if !low.is_finite() || !high.is_finite() {
+        return Vec::new();
+    }
+
+    // ขอบใหม่ (local) → กรอบ crop ใหม่ (สัดส่วนของภาพต้นฉบับ)
+    let to_fraction = |edge: f32, visible: f32, from: f32, to: f32| -> f32 {
+        let window = to - from;
+        if window <= f32::EPSILON || visible <= 0.0 {
+            return from;
+        }
+        let span = (visible * 2.0) / window;
+        from + (edge + visible) / span
+    };
+    let new_crop = CropRect {
+        min: Vec2::new(
+            to_fraction(low.x, half.x, crop.min.x, crop.max.x),
+            to_fraction(low.y, half.y, crop.min.y, crop.max.y),
+        ),
+        max: Vec2::new(
+            to_fraction(high.x, half.x, crop.min.x, crop.max.x),
+            to_fraction(high.y, half.y, crop.min.y, crop.max.y),
+        ),
+    };
+
+    let size = high - low;
+    let centre_local = (low + high) * 0.5;
+    vec![(
+        id,
+        ItemCanvas {
+            // ★ กึ่งกลางขยับตามขอบที่หด — pixel ที่เหลือจึงไม่ขยับบนจอเลย
+            pos: frame.center + ax * centre_local.x + ay * centre_local.y,
+            size,
+            crop: new_crop,
+            ..start
+        },
+    )]
+}
+
+/// กรอบ crop ที่แคบที่สุดที่ยอมให้ลากเหลือ (หน่วย world)
+///
+/// ต้องมากกว่า `MIN_ITEM_SIZE` พอสมควร ไม่งั้น `sanitized()` จะ clamp ขนาดขึ้น
+/// แล้วภาพกับกรอบ crop จะไม่ตรงกันเงียบ ๆ
+const MIN_CROP_SPAN: f32 = 1.0;
 
 /// ตัวคูณของแกนหนึ่ง — มุมที่ทับกับจุดยึดพอดีจะไม่มีทิศให้ยืด จึงคงค่าไว้
 fn ratio(now: f32, base: f32) -> f32 {
@@ -789,6 +1108,7 @@ mod tests {
         last: Option<Rect>,
         handle_reach: f32,
         rotate_reach: f32,
+        active_tool: Tool,
     }
 
     impl Harness {
@@ -804,6 +1124,7 @@ mod tests {
                     last: None,
                     handle_reach: HANDLE_REACH,
                     rotate_reach: ROTATE_REACH,
+                    active_tool: Tool::Select,
                 },
                 ids,
             )
@@ -816,6 +1137,7 @@ mod tests {
                 drag_threshold: 4.0,
                 handle_reach: self.handle_reach,
                 rotate_reach: self.rotate_reach,
+                tool: self.active_tool,
             };
             let outcome = self.tool.handle(ctx, &mut self.selection, event);
             self.last = outcome.rubber_band;
@@ -1779,6 +2101,288 @@ mod tests {
         }
     }
 
+    // ---------- crop (P2-7) ----------
+
+    /// ครอปได้ต้องเข้าเครื่องมือครอปก่อน — เทสต์กลุ่มนี้เลือกภาพเดียวแล้วสลับเครื่องมือ
+    fn cropping(n: u32) -> (Harness, Vec<ItemId>) {
+        let (mut h, ids) = Harness::new(n);
+        h.click(Vec2::ZERO);
+        h.active_tool = Tool::Crop;
+        (h, ids)
+    }
+
+    /// ★★ หัวใจของ "ไม่ทำลายต้นฉบับ": ลากขอบขวาเข้ามา แล้ว
+    /// **pixel ที่เหลือต้องอยู่ที่เดิมเป๊ะ** หายไปแค่ส่วนที่ถูกตัด
+    ///
+    /// ถ้าแก้แต่ `crop` โดยไม่หด `size`/`pos` ผู้ใช้จะเห็นภาพ *ซูมเข้า* แทนที่จะเห็น
+    /// ภาพ *ถูกตัดขอบ* ซึ่งเป็นคนละอย่างกันโดยสิ้นเชิง
+    #[test]
+    fn cropping_an_edge_trims_it_without_moving_what_is_left() {
+        let (mut h, ids) = cropping(2);
+        let before = h.canvas_of(ids[0]);
+        let left_edge = before.obb().corners()[0].x;
+
+        // ภาพกิน -50..50 — ลากขอบขวาเข้ามาที่ x = 0 (ตัดครึ่งขวาทิ้ง)
+        h.press(Vec2::new(50.0, 0.0), Modifiers::default());
+        h.drag_to(Vec2::new(0.0, 0.0));
+        h.release(Vec2::new(0.0, 0.0));
+
+        let after = h.canvas_of(ids[0]);
+        assert_eq!(after.size, Vec2::new(50.0, 100.0), "กว้างหายครึ่ง สูงเท่าเดิม");
+        assert_eq!(after.pos, Vec2::new(-25.0, 0.0), "กึ่งกลางขยับตามขอบที่หด");
+        assert!(
+            (after.obb().corners()[0].x - left_edge).abs() < 1e-4,
+            "ขอบซ้ายต้องไม่ขยับเลย — pixel ที่เหลืออยู่ที่เดิม"
+        );
+        // crop เก็บเป็นสัดส่วนของภาพต้นฉบับ (docs/02 §2.1)
+        assert_eq!(after.crop.min, Vec2::ZERO);
+        assert!((after.crop.max.x - 0.5).abs() < 1e-4, "{:?}", after.crop);
+        assert!((after.crop.max.y - 1.0).abs() < 1e-4);
+    }
+
+    /// ครอปสองครั้งต้องทบกันถูก — สัดส่วนรอบสองคิดจากภาพ**ต้นฉบับ** ไม่ใช่จากที่เหลือ
+    #[test]
+    fn cropping_twice_composes_against_the_original_image() {
+        let (mut h, ids) = cropping(2);
+
+        h.press(Vec2::new(50.0, 0.0), Modifiers::default());
+        h.drag_to(Vec2::ZERO);
+        h.release(Vec2::ZERO);
+        // ตอนนี้ภาพกิน -50..0 และ crop.max.x = 0.5
+
+        h.press(Vec2::new(0.0, 0.0), Modifiers::default());
+        h.drag_to(Vec2::new(-25.0, 0.0));
+        h.release(Vec2::new(-25.0, 0.0));
+
+        let after = h.canvas_of(ids[0]);
+        assert_eq!(after.size.x, 25.0);
+        assert!(
+            (after.crop.max.x - 0.25).abs() < 1e-4,
+            "ครอปเหลือหนึ่งในสี่ของ**ต้นฉบับ** ไม่ใช่ครึ่งของที่เหลือ: {:?}",
+            after.crop
+        );
+    }
+
+    /// ★ ลากกลับออกได้จนสุดขอบภาพต้นฉบับ — ตัดเกินไปนิดเดียวต้องดึงคืนได้ทันที
+    #[test]
+    fn an_edge_can_be_dragged_back_out_but_never_past_the_original() {
+        let (mut h, ids) = cropping(2);
+
+        h.press(Vec2::new(50.0, 0.0), Modifiers::default());
+        h.drag_to(Vec2::ZERO); // ตัดครึ่งขวา
+        h.drag_to(Vec2::new(25.0, 0.0)); // ดึงกลับออกครึ่งหนึ่งของที่ตัด
+        h.release(Vec2::new(25.0, 0.0));
+        let back = h.canvas_of(ids[0]);
+        assert_eq!(back.size.x, 75.0);
+        assert!((back.crop.max.x - 0.75).abs() < 1e-4);
+
+        // ลากออกไปไกลกว่าภาพต้นฉบับ — ต้องหยุดที่ขอบภาพ ไม่ใช่ยืดภาพออก
+        h.press(Vec2::new(25.0, 0.0), Modifiers::default());
+        h.drag_to(Vec2::new(9_000.0, 0.0));
+        h.release(Vec2::new(9_000.0, 0.0));
+        let full = h.canvas_of(ids[0]);
+        assert_eq!(full.size.x, 100.0, "หยุดที่ความกว้างของภาพต้นฉบับ");
+        assert!((full.crop.max.x - 1.0).abs() < 1e-4);
+        assert_eq!(full.pos, Vec2::ZERO, "กลับมาเต็มใบแล้วต้องอยู่ที่เดิม");
+    }
+
+    /// กลางด้านขยับแกนเดียว · มุมขยับสองแกน
+    #[test]
+    fn edge_handles_move_one_axis_and_corner_handles_move_two() {
+        let (mut h, ids) = cropping(2);
+        h.press(Vec2::new(0.0, -50.0), Modifiers::default()); // กลางด้านบน
+        h.drag_to(Vec2::new(0.0, -20.0));
+        h.release(Vec2::new(0.0, -20.0));
+        let after = h.canvas_of(ids[0]);
+        assert_eq!(after.size, Vec2::new(100.0, 70.0), "กว้างต้องไม่เปลี่ยน");
+
+        let (mut h, ids) = cropping(2);
+        h.press(Vec2::new(50.0, 50.0), Modifiers::default()); // มุมขวาล่าง
+        h.drag_to(Vec2::new(20.0, 30.0));
+        h.release(Vec2::new(20.0, 30.0));
+        let after = h.canvas_of(ids[0]);
+        assert_eq!(after.size, Vec2::new(70.0, 80.0), "มุมตัดสองแกนพร้อมกัน");
+    }
+
+    /// ★ ครอปแล้ว hit-test ต้องใช้กรอบใหม่ — คลิกในส่วนที่ถูกตัดออกไปต้องไม่โดน
+    #[test]
+    fn hit_testing_ignores_the_part_that_was_cropped_away() {
+        let (mut h, ids) = cropping(2);
+        assert_eq!(
+            h.index.hit_test(&h.board, Vec2::new(40.0, 0.0)),
+            Some(ids[0])
+        );
+
+        h.press(Vec2::new(50.0, 0.0), Modifiers::default());
+        h.drag_to(Vec2::ZERO);
+        h.release(Vec2::ZERO);
+        h.index.rebuild(&h.board);
+
+        assert_eq!(
+            h.index.hit_test(&h.board, Vec2::new(40.0, 0.0)),
+            None,
+            "ส่วนที่ถูกตัดไปแล้วต้องกดไม่โดน"
+        );
+        assert_eq!(
+            h.index.hit_test(&h.board, Vec2::new(-40.0, 0.0)),
+            Some(ids[0]),
+            "ส่วนที่ยังเหลือยังกดโดนตามปกติ"
+        );
+    }
+
+    /// docs/03 §2: ดับเบิลคลิกรีเซ็ต — และต้องคืน**เรขาคณิต**ด้วย ไม่ใช่แค่ค่า `crop`
+    #[test]
+    fn double_clicking_resets_the_crop_and_the_geometry_together() {
+        let (mut h, ids) = cropping(2);
+        let original = h.canvas_of(ids[0]);
+
+        h.press(Vec2::new(50.0, 50.0), Modifiers::default());
+        h.drag_to(Vec2::new(-20.0, -10.0));
+        h.release(Vec2::new(-20.0, -10.0));
+        let cropped = h.canvas_of(ids[0]);
+        assert_ne!(cropped.size, original.size);
+
+        h.feed(CanvasEvent::DoubleClick {
+            world: cropped.pos, // กลางภาพที่ครอปแล้ว
+        });
+
+        let reset = h.canvas_of(ids[0]);
+        assert_eq!(reset.crop, CropRect::default(), "กรอบ crop กลับเป็นภาพเต็ม");
+        // ★ ส่วนที่ยังเห็นอยู่ต้องไม่ขยับ — มุมซ้ายบนของภาพที่ครอปแล้วยังอยู่ที่เดิม
+        //   เทียบกับตำแหน่งเดียวกันในภาพเต็ม (ครอปจากมุมขวาล่าง ขอบซ้ายบนจึงไม่ขยับ)
+        assert!(
+            (reset.obb().corners()[0] - cropped.obb().corners()[0]).length() < 1e-3,
+            "ขอบที่ไม่ได้ถูกตัดต้องอยู่ที่เดิม: {:?} vs {:?}",
+            reset.obb().corners()[0],
+            cropped.obb().corners()[0]
+        );
+        // ขนาดคืนมาจากการหารด้วยสัดส่วน จึงคลาดเคลื่อนระดับ f32 ได้ ไม่ใช่เท่าเป๊ะ
+        assert!(
+            (reset.size - original.size).length() < 1e-3,
+            "ขนาดต้องกลับมาเท่าภาพเต็ม: {:?} vs {:?}",
+            reset.size,
+            original.size
+        );
+    }
+
+    /// ดับเบิลคลิกตอนไม่ได้อยู่ในเครื่องมือครอป ต้องไม่แตะอะไรเลย
+    #[test]
+    fn double_clicking_outside_the_crop_tool_changes_nothing() {
+        let (mut h, ids) = cropping(2);
+        h.press(Vec2::new(50.0, 50.0), Modifiers::default());
+        h.drag_to(Vec2::new(0.0, 0.0));
+        h.release(Vec2::new(0.0, 0.0));
+        let cropped = h.canvas_of(ids[0]);
+
+        h.active_tool = Tool::Select;
+        h.feed(CanvasEvent::DoubleClick { world: cropped.pos });
+        assert_eq!(h.canvas_of(ids[0]), cropped);
+
+        // และดับเบิลคลิกที่ว่างตอนอยู่ในเครื่องมือครอปก็ต้องไม่รีเซ็ต
+        h.active_tool = Tool::Crop;
+        h.feed(CanvasEvent::DoubleClick {
+            world: Vec2::new(600.0, 600.0),
+        });
+        assert_eq!(h.canvas_of(ids[0]), cropped);
+    }
+
+    /// ★ เกณฑ์เดียวกับ P2-5: ลากค้าง = 1 undo กลับที่เดิมเป๊ะ · ปล่อยแล้ว seal
+    #[test]
+    fn a_long_crop_drag_is_one_undo_and_two_drags_stay_separate() {
+        let (mut h, ids) = cropping(2);
+        let original = h.canvas_of(ids[0]);
+
+        h.press(Vec2::new(50.0, 0.0), Modifiers::default());
+        for step in 1..=200 {
+            h.drag_to(Vec2::new(50.0 - step as f32 * 0.2, 0.0));
+        }
+        h.release(Vec2::new(10.0, 0.0));
+        assert_eq!(h.history.undo_depth(), 1, "ลากค้างต้องเป็นขั้นเดียว");
+
+        h.press(Vec2::new(10.0, 0.0), Modifiers::default());
+        h.drag_to(Vec2::new(0.0, 0.0));
+        h.release(Vec2::new(0.0, 0.0));
+        assert_eq!(h.history.undo_depth(), 2, "ปล่อยแล้วลากใหม่ = คนละขั้น");
+
+        h.history.undo(&mut h.board).unwrap();
+        h.history.undo(&mut h.board).unwrap();
+        assert_eq!(h.canvas_of(ids[0]), original, "ย้อนครบต้องคืนสภาพเป๊ะ");
+    }
+
+    /// ★ ครอปกับการย้าย **ห้าม merge ข้ามกัน** แม้จะแตะ item ตัวเดียวกัน
+    ///
+    /// ผู้ใช้ที่ครอปเสร็จแล้วสลับไปย้ายต่อ ต้องกด Ctrl+Z แล้วได้การย้ายคืนอย่างเดียว
+    /// ไม่ใช่เสียการครอปไปด้วยทั้งที่ไม่ได้ขอ
+    #[test]
+    fn a_crop_never_merges_with_a_move() {
+        let (mut h, ids) = cropping(2);
+        h.press(Vec2::new(50.0, 0.0), Modifiers::default());
+        h.drag_to(Vec2::new(20.0, 0.0));
+        // ★ จงใจไม่ปล่อยเมาส์ (ไม่ seal) แล้วสลับเครื่องมือ — หน้าต่าง merge ยังเปิดอยู่
+        h.active_tool = Tool::Select;
+        let cropped = h.canvas_of(ids[0]);
+
+        h.press(cropped.pos, Modifiers::default());
+        h.drag_to(cropped.pos + Vec2::new(200.0, 0.0));
+        h.release(cropped.pos + Vec2::new(200.0, 0.0));
+
+        assert_eq!(h.history.undo_depth(), 2, "ต้องเป็นสองขั้น ไม่ใช่ขั้นเดียว");
+        h.history.undo(&mut h.board).unwrap();
+        let after_undo = h.canvas_of(ids[0]);
+        assert_eq!(after_undo.crop, cropped.crop, "ย้อนการย้ายต้องไม่เสียการครอป");
+        assert_eq!(after_undo.size, cropped.size);
+    }
+
+    /// เลือกหลายใบแล้วครอปไม่ได้ — กรอบรวมไม่ได้ผูกกับ pixel ของภาพไหนเลย
+    #[test]
+    fn cropping_needs_exactly_one_item() {
+        let (mut h, ids) = Harness::new(3);
+        h.press(Vec2::ZERO, CTRL);
+        h.release(Vec2::ZERO);
+        h.press(Vec2::new(200.0, 0.0), CTRL);
+        h.release(Vec2::new(200.0, 0.0));
+        h.active_tool = Tool::Crop;
+        let before = (h.canvas_of(ids[0]), h.canvas_of(ids[1]));
+
+        let corner = selection_frame(&h.board, &h.selection).unwrap().corners()[2];
+        h.press(corner, Modifiers::default());
+        h.drag_to(corner - Vec2::splat(40.0));
+        h.release(corner - Vec2::splat(40.0));
+
+        assert_eq!((h.canvas_of(ids[0]), h.canvas_of(ids[1])), before);
+        assert_eq!(h.history.undo_depth(), 0);
+    }
+
+    /// เครื่องมือครอปมี handle แปดตัว เครื่องมือเลือกมีสี่ — และมุมมาก่อนกลางด้านเสมอ
+    #[test]
+    fn the_crop_tool_offers_edge_handles_that_select_does_not() {
+        assert_eq!(handles_for(Tool::Select).len(), 4);
+        assert_eq!(handles_for(Tool::Crop).len(), 8);
+        assert!(
+            handles_for(Tool::Crop)[..4]
+                .iter()
+                .all(|dir| dir.x != 0 && dir.y != 0),
+            "สี่ตัวแรกต้องเป็นมุม ไม่งั้นกลางด้านจะแย่งการกดที่มุมของกรอบแคบ ๆ"
+        );
+    }
+
+    /// I-4: พิกัดพังระหว่างครอปต้องไม่ทำให้ค่าใน `ItemCanvas` เพี้ยน
+    #[test]
+    fn non_finite_input_never_corrupts_a_crop() {
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let (mut h, ids) = cropping(2);
+            h.press(Vec2::new(50.0, 50.0), Modifiers::default());
+            h.drag_to(Vec2::new(bad, 10.0));
+            h.drag_to(Vec2::new(10.0, bad));
+            h.release(Vec2::new(bad, bad));
+
+            let canvas = h.canvas_of(ids[0]);
+            assert!(canvas.is_sane(), "{bad}: {canvas:?}");
+            assert!(canvas.crop.min.is_finite() && canvas.crop.max.is_finite());
+            assert!(canvas.crop.max.x >= canvas.crop.min.x);
+        }
+    }
+
     // ---------- I-1 / ความทนทาน ----------
 
     /// ★ I-1: event ที่ไม่ได้เปลี่ยนอะไรต้องไม่ขอวาดเฟรมใหม่
@@ -1793,6 +2397,7 @@ mod tests {
             drag_threshold: 4.0,
             handle_reach: HANDLE_REACH,
             rotate_reach: ROTATE_REACH,
+            tool: Tool::Select,
         };
 
         let outcome = tool.handle(
