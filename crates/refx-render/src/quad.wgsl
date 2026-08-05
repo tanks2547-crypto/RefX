@@ -14,17 +14,6 @@ const FLAG_INVERT:      u32 = 2u;
 const FLAG_SELECTED:    u32 = 4u;
 const FLAG_PLACEHOLDER: u32 = 8u;
 
-// brightness/contrast ยัดอยู่ในบิตบนของ flags อย่างละ 8 บิต (ดู instance.rs)
-// เพราะ QuadInstance ถูกตรึงไว้ที่ 64 ไบต์ตาม docs/04 §3 — ขยายไม่ได้โดยไม่แก้ spec
-const BRIGHTNESS_SHIFT: u32 = 16u;
-const CONTRAST_SHIFT:   u32 = 24u;
-const ADJUST_NEUTRAL:   f32 = 128.0;
-const ADJUST_SCALE:     f32 = 127.0;
-
-/// 8 บิต → -1.0..=1.0
-fn unpack_adjust(bits: u32, shift: u32) -> f32 {
-    return (f32((bits >> shift) & 255u) - ADJUST_NEUTRAL) / ADJUST_SCALE;
-}
 
 // luminance ของ Rec. 709 — ไม่ใช่ค่าเฉลี่ยธรรมดา
 // ผลต่างเห็นชัดมากเวลานักวาดใช้เช็ค value ของภาพ
@@ -60,6 +49,8 @@ struct InstanceInput {
     @location(3) tint:        vec4<f32>,
     @location(4) layer:       u32,
     @location(5) flags:       u32,
+    // [brightness, contrast] เป็น f32 เต็ม — location 6 เป็นของมุม quad
+    @location(7) adjust:      vec2<f32>,
 };
 
 struct VertexOutput {
@@ -68,6 +59,7 @@ struct VertexOutput {
     @location(1) tint:  vec4<f32>,
     // ต้อง flat: ค่าเดียวกันทั้ง primitive ห้าม interpolate
     @location(2) @interpolate(flat) flags: u32,
+    @location(5) @interpolate(flat) adjust: vec2<f32>,
     @location(3) @interpolate(flat) layer: u32,
     // ตำแหน่งภายใน quad (0..1) ใช้วาดกรอบเลือก
     @location(4) local: vec2<f32>,
@@ -93,6 +85,7 @@ fn vs_main(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
     out.uv = mix(instance.uv_rect.xy, instance.uv_rect.zw, vertex.corner);
     out.tint = instance.tint;
     out.flags = instance.flags;
+    out.adjust = instance.adjust;
     out.layer = instance.layer;
     out.local = vertex.corner;
     return out;
@@ -110,8 +103,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // ★ brightness/contrast — ไม่มี if เลยโดยโครงสร้าง: ค่ากลางให้ผลเป็นตัวมันเอง
     //   (brightness 0 บวกศูนย์ · contrast 0 คูณหนึ่ง) จึงไม่ต้อง select() ด้วยซ้ำ
     //   ทำ **ก่อน** grayscale เพื่อให้ผู้ใช้ที่ปรับค่าแล้วสลับไปดูขาวดำ เห็นค่าที่ปรับแล้ว
-    let brightness = unpack_adjust(in.flags, BRIGHTNESS_SHIFT);
-    let contrast = unpack_adjust(in.flags, CONTRAST_SHIFT);
+    //   ★ เป็น f32 เต็มตั้งแต่ 4 ส.ค. 2026 (docs/04 §3.5) — เดิมยัดใน 8 บิตต่อค่า
+    let brightness = in.adjust.x;
+    let contrast = in.adjust.y;
     let adjusted = (color.rgb + vec3<f32>(brightness) - vec3<f32>(0.5))
         * (1.0 + contrast) + vec3<f32>(0.5);
     color = vec4<f32>(clamp(adjusted, vec3<f32>(0.0), vec3<f32>(1.0)), color.a);

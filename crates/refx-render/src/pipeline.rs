@@ -501,11 +501,11 @@ mod tests {
         QuadInstance {
             transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
             uv_rect: [0.0, 0.0, 1.0, 1.0],
-            tint: rgba,
+            tint: crate::instance::pack_tint(rgba),
             layer: 0,
-            flags: crate::instance::flags::PLACEHOLDER
-                | QuadInstance::neutral_adjust()
-                | extra_flags,
+            flags: crate::instance::flags::PLACEHOLDER | extra_flags,
+            adjust: QuadInstance::NEUTRAL_ADJUST,
+            reserved: 0,
         }
     }
 
@@ -552,9 +552,9 @@ mod tests {
             return;
         };
         let source = [0.5, 0.5, 0.5, 1.0];
-        let shoot = |bits: u32| {
+        let shoot = |adjust: [f32; 2]| {
             let mut quad = flat_quad(source, 0);
-            quad.flags = (quad.flags & 0xFFFF) | bits;
+            quad.adjust = adjust;
             render_pixel(
                 &device,
                 &queue,
@@ -565,9 +565,9 @@ mod tests {
             )
         };
 
-        let neutral = shoot(QuadInstance::neutral_adjust());
-        let brighter = shoot(QuadInstance::adjust_bits(0.4, 0.0));
-        let darker = shoot(QuadInstance::adjust_bits(-0.4, 0.0));
+        let neutral = shoot(QuadInstance::NEUTRAL_ADJUST);
+        let brighter = shoot([0.4, 0.0]);
+        let darker = shoot([-0.4, 0.0]);
         assert!(
             brighter[0] > neutral[0] + 40 && darker[0] + 40 < neutral[0],
             "brightness ต้องขยับ pixel จริง: มืด {darker:?} กลาง {neutral:?} สว่าง {brighter:?}"
@@ -576,9 +576,9 @@ mod tests {
         // contrast ที่เทากลางพอดีต้องไม่ขยับ (เป็นจุดหมุนของสูตร) —
         // จึงต้องวัดกับสีที่ **ไม่ใช่** 0.5 ถึงจะเห็นผล
         let dim = [0.25, 0.25, 0.25, 1.0];
-        let with_contrast = |bits: u32| {
+        let with_contrast = |adjust: [f32; 2]| {
             let mut quad = flat_quad(dim, 0);
-            quad.flags = (quad.flags & 0xFFFF) | bits;
+            quad.adjust = adjust;
             render_pixel(
                 &device,
                 &queue,
@@ -588,14 +588,87 @@ mod tests {
                 full_target_camera(),
             )
         };
-        let plain = with_contrast(QuadInstance::neutral_adjust());
-        let punchy = with_contrast(QuadInstance::adjust_bits(0.0, 0.6));
-        let flat = with_contrast(QuadInstance::adjust_bits(0.0, -0.6));
+        let plain = with_contrast(QuadInstance::NEUTRAL_ADJUST);
+        let punchy = with_contrast([0.0, 0.6]);
+        let flat = with_contrast([0.0, -0.6]);
         assert!(
             punchy[0] < plain[0] && flat[0] > plain[0],
             "สีที่มืดกว่ากลางต้องมืดลงเมื่อเพิ่ม contrast และจางลงเมื่อลด: \
              เพิ่ม {punchy:?} เดิม {plain:?} ลด {flat:?}"
         );
+    }
+
+    /// ★★ พิสูจน์ว่าการทวงที่คืนจาก `tint` **ได้ความละเอียดจริง** (docs/04 §3.5)
+    ///
+    /// เลือกค่าสองตัวที่ **ตกในถังเดียวกันของการแพ็กแบบ 8 บิตเดิม** (ก้าวละ 1/127):
+    /// `25/127 ± 0.0035` → ทั้งคู่ปัดเป็น 25 เหมือนกัน = เดิมให้ pixel เดียวกันเป๊ะ
+    ///
+    /// แต่ระยะห่างจริงของมัน (0.007) กว้างกว่าหนึ่งขั้นของ framebuffer 8 บิต
+    /// (1/255 ≈ 0.0039) → **ตาเห็นความต่างได้** ถ้าเก็บเป็น f32
+    ///
+    /// ★ เทสต์รุ่นแรกของข้อนี้ **ผ่านทั้งที่ยังแพ็ก 8 บิตอยู่** เพราะเลือกช่วงกว้างเกิน
+    /// หนึ่งถัง — negative control จับได้ ถ้าไม่ได้ลองทำให้มันพัง เราจะเชื่อผิดว่า
+    /// การเปลี่ยน layout ได้ผล ทั้งที่เทสต์ไม่ได้วัดสิ่งนั้นเลย (docs/08 §3.9 ข้อ 1)
+    #[test]
+    fn the_reclaimed_bytes_actually_buy_finer_brightness_steps() {
+        let Some((device, queue, atlas, pipeline)) = pixel_harness() else {
+            eprintln!("ข้าม: ไม่มี GPU adapter");
+            return;
+        };
+        let source = [0.5, 0.5, 0.5, 1.0];
+        let shoot = |brightness: f32| {
+            let mut quad = flat_quad(source, 0);
+            quad.adjust = [brightness, 0.0];
+            render_pixel(
+                &device,
+                &queue,
+                &atlas,
+                &pipeline,
+                quad,
+                full_target_camera(),
+            )[0]
+        };
+
+        // จุดกึ่งกลางของถังที่ 25 ในการแพ็กแบบเดิม
+        let bucket = 25.0 / 127.0;
+        let low = shoot(bucket - 0.0035);
+        let high = shoot(bucket + 0.0035);
+
+        assert_ne!(
+            low, high,
+            "สองค่านี้เคยตกถังเดียวกันตอนแพ็ก 8 บิต — ถ้ายังให้ pixel เดียวกัน              แปลว่าเปลี่ยน layout แล้วแต่ไม่ได้ความละเอียดกลับมา"
+        );
+        assert!(high > low, "ค่าที่สูงกว่าต้องสว่างกว่า: {low} vs {high}");
+    }
+
+    /// `tint` ที่เป็นไบต์แล้วต้องยังให้สีเดิมกลับมาในระดับที่ตาแยกไม่ออก
+    #[test]
+    fn packing_the_tint_into_bytes_does_not_shift_the_colour() {
+        let Some((device, queue, atlas, pipeline)) = pixel_harness() else {
+            eprintln!("ข้าม: ไม่มี GPU adapter");
+            return;
+        };
+        for source in [
+            [0.0, 0.25, 0.5, 1.0],
+            [1.0, 0.75, 0.333, 1.0],
+            [0.125, 0.875, 0.625, 1.0],
+        ] {
+            let got = render_pixel(
+                &device,
+                &queue,
+                &atlas,
+                &pipeline,
+                flat_quad(source, 0),
+                full_target_camera(),
+            );
+            for (channel, want) in got[..3].iter().zip(source) {
+                let want = (want * 255.0_f32).round() as u8;
+                assert!(
+                    channel.abs_diff(want) <= 1,
+                    "{source:?}: ได้ {got:?} คลาดจาก {want} เกินหนึ่งขั้น"
+                );
+            }
+        }
     }
 
     /// ★ grayscale ระดับ board มาจาก **uniform ตัวเดียว** — instance ไม่เปลี่ยนเลย

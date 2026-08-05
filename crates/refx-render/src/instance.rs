@@ -19,38 +19,6 @@ pub mod flags {
     ///
     /// docs/04 §8: ห้ามรอ ห้ามข้าม ผู้ใช้ต้องเห็น layout ทันที
     pub const PLACEHOLDER: u32 = 1 << 3;
-
-    /// บิตที่เหลือของ `flags` ใช้เก็บ brightness/contrast แบบ 8 บิตต่อค่า
-    ///
-    /// ★ **ทำไมยัดลงบิตแทนที่จะเพิ่มฟิลด์:** `QuadInstance` ถูกตรึงไว้ที่ **64 ไบต์**
-    /// และตัวเลขนั้นอยู่ใน `docs/04 §3` พร้อมงบ VRAM ที่คำนวณจากมัน (1000 ภาพ = 64 KB)
-    /// การขยายเป็น 80 ไบต์คือการแก้ spec ซึ่งต้องถามเจ้าของก่อน — ทางที่ไม่ต้องแก้ spec
-    /// คือใช้บิตที่ยังว่างอยู่ 28 บิต
-    ///
-    /// ความละเอียด 1/127 ต่อขั้น ซึ่งละเอียดกว่าที่ตาแยกออกบนสไลเดอร์ -1..1
-    pub mod adjust {
-        /// บิตแรกของ brightness (8 บิต, 128 = ไม่เปลี่ยน)
-        pub const BRIGHTNESS_SHIFT: u32 = 16;
-        /// บิตแรกของ contrast (8 บิต, 128 = ไม่เปลี่ยน)
-        pub const CONTRAST_SHIFT: u32 = 24;
-        /// ค่าที่แปลว่า "ไม่เปลี่ยน"
-        pub const NEUTRAL: u32 = 128;
-
-        /// `-1.0..=1.0` → 8 บิต · ค่าที่ไม่ใช่ตัวเลขตกเป็นกลาง (I-4)
-        #[must_use]
-        pub fn pack(value: f32) -> u32 {
-            if !value.is_finite() {
-                return NEUTRAL;
-            }
-            // ปัดแบบ round-half-away — 0.0 ต้องได้ NEUTRAL เป๊ะเสมอ
-            #[expect(
-                clippy::cast_possible_truncation,
-                reason = "clamp มาก่อนแล้ว ค่าอยู่ใน 0..=255 เสมอ"
-            )]
-            let packed = (value.clamp(-1.0, 1.0) * 127.0).round() as i32 + NEUTRAL as i32;
-            packed.clamp(0, 255) as u32
-        }
-    }
 }
 
 /// ข้อมูลหนึ่งภาพที่ส่งให้ GPU
@@ -64,12 +32,26 @@ pub struct QuadInstance {
     pub transform: [f32; 6],
     /// ตำแหน่งใน atlas หรือ crop rect: `[u0, v0, u1, v1]`
     pub uv_rect: [f32; 4],
-    /// คูณสี rgb + alpha (opacity)
-    pub tint: [f32; 4],
+    /// ★ คูณสี rgba — **`u8` ไม่ใช่ `f32`** (`VertexFormat::Unorm8x4`)
+    ///
+    /// GPU ขยาย `0..=255` เป็น `0.0..=1.0` ให้ฟรี shader จึงยังอ่านเป็น `vec4<f32>`
+    /// เหมือนเดิมทุกประการ · ปลายทางเป็น framebuffer 8 บิตต่อช่องอยู่แล้ว
+    /// `f32` ตรงนี้จึงให้ความละเอียดที่มองไม่เห็นความต่าง (docs/04 §3.5)
+    ///
+    /// **ข้อจำกัดที่ยอมรับ:** tint เกิน 1.0 ไม่ได้ (ไม่มี HDR multiply) —
+    /// การทำให้สว่างกว่าต้นฉบับเป็นหน้าที่ของ [`Self::adjust`] ไม่ใช่ tint
+    pub tint: [u8; 4],
     /// ชั้นใน texture array
     pub layer: u32,
     /// bitfield ดู [`flags`]
     pub flags: u32,
+    /// ★ `[brightness, contrast]` เป็น **f32 เต็ม** ช่วง `-1.0..=1.0`
+    ///
+    /// ที่มาของ 8 ไบต์นี้คือที่ที่ทวงคืนจาก `tint` (docs/04 §3.5) —
+    /// เดิมเคยยัดลง 16 บิตบนของ `flags` ซึ่งได้ความละเอียดแค่ 1/127 ต่อขั้น
+    pub adjust: [f32; 2],
+    /// เผื่อไว้ให้ครบ 64 ไบต์ — **ห้ามใช้โดยไม่แก้ `ATTRIBUTES` ให้ตรงกัน**
+    pub reserved: u32,
 }
 
 // ★ ขนาดต้องเป็น 64 ไบต์เป๊ะ (docs/04 §3) ถ้าเปลี่ยนแล้วงบ VRAM/แบนด์วิดท์เปลี่ยนตาม
@@ -79,13 +61,19 @@ impl QuadInstance {
     /// layout ของ instance buffer สำหรับ render pipeline
     ///
     /// WGSL ไม่มี `vec6` จึงต้องแยก `transform` เป็น `vec4 + vec2`
-    pub const ATTRIBUTES: [wgpu::VertexAttribute; 6] = wgpu::vertex_attr_array![
-        0 => Float32x4,  // transform[0..4] = a, b, c, d
-        1 => Float32x2,  // transform[4..6] = tx, ty
-        2 => Float32x4,  // uv_rect
-        3 => Float32x4,  // tint
-        4 => Uint32,     // layer
-        5 => Uint32,     // flags
+    /// ★ **ลำดับในนี้ต้องตรงกับลำดับฟิลด์ของ struct เป๊ะ** — มาโครคิด offset
+    /// จากขนาดของ format ที่ไล่มาก่อนหน้า ไม่ได้อ่านจาก struct จริง
+    ///
+    /// location 6 เป็นของ vertex buffer มุม quad อยู่แล้ว `adjust` จึงไปที่ 7
+    /// ส่วน `reserved` (4 ไบต์ท้าย) ไม่ถูก bind — `array_stride` ครอบมันไว้เฉย ๆ
+    pub const ATTRIBUTES: [wgpu::VertexAttribute; 7] = wgpu::vertex_attr_array![
+        0 => Float32x4,  // transform[0..4] = a, b, c, d   @ 0
+        1 => Float32x2,  // transform[4..6] = tx, ty       @ 16
+        2 => Float32x4,  // uv_rect                        @ 24
+        3 => Unorm8x4,   // tint (u8 → 0..1 ให้ฟรี)        @ 40
+        4 => Uint32,     // layer                          @ 44
+        5 => Uint32,     // flags                          @ 48
+        7 => Float32x2,  // adjust = [brightness, contrast] @ 52
     ];
 
     /// คำอธิบาย vertex buffer สำหรับ instance step mode
@@ -104,28 +92,40 @@ impl QuadInstance {
         Self {
             transform: [width, 0.0, 0.0, height, x, y],
             uv_rect: [0.0, 0.0, 1.0, 1.0],
-            tint: rgba,
+            tint: pack_tint(rgba),
             layer: 0,
-            flags: flags::PLACEHOLDER | Self::neutral_adjust(),
+            flags: flags::PLACEHOLDER,
+            adjust: [0.0, 0.0],
+            reserved: 0,
         }
     }
 
-    /// บิต brightness/contrast ที่แปลว่า "ไม่เปลี่ยนอะไร"
+    /// ค่า `adjust` ที่แปลว่า "ไม่เปลี่ยนอะไร"
     ///
-    /// ★ **ต้องใส่เสมอแม้ไม่ได้ปรับอะไร** — บิตศูนย์แปลว่า brightness = -1.0
-    /// (มืดสนิท) ไม่ใช่ "ไม่เปลี่ยน" ลืมข้อนี้แล้วภาพทุกใบจะดำทั้งจอ
-    #[must_use]
-    pub const fn neutral_adjust() -> u32 {
-        (flags::adjust::NEUTRAL << flags::adjust::BRIGHTNESS_SHIFT)
-            | (flags::adjust::NEUTRAL << flags::adjust::CONTRAST_SHIFT)
-    }
+    /// ★ ตอนนี้เป็น **ศูนย์ตรง ๆ** ซึ่งเป็นค่า `Default` ด้วย — ต่างจากตอนที่ยัดลงบิต
+    /// ที่ศูนย์แปลว่า "มืดสนิท" แล้วลืมใส่ทีเดียวภาพดำทั้งจอ (กับดักนั้นหายไปแล้ว)
+    pub const NEUTRAL_ADJUST: [f32; 2] = [0.0, 0.0];
+}
 
-    /// บิตของ brightness/contrast จากค่า `-1.0..=1.0`
-    #[must_use]
-    pub fn adjust_bits(brightness: f32, contrast: f32) -> u32 {
-        (flags::adjust::pack(brightness) << flags::adjust::BRIGHTNESS_SHIFT)
-            | (flags::adjust::pack(contrast) << flags::adjust::CONTRAST_SHIFT)
-    }
+/// `0.0..=1.0` ต่อช่อง → ไบต์ที่ GPU จะขยายกลับเป็น `0.0..=1.0` ให้เอง
+///
+/// ค่าที่ไม่ใช่ตัวเลขตกเป็น 0 (I-4) — `NaN` ที่หลุดไปถึง GPU ทำให้ภาพหายทั้งจอ
+/// โดยไม่มี error ที่ไหนเลย
+#[must_use]
+pub fn pack_tint(rgba: [f32; 4]) -> [u8; 4] {
+    rgba.map(|channel| {
+        if channel.is_finite() {
+            #[expect(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "clamp มาก่อนแล้ว ค่าอยู่ใน 0..=255 เสมอ"
+            )]
+            let byte = (channel.clamp(0.0, 1.0) * 255.0).round() as u8;
+            byte
+        } else {
+            0
+        }
+    })
 }
 
 /// buffer ที่จองครั้งเดียวตอนเปิดโปรแกรมแล้วเขียนทับทุกเฟรม
@@ -196,6 +196,67 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
 
     use super::*;
+
+    /// ★★ offset ที่มาโครคำนวณ ต้องตรงกับ offset จริงของฟิลด์ **ทุกตัว**
+    ///
+    /// `vertex_attr_array!` ไล่บวก offset จากขนาดของ format ที่ประกาศมาก่อนหน้า
+    /// **มันไม่ได้อ่านจาก struct จริง** — สลับลำดับฟิลด์หรือเปลี่ยนชนิดเมื่อไหร่
+    /// ทั้งสองฝั่งจะเงียบ ๆ ไม่ตรงกัน แล้ว GPU จะอ่าน `tint` เป็น `layer`
+    /// ซึ่งเป็นความผิดพลาดที่ **ไม่มี error ที่ไหนเลย** มีแค่ภาพที่ดูแปลก ๆ
+    #[test]
+    fn every_attribute_points_at_the_field_it_claims_to() {
+        let base = std::ptr::from_ref::<QuadInstance>(&ZERO).cast::<u8>();
+        let offset_of = |field: *const u8| {
+            u64::try_from(field as usize - base as usize).expect("offset ต้องเป็นบวก")
+        };
+        let want = [
+            offset_of(std::ptr::from_ref(&ZERO.transform).cast()),
+            offset_of(std::ptr::from_ref(&ZERO.transform[4]).cast()),
+            offset_of(std::ptr::from_ref(&ZERO.uv_rect).cast()),
+            offset_of(std::ptr::from_ref(&ZERO.tint).cast()),
+            offset_of(std::ptr::from_ref(&ZERO.layer).cast()),
+            offset_of(std::ptr::from_ref(&ZERO.flags).cast()),
+            offset_of(std::ptr::from_ref(&ZERO.adjust).cast()),
+        ];
+        let got: Vec<u64> = QuadInstance::ATTRIBUTES
+            .iter()
+            .map(|attr| attr.offset)
+            .collect();
+        assert_eq!(got, want, "offset ของ vertex attribute ไม่ตรงกับฟิลด์จริง");
+
+        // และช่องสุดท้ายต้องยังอยู่ในขอบเขต 64 ไบต์
+        let last = QuadInstance::ATTRIBUTES.last().expect("ต้องมีอย่างน้อยหนึ่ง");
+        assert!(last.offset + last.format.size() <= 64);
+    }
+
+    /// ค่าอ้างอิงสำหรับคำนวณ offset — ต้องเป็น `static` เพื่อให้ที่อยู่นิ่ง
+    static ZERO: QuadInstance = QuadInstance {
+        transform: [0.0; 6],
+        uv_rect: [0.0; 4],
+        tint: [0; 4],
+        layer: 0,
+        flags: 0,
+        adjust: [0.0; 2],
+        reserved: 0,
+    };
+
+    /// `tint` ที่เป็นไบต์ต้องยังกลับมาเป็นค่าเดิมในระดับที่ตาแยกไม่ออก
+    #[test]
+    fn packing_a_tint_round_trips_within_one_step() {
+        for value in [0.0_f32, 0.25, 0.5, 0.75, 1.0, 0.333] {
+            let packed = pack_tint([value; 4])[0];
+            let back = f32::from(packed) / 255.0;
+            assert!(
+                (back - value).abs() <= 1.0 / 255.0,
+                "{value} → {packed} → {back}"
+            );
+        }
+        // I-4: ค่าที่พังต้องไม่กลายเป็นขยะ
+        assert_eq!(
+            pack_tint([f32::NAN, f32::INFINITY, -5.0, 2.0]),
+            [0, 0, 0, 255]
+        );
+    }
 
     #[test]
     fn instance_is_exactly_64_bytes() {

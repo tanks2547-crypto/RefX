@@ -2073,14 +2073,18 @@ impl RefxApp {
         if filter.invert {
             flags |= refx_render::instance::flags::INVERT;
         }
-        flags |= QuadInstance::adjust_bits(filter.brightness, filter.contrast);
 
         Some(QuadInstance {
             transform: [a, b, c, d, origin.x, origin.y],
             uv_rect,
-            tint,
+            // ★ tint เป็นไบต์แล้ว (docs/04 §3.5) — ปลายทาง framebuffer 8 บิตต่อช่อง
+            //   ความละเอียดที่หายไปมองไม่เห็น แต่ที่ที่ได้คืนมาเลี้ยง brightness/contrast
+            //   ให้เป็น f32 เต็มได้ ซึ่ง**เห็นความต่างจริง**บนสไลเดอร์
+            tint: refx_render::instance::pack_tint(tint),
             layer,
             flags,
+            adjust: [filter.brightness, filter.contrast],
+            reserved: 0,
         })
     }
 
