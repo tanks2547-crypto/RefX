@@ -29,10 +29,11 @@
 | **audit ฟิลด์ → shader** | ✅ เสร็จ (`9eea230`) — ดู §2.2d |
 | **P2-6** z-order + ลบภาพ + อายุของ thumbnail | ✅ **เสร็จ** ดู §2.5 · ยืนยันด้วยภาพหน้าจอ |
 | **P2-7** crop แบบ non-destructive | ✅ **เสร็จ** ดู §2.6 · ยืนยันด้วยภาพหน้าจอ |
-| **P2-8** grayscale / flip / opacity / filter | ← **เริ่มที่นี่** (ทั้งสี่ยังไม่ถึง shader — §2.2d) |
+| **P2-8** grayscale / flip / opacity / filter | ✅ **เสร็จ** ดู §2.7 · **สลับ grayscale 1000 ภาพ = 0 texture upload** |
+| **P2-9** align / distribute | ← **เริ่มที่นี่** |
 
 **เกณฑ์คุณภาพล่าสุดที่ผ่าน:** `fmt` / `clippy --all-features -D warnings` (workspace + `fuzz/`) /
-`nextest 456/456` / `deny check` ครบ 4 หมวด / **binary 15.59 MB จากเพดาน 25 MB (บังคับใน CI)**
+`nextest 464/464` / `deny check` ครบ 4 หมวด / **binary 15.83 MB จากเพดาน 25 MB (บังคับใน CI)**
 
 crate ที่มี: `refx-app` `refx-asset` `refx-core` `refx-io` `refx-platform` `refx-render` `refx-ui`
 
@@ -43,7 +44,7 @@ repo: **`github.com/tanks2547-crypto/RefX` (private)** · branch `main`
 | | windows-latest | ubuntu-latest |
 |---|---|---|
 | GPU ที่ใช้ตรวจจริง | **WARP** (Dx12/Cpu) | **lavapipe** (Vulkan/Cpu) |
-| เทสต์ | 456/456 | 456/456 |
+| เทสต์ | 464/464 | 464/464 |
 | binary | 15.52 MB (เครื่องพัฒนา) | — |
 
 **`Fuzz (nightly)` เขียวครั้งแรก 2 ส.ค. 2026** — ทั้งสาม job (`fuzz_decode` ยิงเต็ม 15 นาที ·
@@ -239,10 +240,10 @@ docs/02 §2.2.5 บังคับว่า **ทุก enum ที่ลง `.r
 | `visible` | ✅ | `quad_for` คืน `None` — **เพิ่งต่อตอน audit นี้** ดูด้านล่าง |
 | `locked` | — | **ไม่ใช่เรื่องของการวาดโดยตั้งใจ** คุมแค่การแก้ไข (`SelectTool`) |
 | `crop` | ✅ | หด `uv_rect` ลงในช่องของ atlas — **ต่อแล้วตอน P2-7** (`80b12d9` ตามด้วย P2-7) |
-| `flip` | ❌ | ต้องสลับ `uv_rect` ใน shader — **P2-8** |
-| `opacity` | ❌ | ต้องเขียนลง `tint[3]` · pipeline alpha-blend รออยู่แล้ว (`pipeline.rs`) — **P2-8** |
-| `filter.grayscale` / `.invert` | ❌ | `quad.wgsl` มี `FLAG_GRAYSCALE`/`FLAG_INVERT` **และอ่านมันอยู่แล้ว** แต่ไม่มีใครเซ็ต `state.flags` จาก `canvas.filter` — **P2-8** |
-| `filter.brightness` / `.contrast` | ❌❌ | **ไม่มีแม้แต่โค้ดใน shader** ต่างจากสองตัวบนที่รอ caller อยู่ — **P2-8** |
+| `flip` | ✅ | สลับปลายช่วง `uv` (`crop_uv`) — **ต่อแล้วตอน P2-8** · ไม่แตะเรขาคณิต hit-test จึงไม่เพี้ยน |
+| `opacity` | ✅ | คูณลง `tint[3]` · pipeline alpha-blend อยู่แล้ว — **ต่อแล้วตอน P2-8** |
+| `filter.grayscale` / `.invert` | ✅ | ธงใน `flags` ที่ shader อ่านอยู่แล้ว — **ต่อแล้วตอน P2-8** |
+| `filter.brightness` / `.contrast` | ✅ | **เขียนโค้ด shader ใหม่ทั้งฝั่ง** + ยัดค่าลง 16 บิตบนของ `flags` — **ต่อแล้วตอน P2-8** |
 
 **ตัวที่ ❌ ไม่ใช่บั๊ก** มีคิวของมันอยู่แล้วและ**ไม่ต้องรีบเขียนล่วงหน้า**
 (โครงเปล่าที่ `docs/08 §3.9` ข้อ 2 ห้าม) — audit นี้แค่ทำให้ "ยังไม่ถึง"
@@ -460,6 +461,70 @@ API คือ `History::take_forgotten()` ส่วนชั้น UI มี `co
 > ทั้งสองข้อ**เทสต์ชุดแรกผ่านหมด** — ข้อแรกเพราะ assert ไม่ครบ ข้อสองเพราะ
 > ตรรกะแต่ละชิ้นถูกหมด ผิดแค่ตอนประกอบกัน · นี่คือเหตุผลที่ `docs/08 §3.9` ข้อ 5
 > บังคับภาพหน้าจอจริง
+
+### 2.7 ✅ P2-8: grayscale / flip / opacity / filter ผ่าน shader (4 ส.ค. 2026)
+
+**★ เกณฑ์หลักผ่านแล้ว: สลับ grayscale ทั้ง board ที่ 1000 ภาพ = 0 texture upload**
+(ตัวนับบน status bar: **2536 → 2536** ก่อน/หลังกด `G`)
+
+| ปุ่ม / ที่อยู่ | ผล |
+|---|---|
+| `G` | grayscale **ทั้ง board** — uniform ตัวเดียว (`view_b.z`) |
+| `H` | พลิกแนวนอนของสิ่งที่เลือก (ผ่าน `SetFilter` → undo ได้) |
+| Inspector | opacity · grayscale · invert · brightness · contrast · flip 4 แบบ |
+
+#### ★ สองชั้นที่ต้องแยกกันให้ขาด
+
+| | `G` ทั้ง board | ช่องใน Inspector |
+|---|---|---|
+| อยู่ที่ไหน | `ShellState` (สถานะการมองเห็น) | `ItemCanvas.filter` (เอกสาร) |
+| ผ่าน `Command` | ❌ | ✅ `SetFilter` |
+| กิน undo / ทำให้ dirty | ❌ | ✅ |
+| ราคาตอนสลับ | **เขียน uniform 32 ไบต์ครั้งเดียว** | เขียน instance ของ item ที่เปลี่ยน |
+
+`G` ไม่เข้า undo stack โดยตั้งใจ — ผู้ใช้ที่กด `G` ดูค่าน้ำหนักแล้วกด Ctrl+Z
+ต้องได้ **งาน** คืน ไม่ใช่ได้สีคืน (เหตุผลเดียวกับที่ `selection` ออกจาก `Board`)
+
+#### ★ ที่เก็บ brightness/contrast — ตัดสินเองเพราะ spec ชนกัน
+
+`QuadInstance` ถูกตรึงที่ **64 ไบต์** และ `docs/04 §3` คำนวณงบ VRAM จากตัวเลขนั้น
+(1000 ภาพ = 64 KB) แต่ `ItemFilter` มี `brightness`/`contrast` ที่ไม่มีที่ว่างเหลือ
+
+→ **ยัดลงบิตบนของ `flags` อย่างละ 8 บิต** (ความละเอียด 1/127 ต่อขั้น)
+แทนที่จะขยายเป็น 80 ไบต์ ซึ่งจะเป็นการแก้ spec ที่ต้องถามก่อน
+**ถ้าเจ้าของโปรเจกต์อยากได้ความละเอียดเต็ม f32 ต้องอนุมัติให้ขยาย `QuadInstance` ก่อน**
+
+> ★ `neutral_adjust()` ต้องถูกใส่ **เสมอ** — บิตศูนย์แปลว่า brightness = −1.0
+> (มืดสนิท) ไม่ใช่ "ไม่เปลี่ยน" ลืมข้อนี้แล้วภาพทุกใบจะดำทั้งจอ
+
+#### ★★ สองบั๊กชนิด "ทุกชิ้นถูก ประกอบผิด" ที่เจอตอนรันจริง
+
+**1. inspector ทับสิ่งที่คีย์ลัดเพิ่งเปลี่ยน** — เดิมชั้น `app` อ่าน `shell.appearance`
+(ค่าที่เติมไว้ *เฟรมก่อน* เพื่อ **แสดง**) กลับไปเขียนลง board ทุกเฟรม
+กด `H` → คีย์ลัดตั้ง `flip = Horizontal` → เฟรมเดียวกัน inspector เขียนค่าเก่าทับ
+→ **ภาพพลิกแล้วเด้งกลับทันที** ไม่มี error ไม่มี log และ unit test ทุกตัวผ่าน
+
+แก้ตาม `docs/08 §3.9` ข้อ 8.1: แยก **"ค่าที่แสดง"** (`appearance`) ออกจาก
+**"สิ่งที่ผู้ใช้ขอ"** (`appearance_edit`) — ตัวหลังถูกเขียนเฉพาะตอน widget รายงาน
+`.changed()` และถูก `take()` ทันที **เจ้าของมีคนเดียว ไม่ต้องพึ่งลำดับ**
+เทสต์: `the_inspector_asks_for_nothing_when_nobody_touches_it`
+
+**2. `flip` ทำงานตอนซูมออก แต่ไม่ทำงานตอนซูมเข้า** — เส้นทางวาดมีสองทาง
+(atlas กับ working texture) และ uv ของทาง working ถูกคำนวณด้วย**สูตรที่เขียนแยก**
+ซึ่งลืมใส่ `flip` · แก้โดยให้ทั้งสองทางเรียก `crop_uv()` ตัวเดียวกัน
+(working texture = "ช่อง" ที่กินทั้ง texture คือ `[0,0,1,1]`)
+เทสต์: `flipping_reaches_both_draw_paths_not_just_one`
+
+> ★ ทั้งสองข้อจับได้เพราะ**รันของจริงแล้ววัด pixel** ไม่ใช่เพราะเทสต์ —
+> และข้อ 2 ยังหลอกตาได้อีกชั้นเพราะลายของภาพทดสอบเกือบสมมาตร
+> **ต้อง diff pixel เป็นตัวเลข** ถึงจะรู้ว่ามันไม่ได้พลิกจริง (ตาอ่านว่า "ก็เหมือนจะพลิกนะ")
+
+#### เทสต์ที่พิสูจน์ว่า pixel เปลี่ยนจริง ไม่ใช่แค่ธงถูกตั้ง
+
+`refx-render` มีเทสต์ที่ **เรนเดอร์ออก texture แล้วอ่านสีกลับมา** 5 ตัว
+(`brightness_and_contrast_actually_change_the_rendered_pixel` ฯลฯ) รันบน GPU จริง
+ทั้งสอง runner ของ CI · ข้อนี้สำคัญเพราะ `brightness`/`contrast` เขียน shader ใหม่ทั้งฝั่ง
+ถ้าทำแต่ฝั่ง Rust **ประตู audit จะยังเขียว** (ธงเปลี่ยนจริง) แต่ภาพไม่ขยับเลย
 
 ### 2.3 กับดัก pointer ของ egui — ถึงเวลาแก้ที่ต้นเหตุแล้ว
 

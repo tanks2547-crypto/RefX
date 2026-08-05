@@ -504,6 +504,70 @@ impl Command for SetCrop {
 }
 
 // ---------------------------------------------------------------------------
+// SetFilter
+// ---------------------------------------------------------------------------
+
+/// เปลี่ยนลักษณะการแสดงผลของภาพ — opacity / flip / filter (P2-8)
+///
+/// ★ **แยกจาก `TransformItems` ด้วยเหตุผลเดียวกับ [`SetCrop`]**: ชื่อในเมนู undo
+/// ต้องบอกว่าผู้ใช้ทำอะไร และการลากสไลเดอร์ opacity ต้องไม่ merge เข้ากับการลากย้าย
+/// ที่เพิ่งทำไปก่อนหน้า ถ้าใช้คำสั่งเดียวกันมันจะกลืนกันแล้วย้อนทีเดียวเสียทั้งสองอย่าง
+///
+/// `docs/02 §3` ไม่ได้ระบุคำสั่งชื่อนี้ไว้ (ตารางมีแค่ `SetCrop`/`EditMeta`) —
+/// ตัดสินใจเพิ่มเพราะ `ItemFilter`/`opacity`/`flip` อยู่ใน `ItemCanvas` ซึ่งเป็น
+/// เอกสาร จึงต้องผ่าน `Command` ตาม `docs/08 §4` ข้อ 10 และไม่มีคำสั่งไหนที่เหมาะกว่า
+#[derive(Debug)]
+pub struct SetFilter {
+    inner: TransformItems,
+}
+
+impl SetFilter {
+    /// ตั้ง `ItemCanvas` ชุดใหม่ที่ต่างกันเฉพาะช่องการแสดงผล
+    ///
+    /// # Errors
+    /// [`CmdError::Empty`] ถ้ารายการว่าง
+    pub fn new(changes: Vec<(ItemId, ItemCanvas)>) -> Result<Self, CmdError> {
+        Ok(Self {
+            inner: TransformItems::new(changes)?,
+        })
+    }
+}
+
+impl Command for SetFilter {
+    fn apply(&mut self, board: &mut Board) -> Result<(), CmdError> {
+        self.inner.apply(board)
+    }
+
+    fn undo(&mut self, board: &mut Board) -> Result<(), CmdError> {
+        self.inner.undo(board)
+    }
+
+    /// รวมได้เฉพาะกับ `SetFilter` ด้วยกัน — ลากสไลเดอร์รัว ๆ = undo ขั้นเดียว
+    fn merge(&mut self, next: &dyn Command) -> bool {
+        let Some(next) = next.as_any().downcast_ref::<Self>() else {
+            return false;
+        };
+        self.inner.merge(&next.inner)
+    }
+
+    fn affected(&self) -> Vec<ItemId> {
+        self.inner.affected()
+    }
+
+    fn label(&self) -> &'static str {
+        "Filter"
+    }
+
+    fn heap_size(&self) -> usize {
+        self.inner.heap_size()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ReorderZ
 // ---------------------------------------------------------------------------
 

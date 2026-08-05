@@ -14,6 +14,18 @@ const FLAG_INVERT:      u32 = 2u;
 const FLAG_SELECTED:    u32 = 4u;
 const FLAG_PLACEHOLDER: u32 = 8u;
 
+// brightness/contrast ยัดอยู่ในบิตบนของ flags อย่างละ 8 บิต (ดู instance.rs)
+// เพราะ QuadInstance ถูกตรึงไว้ที่ 64 ไบต์ตาม docs/04 §3 — ขยายไม่ได้โดยไม่แก้ spec
+const BRIGHTNESS_SHIFT: u32 = 16u;
+const CONTRAST_SHIFT:   u32 = 24u;
+const ADJUST_NEUTRAL:   f32 = 128.0;
+const ADJUST_SCALE:     f32 = 127.0;
+
+/// 8 บิต → -1.0..=1.0
+fn unpack_adjust(bits: u32, shift: u32) -> f32 {
+    return (f32((bits >> shift) & 255u) - ADJUST_NEUTRAL) / ADJUST_SCALE;
+}
+
 // luminance ของ Rec. 709 — ไม่ใช่ค่าเฉลี่ยธรรมดา
 // ผลต่างเห็นชัดมากเวลานักวาดใช้เช็ค value ของภาพ
 const LUMA: vec3<f32> = vec3<f32>(0.2126, 0.7152, 0.0722);
@@ -22,7 +34,11 @@ struct Camera {
     // affine world→clip เก็บเป็น 2 vec4 เพื่อให้ align 16 ไบต์
     // a, b, c, d
     view_a: vec4<f32>,
-    // tx, ty, (ว่าง 2 ช่อง)
+    // tx, ty, grayscale ทั้ง board (0/1), (ว่าง 1 ช่อง)
+    //
+    // ★ grayscale ระดับ board เป็น **uniform ตัวเดียว** ตาม docs/03 §2 โดยตั้งใจ:
+    //   สลับทั้ง board ที่ 1000 ภาพจึงเขียน uniform 32 ไบต์ครั้งเดียว
+    //   **ไม่แตะ instance buffer และไม่แตะ texture เลยแม้แต่ไบต์เดียว**
     view_b: vec4<f32>,
 };
 
@@ -91,9 +107,20 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // select() แทน if เพื่อไม่ให้ warp แตกสาย (docs/04 §9)
     var color = select(sampled * in.tint, in.tint, is_placeholder);
 
+    // ★ brightness/contrast — ไม่มี if เลยโดยโครงสร้าง: ค่ากลางให้ผลเป็นตัวมันเอง
+    //   (brightness 0 บวกศูนย์ · contrast 0 คูณหนึ่ง) จึงไม่ต้อง select() ด้วยซ้ำ
+    //   ทำ **ก่อน** grayscale เพื่อให้ผู้ใช้ที่ปรับค่าแล้วสลับไปดูขาวดำ เห็นค่าที่ปรับแล้ว
+    let brightness = unpack_adjust(in.flags, BRIGHTNESS_SHIFT);
+    let contrast = unpack_adjust(in.flags, CONTRAST_SHIFT);
+    let adjusted = (color.rgb + vec3<f32>(brightness) - vec3<f32>(0.5))
+        * (1.0 + contrast) + vec3<f32>(0.5);
+    color = vec4<f32>(clamp(adjusted, vec3<f32>(0.0), vec3<f32>(1.0)), color.a);
+
     // ใช้ select() แทน if เพื่อไม่ให้ warp แตกสาย (docs/04 §9)
+    // grayscale มาได้สองทาง: ธงของภาพเอง หรือสวิตช์ระดับ board (uniform ตัวเดียว)
     let gray = vec4<f32>(vec3<f32>(dot(color.rgb, LUMA)), color.a);
-    color = select(color, gray, (in.flags & FLAG_GRAYSCALE) != 0u);
+    let want_gray = ((in.flags & FLAG_GRAYSCALE) != 0u) || camera.view_b.z > 0.5;
+    color = select(color, gray, want_gray);
 
     let inverted = vec4<f32>(1.0 - color.rgb, color.a);
     color = select(color, inverted, (in.flags & FLAG_INVERT) != 0u);

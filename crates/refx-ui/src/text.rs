@@ -112,6 +112,18 @@ pub enum Key {
     NothingToRedo,
     /// กด Delete แต่ไม่มีอะไรที่ลบได้ (ไม่ได้เลือก หรือเลือกแต่ภาพที่ล็อกไว้)
     NothingToDelete,
+    /// เลือกภาพก่อนถึงจะปรับได้
+    InspectorNoSelection,
+    /// ความทึบ
+    Opacity,
+    /// กลับสี
+    Invert,
+    /// ความสว่าง
+    Brightness,
+    /// คอนทราสต์
+    Contrast,
+    /// พลิกภาพ
+    Flip,
 }
 
 /// ข้อความภาษาอังกฤษ — **ต้องมีครบทุก key เสมอ** (เป็นตัวสำรองสุดท้าย)
@@ -141,6 +153,12 @@ fn en(key: Key) -> &'static str {
         Key::NothingToUndo => "Nothing left to undo",
         Key::NothingToRedo => "Nothing left to redo",
         Key::NothingToDelete => "Nothing to delete — select an unlocked image first",
+        Key::InspectorNoSelection => "Select an image to adjust it",
+        Key::Opacity => "Opacity",
+        Key::Invert => "Invert",
+        Key::Brightness => "Brightness",
+        Key::Contrast => "Contrast",
+        Key::Flip => "Flip",
     }
 }
 
@@ -171,6 +189,12 @@ fn th(key: Key) -> Option<&'static str> {
         Key::NothingToUndo => "ไม่มีอะไรให้ย้อนกลับแล้ว",
         Key::NothingToRedo => "ไม่มีอะไรให้ทำซ้ำแล้ว",
         Key::NothingToDelete => "ไม่มีอะไรให้ลบ — เลือกภาพที่ไม่ได้ล็อกไว้ก่อน",
+        Key::InspectorNoSelection => "เลือกภาพก่อนถึงจะปรับได้",
+        Key::Opacity => "ความทึบ",
+        Key::Invert => "กลับสี",
+        Key::Brightness => "ความสว่าง",
+        Key::Contrast => "คอนทราสต์",
+        Key::Flip => "พลิกภาพ",
     })
 }
 
@@ -214,6 +238,8 @@ pub enum Template {
     DecodeCancelled,
     /// `{used}` `{limit}` `{calls}` `{evicted}` — working texture ชั้น B (docs/04 §4)
     WorkingTextures,
+    /// จำนวน texture upload สะสม (หลักฐานเกณฑ์ P2-8)
+    AtlasUploads,
     /// `{done}` `{total}` — ความคืบหน้าการโหลด (docs/05 §6 เงื่อนไขข้อ 3)
     Loading,
     /// `{n}` — กำลังเปิดไฟล์กี่ไฟล์
@@ -274,6 +300,7 @@ fn template_en(template: Template) -> &'static str {
         Template::DecodeQueued => "Decode queue {n}",
         Template::DecodeCancelled => "Cancelled {n}",
         Template::WorkingTextures => "Sharp {used} / {limit} · {calls} draws · {evicted} evicted",
+        Template::AtlasUploads => "{uploads} uploads",
         Template::Loading => "Loading {done} / {total}",
         Template::OpeningFiles => "Opening {n} files…",
         Template::OpenedFiles => "Opened {n} files in {ms} ms",
@@ -361,6 +388,7 @@ fn template_th(template: Template) -> Option<&'static str> {
         Template::DecodeQueued => "คิวถอดรหัส {n}",
         Template::DecodeCancelled => "ยกเลิกไป {n}",
         Template::WorkingTextures => "ภาพคม {used} / {limit} · วาด {calls} ครั้ง · ไล่ออก {evicted}",
+        Template::AtlasUploads => "อัป texture {uploads} ครั้ง",
         Template::Loading => "กำลังโหลด {done} / {total}",
         Template::OpeningFiles => "กำลังเปิด {n} ไฟล์…",
         Template::OpenedFiles => "เปิด {n} ไฟล์ใน {ms} ms",
@@ -601,6 +629,12 @@ mod tests {
         Key::NothingToUndo,
         Key::NothingToRedo,
         Key::NothingToDelete,
+        Key::InspectorNoSelection,
+        Key::Opacity,
+        Key::Invert,
+        Key::Brightness,
+        Key::Contrast,
+        Key::Flip,
     ];
 
     const ALL_TEMPLATES: &[Template] = &[
@@ -613,6 +647,7 @@ mod tests {
         Template::DecodeQueued,
         Template::DecodeCancelled,
         Template::WorkingTextures,
+        Template::AtlasUploads,
         Template::Loading,
         Template::OpeningFiles,
         Template::OpenedFiles,

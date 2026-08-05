@@ -14,6 +14,27 @@ use refx_core::view::Mode;
 
 use crate::text::{self, Key, Lang, Template};
 
+/// ค่าการแสดงผลที่ inspector ปรับได้ — สำเนาของช่องใน `ItemCanvas` ที่เกี่ยวข้อง
+///
+/// ★ เป็น **สำเนา** ไม่ใช่ `&mut ItemCanvas` โดยตั้งใจ: ทุกการแก้ `Board`
+/// ต้องผ่าน `Command` (docs/08 §4 ข้อ 10) ถ้าปล่อย `&mut` เข้ามาถึง widget
+/// egui จะเขียนทับ board ตรง ๆ แล้วกฎนั้นก็หายไปโดยไม่มีอะไรบังคับ
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Appearance {
+    /// ความทึบ 0..=1
+    pub opacity: f32,
+    /// ขาวดำเฉพาะภาพนี้
+    pub grayscale: bool,
+    /// กลับสี
+    pub invert: bool,
+    /// ความสว่าง -1..=1
+    pub brightness: f32,
+    /// คอนทราสต์ -1..=1
+    pub contrast: f32,
+    /// การพลิก
+    pub flip: refx_core::board::Flip,
+}
+
 /// สถานะที่ shell ต้องอ่าน/เขียน
 ///
 /// P2+ จะขยายเป็น `App` เต็มที่มี board, selection, history
@@ -22,6 +43,33 @@ use crate::text::{self, Key, Lang, Template};
 pub struct ShellState {
     /// mode ปัจจุบัน
     pub mode: Mode,
+    /// ★ ค่าการแสดงผลของสิ่งที่เลือกอยู่ — inspector อ่านจากที่นี่และเขียนกลับที่นี่
+    ///
+    /// `None` = ไม่ได้เลือกอะไร · ชั้น `app` เติมค่าก่อนวาดแล้วอ่านกลับหลังวาด
+    /// ถ้าต่างจากเดิมแปลว่าผู้ใช้ปรับ แล้วมันจะถูกห่อเป็น `SetFilter` เข้า `History`
+    pub appearance: Option<Appearance>,
+    /// ★★ **สิ่งที่ผู้ใช้ขอในเฟรมนี้** — `None` = ไม่ได้แตะอะไรเลย
+    ///
+    /// แยกจาก `appearance` (ที่เป็นแค่ค่าสำหรับ *แสดง*) โดยตั้งใจ เพราะเคยเป็นบั๊กจริง:
+    /// เดิมชั้น `app` อ่าน `appearance` กลับไปเขียนลง board ทุกเฟรม ซึ่งแปลว่า
+    /// **ค่าที่ค้างอยู่จากเฟรมก่อนจะทับสิ่งที่คีย์ลัดเพิ่งเปลี่ยน** — กด `H` แล้วภาพพลิก
+    /// เสี้ยววินาทีแล้วเด้งกลับ โดยไม่มี error ที่ไหนเลย
+    ///
+    /// ตอนนี้มีเจ้าของเดียว: เขียนตรงนี้ **เฉพาะตอน widget รายงานว่าถูกแตะ**
+    /// (`docs/08 §3.9` ข้อ 8.1 — ทำให้ API ถูกได้ทางเดียว ไม่ใช่ต้องใช้ให้ถูก)
+    pub appearance_edit: Option<Appearance>,
+    /// ผู้ใช้ปล่อยตัวควบคุมในเฟรมนี้ → ปิดหน้าต่าง merge (undo ขั้นใหม่)
+    pub appearance_sealed: bool,
+    /// ★ grayscale ทั้ง board — **สวิตช์ของการมองเห็น ไม่ใช่ของเอกสาร**
+    ///
+    /// docs/03 §2 เรียกมันว่า "uniform ตัวเดียว" ซึ่งเป็นสิ่งที่มันเป็นจริงในเส้นทางวาด
+    /// ไม่อยู่ใน `Board` จึงไม่กิน undo และไม่ทำให้เอกสาร dirty
+    /// (เหตุผลเดียวกับที่ `selection` ถูกย้ายออก — docs/02 §2.9)
+    pub board_grayscale: bool,
+    /// ★ จำนวน texture upload สะสม — หลักฐานของเกณฑ์ ROADMAP P2-8 ที่ **เห็นได้ด้วยตา**
+    ///
+    /// สลับ `G` แล้วเลขนี้ต้องไม่ขยับแม้แต่หนึ่ง ไม่ว่าบน board จะมีกี่ภาพ
+    pub atlas_uploads: u64,
     /// เครื่องมือที่เลือกอยู่ — **อ่านอย่างเดียว** ชั้นแอปเขียนค่านี้ทุกเฟรม
     ///
     /// ★ เจ้าของจริงคือ `Gfx::tool` ที่เดียว ที่นี่เป็นแค่สำเนาไว้วาดปุ่มให้ถูก
@@ -139,6 +187,11 @@ impl Default for ShellState {
     fn default() -> Self {
         Self {
             mode: Mode::default(),
+            appearance: None,
+            appearance_edit: None,
+            appearance_sealed: false,
+            board_grayscale: false,
+            atlas_uploads: 0,
             tool: refx_core::interact::Tool::default(),
             tool_request: None,
             lang: Lang::default(),
@@ -316,6 +369,14 @@ pub fn draw_in_ui(
                 ));
             }
 
+            // ★ หลักฐานของเกณฑ์ P2-8 ที่เห็นได้ด้วยตา — สลับ `G` แล้วเลขนี้ต้องนิ่ง
+            ui.separator();
+            ui.label(text::fill(
+                lang,
+                Template::AtlasUploads,
+                &[("uploads", &state.atlas_uploads.to_string())],
+            ));
+
             if state.decode_queued > 0 {
                 ui.separator();
                 ui.label(text::fill(
@@ -353,11 +414,7 @@ pub fn draw_in_ui(
             ui.separator();
             // docs/03 §1: inspector ปรับตัวตาม mode
             match state.mode {
-                Mode::Canvas => {
-                    ui.label(text::t(lang, Key::InspectorCanvasGeometry));
-                    ui.label(text::t(lang, Key::InspectorCanvasTransform));
-                    ui.small("P2-5 … P2-8");
-                }
+                Mode::Canvas => canvas_inspector(ui, state),
                 Mode::Arrange => {
                     ui.label(text::t(lang, Key::InspectorArrangeMeta));
                     ui.label(text::t(lang, Key::InspectorArrangeGroup));
@@ -414,6 +471,73 @@ fn canvas_tools(ui: &mut egui::Ui, state: &mut ShellState) {
     }
 }
 
+/// ★ inspector ของ Canvas mode — ช่องที่ docs/03 §1 กำหนดไว้ (opacity, filter)
+///
+/// ตัวควบคุมเขียนลง `state.appearance` เท่านั้น **ไม่แตะ `Board` เลย** ชั้น `app`
+/// เป็นคนเทียบกับค่าเดิมแล้วห่อเป็น `SetFilter` เข้า `History` — ทางเดียวที่กฎ
+/// "ทุก mutation ผ่าน Command" ยังบังคับได้จริงเมื่อ widget เป็นคนแก้ค่า
+fn canvas_inspector(ui: &mut egui::Ui, state: &mut ShellState) {
+    use refx_core::board::Flip;
+
+    let lang = state.lang;
+    ui.label(text::t(lang, Key::InspectorCanvasGeometry));
+    ui.separator();
+
+    let Some(appearance) = state.appearance.as_mut() else {
+        ui.label(text::t(lang, Key::InspectorNoSelection));
+        return;
+    };
+
+    // ★ `touched` = ผู้ใช้แตะตัวควบคุมในเฟรมนี้จริง ๆ · `released` = ปล่อยแล้ว (seal)
+    //   ถ้าไม่แยกสองอย่างนี้ ค่าที่ค้างอยู่จะถูกเขียนกลับลง board ทุกเฟรม
+    //   แล้วมันจะทับสิ่งที่คีย์ลัดเพิ่งเปลี่ยน (เคยเป็นบั๊กจริงตอนทำ P2-8)
+    let mut touched = false;
+    let mut released = false;
+    let mut note = |response: &egui::Response| {
+        touched |= response.changed();
+        released |= response.drag_stopped() || response.lost_focus();
+    };
+
+    ui.label(text::t(lang, Key::Opacity));
+    note(&ui.add(egui::Slider::new(&mut appearance.opacity, 0.0..=1.0).show_value(true)));
+
+    ui.separator();
+    note(&ui.checkbox(&mut appearance.grayscale, text::t(lang, Key::ToolGrayscale)));
+    note(&ui.checkbox(&mut appearance.invert, text::t(lang, Key::Invert)));
+
+    ui.label(text::t(lang, Key::Brightness));
+    note(&ui.add(egui::Slider::new(&mut appearance.brightness, -1.0..=1.0)));
+
+    ui.label(text::t(lang, Key::Contrast));
+    note(&ui.add(egui::Slider::new(&mut appearance.contrast, -1.0..=1.0)));
+
+    ui.separator();
+    ui.label(text::t(lang, Key::Flip));
+    ui.horizontal(|ui| {
+        for (flip, label) in [
+            (Flip::None, "—"),
+            (Flip::Horizontal, "↔"),
+            (Flip::Vertical, "↕"),
+            (Flip::Both, "⇄⇅"),
+        ] {
+            if ui
+                .selectable_label(appearance.flip == flip, label)
+                .clicked()
+            {
+                appearance.flip = flip;
+                touched = true;
+                // ปุ่มเป็นการกดครั้งเดียว ต้อง seal ทันที ไม่งั้นการกดถัดไปถูกกลืน
+                released = true;
+            }
+        }
+    });
+
+    let wanted = *appearance;
+    // ★★ เขียน "สิ่งที่ผู้ใช้ขอ" **เฉพาะตอนมีคนแตะจริง** — เจ้าของเดียว ไม่มีการทับกัน
+    state.appearance_edit = touched.then_some(wanted);
+    state.appearance_sealed = released;
+}
+
 /// ปุ่มเครื่องมือของ Arrange mode
 fn arrange_tools(ui: &mut egui::Ui, state: &mut ShellState) {
     let lang = state.lang;
@@ -439,6 +563,46 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+
+    /// ★★ inspector ต้อง **ไม่ขออะไร** ถ้าผู้ใช้ไม่ได้แตะมันในเฟรมนั้น
+    ///
+    /// เคยเป็นบั๊กจริงตอน P2-8: `appearance` ถูกอ่านกลับไปเขียนลง board ทุกเฟรม
+    /// ค่าที่ค้างจากเฟรมก่อนจึง**ทับสิ่งที่คีย์ลัด `H` เพิ่งเปลี่ยน** — ภาพพลิกแล้วเด้งกลับ
+    /// ทันทีโดยไม่มี error ที่ไหนเลย และ unit test ของแต่ละชิ้นก็ผ่านหมด
+    /// เพราะแต่ละชิ้นถูกจริง ๆ สิ่งที่ผิดอยู่ระหว่างชิ้น (`docs/08 §3.9` ข้อ 8)
+    #[test]
+    fn the_inspector_asks_for_nothing_when_nobody_touches_it() {
+        let ctx = egui::Context::default();
+        let mut state = ShellState {
+            appearance: Some(Appearance {
+                opacity: 0.5,
+                grayscale: true,
+                invert: false,
+                brightness: 0.25,
+                contrast: -0.25,
+                flip: refx_core::board::Flip::Horizontal,
+            }),
+            ..ShellState::default()
+        };
+
+        // วาดหลายเฟรมโดยไม่มี pointer/keyboard เลย
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| {
+                let _ = draw_in_ui(ui, &mut state, |_| {});
+            });
+            assert!(
+                state.appearance_edit.is_none(),
+                "ไม่มีใครแตะ แต่ inspector กลับขอให้เขียนค่าลง board"
+            );
+        }
+    }
 
     #[test]
     fn default_state_starts_in_canvas_mode() {

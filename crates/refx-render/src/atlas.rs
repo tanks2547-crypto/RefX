@@ -241,6 +241,11 @@ pub struct ThumbnailAtlas {
     allocator: SlotAllocator,
     /// ทางเดียวที่ atlas จอง/คืน VRAM ได้ (I-6) — ถือไว้เพราะต้องจองเพิ่มระหว่างทาง
     textures: TextureAllocator,
+    /// ★ จำนวนครั้งที่เขียน pixel ลง texture จริง ๆ ตลอดอายุ atlas
+    ///
+    /// มีไว้พิสูจน์เกณฑ์ของ ROADMAP P2-8: **สลับ grayscale ทั้ง board = 0 texture upload**
+    /// ตัวเลขที่ไม่มีใครนับคือคำกล่าวอ้าง ไม่ใช่หลักฐาน (docs/08 §3.9 ข้อ 6)
+    uploads: u64,
 }
 
 /// descriptor ของ texture atlas ที่มี `layers` ชั้นขนาดเต็ม
@@ -346,6 +351,7 @@ impl ThumbnailAtlas {
             bind_group_layout,
             allocator: SlotAllocator::new(max_layers),
             textures: allocator.clone(),
+            uploads: 0,
         })
     }
 
@@ -509,6 +515,8 @@ impl ThumbnailAtlas {
         let slot = self.allocator.allocate()?;
         let (x, y) = slot.origin_px();
 
+        // นับ **ก่อน** เขียนจริง — ตัวเลขนี้คือหลักฐานของเกณฑ์ "0 texture upload"
+        self.uploads += 1;
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: self.texture.texture(),
@@ -534,6 +542,12 @@ impl ThumbnailAtlas {
         );
 
         Ok(slot)
+    }
+
+    /// จำนวนครั้งที่อัป pixel ขึ้น texture ตลอดอายุ atlas (ดูฟิลด์ `uploads`)
+    #[must_use]
+    pub fn uploads(&self) -> u64 {
+        self.uploads
     }
 
     /// คืนช่องให้ใช้ซ้ำ (LRU eviction — I-6)

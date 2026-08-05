@@ -18,7 +18,7 @@ use crate::instance::{InstanceBuffer, QuadInstance};
 pub struct CameraUniform {
     /// a, b, c, d ของ affine 2×3
     pub view_a: [f32; 4],
-    /// tx, ty แล้วเว้นอีก 2 ช่องให้ครบ 16 ไบต์
+    /// tx, ty, **grayscale ทั้ง board** (0/1), แล้วเว้นอีก 1 ช่องให้ครบ 16 ไบต์
     pub view_b: [f32; 4],
 }
 
@@ -35,6 +35,17 @@ impl CameraUniform {
             view_a: [2.0 / w, 0.0, 0.0, -2.0 / h],
             view_b: [-1.0, 1.0, 0.0, 0.0],
         }
+    }
+
+    /// เปิด/ปิด grayscale ระดับ board (docs/03 §2 — "uniform ตัวเดียว")
+    ///
+    /// ★ สลับสวิตช์นี้ที่ 1000 ภาพเขียน uniform 32 ไบต์ครั้งเดียว **ไม่แตะ
+    /// instance buffer และไม่อัป texture เลย** ซึ่งคือทั้งหมดที่ทำให้ปุ่ม `G`
+    /// ราคาเกือบศูนย์ตามที่ ROADMAP P2-8 กำหนด
+    #[must_use]
+    pub fn with_grayscale(mut self, on: bool) -> Self {
+        self.view_b[2] = if on { 1.0 } else { 0.0 };
+        self
     }
 
     /// สร้างจาก affine 2×3 `[a, b, c, d, tx, ty]`
@@ -104,7 +115,10 @@ impl QuadPipeline {
             label: Some("refx-camera-layout"),
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
+                // ★ ต้องมองเห็นทั้งสอง stage — vertex ใช้ affine ส่วน fragment อ่าน
+                //   สวิตช์ grayscale ระดับ board (view_b.z) ตั้งแต่ P2-8
+                //   ถ้าปล่อยเป็น VERTEX อย่างเดียว wgpu จะปฏิเสธ pipeline ตอนสร้าง
+                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                 ty: wgpu::BindingType::Buffer {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -352,5 +366,324 @@ mod tests {
         // ต้อง align 16 ไบต์สำหรับ uniform buffer
         assert_eq!(size_of::<CameraUniform>(), 32);
         assert_eq!(size_of::<CameraUniform>() % 16, 0);
+    }
+
+    // ---------- ★ P2-8: พิสูจน์ว่า **pixel เปลี่ยนจริง** ไม่ใช่แค่ธงถูกตั้ง ----------
+
+    /// วาด quad หนึ่งใบเต็มเป้าแล้วอ่านสีกลับมา — เป้าเป็น `Rgba8Unorm` (ไม่ใช่ sRGB)
+    /// เพื่อให้เลขที่อ่านได้เป็นค่าเดียวกับที่ shader คำนวณ ไม่ต้องถอด gamma ก่อนเทียบ
+    ///
+    /// ใช้ธง `PLACEHOLDER` เพื่อให้ shader ใช้ `tint` เป็นสีต้นทางตรง ๆ —
+    /// เทสต์นี้สนใจ **ขั้นตอนหลังการ sample** (brightness/contrast/grayscale/invert)
+    /// ไม่ใช่การอ่าน texture ซึ่งมีเทสต์ของตัวเองอยู่แล้วใน `atlas.rs`
+    fn render_pixel(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        atlas: &crate::atlas::ThumbnailAtlas,
+        pipeline: &QuadPipeline,
+        instance: QuadInstance,
+        camera: CameraUniform,
+    ) -> [u8; 4] {
+        const SIDE: u32 = 1;
+        // wgpu บังคับให้แถวของ buffer ปลายทางหาร 256 ลงตัว
+        const ROW: u32 = 256;
+
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("refx-test-target"),
+            size: wgpu::Extent3d {
+                width: SIDE,
+                height: SIDE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("refx-test-pixel"),
+            size: u64::from(ROW),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        pipeline.set_camera(queue, camera);
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("refx-test-draw"),
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("refx-test-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            let batch = DrawBatch {
+                bind_group: atlas.bind_group(),
+                instances: std::slice::from_ref(&instance),
+            };
+            pipeline.draw_batches(queue, &mut pass, &[batch]);
+        }
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &target,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(ROW),
+                    rows_per_image: Some(SIDE),
+                },
+            },
+            wgpu::Extent3d {
+                width: SIDE,
+                height: SIDE,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+
+        readback.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        // ★ ต้องมี timeout เสมอ — เทสต์ที่ค้างตลอดกาลใน CI แย่กว่าเทสต์ที่ล้ม
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(std::time::Duration::from_secs(10)),
+            })
+            .expect("รอ GPU ไม่สำเร็จ");
+        let bytes = readback.slice(..).get_mapped_range().to_vec();
+        readback.unmap();
+        [bytes[0], bytes[1], bytes[2], bytes[3]]
+    }
+
+    /// เตรียม device + atlas (1 layer) + pipeline สำหรับเทสต์กลุ่มนี้
+    fn pixel_harness() -> Option<(
+        wgpu::Device,
+        wgpu::Queue,
+        crate::atlas::ThumbnailAtlas,
+        QuadPipeline,
+    )> {
+        let (device, queue, caps) = crate::device::gpu_for_test()?;
+        let allocator = crate::texture::TextureAllocator::new(&caps);
+        let mut atlas = crate::atlas::ThumbnailAtlas::new(&device, &allocator, 2).ok()?;
+        // atlas ที่เพิ่งสร้างมี 0 layer (จองแบบ lazy) — ต้องมีอย่างน้อยหนึ่งชั้น
+        // ไม่งั้น texture view ที่ผูกเข้า bind group ไม่มีอะไรให้ sample
+        atlas.resize(&device, 1).ok()?;
+        let pipeline = QuadPipeline::new(
+            &device,
+            wgpu::TextureFormat::Rgba8Unorm,
+            atlas.bind_group_layout(),
+        );
+        Some((device, queue, atlas, pipeline))
+    }
+
+    /// quad ที่กินเป้า 1×1 พอดี พร้อมสีต้นทางที่กำหนดเอง
+    fn flat_quad(rgba: [f32; 4], extra_flags: u32) -> QuadInstance {
+        QuadInstance {
+            transform: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            uv_rect: [0.0, 0.0, 1.0, 1.0],
+            tint: rgba,
+            layer: 0,
+            flags: crate::instance::flags::PLACEHOLDER
+                | QuadInstance::neutral_adjust()
+                | extra_flags,
+        }
+    }
+
+    /// กล้องที่แมป world 0..1 ให้เต็มเป้า 1×1
+    fn full_target_camera() -> CameraUniform {
+        CameraUniform::from_viewport(1, 1)
+    }
+
+    /// ★ ค่ากลางต้องไม่เปลี่ยนสีเลย — ถ้าข้อนี้พัง แปลว่าบิต adjust ถูกอ่านผิด
+    /// แล้วภาพ**ทุกใบ**บนจอจะเพี้ยนพร้อมกัน (บิตศูนย์ = มืดสนิท ไม่ใช่ "ไม่เปลี่ยน")
+    #[test]
+    fn neutral_adjustment_leaves_every_pixel_untouched() {
+        let Some((device, queue, atlas, pipeline)) = pixel_harness() else {
+            eprintln!("ข้าม: ไม่มี GPU adapter");
+            return;
+        };
+        let source = [0.4, 0.6, 0.8, 1.0];
+        let got = render_pixel(
+            &device,
+            &queue,
+            &atlas,
+            &pipeline,
+            flat_quad(source, 0),
+            full_target_camera(),
+        );
+        for (channel, want) in got[..3].iter().zip(source) {
+            let want = (want * 255.0_f32).round() as u8;
+            assert!(
+                channel.abs_diff(want) <= 1,
+                "ค่ากลางต้องคืนสีเดิม: ได้ {got:?} ควรได้ราว ๆ {want}"
+            );
+        }
+    }
+
+    /// ★★ brightness/contrast **ต้องเปลี่ยน pixel จริง** ไม่ใช่แค่ธงถูกส่งไป
+    ///
+    /// ฝั่ง shader ของสองค่านี้เขียนใหม่ทั้งหมดตอน P2-8 (ต่างจาก grayscale/invert
+    /// ที่ shader รออยู่แล้ว) — ถ้าเขียนแต่ฝั่ง Rust ประตู audit จะยังเขียว
+    /// เพราะธงเปลี่ยนจริง **แต่ภาพบนจอไม่ขยับเลย** เทสต์นี้คือด่านที่จับข้อนั้น
+    #[test]
+    fn brightness_and_contrast_actually_change_the_rendered_pixel() {
+        let Some((device, queue, atlas, pipeline)) = pixel_harness() else {
+            eprintln!("ข้าม: ไม่มี GPU adapter");
+            return;
+        };
+        let source = [0.5, 0.5, 0.5, 1.0];
+        let shoot = |bits: u32| {
+            let mut quad = flat_quad(source, 0);
+            quad.flags = (quad.flags & 0xFFFF) | bits;
+            render_pixel(
+                &device,
+                &queue,
+                &atlas,
+                &pipeline,
+                quad,
+                full_target_camera(),
+            )
+        };
+
+        let neutral = shoot(QuadInstance::neutral_adjust());
+        let brighter = shoot(QuadInstance::adjust_bits(0.4, 0.0));
+        let darker = shoot(QuadInstance::adjust_bits(-0.4, 0.0));
+        assert!(
+            brighter[0] > neutral[0] + 40 && darker[0] + 40 < neutral[0],
+            "brightness ต้องขยับ pixel จริง: มืด {darker:?} กลาง {neutral:?} สว่าง {brighter:?}"
+        );
+
+        // contrast ที่เทากลางพอดีต้องไม่ขยับ (เป็นจุดหมุนของสูตร) —
+        // จึงต้องวัดกับสีที่ **ไม่ใช่** 0.5 ถึงจะเห็นผล
+        let dim = [0.25, 0.25, 0.25, 1.0];
+        let with_contrast = |bits: u32| {
+            let mut quad = flat_quad(dim, 0);
+            quad.flags = (quad.flags & 0xFFFF) | bits;
+            render_pixel(
+                &device,
+                &queue,
+                &atlas,
+                &pipeline,
+                quad,
+                full_target_camera(),
+            )
+        };
+        let plain = with_contrast(QuadInstance::neutral_adjust());
+        let punchy = with_contrast(QuadInstance::adjust_bits(0.0, 0.6));
+        let flat = with_contrast(QuadInstance::adjust_bits(0.0, -0.6));
+        assert!(
+            punchy[0] < plain[0] && flat[0] > plain[0],
+            "สีที่มืดกว่ากลางต้องมืดลงเมื่อเพิ่ม contrast และจางลงเมื่อลด: \
+             เพิ่ม {punchy:?} เดิม {plain:?} ลด {flat:?}"
+        );
+    }
+
+    /// ★ grayscale ระดับ board มาจาก **uniform ตัวเดียว** — instance ไม่เปลี่ยนเลย
+    ///
+    /// เทสต์นี้ยิง quad **ตัวเดิมเป๊ะ** สองครั้ง ต่างกันแค่ค่าใน uniform
+    /// ซึ่งเป็นหลักฐานตรงว่าปุ่ม `G` ไม่ต้องแตะ instance buffer หรือ texture
+    #[test]
+    fn the_board_wide_grayscale_uniform_changes_pixels_without_touching_instances() {
+        let Some((device, queue, atlas, pipeline)) = pixel_harness() else {
+            eprintln!("ข้าม: ไม่มี GPU adapter");
+            return;
+        };
+        let source = [0.9, 0.2, 0.1, 1.0];
+        let quad = flat_quad(source, 0);
+
+        let colour = render_pixel(
+            &device,
+            &queue,
+            &atlas,
+            &pipeline,
+            quad,
+            full_target_camera().with_grayscale(false),
+        );
+        let gray = render_pixel(
+            &device,
+            &queue,
+            &atlas,
+            &pipeline,
+            quad, // ★ instance เดิมเป๊ะ ไม่ได้แก้อะไรเลย
+            full_target_camera().with_grayscale(true),
+        );
+
+        assert!(colour[0] > colour[1] + 40, "ภาพสีต้องยังเป็นสี: {colour:?}");
+        assert!(
+            gray[0].abs_diff(gray[1]) <= 2 && gray[1].abs_diff(gray[2]) <= 2,
+            "เปิด grayscale แล้วสามช่องต้องเท่ากัน: {gray:?}"
+        );
+        // Rec. 709 ของ (0.9, 0.2, 0.1) ≈ 0.34 — ไม่ใช่ค่าเฉลี่ยธรรมดา (0.4)
+        // ข้อนี้จับได้ถ้ามีใครเปลี่ยนไปใช้ค่าเฉลี่ย ซึ่งนักวาดจะเห็นความต่างทันที
+        let want = (0.2126 * 0.9 + 0.7152 * 0.2 + 0.0722 * 0.1) * 255.0;
+        assert!(
+            f32::from(gray[0]) - want < 4.0 && want - f32::from(gray[0]) < 4.0,
+            "ต้องใช้ luminance ของ Rec. 709 (≈{want:.0}) ไม่ใช่ค่าเฉลี่ย: ได้ {gray:?}"
+        );
+    }
+
+    /// ธง grayscale ของ **ภาพใบเดียว** ต้องทำงานแยกจากสวิตช์ระดับ board
+    #[test]
+    fn the_per_item_grayscale_flag_works_on_its_own() {
+        let Some((device, queue, atlas, pipeline)) = pixel_harness() else {
+            eprintln!("ข้าม: ไม่มี GPU adapter");
+            return;
+        };
+        let source = [0.9, 0.2, 0.1, 1.0];
+        let flagged = render_pixel(
+            &device,
+            &queue,
+            &atlas,
+            &pipeline,
+            flat_quad(source, crate::instance::flags::GRAYSCALE),
+            full_target_camera().with_grayscale(false),
+        );
+        assert!(
+            flagged[0].abs_diff(flagged[1]) <= 2,
+            "ธงของภาพเองต้องพอแล้ว แม้สวิตช์ระดับ board ปิดอยู่: {flagged:?}"
+        );
+    }
+
+    /// invert ต้องกลับค่าจริง ๆ ไม่ใช่แค่ตั้งธงทิ้งไว้
+    #[test]
+    fn invert_flips_the_channels_it_is_given() {
+        let Some((device, queue, atlas, pipeline)) = pixel_harness() else {
+            eprintln!("ข้าม: ไม่มี GPU adapter");
+            return;
+        };
+        let source = [0.8, 0.8, 0.8, 1.0];
+        let got = render_pixel(
+            &device,
+            &queue,
+            &atlas,
+            &pipeline,
+            flat_quad(source, crate::instance::flags::INVERT),
+            full_target_camera(),
+        );
+        let want = ((1.0_f32 - 0.8) * 255.0).round() as u8;
+        assert!(
+            got[0].abs_diff(want) <= 2,
+            "0.8 กลับค่าต้องได้ราว ๆ {want}: ได้ {got:?}"
+        );
     }
 }

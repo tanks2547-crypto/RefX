@@ -19,6 +19,38 @@ pub mod flags {
     ///
     /// docs/04 §8: ห้ามรอ ห้ามข้าม ผู้ใช้ต้องเห็น layout ทันที
     pub const PLACEHOLDER: u32 = 1 << 3;
+
+    /// บิตที่เหลือของ `flags` ใช้เก็บ brightness/contrast แบบ 8 บิตต่อค่า
+    ///
+    /// ★ **ทำไมยัดลงบิตแทนที่จะเพิ่มฟิลด์:** `QuadInstance` ถูกตรึงไว้ที่ **64 ไบต์**
+    /// และตัวเลขนั้นอยู่ใน `docs/04 §3` พร้อมงบ VRAM ที่คำนวณจากมัน (1000 ภาพ = 64 KB)
+    /// การขยายเป็น 80 ไบต์คือการแก้ spec ซึ่งต้องถามเจ้าของก่อน — ทางที่ไม่ต้องแก้ spec
+    /// คือใช้บิตที่ยังว่างอยู่ 28 บิต
+    ///
+    /// ความละเอียด 1/127 ต่อขั้น ซึ่งละเอียดกว่าที่ตาแยกออกบนสไลเดอร์ -1..1
+    pub mod adjust {
+        /// บิตแรกของ brightness (8 บิต, 128 = ไม่เปลี่ยน)
+        pub const BRIGHTNESS_SHIFT: u32 = 16;
+        /// บิตแรกของ contrast (8 บิต, 128 = ไม่เปลี่ยน)
+        pub const CONTRAST_SHIFT: u32 = 24;
+        /// ค่าที่แปลว่า "ไม่เปลี่ยน"
+        pub const NEUTRAL: u32 = 128;
+
+        /// `-1.0..=1.0` → 8 บิต · ค่าที่ไม่ใช่ตัวเลขตกเป็นกลาง (I-4)
+        #[must_use]
+        pub fn pack(value: f32) -> u32 {
+            if !value.is_finite() {
+                return NEUTRAL;
+            }
+            // ปัดแบบ round-half-away — 0.0 ต้องได้ NEUTRAL เป๊ะเสมอ
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "clamp มาก่อนแล้ว ค่าอยู่ใน 0..=255 เสมอ"
+            )]
+            let packed = (value.clamp(-1.0, 1.0) * 127.0).round() as i32 + NEUTRAL as i32;
+            packed.clamp(0, 255) as u32
+        }
+    }
 }
 
 /// ข้อมูลหนึ่งภาพที่ส่งให้ GPU
@@ -74,8 +106,25 @@ impl QuadInstance {
             uv_rect: [0.0, 0.0, 1.0, 1.0],
             tint: rgba,
             layer: 0,
-            flags: flags::PLACEHOLDER,
+            flags: flags::PLACEHOLDER | Self::neutral_adjust(),
         }
+    }
+
+    /// บิต brightness/contrast ที่แปลว่า "ไม่เปลี่ยนอะไร"
+    ///
+    /// ★ **ต้องใส่เสมอแม้ไม่ได้ปรับอะไร** — บิตศูนย์แปลว่า brightness = -1.0
+    /// (มืดสนิท) ไม่ใช่ "ไม่เปลี่ยน" ลืมข้อนี้แล้วภาพทุกใบจะดำทั้งจอ
+    #[must_use]
+    pub const fn neutral_adjust() -> u32 {
+        (flags::adjust::NEUTRAL << flags::adjust::BRIGHTNESS_SHIFT)
+            | (flags::adjust::NEUTRAL << flags::adjust::CONTRAST_SHIFT)
+    }
+
+    /// บิตของ brightness/contrast จากค่า `-1.0..=1.0`
+    #[must_use]
+    pub fn adjust_bits(brightness: f32, contrast: f32) -> u32 {
+        (flags::adjust::pack(brightness) << flags::adjust::BRIGHTNESS_SHIFT)
+            | (flags::adjust::pack(contrast) << flags::adjust::CONTRAST_SHIFT)
     }
 }
 

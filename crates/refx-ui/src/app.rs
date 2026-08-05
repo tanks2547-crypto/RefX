@@ -11,7 +11,8 @@ use refx_asset::cache::{CacheStats, IoRequest, IoThread};
 use refx_asset::pool::DecodePool;
 use refx_core::arena::ItemId;
 use refx_core::board::{AssetRef, Board, ImageFormat, Item, ItemCanvas, ItemKind};
-use refx_core::command::{AddItems, History, RemoveItems, ReorderZ};
+use refx_core::board::{Flip, ItemFilter};
+use refx_core::command::{AddItems, History, RemoveItems, ReorderZ, SetFilter};
 use refx_core::geom::Rect as WorldRect;
 use refx_core::interact::Tool;
 use refx_core::interact::{CanvasButton, CanvasContext, CanvasEvent, Modifiers, SelectTool};
@@ -254,6 +255,39 @@ fn tool_shortcut(key: &winit::keyboard::Key, modifiers: ModifiersState) -> Optio
         return Some(Tool::Crop);
     }
     None
+}
+
+/// `G` = grayscale ทั้ง board · `H` = พลิกแนวนอน (docs/03 §2, §5)
+///
+/// ★ สองปุ่มนี้ทำคนละชั้นกันโดยตั้งใจ: `G` เป็น**สวิตช์การมองเห็น**ของทั้ง board
+/// (uniform ตัวเดียว ไม่กิน undo ไม่ทำให้ dirty) ส่วน `H` **แก้เอกสาร**
+/// ของภาพที่เลือก จึงผ่าน `Command` และย้อนได้ตามปกติ
+fn appearance_shortcut(
+    key: &winit::keyboard::Key,
+    modifiers: ModifiersState,
+) -> Option<AppearanceKey> {
+    if modifiers.control_key() || modifiers.alt_key() {
+        return None;
+    }
+    let winit::keyboard::Key::Character(text) = key else {
+        return None;
+    };
+    if text.eq_ignore_ascii_case("g") {
+        return Some(AppearanceKey::ToggleBoardGrayscale);
+    }
+    if text.eq_ignore_ascii_case("h") {
+        return Some(AppearanceKey::FlipHorizontal);
+    }
+    None
+}
+
+/// ปุ่มที่แตะการแสดงผล
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppearanceKey {
+    /// `G` — ขาวดำทั้ง board (การมองเห็น ไม่ใช่เอกสาร)
+    ToggleBoardGrayscale,
+    /// `H` — พลิกแนวนอนของภาพที่เลือก (เอกสาร → ผ่าน Command)
+    FlipHorizontal,
 }
 
 /// `Delete` / `Backspace` = ลบสิ่งที่เลือก (docs/03 §5)
@@ -527,15 +561,21 @@ impl Default for CanvasFrameInput {
 /// ★ `crop` เป็นสัดส่วน **ของภาพต้นฉบับ** (docs/02 §2.1) ส่วน `slot` คือช่องที่ภาพนั้น
 /// อยู่ใน atlas — จึงต้อง lerp กรอบ crop ลงในช่วงของช่อง ไม่ใช่เอาไปใช้ตรง ๆ
 /// ถ้าใช้ตรง ๆ ภาพทุกใบจะไปสุ่มหยิบ pixel ของภาพอื่นในชั้นเดียวกันมาแสดง
-fn crop_uv(slot: [f32; 4], crop: refx_core::board::CropRect) -> [f32; 4] {
+fn crop_uv(slot: [f32; 4], canvas: &ItemCanvas) -> [f32; 4] {
     let [u0, v0, u1, v1] = slot;
-    let crop = crop.sanitized();
-    [
-        u0 + (u1 - u0) * crop.min.x,
-        v0 + (v1 - v0) * crop.min.y,
-        u0 + (u1 - u0) * crop.max.x,
-        v0 + (v1 - v0) * crop.max.y,
-    ]
+    let crop = canvas.crop.sanitized();
+    let (mut left, mut right) = (u0 + (u1 - u0) * crop.min.x, u0 + (u1 - u0) * crop.max.x);
+    let (mut top, mut bottom) = (v0 + (v1 - v0) * crop.min.y, v0 + (v1 - v0) * crop.max.y);
+    // ★ flip ทำที่ **uv** ไม่ใช่ที่เรขาคณิต — สลับปลายทั้งสองของช่วงแล้วจบ
+    //   ไม่ต้องมีธงใน shader ไม่ต้องแตะ texture และที่สำคัญ **`obb()` ไม่เปลี่ยน**
+    //   hit-test จึงยังตรงเป๊ะหลังพลิก (ภาพพลิกแล้วยังกินพื้นที่เดิมบนจอ)
+    if matches!(canvas.flip, Flip::Horizontal | Flip::Both) {
+        std::mem::swap(&mut left, &mut right);
+    }
+    if matches!(canvas.flip, Flip::Vertical | Flip::Both) {
+        std::mem::swap(&mut top, &mut bottom);
+    }
+    [left, top, right, bottom]
 }
 
 /// สีเด่นของภาพ (ARGB จาก `Thumbnail`) → tint ของ quad
@@ -805,6 +845,8 @@ pub struct RefxApp {
     pending_zorder: Option<ZMove>,
     /// ผู้ใช้กด `Delete` ในรอบ event ที่ผ่านมา
     pending_delete: bool,
+    /// ผู้ใช้กด `G`/`H` ในรอบ event ที่ผ่านมา (P2-8)
+    pending_appearance: Option<AppearanceKey>,
     /// ★ กันการกด `Ctrl+V` รัว ๆ ให้เหลือทีละครั้ง — ภาพจาก clipboard ใหญ่ได้
     /// ระดับ 6000×4000 (96 MB) และ `arboard` จอง RAM ก้อนนั้นก่อนที่เพดานของเรา
     /// จะได้ตรวจ ถ้าปล่อยให้ซ้อนกันสิบใบคือแย่ง RAM กับ Photoshop ตรง ๆ
@@ -869,6 +911,7 @@ impl RefxApp {
             pending_history: None,
             pending_zorder: None,
             pending_delete: false,
+            pending_appearance: None,
             paste_in_flight: None,
             paste_count: 0,
             batch_from_clipboard: false,
@@ -1476,11 +1519,13 @@ impl RefxApp {
                 continue;
             };
             if let Some(mut quad) = Self::quad_for(&item.canvas, state) {
-                // ★ working texture ถือภาพเดียวเต็มใบที่ layer 0 — uv ของมันจึงเป็น
-                //   **กรอบ crop ตรง ๆ** ไม่ต้อง lerp ลงในช่องแบบทาง atlas
-                //   (คำนวณที่นี่จุดเดียว ไม่ใช่ตอนวาด เพื่อให้มีที่เดียวที่ตัดสินเรื่อง uv)
-                let crop = item.canvas.crop.sanitized();
-                quad.uv_rect = [crop.min.x, crop.min.y, crop.max.x, crop.max.y];
+                // ★ working texture ถือภาพเดียวเต็มใบที่ layer 0 — "ช่อง" ของมันคือ
+                //   texture ทั้งใบ (0..1) จึงใช้ **ฟังก์ชันเดียวกับทาง atlas** ได้เลย
+                //
+                //   ★★ ต้องเป็นฟังก์ชันเดียวกันจริง ๆ ไม่ใช่เขียนสูตรซ้ำ: เคยเขียนแยก
+                //   แล้วลืมใส่ `flip` ทางนี้ ผลคือกด `H` แล้วภาพพลิกตอนซูมออก
+                //   (ทาง atlas) แต่ **ไม่พลิกตอนซูมเข้า** (ทาง working) โดยไม่มี error
+                quad.uv_rect = crop_uv([0.0, 0.0, 1.0, 1.0], &item.canvas);
                 quad.layer = 0;
                 gfx.working_quads.push((key, quad));
             }
@@ -1696,6 +1741,114 @@ impl RefxApp {
         }
     }
 
+    /// `G` / `H` (P2-8)
+    fn apply_appearance_key(&mut self, what: AppearanceKey) {
+        let Some(gfx) = self.gfx.as_mut() else {
+            return;
+        };
+        match what {
+            // ★ ไม่ผ่าน `Command` โดยตั้งใจ — เป็นสวิตช์การมองเห็น ไม่ใช่การแก้เอกสาร
+            //   (ถ้าเอาเข้า undo stack ผู้ใช้ที่กด G ดูค่าน้ำหนักแล้วกด Ctrl+Z
+            //   จะได้สีคืนแทนที่จะได้งานคืน ซึ่งไม่ใช่สิ่งที่เขาขอ)
+            AppearanceKey::ToggleBoardGrayscale => {
+                self.shell.board_grayscale = !self.shell.board_grayscale;
+                gfx.window.request_redraw();
+            }
+            AppearanceKey::FlipHorizontal => {
+                let changes: Vec<(ItemId, ItemCanvas)> = gfx
+                    .selection
+                    .iter()
+                    .filter_map(|id| gfx.board.item(id).map(|item| (id, item.canvas)))
+                    .filter(|(_, canvas)| !canvas.locked)
+                    .map(|(id, canvas)| {
+                        let flip = match canvas.flip {
+                            Flip::None => Flip::Horizontal,
+                            Flip::Horizontal => Flip::None,
+                            Flip::Vertical => Flip::Both,
+                            Flip::Both => Flip::Vertical,
+                        };
+                        (id, ItemCanvas { flip, ..canvas })
+                    })
+                    .collect();
+                let Ok(command) = SetFilter::new(changes) else {
+                    return;
+                };
+                if let Err(err) = gfx.history.apply(&mut gfx.board, Box::new(command)) {
+                    tracing::error!(%err, "cannot flip the selected images");
+                    return;
+                }
+                // กดทีละครั้ง = คนละขั้นเสมอ ห้ามให้การกดถัดไปกลืนเข้าไป
+                gfx.history.seal();
+                Self::collect_forgotten(gfx);
+                Self::rebuild_quads(gfx);
+                gfx.window.request_redraw();
+            }
+        }
+    }
+
+    /// ★ ค่าที่ผู้ใช้ปรับใน inspector — เทียบกับของจริงแล้วห่อเป็น `SetFilter`
+    ///
+    /// widget เขียนลง `shell.appearance` เท่านั้น **ไม่มี `&mut Board` หลุดไปถึง egui**
+    /// กฎ "ทุก mutation ผ่าน `Command`" (docs/08 §4 ข้อ 10) จึงยังบังคับได้จริง
+    fn apply_inspector_edit(&mut self) {
+        let sealed = std::mem::take(&mut self.shell.appearance_sealed);
+        // ★ `take` — สิ่งที่ผู้ใช้ขอมีอายุหนึ่งเฟรม ถ้าปล่อยค้างไว้มันจะถูกเขียนซ้ำ
+        //   ทุกเฟรมแล้วทับสิ่งที่คีย์ลัด (`H`) เพิ่งเปลี่ยน
+        let Some(wanted) = self.shell.appearance_edit.take() else {
+            if sealed && let Some(gfx) = self.gfx.as_mut() {
+                gfx.history.seal();
+            }
+            return;
+        };
+        let Some(gfx) = self.gfx.as_mut() else {
+            return;
+        };
+
+        let changes: Vec<(ItemId, ItemCanvas)> = gfx
+            .selection
+            .iter()
+            .filter_map(|id| gfx.board.item(id).map(|item| (id, item.canvas)))
+            .filter(|(_, canvas)| !canvas.locked)
+            .filter_map(|(id, canvas)| {
+                let next = ItemCanvas {
+                    opacity: wanted.opacity,
+                    flip: wanted.flip,
+                    filter: ItemFilter {
+                        grayscale: wanted.grayscale,
+                        invert: wanted.invert,
+                        brightness: wanted.brightness,
+                        contrast: wanted.contrast,
+                    },
+                    ..canvas
+                }
+                .sanitized();
+                // ★ ไม่มีอะไรเปลี่ยน = ไม่สร้างคำสั่ง ไม่ขอเฟรม (I-1)
+                //   ถ้าไม่กรอง ทุกเฟรมที่ inspector วาดจะยิงคำสั่งเปล่าเข้า History
+                (next != canvas).then_some((id, next))
+            })
+            .collect();
+
+        if changes.is_empty() {
+            if sealed {
+                gfx.history.seal();
+            }
+            return;
+        }
+        let Ok(command) = SetFilter::new(changes) else {
+            return;
+        };
+        if let Err(err) = gfx.history.apply(&mut gfx.board, Box::new(command)) {
+            tracing::error!(%err, "cannot change the appearance of the selection");
+            return;
+        }
+        if sealed {
+            gfx.history.seal();
+        }
+        Self::collect_forgotten(gfx);
+        Self::rebuild_quads(gfx);
+        gfx.window.request_redraw();
+    }
+
     /// ย้ายชั้นของสิ่งที่เลือกไว้ (P2-6)
     fn apply_zorder(&mut self, movement: ZMove) {
         let Some(gfx) = self.gfx.as_mut() else {
@@ -1898,13 +2051,8 @@ impl RefxApp {
         let origin = canvas.pos - (Vec2::new(a, b) + Vec2::new(c, d)) * 0.5;
         // ★ ไม่มีช่องใน atlas = วาดสี่เหลี่ยมสีเด่นแทน **ห้ามข้ามไม่วาด** (docs/04 §8)
         //   ผู้ใช้ต้องเห็นว่า layout ยังอยู่ครบ ไม่ใช่ช่องว่างที่อ่านได้ว่า "ภาพหาย"
-        let (uv_rect, layer, tint, flags) = match state.slot {
-            Some(slot) => (
-                crop_uv(slot.uv_rect(), canvas.crop),
-                slot.layer,
-                [1.0; 4],
-                0,
-            ),
+        let (uv_rect, layer, mut tint, mut flags) = match state.slot {
+            Some(slot) => (crop_uv(slot.uv_rect(), canvas), slot.layer, [1.0; 4], 0),
             None => (
                 [0.0, 0.0, 1.0, 1.0],
                 0,
@@ -1912,6 +2060,21 @@ impl RefxApp {
                 refx_render::instance::flags::PLACEHOLDER,
             ),
         };
+
+        // ★ opacity คูณลงช่อง alpha ของ tint — pipeline เปิด alpha blending ไว้แล้ว
+        //   (`BlendState::ALPHA_BLENDING`) ภาพโปร่งซ้อนกันจึงผสมตามลำดับ z ที่วาด
+        tint[3] *= canvas.opacity.clamp(0.0, 1.0);
+
+        // filter ที่คำนวณใน shader — ไม่แตะ texture เลยแม้แต่ไบต์เดียว (docs/04 §3)
+        let filter = canvas.filter.sanitized();
+        if filter.grayscale {
+            flags |= refx_render::instance::flags::GRAYSCALE;
+        }
+        if filter.invert {
+            flags |= refx_render::instance::flags::INVERT;
+        }
+        flags |= QuadInstance::adjust_bits(filter.brightness, filter.contrast);
+
         Some(QuadInstance {
             transform: [a, b, c, d, origin.x, origin.y],
             uv_rect,
@@ -2122,6 +2285,13 @@ impl AppDelegate for RefxApp {
             self.apply_delete();
         }
 
+        // `G` / `H` ที่กดไปเมื่อกี้ (P2-8)
+        if let Some(what) = self.pending_appearance.take() {
+            self.apply_appearance_key(what);
+        }
+        // ค่าที่ผู้ใช้ปรับใน inspector เมื่อเฟรมที่แล้ว
+        self.apply_inspector_edit();
+
         // เก็บผล decode ที่เสร็จแล้วก่อนวาด (ไม่บล็อก)
         self.drain_decode_results();
         // ★ ตัดสินใจเรื่อง working texture ก่อนวาด — ใช้กล้อง/กรอบของเฟรมที่แล้ว
@@ -2166,10 +2336,25 @@ impl AppDelegate for RefxApp {
         shell.zoom = gfx.camera.zoom();
         // ★ ปุ่มบน toolbar เป็นภาพสะท้อนของ `gfx.tool` เท่านั้น — เจ้าของมีคนเดียว
         shell.tool = gfx.tool;
+        // ★ inspector อ่านค่าจากภาพ **ตัวแรกในชุดที่เลือก** (anchor ของการเลือก)
+        //   เลือกหลายใบแล้วปรับ = ทุกใบได้ค่าเดียวกัน ซึ่งตรงกับที่ผู้ใช้เห็นบนสไลเดอร์
+        shell.appearance = gfx
+            .selection
+            .iter()
+            .find_map(|id| gfx.board.item(id))
+            .map(|item| crate::shell::Appearance {
+                opacity: item.canvas.opacity,
+                grayscale: item.canvas.filter.grayscale,
+                invert: item.canvas.filter.invert,
+                brightness: item.canvas.filter.brightness,
+                contrast: item.canvas.filter.contrast,
+                flip: item.canvas.flip,
+            });
         shell.vram_used = gfx.textures.budget().used();
         shell.working_used = gfx.working.used();
         shell.working_limit = gfx.working.limit();
         shell.working_evicted = gfx.working.evicted();
+        shell.atlas_uploads = gfx.atlas.uploads();
         shell.vram_limit = gfx.textures.budget().limit();
         if let Some(assets) = assets.as_ref() {
             let (used, limit) = assets.pool.ram_usage();
@@ -2306,7 +2491,9 @@ impl AppDelegate for RefxApp {
                 let viewport = gfx.canvas.size;
                 gfx.pipeline.set_camera(
                     gfx.render.queue(),
-                    CameraUniform::from_affine(gfx.camera.to_clip_affine(viewport)),
+                    CameraUniform::from_affine(gfx.camera.to_clip_affine(viewport))
+                        // ★ สวิตช์ `G` ทั้ง board เดินทางมาถึง GPU ผ่านช่องนี้ช่องเดียว
+                        .with_grayscale(shell.board_grayscale),
                 );
                 // ★ ภาพที่มี working texture วาดแยกทีละใบ (docs/04 §4 ชั้น B)
                 //   ที่เหลือวาดรวมกันจาก atlas ใน draw call เดียวเหมือนเดิม
@@ -2501,6 +2688,14 @@ impl AppDelegate for RefxApp {
                 //   ต้องกดกลับหลายสิบครั้ง ทั้งที่ผู้ใช้ตั้งใจกดครั้งเดียว
                 if event.state.is_pressed() && !event.repeat && is_delete(&event.logical_key) {
                     self.pending_delete = true;
+                    needs_redraw = true;
+                }
+                // ★ การแสดงผล (P2-8)
+                if event.state.is_pressed()
+                    && !event.repeat
+                    && let Some(what) = appearance_shortcut(&event.logical_key, gfx.modifiers)
+                {
+                    self.pending_appearance = Some(what);
                     needs_redraw = true;
                 }
                 // ★ สลับเครื่องมือ (P2-7) — กดค้างซ้ำไม่มีผลอยู่แล้วเพราะตั้งค่าเดิมซ้ำ
@@ -2916,8 +3111,8 @@ mod tests {
                     flip: Flip::Horizontal,
                     ..base
                 },
-                false,
-                "ยังไม่ถึง — สลับ uv ใน shader คือ P2-8",
+                true,
+                "สลับปลายช่วง uv (ต่อแล้วตอน P2-8)",
             ),
             (
                 "opacity",
@@ -2925,8 +3120,8 @@ mod tests {
                     opacity: 0.25,
                     ..base
                 },
-                false,
-                "ยังไม่ถึง — ต้องเขียนลง tint[3] คือ P2-8",
+                true,
+                "คูณลง tint[3] แล้ว pipeline alpha-blend ให้ (ต่อแล้วตอน P2-8)",
             ),
             (
                 "filter",
@@ -2937,8 +3132,8 @@ mod tests {
                     },
                     ..base
                 },
-                false,
-                "ยังไม่ถึง — shader มี FLAG_GRAYSCALE/INVERT รออยู่แล้ว แต่ไม่มีใครเซ็ต · brightness/contrast ยังไม่มีแม้แต่โค้ดใน shader · ทั้งหมดคือ P2-8",
+                true,
+                "grayscale/invert เป็นธง · brightness/contrast ยัดใน 16 บิตบนของ flags แล้ว shader คลายออก (ต่อแล้วตอน P2-8)",
             ),
             (
                 "crop",
@@ -3255,9 +3450,12 @@ mod tests {
         let full = slot.uv_rect();
         let half = crop_uv(
             full,
-            refx_core::board::CropRect {
-                min: Vec2::ZERO,
-                max: Vec2::new(0.5, 1.0),
+            &ItemCanvas {
+                crop: refx_core::board::CropRect {
+                    min: Vec2::ZERO,
+                    max: Vec2::new(0.5, 1.0),
+                },
+                ..ItemCanvas::default()
             },
         );
 
@@ -3274,6 +3472,87 @@ mod tests {
         }
     }
 
+    /// ★★ `flip` ต้องมีผล **ทั้งสองเส้นทางวาด** — atlas (ซูมออก) และ working (ซูมเข้า)
+    ///
+    /// เคยเป็นบั๊กจริงตอน P2-8: uv ของ working texture ถูกคำนวณด้วยสูตรที่เขียนแยก
+    /// ซึ่งลืมใส่ `flip` ผลคือกด `H` แล้วภาพพลิกตอนซูมออกแต่**ไม่พลิกตอนซูมเข้า**
+    /// ไม่มี error ไม่มี log — และ unit test ของ `crop_uv` ก็ผ่าน เพราะตัวมันถูก
+    /// สิ่งที่ผิดคือ *มีสูตรอยู่สองที่* (`docs/08 §3.9` ข้อ 8)
+    #[test]
+    fn flipping_reaches_both_draw_paths_not_just_one() {
+        let flipped = ItemCanvas {
+            flip: Flip::Horizontal,
+            ..ItemCanvas::default()
+        };
+        let plain = ItemCanvas::default();
+
+        // เส้นทาง atlas — ช่องใดช่องหนึ่งใน texture array
+        let slot = refx_render::atlas::AtlasSlot { layer: 0, index: 5 }.uv_rect();
+        let atlas_plain = crop_uv(slot, &plain);
+        let atlas_flipped = crop_uv(slot, &flipped);
+        assert_eq!(
+            [atlas_flipped[0], atlas_flipped[2]],
+            [atlas_plain[2], atlas_plain[0]],
+            "ทาง atlas: ปลาย u ต้องสลับกัน"
+        );
+
+        // เส้นทาง working texture — "ช่อง" คือ texture ทั้งใบ
+        let full = [0.0, 0.0, 1.0, 1.0];
+        let working_plain = crop_uv(full, &plain);
+        let working_flipped = crop_uv(full, &flipped);
+        assert_eq!(
+            [working_flipped[0], working_flipped[2]],
+            [working_plain[2], working_plain[0]],
+            "ทาง working: ปลาย u ต้องสลับกันเหมือนกัน"
+        );
+        assert_ne!(working_flipped, working_plain);
+
+        // แนวตั้งก็ต้องทำงาน และ Both ต้องสลับทั้งสองแกน
+        let vertical = crop_uv(
+            full,
+            &ItemCanvas {
+                flip: Flip::Vertical,
+                ..plain
+            },
+        );
+        assert_eq!(
+            [vertical[1], vertical[3]],
+            [working_plain[3], working_plain[1]]
+        );
+        let both = crop_uv(
+            full,
+            &ItemCanvas {
+                flip: Flip::Both,
+                ..plain
+            },
+        );
+        assert_eq!(both, [1.0, 1.0, 0.0, 0.0]);
+    }
+
+    /// ★ พลิกแล้ว **hit-test ต้องไม่เพี้ยน** — `flip` แตะแค่ uv ไม่แตะเรขาคณิต
+    #[test]
+    fn flipping_never_moves_the_shape_that_hit_testing_uses() {
+        let plain = ItemCanvas {
+            pos: Vec2::new(10.0, -4.0),
+            size: Vec2::new(80.0, 50.0),
+            rotation: 0.7,
+            ..ItemCanvas::default()
+        };
+        for flip in [Flip::Horizontal, Flip::Vertical, Flip::Both] {
+            let flipped = ItemCanvas { flip, ..plain };
+            assert_eq!(
+                flipped.obb(),
+                plain.obb(),
+                "{flip:?} ทำให้รูปทรงที่ hit-test ใช้เปลี่ยนไป"
+            );
+            let state = bare_render_state();
+            let a = RefxApp::quad_for(&plain, &state).unwrap();
+            let b = RefxApp::quad_for(&flipped, &state).unwrap();
+            assert_eq!(a.transform, b.transform, "เรขาคณิตต้องเท่าเดิมเป๊ะ");
+            assert_ne!(a.uv_rect, b.uv_rect, "แต่ uv ต้องต่าง");
+        }
+    }
+
     /// กรอบ crop ที่พังจากไฟล์เสียต้องไม่ทำให้ uv หลุดออกนอกช่อง (I-4)
     #[test]
     fn a_broken_crop_never_escapes_its_slot() {
@@ -3287,7 +3566,13 @@ mod tests {
             (Vec2::splat(-5.0), Vec2::splat(f32::INFINITY)),
             (Vec2::splat(0.9), Vec2::splat(0.1)),
         ] {
-            let uv = crop_uv(full, refx_core::board::CropRect { min, max });
+            let uv = crop_uv(
+                full,
+                &ItemCanvas {
+                    crop: refx_core::board::CropRect { min, max },
+                    ..ItemCanvas::default()
+                },
+            );
             assert!(uv.iter().all(|v| v.is_finite()), "{uv:?}");
             assert!(uv[0] >= full[0] - 1e-6 && uv[2] <= full[2] + 1e-6, "{uv:?}");
             assert!(uv[1] >= full[1] - 1e-6 && uv[3] <= full[3] + 1e-6, "{uv:?}");
