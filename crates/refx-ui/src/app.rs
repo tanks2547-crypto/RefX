@@ -12,7 +12,7 @@ use refx_asset::pool::DecodePool;
 use refx_core::arena::ItemId;
 use refx_core::board::{AssetRef, Board, ImageFormat, Item, ItemCanvas, ItemKind};
 use refx_core::board::{Flip, ItemFilter};
-use refx_core::command::{AddItems, History, RemoveItems, ReorderZ, SetFilter};
+use refx_core::command::{AddItems, History, RemoveItems, ReorderZ, SetFilter, TransformItems};
 use refx_core::geom::Rect as WorldRect;
 use refx_core::interact::Tool;
 use refx_core::interact::{CanvasButton, CanvasContext, CanvasEvent, Modifiers, SelectTool};
@@ -365,6 +365,8 @@ struct Gfx {
     tool: Tool,
     /// กรอบ rubber-band ที่กำลังลากอยู่ (world) — `None` = ไม่ต้องวาด
     rubber_band: Option<WorldRect>,
+    /// เส้นไกด์ที่ต้องวาดตอนนี้ (P2-9) — ว่างเมื่อไม่ได้ลากหรือไม่มีอะไรตรงกัน
+    guides: Vec<refx_core::align::Guide>,
     /// ★ thumbnail ของทุก item บน board เก็บไว้เติม atlas กลับหลังกู้ device
     ///
     /// docs/04 §4: ถ้าไม่เติมกลับ ผู้ใช้จะเห็น **board ว่างเปล่า** หลัง driver อัปเดต
@@ -510,6 +512,22 @@ struct ItemRender {
     tint: [f32; 4],
 }
 
+/// ทุกอย่างที่ canvas widget ต้อง **อ่าน** เพื่อวาดหนึ่งเฟรม
+///
+/// ★ รวมเป็น struct เพราะรายการยาวขึ้นทุกเฟส (P2-4 กรอบเลือก · P2-5 handle ·
+/// P2-7 เครื่องมือ · P2-9 ไกด์) — พารามิเตอร์แปดตัวเรียงกันสลับที่กันได้ง่ายมาก
+/// และคอมไพเลอร์จับไม่ได้ถ้าสองตัวเป็นชนิดเดียวกัน
+#[derive(Clone, Copy)]
+struct CanvasView<'a> {
+    board: &'a Board,
+    selection: &'a Selection,
+    render_state: &'a std::collections::HashMap<ItemId, ItemRender>,
+    camera: Camera,
+    rubber_band: Option<WorldRect>,
+    tool: Tool,
+    guides: &'a [refx_core::align::Guide],
+}
+
 /// สิ่งที่ canvas widget เก็บได้จาก egui ในเฟรมหนึ่ง
 ///
 /// ★ **เก็บไว้ก่อน แล้วค่อยเอาไปประมวลผลหลัง `run_ui` จบ** — ระหว่างอยู่ในคลอเชอร์
@@ -591,6 +609,15 @@ fn dominant_rgba(dominant: u32) -> [f32; 4] {
     ]
 }
 
+/// ระยะที่ไกด์ดึงเข้าหาขอบของภาพอื่น (พิกเซลบนจอ)
+///
+/// ★ กว้างกว่า `DEFAULT_DRAG_THRESHOLD_PX` เล็กน้อยโดยตั้งใจ — ต้องรู้สึกว่า
+/// "มันช่วยจัดให้" ไม่ใช่ "ต้องเล็งเอง" แต่ไม่กว้างจนวางภาพอิสระข้าง ๆ กันไม่ได้
+const GUIDE_SNAP_PX: f32 = 6.0;
+
+/// สีของเส้นไกด์ — ★ ต้องต่างจากสีกรอบเลือกชัด ๆ ไม่งั้นแยกไม่ออกว่าอันไหนคืออะไร
+const GUIDE_STROKE: egui::Color32 = egui::Color32::from_rgb(255, 96, 160);
+
 /// สีของกรอบสิ่งที่ถูกเลือกและกรอบ rubber-band
 const SELECT_STROKE: egui::Color32 = egui::Color32::from_rgb(120, 190, 255);
 
@@ -611,15 +638,16 @@ impl RefxApp {
     ///
     /// พอจองพื้นที่ด้วย `allocate_response` แล้ว **egui เป็นคนจัดลำดับให้เอง**:
     /// คลิกบน toolbar/inspector จะไม่ตกมาถึงเรา เพราะ widget พวกนั้นกิน response ไปก่อน
-    fn canvas_widget(
-        ui: &mut egui::Ui,
-        board: &Board,
-        selection: &Selection,
-        render_state: &std::collections::HashMap<ItemId, ItemRender>,
-        camera: Camera,
-        rubber_band: Option<WorldRect>,
-        tool: Tool,
-    ) -> CanvasFrameInput {
+    fn canvas_widget(ui: &mut egui::Ui, view: CanvasView<'_>) -> CanvasFrameInput {
+        let CanvasView {
+            board,
+            selection,
+            render_state,
+            camera,
+            rubber_band,
+            tool,
+            guides,
+        } = view;
         let response = ui.allocate_response(ui.available_size(), egui::Sense::click_and_drag());
         let rect = response.rect;
 
@@ -681,6 +709,24 @@ impl RefxApp {
                     egui::StrokeKind::Middle,
                 );
             }
+        }
+
+        // ---- วาดเส้นไกด์ (P2-9) ----
+        //
+        // ★ วาด **ก่อน** กรอบเลือกและ handle เพื่อให้ของที่ผู้ใช้กำลังจับอยู่อยู่บนสุด
+        for guide in guides {
+            let (a, b) = if guide.vertical {
+                (
+                    to_point(Vec2::new(guide.at, guide.from)),
+                    to_point(Vec2::new(guide.at, guide.to)),
+                )
+            } else {
+                (
+                    to_point(Vec2::new(guide.from, guide.at)),
+                    to_point(Vec2::new(guide.to, guide.at)),
+                )
+            };
+            painter.line_segment([a, b], egui::Stroke::new(1.0, GUIDE_STROKE));
         }
 
         // ---- วาดกรอบ rubber-band ----
@@ -1600,6 +1646,9 @@ impl RefxApp {
             handle_reach: refx_core::interact::DEFAULT_HANDLE_PX * world_per_point,
             rotate_reach: refx_core::interact::DEFAULT_ROTATE_PX * world_per_point,
             tool: gfx.tool,
+            // ★ ระยะไกด์คิดเป็นพิกเซลบนจอเหมือนระยะอื่น ๆ ทั้งหมด
+            snap_reach: GUIDE_SNAP_PX * world_per_point,
+            viewport: Self::visible_world(gfx),
         };
 
         // ★ ดับเบิลคลิกมาก่อน press/release ของรอบเดียวกัน — ไม่งั้นคลิกที่สองจะถูก
@@ -1636,6 +1685,9 @@ impl RefxApp {
         let moved: Vec<ItemId> = gfx.selection.iter().collect();
         let outcome = gfx.select_tool.handle(ctx, &mut gfx.selection, event);
         gfx.rubber_band = outcome.rubber_band;
+        // ★ เส้นที่โผล่/หายต้องวาดใหม่ แม้ตำแหน่งภาพจะไม่เปลี่ยน
+        changed |= gfx.guides != outcome.guides;
+        gfx.guides = outcome.guides;
         changed |= outcome.needs_redraw;
 
         let has_commands = !outcome.commands.is_empty();
@@ -1664,6 +1716,16 @@ impl RefxApp {
             changed = true;
         }
         changed
+    }
+
+    /// กรอบที่มองเห็นอยู่ในหน่วย world — ขอบเขตของการค้นหาไกด์ (P2-9)
+    fn visible_world(gfx: &Gfx) -> WorldRect {
+        let size = gfx.canvas.size;
+        let zoom = gfx.camera.zoom();
+        if !size.is_finite() || zoom <= 0.0 {
+            return WorldRect::EMPTY;
+        }
+        WorldRect::from_center_size(gfx.camera.center(), size / zoom)
     }
 
     /// ★★ ทำให้ "ใครอยู่บน GPU" ตรงกับ "ใครอยู่บน board" — เรียกหลังคำสั่งที่เพิ่ม/ลบ item
@@ -1843,6 +1905,56 @@ impl RefxApp {
         }
         if sealed {
             gfx.history.seal();
+        }
+        Self::collect_forgotten(gfx);
+        Self::rebuild_quads(gfx);
+        gfx.window.request_redraw();
+    }
+
+    /// จัดเรียงสิ่งที่เลือกไว้ (P2-9) — align / distribute
+    ///
+    /// ★ **ทั้งชุดเป็น undo ขั้นเดียว** — `TransformItems` ตัวเดียวถือทุกใบ
+    /// ผู้ใช้ที่กด "ชิดซ้าย" แล้วไม่ชอบ ต้องกด Ctrl+Z **ครั้งเดียว** ได้ทุกใบกลับที่เดิม
+    fn apply_arrange(&mut self, request: crate::shell::ArrangeRequest) {
+        use crate::shell::ArrangeRequest;
+
+        let lang = self.shell.lang;
+        let Some(gfx) = self.gfx.as_mut() else {
+            return;
+        };
+        // ภาพที่ล็อกไว้ต้องไม่ขยับ — เหมือนทุกเครื่องมือที่แก้เรขาคณิต
+        let picked: Vec<(ItemId, ItemCanvas)> = gfx
+            .selection
+            .iter()
+            .filter_map(|id| gfx.board.item(id).map(|item| (id, item.canvas)))
+            .filter(|(_, canvas)| !canvas.locked)
+            .collect();
+
+        let changes = match request {
+            ArrangeRequest::Align(how) => refx_core::align::aligned(&picked, how),
+            ArrangeRequest::Distribute(how) => refx_core::align::distributed(&picked, how),
+        };
+        let Some(changes) = changes else {
+            // ★ กดแล้วไม่มีอะไรเกิดขึ้น **ต้องบอก** ไม่ใช่เงียบ
+            //   (เลือกน้อยเกินไป หรือมันตรงกันอยู่แล้ว — ทั้งสองอย่างไม่ใช่ความผิดพลาด)
+            self.shell.status = text::t(lang, Key::NothingToArrange).to_owned();
+            return;
+        };
+        let moved: Vec<ItemId> = changes.iter().map(|(id, _)| *id).collect();
+        let Ok(command) = TransformItems::new(changes) else {
+            return;
+        };
+        if let Err(err) = gfx.history.apply(&mut gfx.board, Box::new(command)) {
+            tracing::error!(%err, "cannot arrange the selection");
+            return;
+        }
+        // กดปุ่มหนึ่งครั้ง = ขั้นเดียวเสมอ ห้ามให้การกดถัดไปกลืนเข้าไป
+        gfx.history.seal();
+        // ★ index ต้องตามตำแหน่งใหม่ทันที ไม่งั้นคลิกครั้งถัดไปจะพลาด
+        for id in moved {
+            if let Some(item) = gfx.board.item(id) {
+                gfx.index.insert(id, &item.canvas);
+            }
         }
         Self::collect_forgotten(gfx);
         Self::rebuild_quads(gfx);
@@ -2241,6 +2353,7 @@ impl AppDelegate for RefxApp {
             select_tool: SelectTool::new(),
             tool: Tool::default(),
             rubber_band: None,
+            guides: Vec::new(),
             working,
             working_pending: std::collections::HashSet::new(),
             working_quads: Vec::new(),
@@ -2295,6 +2408,10 @@ impl AppDelegate for RefxApp {
         }
         // ค่าที่ผู้ใช้ปรับใน inspector เมื่อเฟรมที่แล้ว
         self.apply_inspector_edit();
+        // ปุ่มจัดเรียงที่กดไปเมื่อเฟรมที่แล้ว (P2-9)
+        if let Some(request) = self.shell.arrange_request.take() {
+            self.apply_arrange(request);
+        }
 
         // เก็บผล decode ที่เสร็จแล้วก่อนวาด (ไม่บล็อก)
         self.drain_decode_results();
@@ -2390,18 +2507,22 @@ impl AppDelegate for RefxApp {
             let camera = gfx.camera;
             let rubber_band = gfx.rubber_band;
             let tool = gfx.tool;
+            let guides = gfx.guides.as_slice();
             egui_ctx.run_ui(raw_input, |ui| {
                 canvas_points = crate::shell::draw_in_ui(ui, shell, |ui| {
                     // ช่องกลางคือ canvas — ภาพวาดด้วย wgpu ใต้ egui อีกที
                     // ★ เป็น widget จริงแล้ว egui จึงจัดลำดับ pointer ให้เอง
                     canvas_input = Self::canvas_widget(
                         ui,
-                        board,
-                        selection,
-                        render_state,
-                        camera,
-                        rubber_band,
-                        tool,
+                        CanvasView {
+                            board,
+                            selection,
+                            render_state,
+                            camera,
+                            rubber_band,
+                            tool,
+                            guides,
+                        },
                     );
                 });
             })
@@ -2832,12 +2953,15 @@ mod tests {
                     let _ = crate::shell::draw_in_ui(ui, &mut state, |ui| {
                         let got = RefxApp::canvas_widget(
                             ui,
-                            &board,
-                            &selection,
-                            &render_state,
-                            Camera::default(),
-                            None,
-                            Tool::Select,
+                            CanvasView {
+                                board: &board,
+                                selection: &selection,
+                                render_state: &render_state,
+                                camera: Camera::default(),
+                                rubber_band: None,
+                                tool: Tool::Select,
+                                guides: &[],
+                            },
                         );
                         seen = got.pointer.is_some();
                     });
@@ -2909,12 +3033,15 @@ mod tests {
                 let _ = crate::shell::draw_in_ui(ui, &mut state, |ui| {
                     let got = RefxApp::canvas_widget(
                         ui,
-                        &board,
-                        &selection,
-                        &render_state,
-                        Camera::default(),
-                        None,
-                        Tool::Select,
+                        CanvasView {
+                            board: &board,
+                            selection: &selection,
+                            render_state: &render_state,
+                            camera: Camera::default(),
+                            rubber_band: None,
+                            tool: Tool::Select,
+                            guides: &[],
+                        },
                     );
                     if got.primary_pressed {
                         pressed_at.push(got.pointer);
@@ -3222,12 +3349,15 @@ mod tests {
                 let _ = crate::shell::draw_in_ui(ui, &mut state, |ui| {
                     let _ = RefxApp::canvas_widget(
                         ui,
-                        board,
-                        selection,
-                        &render_state,
-                        camera,
-                        None,
-                        tool,
+                        CanvasView {
+                            board,
+                            selection,
+                            render_state: &render_state,
+                            camera,
+                            rubber_band: None,
+                            tool,
+                            guides: &[],
+                        },
                     );
                 });
             });

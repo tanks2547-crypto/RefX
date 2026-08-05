@@ -124,6 +124,24 @@ pub enum Key {
     Contrast,
     /// พลิกภาพ
     Flip,
+    /// ชิดซ้าย
+    AlignLeft,
+    /// กึ่งกลางแนวนอน
+    AlignCentreX,
+    /// ชิดขวา
+    AlignRight,
+    /// ชิดบน
+    AlignTop,
+    /// กึ่งกลางแนวตั้ง
+    AlignCentreY,
+    /// ชิดล่าง
+    AlignBottom,
+    /// กระจายแนวนอน
+    DistributeX,
+    /// กระจายแนวตั้ง
+    DistributeY,
+    /// เลือกอย่างน้อยสองภาพก่อนถึงจะจัดเรียงได้
+    NothingToArrange,
 }
 
 /// ข้อความภาษาอังกฤษ — **ต้องมีครบทุก key เสมอ** (เป็นตัวสำรองสุดท้าย)
@@ -159,6 +177,15 @@ fn en(key: Key) -> &'static str {
         Key::Brightness => "Brightness",
         Key::Contrast => "Contrast",
         Key::Flip => "Flip",
+        Key::AlignLeft => "Align left",
+        Key::AlignCentreX => "Align centre (horizontal)",
+        Key::AlignRight => "Align right",
+        Key::AlignTop => "Align top",
+        Key::AlignCentreY => "Align middle (vertical)",
+        Key::AlignBottom => "Align bottom",
+        Key::DistributeX => "Distribute horizontally",
+        Key::DistributeY => "Distribute vertically",
+        Key::NothingToArrange => "Select at least two images to arrange them",
     }
 }
 
@@ -195,6 +222,15 @@ fn th(key: Key) -> Option<&'static str> {
         Key::Brightness => "ความสว่าง",
         Key::Contrast => "คอนทราสต์",
         Key::Flip => "พลิกภาพ",
+        Key::AlignLeft => "ชิดซ้าย",
+        Key::AlignCentreX => "กึ่งกลางแนวนอน",
+        Key::AlignRight => "ชิดขวา",
+        Key::AlignTop => "ชิดบน",
+        Key::AlignCentreY => "กึ่งกลางแนวตั้ง",
+        Key::AlignBottom => "ชิดล่าง",
+        Key::DistributeX => "กระจายแนวนอน",
+        Key::DistributeY => "กระจายแนวตั้ง",
+        Key::NothingToArrange => "เลือกอย่างน้อยสองภาพก่อนถึงจะจัดเรียงได้",
     })
 }
 
@@ -635,6 +671,15 @@ mod tests {
         Key::Brightness,
         Key::Contrast,
         Key::Flip,
+        Key::AlignLeft,
+        Key::AlignCentreX,
+        Key::AlignRight,
+        Key::AlignTop,
+        Key::AlignCentreY,
+        Key::AlignBottom,
+        Key::DistributeX,
+        Key::DistributeY,
+        Key::NothingToArrange,
     ];
 
     const ALL_TEMPLATES: &[Template] = &[

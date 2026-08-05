@@ -10,6 +10,7 @@
 //!
 //! spec: docs/03-modes-and-ui.md §1
 
+use refx_core::align::{Align as A, Distribute as D};
 use refx_core::view::Mode;
 
 use crate::text::{self, Key, Lang, Template};
@@ -33,6 +34,15 @@ pub struct Appearance {
     pub contrast: f32,
     /// การพลิก
     pub flip: refx_core::board::Flip,
+}
+
+/// สิ่งที่ปุ่มจัดเรียงขอให้ทำ (P2-9)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArrangeRequest {
+    /// ชิดขอบ/กึ่งกลางตามที่ระบุ
+    Align(refx_core::align::Align),
+    /// กระจายระยะให้เท่ากัน
+    Distribute(refx_core::align::Distribute),
 }
 
 /// สถานะที่ shell ต้องอ่าน/เขียน
@@ -60,6 +70,10 @@ pub struct ShellState {
     pub appearance_edit: Option<Appearance>,
     /// ผู้ใช้ปล่อยตัวควบคุมในเฟรมนี้ → ปิดหน้าต่าง merge (undo ขั้นใหม่)
     pub appearance_sealed: bool,
+    /// ★ ผู้ใช้กดปุ่ม align/distribute ในเฟรมนี้ — ชั้น `app` เป็นคนลงมือ
+    ///
+    /// เจ้าของเดียวเหมือน `appearance_edit`: widget แค่ **ขอ** ไม่ได้แก้ board เอง
+    pub arrange_request: Option<ArrangeRequest>,
     /// ★ grayscale ทั้ง board — **สวิตช์ของการมองเห็น ไม่ใช่ของเอกสาร**
     ///
     /// docs/03 §2 เรียกมันว่า "uniform ตัวเดียว" ซึ่งเป็นสิ่งที่มันเป็นจริงในเส้นทางวาด
@@ -189,6 +203,7 @@ impl Default for ShellState {
             mode: Mode::default(),
             appearance: None,
             appearance_edit: None,
+            arrange_request: None,
             appearance_sealed: false,
             board_grayscale: false,
             atlas_uploads: 0,
@@ -460,16 +475,50 @@ fn canvas_tools(ui: &mut egui::Ui, state: &mut ShellState) {
             state.tool_request = Some(tool);
         }
     }
-    // ที่ยังไม่ได้ทำ — บอกตรง ๆ ว่ารออยู่เฟสไหน ไม่ใช่ปุ่มที่กดแล้วเงียบ
-    let label = text::t(lang, Key::ToolGrayscale);
-    if ui.button(label).on_hover_text("P2-8").clicked() {
-        state.status = text::fill(
-            lang,
-            Template::NotImplemented,
-            &[("what", label), ("when", "P2-8")],
-        );
+    // ★ grayscale ทั้ง board — เป็นปุ่มสลับจริงตั้งแต่ P2-8 (ชี้ค่าเดียวกับปุ่ม `G`)
+    if ui
+        .selectable_label(state.board_grayscale, text::t(lang, Key::ToolGrayscale))
+        .on_hover_text("G")
+        .clicked()
+    {
+        state.board_grayscale = !state.board_grayscale;
+    }
+
+    ui.separator();
+    // ★ จัดเรียง (P2-9) — ป้ายบนปุ่มอยู่ใน `ARRANGE_BUTTONS` คำอธิบายอยู่ใน tooltip
+    for (request, glyph, key) in ARRANGE_BUTTONS {
+        if ui.button(glyph).on_hover_text(text::t(lang, key)).clicked() {
+            state.arrange_request = Some(request);
+        }
     }
 }
+
+/// ★★ ปุ่มจัดเรียงทั้งแปด — **ป้ายต้องเป็นตัวอักษรที่ฟอนต์ที่เราฝังมี glyph จริง**
+///
+/// รอบแรกใช้สัญลักษณ์เส้นตาราง ซึ่งดูเหมาะที่สุด แต่ทั้งฟอนต์ละตินของ egui และ
+/// Noto Sans Thai **ไม่มี glyph พวกนั้น** ผลคือปุ่มขึ้นเป็นกล่องสี่เหลี่ยมว่างบนจอจริง
+/// โดยไม่มี error ที่ไหนเลย (docs/03 §0: ไม่ฝัง CJK เพราะเพดาน binary)
+///
+/// `↔`/`↕` ใช้ได้เพราะ Noto Sans Thai มีให้ ส่วน `← → ↑ ↓` **ไม่มี** — เดาไม่ได้
+/// ต้องตรวจ · เทสต์ `arrange_button_labels_all_have_glyphs` ยืนยันให้ทุกครั้งที่ build
+pub(crate) const ARRANGE_BUTTONS: [(ArrangeRequest, &str, Key); 8] = [
+    (ArrangeRequest::Align(A::Left), "L", Key::AlignLeft),
+    (ArrangeRequest::Align(A::CentreX), "C", Key::AlignCentreX),
+    (ArrangeRequest::Align(A::Right), "R", Key::AlignRight),
+    (ArrangeRequest::Align(A::Top), "T", Key::AlignTop),
+    (ArrangeRequest::Align(A::CentreY), "M", Key::AlignCentreY),
+    (ArrangeRequest::Align(A::Bottom), "B", Key::AlignBottom),
+    (
+        ArrangeRequest::Distribute(D::Horizontal),
+        "↔",
+        Key::DistributeX,
+    ),
+    (
+        ArrangeRequest::Distribute(D::Vertical),
+        "↕",
+        Key::DistributeY,
+    ),
+];
 
 /// ★ inspector ของ Canvas mode — ช่องที่ docs/03 §1 กำหนดไว้ (opacity, filter)
 ///

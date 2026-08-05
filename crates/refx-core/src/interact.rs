@@ -19,6 +19,7 @@
 
 use glam::Vec2;
 
+use crate::align;
 use crate::arena::ItemId;
 use crate::board::Board;
 use crate::board::{CropRect, ItemCanvas};
@@ -109,6 +110,8 @@ pub struct Interaction {
     /// ที่ไม่ได้อยู่ใน `Board` — docs/02 §2.9) `TransformItems` merge ได้ การลาก
     /// ค้างทั้งครั้งจึงยุบเป็น undo ขั้นเดียว
     pub commands: Vec<Box<dyn Command>>,
+    /// ★ เส้นไกด์ที่ต้องวาดตอนนี้ (P2-9) — ว่าง = ไม่มีอะไรตรงกัน
+    pub guides: Vec<align::Guide>,
     /// ★ ต้องเรียก `History::seal()` หรือไม่ — **จริงตอนปล่อยเมาส์**
     ///
     /// ถ้าไม่ seal การลากสองครั้งติดกันจะกลายเป็น undo เดียว ผู้ใช้จะงง (docs/02 §3)
@@ -121,6 +124,7 @@ impl std::fmt::Debug for Interaction {
             .field("rubber_band", &self.rubber_band)
             .field("needs_redraw", &self.needs_redraw)
             .field("commands", &self.commands.len())
+            .field("guides", &self.guides.len())
             .field("seal", &self.seal)
             .finish()
     }
@@ -147,6 +151,16 @@ pub struct CanvasContext<'a> {
     pub rotate_reach: f32,
     /// เครื่องมือที่ผู้ใช้เลือกอยู่ — ตัดสินว่า handle ทำอะไรและมีกี่ตัว
     pub tool: Tool,
+    /// ★ ระยะที่ยอมให้ไกด์ดึงเข้าหาขอบของภาพอื่น (world units)
+    ///
+    /// คิดจาก **พิกเซลบนจอ ÷ zoom** เหมือน `drag_threshold` — ถ้าเป็นค่าคงที่ใน world
+    /// ตอนซูมออกมันจะดูดทุกอย่างเข้าหากันจนวางภาพอิสระไม่ได้เลย
+    pub snap_reach: f32,
+    /// กรอบที่มองเห็นอยู่ (world) — ขอบเขตของการค้นหาไกด์
+    ///
+    /// ไกด์ที่อยู่นอกจอไม่มีประโยชน์กับผู้ใช้ และการจำกัดขอบเขตทำให้ต้นทุน
+    /// ไม่โตตามขนาด board (ROADMAP P2-9: 1000 ภาพแล้วลากต้องไม่ทำให้เฟรมตก)
+    pub viewport: Rect,
 }
 
 /// ระยะเริ่มลากเริ่มต้น (พิกเซลบนจอ) — กันมือสั่นตอนคลิก
@@ -537,8 +551,25 @@ impl SelectTool {
             if !started_dragging(press, ctx.drag_threshold, world) {
                 return Interaction::default();
             }
+            let mut guides = Vec::new();
             let changes = match grab {
-                Grab::Move => move_changes(&press.moving, world - press.origin),
+                Grab::Move => {
+                    // ★ ตำแหน่งดิบก่อน แล้วค่อยให้ไกด์ดึงเข้าหาขอบของภาพอื่น
+                    //   คิดจาก "จุดเริ่ม + ระยะรวม" เสมอ (ไม่สะสมทีละเฟรม)
+                    let delta = world - press.origin;
+                    let bounds = union_bounds(&press.moving, delta);
+                    let ids: Vec<ItemId> = press.moving.iter().map(|(id, _)| *id).collect();
+                    let snap = align::snap_to_neighbours(
+                        ctx.board,
+                        ctx.index,
+                        bounds,
+                        ctx.viewport,
+                        &ids,
+                        ctx.snap_reach,
+                    );
+                    guides = snap.guides;
+                    move_changes(&press.moving, delta + snap.offset)
+                }
                 Grab::Scale { dir, frame } => {
                     scale_changes(&press.moving, frame, dir, world, modifiers)
                 }
@@ -568,7 +599,11 @@ impl SelectTool {
                 ),
                 Grab::Band | Grab::Inert => Vec::new(),
             };
-            return transform(changes);
+            let mut out = transform(changes);
+            // ★ เส้นที่โผล่/หายก็ต้องวาดใหม่ แม้ตำแหน่งจะไม่เปลี่ยน
+            out.needs_redraw |= !guides.is_empty();
+            out.guides = guides;
+            return out;
         }
 
         if !started_dragging(press, ctx.drag_threshold, world) {
@@ -758,6 +793,19 @@ fn transform(changes: Vec<(ItemId, ItemCanvas)>) -> Interaction {
         out.commands.push(Box::new(command));
     }
     out
+}
+
+/// กรอบรวมของสิ่งที่กำลังลาก **หลังขยับไปแล้ว** — ขอบเขตที่ใช้หาไกด์
+fn union_bounds(moving: &[(ItemId, ItemCanvas)], delta: Vec2) -> Rect {
+    let mut bounds = Rect::EMPTY;
+    for (_, start) in moving {
+        let shifted = ItemCanvas {
+            pos: start.pos + delta,
+            ..*start
+        };
+        bounds = bounds.union(shifted.world_bounds());
+    }
+    bounds
 }
 
 /// ย้ายทั้งชุดอย่างแข็ง — ระยะห่างระหว่างภาพในชุดต้องไม่เปลี่ยน
@@ -1106,9 +1154,11 @@ mod tests {
         history: History,
         tool: SelectTool,
         last: Option<Rect>,
+        guides: Vec<crate::align::Guide>,
         handle_reach: f32,
         rotate_reach: f32,
         active_tool: Tool,
+        snap_reach: f32,
     }
 
     impl Harness {
@@ -1122,9 +1172,13 @@ mod tests {
                     history: History::default(),
                     tool: SelectTool::new(),
                     last: None,
+                    guides: Vec::new(),
                     handle_reach: HANDLE_REACH,
                     rotate_reach: ROTATE_REACH,
                     active_tool: Tool::Select,
+                    // ★ เทสต์เดิมทั้งหมดปิดไกด์ไว้ — มันทดสอบการย้ายแบบดิบ
+                    //   เทสต์ของไกด์เปิดเองเมื่อจะใช้
+                    snap_reach: 0.0,
                 },
                 ids,
             )
@@ -1138,9 +1192,15 @@ mod tests {
                 handle_reach: self.handle_reach,
                 rotate_reach: self.rotate_reach,
                 tool: self.active_tool,
+                snap_reach: self.snap_reach,
+                viewport: Rect {
+                    min: Vec2::splat(-100_000.0),
+                    max: Vec2::splat(100_000.0),
+                },
             };
             let outcome = self.tool.handle(ctx, &mut self.selection, event);
             self.last = outcome.rubber_band;
+            self.guides = outcome.guides;
             let moved: Vec<ItemId> = self.selection.iter().collect();
             for command in outcome.commands {
                 self.history.apply(&mut self.board, command).unwrap();
@@ -2101,6 +2161,79 @@ mod tests {
         }
     }
 
+    // ---------- alignment guide ตอนลาก (P2-9) ----------
+
+    /// ★★ ลากภาพมาใกล้ขอบของภาพอื่นแล้ว **ต้องถูกดึงให้ตรงกันเป๊ะ** พร้อมมีเส้นให้เห็น
+    ///
+    /// นี่คือสิ่งที่นักวาดอยากได้จริง (HANDOFF §2.4) ต่างจาก snap เข้ากริดที่
+    /// P2-5 ตัดสินว่าไม่ทำ เพราะมันเด้งภาพไปที่ที่ผู้ใช้ไม่ได้ตั้งใจ
+    #[test]
+    fn dragging_close_to_another_edge_snaps_and_shows_a_guide() {
+        let (mut h, ids) = Harness::new(3);
+        h.snap_reach = 8.0;
+        h.click(Vec2::ZERO);
+
+        // ภาพ 0 อยู่ที่ x=0 (ขอบซ้าย -50) · ลากมันลงล่างแล้วเยื้องขวา 3 หน่วย
+        // ให้ขอบซ้ายเกือบตรงกับขอบซ้ายของภาพ 1 ที่ x=200 (ขอบซ้าย 150)
+        h.press(Vec2::ZERO, Modifiers::default());
+        h.drag_to(Vec2::new(203.0, 400.0));
+        h.release(Vec2::new(203.0, 400.0));
+
+        assert_eq!(
+            h.canvas_of(ids[0]).pos.x,
+            200.0,
+            "ต้องถูกดึงให้ขอบซ้ายตรงกับภาพที่ 1 เป๊ะ"
+        );
+        assert_eq!(h.canvas_of(ids[0]).pos.y, 400.0, "แกน y ไม่มีอะไรใกล้");
+        assert_eq!(h.history.undo_depth(), 1, "ยังเป็นการลากขั้นเดียว");
+    }
+
+    /// ★ ปิดไกด์ (ระยะ 0) แล้วต้องได้ตำแหน่งดิบเป๊ะ — พิสูจน์ว่าไกด์เป็นตัวที่ดึงจริง
+    #[test]
+    fn without_a_snap_reach_the_drag_lands_exactly_where_the_pointer_is() {
+        let (mut h, ids) = Harness::new(3);
+        h.snap_reach = 0.0;
+        h.click(Vec2::ZERO);
+
+        h.press(Vec2::ZERO, Modifiers::default());
+        h.drag_to(Vec2::new(203.0, 400.0));
+        h.release(Vec2::new(203.0, 400.0));
+
+        assert_eq!(h.canvas_of(ids[0]).pos, Vec2::new(203.0, 400.0));
+    }
+
+    /// เส้นไกด์ต้องโผล่ระหว่างลาก และ **หายไปตอนปล่อย**
+    #[test]
+    fn guides_appear_while_dragging_and_vanish_on_release() {
+        let (mut h, _) = Harness::new(3);
+        h.snap_reach = 8.0;
+        h.click(Vec2::ZERO);
+
+        h.press(Vec2::ZERO, Modifiers::default());
+        h.drag_to(Vec2::new(203.0, 400.0));
+        assert!(!h.guides.is_empty(), "ต้องมีเส้นให้ผู้ใช้เห็นว่ามันตรงกับอะไร");
+
+        h.release(Vec2::new(203.0, 400.0));
+        assert!(h.guides.is_empty(), "ปล่อยแล้วเส้นต้องหาย");
+    }
+
+    /// ★ ลากไปที่ที่ไม่มีอะไรใกล้ = ไม่ถูกดึง และไม่มีเส้น
+    ///
+    /// ถ้าไม่มีข้อนี้ ไกด์จะกลายเป็นกริดที่มองไม่เห็น ซึ่งคือสิ่งที่ P2-5 ปฏิเสธ
+    #[test]
+    fn dragging_into_open_space_is_never_pulled_anywhere() {
+        let (mut h, ids) = Harness::new(3);
+        h.snap_reach = 8.0;
+        h.click(Vec2::ZERO);
+
+        h.press(Vec2::ZERO, Modifiers::default());
+        h.drag_to(Vec2::new(37.0, 613.0));
+        h.release(Vec2::new(37.0, 613.0));
+
+        assert_eq!(h.canvas_of(ids[0]).pos, Vec2::new(37.0, 613.0));
+        assert!(h.guides.is_empty());
+    }
+
     // ---------- crop (P2-7) ----------
 
     /// ครอปได้ต้องเข้าเครื่องมือครอปก่อน — เทสต์กลุ่มนี้เลือกภาพเดียวแล้วสลับเครื่องมือ
@@ -2398,6 +2531,11 @@ mod tests {
             handle_reach: HANDLE_REACH,
             rotate_reach: ROTATE_REACH,
             tool: Tool::Select,
+            snap_reach: 0.0,
+            viewport: Rect {
+                min: Vec2::splat(-100_000.0),
+                max: Vec2::splat(100_000.0),
+            },
         };
 
         let outcome = tool.handle(

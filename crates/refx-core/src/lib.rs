@@ -7,6 +7,7 @@
 //! spec: docs/02-data-model.md
 // lint ทั้งหมดสืบทอดจาก [workspace.lints] ใน Cargo.toml ราก
 
+pub mod align; // align / distribute + alignment guide — pure functions
 pub mod arena; // generational arena + ItemId/BoardId/GroupId
 pub mod board; // Board, Item, ItemCanvas, ItemMeta, AssetRef
 pub mod clipboard; // ชนิดข้อมูลกลาง + trait ให้ชั้นบนเสียบตัวอ่านจริง (ไม่มีโค้ด OS)
