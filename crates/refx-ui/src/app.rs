@@ -12,7 +12,9 @@ use refx_asset::pool::DecodePool;
 use refx_core::arena::ItemId;
 use refx_core::board::{AssetRef, Board, ImageFormat, Item, ItemCanvas, ItemKind};
 use refx_core::board::{Flip, ItemFilter};
-use refx_core::command::{AddItems, History, RemoveItems, ReorderZ, SetFilter, TransformItems};
+use refx_core::command::{
+    AddItems, EditText, History, RemoveItems, ReorderZ, SetFilter, TransformItems,
+};
 use refx_core::geom::Rect as WorldRect;
 use refx_core::interact::Tool;
 use refx_core::interact::{CanvasButton, CanvasContext, CanvasEvent, Modifiers, SelectTool};
@@ -260,6 +262,9 @@ fn tool_shortcut(key: &winit::keyboard::Key, modifiers: ModifiersState) -> Optio
     }
     if text.eq_ignore_ascii_case("m") {
         return Some(Tool::Measure);
+    }
+    if text.eq_ignore_ascii_case("t") {
+        return Some(Tool::Text);
     }
     None
 }
@@ -644,6 +649,55 @@ const GUIDE_STROKE: egui::Color32 = egui::Color32::from_rgb(255, 96, 160);
 /// สีของกรอบสิ่งที่ถูกเลือกและกรอบ rubber-band
 const SELECT_STROKE: egui::Color32 = egui::Color32::from_rgb(120, 190, 255);
 
+/// พื้นของโน้ตข้อความ (P2-11) — ทึบพอให้อ่านออกบนพื้นหลังอะไรก็ได้
+const NOTE_FILL: egui::Color32 = egui::Color32::from_rgb(48, 44, 36);
+/// ขอบของโน้ต
+const NOTE_STROKE: egui::Color32 = egui::Color32::from_rgb(198, 172, 96);
+/// สีตัวอักษรในโน้ต
+const NOTE_TEXT: egui::Color32 = egui::Color32::from_rgb(238, 230, 210);
+
+/// ตัดข้อความเป็นบรรทัดให้พอดีกับความกว้างของโน้ต
+///
+/// ★ ประมาณความกว้างตัวอักษรที่ `0.55 * font_size` แทนที่จะวัดจริงด้วย egui
+/// เพราะการวัดต้องยืม `Fonts` ซึ่งอยู่ใต้ lock เดียวกับที่ painter ถืออยู่
+/// ผลที่ได้ไม่เป๊ะแต่ **ข้อความไม่ล้นออกนอกกรอบ** ซึ่งเป็นสิ่งที่ผู้ใช้สังเกต
+fn wrap_note(text: &str, width: f32, font_size: f32) -> String {
+    let per_char = (font_size * 0.55).max(1.0);
+    let columns = ((width - 12.0) / per_char).floor().max(4.0) as usize;
+    let mut out = String::with_capacity(text.len() + 8);
+    for (index, line) in text.lines().enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        let mut column = 0usize;
+        for word in line.split(' ') {
+            // คำเดียวที่ยาวเกินบรรทัดต้องถูกหั่น ไม่งั้นมันล้นออกไปคำเดียว
+            let mut rest = word;
+            while rest.chars().count() > columns {
+                let cut: String = rest.chars().take(columns).collect();
+                if column > 0 {
+                    out.push('\n');
+                }
+                out.push_str(&cut);
+                out.push('\n');
+                rest = &rest[cut.len()..];
+                column = 0;
+            }
+            let len = rest.chars().count();
+            if column > 0 && column + 1 + len > columns {
+                out.push('\n');
+                column = 0;
+            } else if column > 0 {
+                out.push(' ');
+                column += 1;
+            }
+            out.push_str(rest);
+            column += len;
+        }
+    }
+    out
+}
+
 /// สีของไม้บรรทัด (P2-10) — ★ ต้องต่างจากกรอบเลือก ไกด์ และ handle ครอป
 /// ทั้งสี่อย่างวาดทับกันได้บนจอเดียว ถ้าสีซ้ำผู้ใช้จะแยกไม่ออกว่าอันไหนคืออะไร
 const MEASURE_STROKE: egui::Color32 = egui::Color32::from_rgb(120, 230, 140);
@@ -737,6 +791,45 @@ impl RefxApp {
                     egui::StrokeKind::Middle,
                 );
             }
+        }
+
+        // ---- วาดโน้ตข้อความ (P2-11) ----
+        //
+        // ★★ โน้ต **ไม่มี quad และไม่มีช่องใน atlas** — มันเป็นข้อความ ไม่ใช่ pixel
+        //   `rebuild_quads` ข้ามมันไปเองเพราะไม่มี `render_state` · ที่นี่จึงเป็น
+        //   ที่เดียวที่โน้ตถูกวาด และวาดด้วย egui ซึ่งมี font atlas อยู่แล้ว
+        //
+        // ★ วาดตามลำดับ z เหมือนภาพ เพื่อให้โน้ตที่ผู้ใช้ส่งไปหลังสุดอยู่หลังจริง
+        for (id, item) in board.items_in_z_order() {
+            let refx_core::board::ItemKind::Text(note) = &item.kind else {
+                continue;
+            };
+            if !item.canvas.visible {
+                continue;
+            }
+            let corners = item.canvas.obb().corners().map(to_point);
+            let frame = egui::Rect::from_two_pos(corners[0], corners[2]);
+            painter.rect_filled(frame, 3.0, NOTE_FILL);
+            painter.rect_stroke(
+                frame,
+                3.0,
+                egui::Stroke::new(1.0, NOTE_STROKE),
+                egui::StrokeKind::Middle,
+            );
+            // ขนาดตัวอักษรตามระดับซูม — โน้ตเป็น item บน world เหมือนภาพ
+            // ถ้าขนาดคงที่บนจอ ข้อความจะล้นกรอบทันทีที่ซูมออก
+            let size = (12.0 * scale).clamp(1.0, 400.0);
+            if size >= 4.0 && !note.text.is_empty() {
+                painter.text(
+                    frame.min + egui::vec2(6.0, 4.0),
+                    egui::Align2::LEFT_TOP,
+                    // ★ ตัดเป็นบรรทัดตามความกว้างของโน้ตเอง ไม่ใช่ปล่อยล้นออกไป
+                    wrap_note(&note.text, frame.width(), size),
+                    egui::FontId::proportional(size),
+                    NOTE_TEXT,
+                );
+            }
+            let _ = id;
         }
 
         // ---- วาดเส้นไกด์ (P2-9) ----
@@ -1795,6 +1888,15 @@ impl RefxApp {
             gfx.history.seal();
         }
 
+        // ★ โน้ตที่เพิ่งวาง (P2-11) ต้องถูกเลือกทันที ไม่งั้นผู้ใช้ต้องคลิกซ้ำก่อนพิมพ์
+        //   `insert_item` ต่อท้าย z-order เสมอ ตัวสุดท้ายจึงคือตัวที่เพิ่งเพิ่ม
+        if outcome.select_added
+            && let Some(id) = gfx.board.z_order().last().copied()
+        {
+            gfx.selection.restore(vec![id], Some(id));
+            *changed = true;
+        }
+
         if has_commands {
             // ★ index ต้องตามตำแหน่งใหม่ทันที ไม่งั้นการกดครั้งถัดไปจะ hit-test
             //   กับตำแหน่ง **เก่า** แล้วคลิกไม่โดนภาพที่เพิ่งย้ายไป
@@ -2004,6 +2106,55 @@ impl RefxApp {
     ///
     /// widget เขียนลง `shell.appearance` เท่านั้น **ไม่มี `&mut Board` หลุดไปถึง egui**
     /// กฎ "ทุก mutation ผ่าน `Command`" (docs/08 §4 ข้อ 10) จึงยังบังคับได้จริง
+    /// เขียนสิ่งที่ผู้ใช้พิมพ์ลงโน้ตผ่าน `EditText` (P2-11)
+    ///
+    /// ★ โครงเดียวกับ [`Self::apply_inspector_edit`] เป๊ะ ๆ: `take()` ทันที
+    /// เพราะ "สิ่งที่ผู้ใช้ขอ" มีอายุหนึ่งเฟรม ถ้าปล่อยค้างไว้มันจะถูกเขียนซ้ำทุกเฟรม
+    /// แล้วทับสิ่งที่ undo เพิ่งคืนมา — กด Ctrl+Z แล้วข้อความเด้งกลับทันที
+    fn apply_note_edit(&mut self) {
+        let sealed = std::mem::take(&mut self.shell.note_sealed);
+        let Some(wanted) = self.shell.note_edit.take() else {
+            if sealed && let Some(gfx) = self.gfx.as_mut() {
+                gfx.history.seal();
+            }
+            return;
+        };
+        let Some(gfx) = self.gfx.as_mut() else {
+            return;
+        };
+        // แก้ **ใบเดียว** เสมอ — ช่องข้อความแสดงของ item ตัวแรกในชุดที่เลือก
+        // การเขียนข้อความเดียวกันลงทุกใบที่เลือกไว้ไม่ใช่สิ่งที่ใครคาดหวัง
+        let Some(id) = gfx.selection.iter().find(|id| {
+            matches!(
+                gfx.board.item(*id).map(|item| &item.kind),
+                Some(refx_core::board::ItemKind::Text(_))
+            )
+        }) else {
+            return;
+        };
+        let current = match gfx.board.item(id).map(|item| &item.kind) {
+            Some(refx_core::board::ItemKind::Text(note)) => note.text.clone(),
+            _ => return,
+        };
+        // ★ ไม่มีอะไรเปลี่ยน = ไม่สร้างคำสั่ง ไม่ขอเฟรม (I-1)
+        if current == wanted {
+            if sealed {
+                gfx.history.seal();
+            }
+            return;
+        }
+        if let Err(err) = gfx
+            .history
+            .apply(&mut gfx.board, Box::new(EditText::new(id, wanted)))
+        {
+            tracing::error!(%err, "cannot edit the note");
+        }
+        if sealed {
+            gfx.history.seal();
+        }
+        gfx.window.request_redraw();
+    }
+
     fn apply_inspector_edit(&mut self) {
         let sealed = std::mem::take(&mut self.shell.appearance_sealed);
         // ★ `take` — สิ่งที่ผู้ใช้ขอมีอายุหนึ่งเฟรม ถ้าปล่อยค้างไว้มันจะถูกเขียนซ้ำ
@@ -2560,6 +2711,8 @@ impl AppDelegate for RefxApp {
         }
         // ค่าที่ผู้ใช้ปรับใน inspector เมื่อเฟรมที่แล้ว
         self.apply_inspector_edit();
+        // ข้อความที่ผู้ใช้พิมพ์ลงโน้ตเมื่อเฟรมที่แล้ว (P2-11)
+        self.apply_note_edit();
         // ปุ่มจัดเรียงที่กดไปเมื่อเฟรมที่แล้ว (P2-9)
         if let Some(request) = self.shell.arrange_request.take() {
             self.apply_arrange(request);
@@ -2624,6 +2777,16 @@ impl AppDelegate for RefxApp {
                 brightness: item.canvas.filter.brightness,
                 contrast: item.canvas.filter.contrast,
                 flip: item.canvas.flip,
+            });
+        // ★ เนื้อความของโน้ต (P2-11) — **ค่าสำหรับแสดงเท่านั้น** เหมือน `appearance`
+        //   เติมจาก item ตัวแรกในชุดที่เลือก และเฉพาะตอนที่มันเป็นโน้ตจริง ๆ
+        shell.note = gfx
+            .selection
+            .iter()
+            .find_map(|id| gfx.board.item(id))
+            .and_then(|item| match &item.kind {
+                refx_core::board::ItemKind::Text(note) => Some(note.text.clone()),
+                _ => None,
             });
         shell.vram_used = gfx.textures.budget().used();
         shell.working_used = gfx.working.used();
@@ -2953,6 +3116,20 @@ impl AppDelegate for RefxApp {
             }
 
             // ★ Ctrl+V — วางภาพจาก clipboard (docs/03 §5, P1-8)
+            // ★★ **คีย์ลัดทุกตัวหยุดทำงานขณะที่ช่องข้อความมี focus** (P2-11)
+            //
+            //    ตั้งแต่มีโน้ตข้อความ ตัวอักษรที่ผู้ใช้พิมพ์คือ *ข้อมูล* ไม่ใช่คำสั่ง
+            //    ถ้าไม่กั้นตรงนี้ การพิมพ์คำว่า "vict" จะสลับไปเครื่องมือเลือก
+            //    เปิดครอป จิ้มสี แล้วเปิดโน้ตอีกใบ ส่วน Delete จะลบภาพที่เลือกอยู่
+            //    และ Ctrl+Z จะย้อน **เอกสาร** แทนที่จะย้อนตัวอักษรที่เพิ่งพิมพ์
+            //
+            //    egui จัดการปุ่มพวกนี้ให้ช่องข้อความไปแล้วใน `on_window_event`
+            //    ข้างบน — ที่นี่แค่ต้องไม่แย่งมันมาทำอย่างอื่นซ้ำ
+            //
+            //    ★ เหตุผลเดียวกับที่ P2-4 เลือก **ปุ่มกลาง** ให้ pan แทน space:
+            //    space เป็นอักขระจริงในโน้ต (HANDOFF §2.2 ข้อ 2)
+            WindowEvent::KeyboardInput { .. } if gfx.egui_ctx.egui_wants_keyboard_input() => {}
+
             WindowEvent::KeyboardInput { event, .. } => {
                 // `repeat` = ผู้ใช้กดค้างไว้ ไม่ใช่เจตนาจะวางหลายรอบ
                 // ถ้าไม่กรอง การกดค้างหนึ่งวินาทีจะสั่งอ่าน clipboard หลายสิบครั้ง
@@ -4187,6 +4364,51 @@ mod tests {
             refx_asset::pool::JobSource::File(std::path::PathBuf::from("a.png"))
                 .file()
                 .is_some()
+        );
+    }
+
+    /// ★ ข้อความในโน้ตต้องไม่ล้นออกนอกกรอบ (P2-11)
+    ///
+    /// ผู้ใช้พิมพ์ประโยคยาวเป็นเรื่องปกติ ถ้าไม่ตัดบรรทัด ข้อความจะพาดข้าม board
+    /// ไปทับภาพอื่น ซึ่งอ่านว่า "โปรแกรมวาดผิด" ไม่ใช่ "โน้ตยาวเกินกรอบ"
+    #[test]
+    fn a_note_never_paints_outside_its_own_box() {
+        // กรอบ 100 px ที่ font 10 → ประมาณ (100-12)/5.5 = 16 คอลัมน์
+        let wrapped = wrap_note("aaa bbb ccc ddd eee fff", 100.0, 10.0);
+        for line in wrapped.lines() {
+            assert!(
+                line.chars().count() <= 16,
+                "บรรทัด {line:?} ยาว {} เกินกรอบ",
+                line.chars().count()
+            );
+        }
+        assert!(wrapped.contains('\n'), "ข้อความยาวต้องถูกตัดบรรทัด: {wrapped:?}");
+        // ★ ตัวอักษรต้องครบ ไม่ใช่ถูกตัดทิ้ง — โน้ตที่หายไปครึ่งคือข้อมูลผู้ใช้หาย
+        let letters: String = wrapped.chars().filter(|c| c.is_alphanumeric()).collect();
+        assert_eq!(letters, "aaabbbcccdddeeefff");
+    }
+
+    /// คำเดียวที่ยาวกว่าบรรทัดต้องถูกหั่น ไม่ใช่ปล่อยล้นออกไปคำเดียว
+    #[test]
+    fn one_very_long_word_is_broken_instead_of_overflowing() {
+        let wrapped = wrap_note(&"x".repeat(60), 100.0, 10.0);
+        for line in wrapped.lines() {
+            assert!(line.chars().count() <= 16, "{line:?}");
+        }
+        assert_eq!(wrapped.chars().filter(|c| *c == 'x').count(), 60);
+    }
+
+    /// ขึ้นบรรทัดใหม่ที่ผู้ใช้พิมพ์เองต้องถูกเก็บไว้
+    #[test]
+    fn explicit_line_breaks_survive_wrapping() {
+        let wrapped = wrap_note(
+            "one
+two", 400.0, 10.0,
+        );
+        assert_eq!(
+            wrapped,
+            "one
+two"
         );
     }
 

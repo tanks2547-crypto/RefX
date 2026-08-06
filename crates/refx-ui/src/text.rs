@@ -98,6 +98,8 @@ pub enum Key {
     ToolPicker,
     /// เครื่องมือ: ไม้บรรทัด
     ToolMeasure,
+    /// เครื่องมือ: โน้ตข้อความ
+    ToolText,
     /// เครื่องมือ: ขาวดำ
     ToolGrayscale,
     /// เครื่องมือ: เรียง
@@ -152,6 +154,10 @@ pub enum Key {
     NothingToPick,
     /// อ่านสีจากไฟล์ต้นฉบับไม่ได้
     ColourUnavailable,
+    /// หัวข้อช่องแก้โน้ต
+    Note,
+    /// ข้อความจาง ๆ ในช่องโน้ตที่ยังว่าง
+    NoteHint,
 }
 
 /// ข้อความภาษาอังกฤษ — **ต้องมีครบทุก key เสมอ** (เป็นตัวสำรองสุดท้าย)
@@ -174,6 +180,7 @@ fn en(key: Key) -> &'static str {
         Key::ToolCrop => "Crop",
         Key::ToolPicker => "Picker",
         Key::ToolMeasure => "Measure",
+        Key::ToolText => "Note",
         Key::ToolGrayscale => "Grayscale",
         Key::ToolSort => "Sort",
         Key::ToolFilter => "Filter",
@@ -201,6 +208,8 @@ fn en(key: Key) -> &'static str {
         Key::ReadingColour => "Reading the colour from the original file…",
         Key::NothingToPick => "Nothing there to pick a colour from",
         Key::ColourUnavailable => "Could not read the colour: the original file is unavailable",
+        Key::Note => "Note",
+        Key::NoteHint => "Type a note",
     }
 }
 
@@ -224,6 +233,7 @@ fn th(key: Key) -> Option<&'static str> {
         Key::ToolCrop => "ครอป",
         Key::ToolPicker => "จิ้มสี",
         Key::ToolMeasure => "ไม้บรรทัด",
+        Key::ToolText => "โน้ต",
         Key::ToolGrayscale => "ขาวดำ",
         Key::ToolSort => "เรียง",
         Key::ToolFilter => "กรอง",
@@ -251,6 +261,8 @@ fn th(key: Key) -> Option<&'static str> {
         Key::ReadingColour => "กำลังอ่านสีจากไฟล์ต้นฉบับ…",
         Key::NothingToPick => "ตรงนั้นไม่มีภาพให้อ่านสี",
         Key::ColourUnavailable => "อ่านสีไม่ได้: เปิดไฟล์ต้นฉบับไม่ได้",
+        Key::Note => "โน้ต",
+        Key::NoteHint => "พิมพ์โน้ตที่นี่",
     })
 }
 
@@ -678,6 +690,7 @@ mod tests {
         Key::ToolCrop,
         Key::ToolPicker,
         Key::ToolMeasure,
+        Key::ToolText,
         Key::ToolGrayscale,
         Key::ToolSort,
         Key::ToolFilter,
@@ -705,6 +718,8 @@ mod tests {
         Key::ReadingColour,
         Key::NothingToPick,
         Key::ColourUnavailable,
+        Key::Note,
+        Key::NoteHint,
     ];
 
     const ALL_TEMPLATES: &[Template] = &[

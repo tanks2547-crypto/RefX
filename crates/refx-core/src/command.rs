@@ -786,6 +786,89 @@ impl Command for EditMeta {
 }
 
 // ---------------------------------------------------------------------------
+// EditText
+// ---------------------------------------------------------------------------
+
+/// แก้เนื้อความของโน้ต (P2-11)
+///
+/// ★★ **ทำไมต้องเป็น `Command`** — `TextNote.text` อยู่ใน `Board` จึงเป็นเอกสาร
+/// (`docs/08 §4` ข้อ 10) · โน้ตที่พิมพ์ไปสิบบรรทัดแล้วหายเพราะ Ctrl+Z ย้อนไม่ถึง
+/// คือการทำงานหายแบบเดียวกับภาพหาย (I-3)
+///
+/// ★ **merge ได้เฉพาะ item เดียวกัน** — พิมพ์รัว ๆ ในโน้ตหนึ่งใบยุบเป็น undo
+/// ขั้นเดียว (ไม่งั้นการพิมพ์ประโยคเดียวกิน undo stack ทั้งสแตกจนคำสั่งอื่นถูกตัดทิ้ง
+/// ตามเพดาน 200 ขั้น) แต่ **ห้ามข้ามใบ** ไม่งั้นแก้โน้ต A แล้วแก้ B
+/// จะย้อนทีเดียวเสียทั้งสองใบ
+#[derive(Debug)]
+pub struct EditText {
+    id: ItemId,
+    after: String,
+    /// ข้อความเดิม — เก็บ **ตอน apply ครั้งแรกเท่านั้น** เพื่อให้ redo ไม่เขียนทับ
+    before: Option<String>,
+}
+
+impl EditText {
+    /// ตั้งเนื้อความใหม่ให้โน้ตหนึ่งใบ
+    #[must_use]
+    pub fn new(id: ItemId, text: String) -> Self {
+        Self {
+            id,
+            after: text,
+            before: None,
+        }
+    }
+}
+
+impl Command for EditText {
+    fn apply(&mut self, board: &mut Board) -> Result<(), CmdError> {
+        let previous = board.set_text(self.id, self.after.clone())?;
+        // ★ เก็บของเดิมครั้งแรกครั้งเดียว — redo เรียก `apply` ซ้ำ ถ้าเขียนทับทุกครั้ง
+        //   ค่าเดิมจะกลายเป็นค่าที่คำสั่งนี้เพิ่งเขียนไป แล้ว undo จะคืนอะไรไม่ได้เลย
+        if self.before.is_none() {
+            self.before = Some(previous);
+        }
+        Ok(())
+    }
+
+    fn undo(&mut self, board: &mut Board) -> Result<(), CmdError> {
+        let Some(before) = self.before.clone() else {
+            return Ok(()); // ยังไม่เคย apply — ไม่มีอะไรให้คืน
+        };
+        board.set_text(self.id, before)?;
+        Ok(())
+    }
+
+    fn merge(&mut self, next: &dyn Command) -> bool {
+        let Some(next) = next.as_any().downcast_ref::<Self>() else {
+            return false;
+        };
+        if next.id != self.id {
+            return false;
+        }
+        self.after.clone_from(&next.after);
+        true
+    }
+
+    fn affected(&self) -> Vec<ItemId> {
+        vec![self.id]
+    }
+
+    fn label(&self) -> &'static str {
+        "Edit note"
+    }
+
+    fn heap_size(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.after.capacity()
+            + self.before.as_ref().map_or(0, String::capacity)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+// ---------------------------------------------------------------------------
 // History
 // ---------------------------------------------------------------------------
 

@@ -142,6 +142,19 @@ pub struct ShellState {
     /// จำนวน working texture ที่ถูกไล่ออกตาม LRU — หลักฐานว่า LRU ทำงาน
     pub working_evicted: u64,
 
+    /// ★ เนื้อความของโน้ตที่เลือกอยู่ (P2-11) — `None` = ไม่ได้เลือกโน้ต
+    ///
+    /// **ค่าสำหรับ *แสดง* เท่านั้น** ชั้น `app` เติมให้ทุกเฟรม
+    pub note: Option<String>,
+    /// ★★ **สิ่งที่ผู้ใช้พิมพ์ในเฟรมนี้** — `None` = ไม่ได้แตะช่องข้อความเลย
+    ///
+    /// แยกจาก `note` ด้วยเหตุผลเดียวกับ `appearance_edit` เป๊ะ ๆ: ถ้าอ่าน `note`
+    /// กลับไปเขียนลง board ทุกเฟรม ค่าที่ค้างจากเฟรมก่อนจะทับสิ่งที่ undo
+    /// เพิ่งคืนมา — กด Ctrl+Z แล้วข้อความเด้งกลับทันที (`docs/08 §3.9` ข้อ 8.1)
+    pub note_edit: Option<String>,
+    /// ผู้ใช้ออกจากช่องข้อความแล้ว → ปิดหน้าต่าง merge (undo ขั้นใหม่)
+    pub note_sealed: bool,
+
     /// ★ สีที่ picker อ่านได้ล่าสุด (P2-10) — `None` = ยังไม่ได้จิ้มอะไร
     ///
     /// **เป็นสีของ pixel ต้นฉบับ** ไม่ได้ผ่าน grayscale/brightness/opacity ใด ๆ
@@ -234,6 +247,9 @@ impl Default for ShellState {
             working_used: 0,
             working_limit: 0,
             working_evicted: 0,
+            note: None,
+            note_edit: None,
+            note_sealed: false,
             picked: None,
             measured: None,
             loading: None,
@@ -509,6 +525,7 @@ fn canvas_tools(ui: &mut egui::Ui, state: &mut ShellState) {
         (Tool::Crop, Key::ToolCrop, "C"),
         (Tool::Picker, Key::ToolPicker, "I"),
         (Tool::Measure, Key::ToolMeasure, "M"),
+        (Tool::Text, Key::ToolText, "T"),
     ] {
         let label = text::t(lang, key);
         if ui
@@ -576,8 +593,32 @@ fn canvas_inspector(ui: &mut egui::Ui, state: &mut ShellState) {
     ui.label(text::t(lang, Key::InspectorCanvasGeometry));
     ui.separator();
 
+    // ★ โน้ตข้อความ (P2-11) — ช่องนี้มาก่อนเพราะเป็นทั้งหมดที่โน้ตมีให้แก้
+    //   ★★ egui กิน keyboard ให้เองเมื่อช่องนี้มี focus และชั้น `app` หยุด
+    //   คีย์ลัดทุกตัวตาม `egui_wants_keyboard_input()` — space จึงเป็นอักขระจริง
+    if let Some(note) = state.note.as_mut() {
+        ui.label(text::t(lang, Key::Note));
+        let response = ui.add(
+            egui::TextEdit::multiline(note)
+                .desired_width(f32::INFINITY)
+                .desired_rows(6)
+                .hint_text(text::t(lang, Key::NoteHint)),
+        );
+        let wanted = note.clone();
+        // เขียน "สิ่งที่ผู้ใช้ขอ" เฉพาะตอนมีคนพิมพ์จริง — เจ้าของเดียว ไม่มีการทับกัน
+        state.note_edit = response.changed().then_some(wanted);
+        // ออกจากช่องแล้ว = จบหนึ่งขั้น undo · ระหว่างพิมพ์อยู่ยังยุบเป็นขั้นเดียว
+        state.note_sealed = response.lost_focus();
+        ui.separator();
+    } else {
+        state.note_edit = None;
+        state.note_sealed = false;
+    }
+
     let Some(appearance) = state.appearance.as_mut() else {
-        ui.label(text::t(lang, Key::InspectorNoSelection));
+        if state.note.is_none() {
+            ui.label(text::t(lang, Key::InspectorNoSelection));
+        }
         return;
     };
 
@@ -695,6 +736,62 @@ mod tests {
                 "ไม่มีใครแตะ แต่ inspector กลับขอให้เขียนค่าลง board"
             );
         }
+    }
+
+    /// ★★ ช่องโน้ตต้อง **ไม่ขออะไร** ถ้าผู้ใช้ไม่ได้พิมพ์ในเฟรมนั้น (P2-11)
+    ///
+    /// เหตุผลเดียวกับ `the_inspector_asks_for_nothing_when_nobody_touches_it`:
+    /// ถ้าค่าที่ค้างอยู่ถูกเขียนกลับลง board ทุกเฟรม มันจะทับสิ่งที่ undo เพิ่งคืนมา
+    /// อาการคือ **กด Ctrl+Z แล้วข้อความเด้งกลับ** โดยไม่มี error ที่ไหนเลย
+    #[test]
+    fn the_note_field_asks_for_nothing_when_nobody_types() {
+        let ctx = egui::Context::default();
+        let mut state = ShellState {
+            note: Some("เขียนไว้แล้ว".to_owned()),
+            ..ShellState::default()
+        };
+
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| {
+                let _ = draw_in_ui(ui, &mut state, |_| {});
+            });
+            assert!(
+                state.note_edit.is_none(),
+                "ไม่มีใครพิมพ์ แต่ช่องโน้ตกลับขอให้เขียนลง board"
+            );
+            assert!(!state.note_sealed);
+        }
+    }
+
+    /// ไม่ได้เลือกโน้ต = ต้องไม่มีคำขอค้างจากรอบก่อน
+    #[test]
+    fn deselecting_a_note_clears_any_pending_edit() {
+        let ctx = egui::Context::default();
+        let mut state = ShellState {
+            note: None,
+            note_edit: Some("ค้างจากรอบก่อน".to_owned()),
+            note_sealed: true,
+            ..ShellState::default()
+        };
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| {
+            let _ = draw_in_ui(ui, &mut state, |_| {});
+        });
+        assert!(state.note_edit.is_none());
+        assert!(!state.note_sealed);
     }
 
     #[test]

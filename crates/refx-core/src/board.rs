@@ -741,6 +741,25 @@ impl Board {
         Ok(std::mem::replace(&mut item.canvas, canvas.sanitized()))
     }
 
+    /// แก้เนื้อความของโน้ต คืนข้อความเดิม (P2-11)
+    ///
+    /// ★ คืน [`BoardError::NoSuchItem`] เมื่อ item **ไม่ใช่โน้ต** ด้วย ไม่ใช่แค่ตอน id ตาย
+    /// — การเขียนข้อความทับภาพจะทำให้ `AssetRef` หายไปทั้งก้อน ซึ่งคือการทำงาน
+    /// ของผู้ใช้หายแบบที่ I-3 ห้ามไว้ตรง ๆ
+    ///
+    /// # Errors
+    /// [`BoardError::NoSuchItem`] ถ้า id ตายไปแล้ว หรือ item นั้นไม่ใช่ `ItemKind::Text`
+    pub(crate) fn set_text(&mut self, id: ItemId, text: String) -> Result<String, BoardError> {
+        let item = self
+            .items
+            .get_mut(id)
+            .ok_or(BoardError::NoSuchItem { id })?;
+        let ItemKind::Text(note) = &mut item.kind else {
+            return Err(BoardError::NoSuchItem { id });
+        };
+        Ok(std::mem::replace(&mut note.text, text))
+    }
+
     /// แก้ `ItemMeta` คืนค่าเดิม
     ///
     /// # Errors

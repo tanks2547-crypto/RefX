@@ -22,8 +22,8 @@ use glam::Vec2;
 use crate::align;
 use crate::arena::ItemId;
 use crate::board::Board;
-use crate::board::{CropRect, ItemCanvas};
-use crate::command::{Command, SetCrop, TransformItems};
+use crate::board::{CropRect, Item, ItemCanvas, ItemKind, TextNote};
+use crate::command::{AddItems, Command, SetCrop, TransformItems};
 use crate::geom::{Obb, Rect};
 use crate::selection::Selection;
 use crate::spatial::SpatialIndex;
@@ -116,6 +116,11 @@ pub struct Interaction {
     ///
     /// เป็นเหตุการณ์ครั้งเดียว ไม่ใช่สถานะ: `None` = การกดครั้งนี้ไม่ได้จิ้มอะไร
     pub pick: Option<PickRequest>,
+    /// ★ เพิ่ง `AddItems` ของใหม่เข้าไป — ผู้เรียกต้องเลือกมันหลัง apply (P2-11)
+    ///
+    /// ต้องให้ผู้เรียกทำเพราะ `ItemId` ยังไม่มีตอนที่คำสั่งถูกสร้าง — id เกิดตอน
+    /// `apply` เท่านั้น · อ่านได้จาก `Command::affected()` หลัง apply
+    pub select_added: bool,
     /// ★ ต้องเรียก `History::seal()` หรือไม่ — **จริงตอนปล่อยเมาส์**
     ///
     /// ถ้าไม่ seal การลากสองครั้งติดกันจะกลายเป็น undo เดียว ผู้ใช้จะงง (docs/02 §3)
@@ -130,6 +135,7 @@ impl std::fmt::Debug for Interaction {
             .field("commands", &self.commands.len())
             .field("guides", &self.guides.len())
             .field("pick", &self.pick)
+            .field("select_added", &self.select_added)
             .field("seal", &self.seal)
             .finish()
     }
@@ -183,6 +189,15 @@ pub struct CanvasContext<'a> {
 
 /// ระยะเริ่มลากเริ่มต้น (พิกเซลบนจอ) — กันมือสั่นตอนคลิก
 pub const DEFAULT_DRAG_THRESHOLD_PX: f32 = 4.0;
+
+/// ขนาดเริ่มต้นของโน้ตใหม่ (world unit) — P2-11
+///
+/// ★ เป็น **world** ไม่ใช่พิกเซลบนจอ: โน้ตเป็น item บน board เหมือนภาพ
+/// ถ้าให้ขนาดขึ้นกับระดับซูมตอนวาง โน้ตที่วางตอนซูมออกจะใหญ่กว่าทั้ง board
+///
+/// 240x120 อยู่ในระดับเดียวกับภาพที่ ingest เข้ามา (ด้านยาว 128) จึงอ่านออก
+/// ตั้งแต่ระดับซูมที่เห็นภาพรอบ ๆ พร้อมกัน
+pub const NEW_NOTE_SIZE: glam::Vec2 = glam::Vec2::new(240.0, 120.0);
 
 /// ครึ่งหนึ่งของพื้นที่กด handle มุม (พิกเซลบนจอ)
 ///
@@ -267,6 +282,8 @@ pub enum Tool {
     Picker,
     /// `M` — ลากวัดระยะ/มุม เป็นหน่วย world (P2-10)
     Measure,
+    /// `T` — วางโน้ตข้อความ (P2-11)
+    Text,
 }
 
 /// ส่วนของกรอบที่เคอร์เซอร์จับอยู่
@@ -326,9 +343,10 @@ pub fn handles_for(tool: Tool) -> &'static [HandleDir] {
     match tool {
         Tool::Select => &HandleDir::CORNERS,
         Tool::Crop => &ALL_HANDLES,
-        // ★ picker/measure ไม่แก้เรขาคณิตของภาพเลย จึงต้อง **ไม่มี handle**
+        // ★ picker/measure/text ไม่แก้เรขาคณิตของภาพเลย จึงต้อง **ไม่มี handle**
         //   handle ที่ลากแล้วไม่มีอะไรเกิดขึ้น ผู้ใช้อ่านว่าโปรแกรมค้าง (HANDOFF §2.4 ข้อ 3)
-        Tool::Picker | Tool::Measure => &[],
+        //   (ย่อ/ขยายโน้ตทำได้ที่เครื่องมือเลือกตามปกติ — โน้ตเป็น item เต็มตัว)
+        Tool::Picker | Tool::Measure | Tool::Text => &[],
     }
 }
 
@@ -532,6 +550,38 @@ impl SelectTool {
     ) -> Interaction {
         let base: Vec<ItemId> = selection.iter().collect();
         let mut out = Interaction::default();
+
+        // ★★ วางโน้ต (P2-11) — คลิกที่ **ที่ว่าง** เท่านั้น
+        //    คลิกโดนภาพให้ตกไปเส้นทางปกติ (เลือกภาพนั้น) ไม่ใช่วางโน้ตทับ:
+        //    ผู้ใช้ที่พลาดไปโดนภาพแล้วได้โน้ตซ้อนอยู่ข้างบนจะไม่รู้ตัวจนกว่าจะย้ายภาพ
+        if ctx.tool == Tool::Text && ctx.index.hit_test(ctx.board, world).is_none() {
+            self.press = Some(Press {
+                origin: world,
+                modifiers,
+                dragging: false,
+                grab: Grab::Inert,
+                base,
+                moving: Vec::new(),
+            });
+            if !world.is_finite() {
+                return out;
+            }
+            // ★ จุดที่คลิกคือ **มุมซ้ายบน** ของโน้ต ไม่ใช่กึ่งกลาง — โน้ตงอกลงขวา
+            //   จากที่ผู้ใช้จิ้ม เหมือนเครื่องมือข้อความของโปรแกรมอื่นทุกตัว
+            let size = NEW_NOTE_SIZE;
+            let item = Item::new(ItemKind::Text(TextNote::default())).at(world + size * 0.5, size);
+            if let Ok(command) = AddItems::new(vec![item]) {
+                out.commands.push(Box::new(command));
+                // ★ ต้องเลือกโน้ตใหม่ให้ด้วย ไม่งั้นผู้ใช้วางโน้ตแล้วต้องไปคลิกซ้ำ
+                //   ก่อนถึงจะพิมพ์ได้ · id ยังไม่มีตอนนี้ (คำสั่งยังไม่ถูก apply)
+                //   ผู้เรียกจึงเป็นคนตั้งจาก `affected()` หลัง apply
+                out.select_added = true;
+                out.needs_redraw = true;
+                // วางโน้ตหนึ่งใบ = undo หนึ่งขั้นเสมอ ห้ามกลืนกับการพิมพ์ที่ตามมา
+                out.seal = true;
+            }
+            return out;
+        }
 
         // ★★ ไม้บรรทัดตัดสินก่อนทุกอย่าง — ไม่ต้อง hit-test ไม่แตะการเลือก
         //    เริ่มบนที่ว่างได้ ซึ่งเป็นกรณีปกติของการวัดระยะระหว่างภาพสองใบ
@@ -857,7 +907,7 @@ fn on_image(tool: Tool) -> Grab {
         Tool::Select => Grab::Move,
         // ★ ครอป/picker: ลากบนตัวภาพต้องไม่ทำอะไร — พลาดไปโดนกลางภาพแล้วภาพเลื่อน
         //   แย่กว่าการที่ลากแล้วเงียบ (HANDOFF §2.6 ข้อ 5) · measure ไม่ผ่านทางนี้เลย
-        Tool::Crop | Tool::Picker => Grab::Inert,
+        Tool::Crop | Tool::Picker | Tool::Text => Grab::Inert,
         Tool::Measure => Grab::Measure,
     }
 }
@@ -2894,5 +2944,143 @@ mod tests {
     fn read_only_tools_expose_no_handles() {
         assert!(handles_for(Tool::Picker).is_empty());
         assert!(handles_for(Tool::Measure).is_empty());
+        assert!(handles_for(Tool::Text).is_empty());
+    }
+
+    // ---------- text note (P2-11) ----------
+
+    /// ★★ วางโน้ตต้องผ่าน `Command` และ **undo ได้** (docs/08 §4 ข้อ 10, I-3)
+    #[test]
+    fn placing_a_note_goes_through_a_command_and_undoes_cleanly() {
+        let (mut h, ids) = Harness::new(2);
+        h.active_tool = Tool::Text;
+        let before = h.board.len();
+
+        h.click(Vec2::new(0.0, 800.0)); // ที่ว่าง ห่างจากภาพทั้งสอง
+
+        assert_eq!(h.board.len(), before + 1, "ต้องมีโน้ตเพิ่มขึ้นหนึ่งใบ");
+        assert_eq!(h.history.undo_depth(), 1, "ต้องเป็น undo หนึ่งขั้น");
+        let note = h.board.z_order().last().copied().unwrap();
+        assert!(!ids.contains(&note));
+        assert!(matches!(
+            h.board.item(note).unwrap().kind,
+            ItemKind::Text(_)
+        ));
+        // มุมซ้ายบนต้องอยู่ที่จุดที่คลิก ไม่ใช่กึ่งกลาง
+        let bounds = h.board.item(note).unwrap().canvas.world_bounds();
+        assert!(
+            (bounds.min - Vec2::new(0.0, 800.0)).length() < 1e-3,
+            "{bounds:?}"
+        );
+
+        h.history.undo(&mut h.board).unwrap();
+        assert_eq!(h.board.len(), before, "undo แล้วโน้ตต้องหายไป");
+    }
+
+    /// ★ คลิกโดนภาพขณะอยู่ในเครื่องมือข้อความ = เลือกภาพนั้น **ไม่ใช่วางโน้ตทับ**
+    ///
+    /// โน้ตที่ซ้อนอยู่บนภาพโดยผู้ใช้ไม่ได้ตั้งใจจะไม่มีใครเห็นจนกว่าจะย้ายภาพ
+    #[test]
+    fn clicking_an_image_with_the_text_tool_does_not_bury_a_note_under_it() {
+        let (mut h, ids) = Harness::new(2);
+        h.active_tool = Tool::Text;
+        let before = h.board.len();
+
+        h.click(Vec2::ZERO); // กลางภาพใบแรก
+
+        assert_eq!(h.board.len(), before, "ต้องไม่มีโน้ตใหม่");
+        assert_eq!(h.selected(), vec![ids[0]], "ต้องเลือกภาพที่คลิกโดนแทน");
+    }
+
+    /// ★★ พิมพ์รัว ๆ ในโน้ตใบเดียว = undo **ขั้นเดียว** แต่ห้ามข้ามใบ
+    #[test]
+    fn typing_merges_within_one_note_but_never_across_two() {
+        use crate::command::EditText;
+
+        let (mut h, _) = Harness::new(1);
+        h.active_tool = Tool::Text;
+        h.click(Vec2::new(0.0, 800.0));
+        let first = h.board.z_order().last().copied().unwrap();
+        h.click(Vec2::new(0.0, 1400.0));
+        let second = h.board.z_order().last().copied().unwrap();
+        let base = h.history.undo_depth();
+
+        for text in ["h", "he", "hel", "hell", "hello"] {
+            h.history
+                .apply(
+                    &mut h.board,
+                    Box::new(EditText::new(first, text.to_owned())),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            h.history.undo_depth(),
+            base + 1,
+            "พิมพ์ในใบเดียวกันต้องยุบเป็นขั้นเดียว"
+        );
+
+        h.history
+            .apply(
+                &mut h.board,
+                Box::new(EditText::new(second, "x".to_owned())),
+            )
+            .unwrap();
+        assert_eq!(
+            h.history.undo_depth(),
+            base + 2,
+            "คนละใบต้องเป็นคนละขั้น ไม่งั้นย้อนทีเดียวเสียทั้งสองใบ"
+        );
+
+        // ย้อนขั้นเดียวต้องคืนใบที่สองอย่างเดียว ใบแรกยังเป็น hello
+        h.history.undo(&mut h.board).unwrap();
+        assert_eq!(text_of(&h.board, first), "hello");
+        assert_eq!(text_of(&h.board, second), "");
+        // ย้อนอีกขั้นคืนใบแรกทั้งประโยค (ไม่ใช่ทีละตัวอักษร)
+        h.history.undo(&mut h.board).unwrap();
+        assert_eq!(text_of(&h.board, first), "");
+    }
+
+    /// ★ redo ต้องได้ข้อความกลับมาครบ — `apply` ถูกเรียกซ้ำตอน redo
+    #[test]
+    fn redoing_an_edit_restores_the_text_it_wrote() {
+        use crate::command::EditText;
+
+        let (mut h, _) = Harness::new(1);
+        h.active_tool = Tool::Text;
+        h.click(Vec2::new(0.0, 800.0));
+        let note = h.board.z_order().last().copied().unwrap();
+
+        h.history
+            .apply(
+                &mut h.board,
+                Box::new(EditText::new(note, "จดไว้".to_owned())),
+            )
+            .unwrap();
+        h.history.undo(&mut h.board).unwrap();
+        assert_eq!(text_of(&h.board, note), "");
+        h.history.redo(&mut h.board).unwrap();
+        assert_eq!(text_of(&h.board, note), "จดไว้", "redo ต้องคืนข้อความครบ");
+    }
+
+    /// ★★ เขียนข้อความทับ **ภาพ** ไม่ได้ — `AssetRef` จะหายทั้งก้อน (I-3)
+    #[test]
+    fn text_can_never_be_written_over_an_image_item() {
+        use crate::command::EditText;
+
+        let (mut h, ids) = Harness::new(1);
+        let before = h.board.item(ids[0]).unwrap().kind.clone();
+        let result = h.history.apply(
+            &mut h.board,
+            Box::new(EditText::new(ids[0], "x".to_owned())),
+        );
+        assert!(result.is_err(), "ต้องปฏิเสธ ไม่ใช่เขียนทับ");
+        assert_eq!(h.board.item(ids[0]).unwrap().kind, before, "ภาพต้องไม่ถูกแตะ");
+    }
+
+    fn text_of(board: &Board, id: ItemId) -> String {
+        match &board.item(id).unwrap().kind {
+            ItemKind::Text(note) => note.text.clone(),
+            other => panic!("ไม่ใช่โน้ต: {other:?}"),
+        }
     }
 }
