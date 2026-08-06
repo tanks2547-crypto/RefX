@@ -17,6 +17,7 @@ pub mod hash; // ContentHash — ชนิดล้วน ๆ ส่วนคน
 pub mod interact; // เครื่องสถานะของการเลือกบน canvas (คืน Command ไม่แก้ board เอง)
 pub mod layout; // layout engines — pure functions, deterministic
 pub mod panic_guard; // ธงบอก panic hook ว่า panic นี้ถูกดักไว้แล้ว (I-7)
+pub mod pick; // color picker (world → pixel ต้นฉบับ) + measure — pure functions
 pub mod selection;
 pub mod spatial; // loose uniform grid: culling + hit-test
 pub mod view; // Camera, ViewState, Mode

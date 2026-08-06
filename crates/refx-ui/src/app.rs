@@ -254,6 +254,13 @@ fn tool_shortcut(key: &winit::keyboard::Key, modifiers: ModifiersState) -> Optio
     if text.eq_ignore_ascii_case("c") {
         return Some(Tool::Crop);
     }
+    // docs/03 §2: `I` = color picker · `M` = measure
+    if text.eq_ignore_ascii_case("i") {
+        return Some(Tool::Picker);
+    }
+    if text.eq_ignore_ascii_case("m") {
+        return Some(Tool::Measure);
+    }
     None
 }
 
@@ -526,6 +533,20 @@ struct CanvasView<'a> {
     rubber_band: Option<WorldRect>,
     tool: Tool,
     guides: &'a [refx_core::align::Guide],
+    /// ไม้บรรทัดที่วางอยู่ (P2-10) — `None` = ไม่มีอะไรให้วาด
+    measure: Option<refx_core::pick::Measurement>,
+}
+
+/// สิ่งที่การประมวลผล input หนึ่งเฟรมได้ออกมา
+///
+/// ★ `pick` เป็น **เหตุการณ์** ไม่ใช่สถานะ — ผู้เรียกต้องลงมือทันทีในเฟรมเดียวกัน
+/// ถ้าเก็บไว้ทำทีหลัง เราจะกลับไปอยู่ในกับดักเดียวกับ `take_forgotten` (docs/08 3.9 ข้อ 8)
+#[derive(Debug, Default, Clone, Copy)]
+struct CanvasOutcome {
+    /// มีอะไรเปลี่ยนจนต้องวาดใหม่ไหม — **I-1: ไม่มีอะไรเปลี่ยนต้องไม่ขอเฟรม**
+    redraw: bool,
+    /// ผู้ใช้จิ้มขอสี (P2-10) — ต้องไปอ่านไฟล์ต้นฉบับบน worker
+    pick: Option<refx_core::interact::PickRequest>,
 }
 
 /// สิ่งที่ canvas widget เก็บได้จาก egui ในเฟรมหนึ่ง
@@ -579,21 +600,23 @@ impl Default for CanvasFrameInput {
 /// ★ `crop` เป็นสัดส่วน **ของภาพต้นฉบับ** (docs/02 §2.1) ส่วน `slot` คือช่องที่ภาพนั้น
 /// อยู่ใน atlas — จึงต้อง lerp กรอบ crop ลงในช่วงของช่อง ไม่ใช่เอาไปใช้ตรง ๆ
 /// ถ้าใช้ตรง ๆ ภาพทุกใบจะไปสุ่มหยิบ pixel ของภาพอื่นในชั้นเดียวกันมาแสดง
+///
+/// ★★ **ช่วงของภาพต้นฉบับมาจาก `refx_core::pick::source_span` ที่เดียว** (P2-10)
+/// ที่นี่ทำหน้าที่เดียวคือ lerp ช่วงนั้นลงในช่องของ atlas
+///
+/// เดิมสูตร crop+flip ถูกเขียนไว้ตรงนี้ และ picker ต้องเดินย้อนทางเดียวกัน
+/// ถ้าปล่อยให้เขียนคนละที่ วันที่มีคนแก้ข้างเดียว **ผู้ใช้จะจิ้มตรงที่เห็นสีหนึ่ง
+/// แล้วได้อีกสีหนึ่ง** โดยไม่มี error ที่ไหนเลย — เป็นรูปแบบเดียวกับบั๊ก `flip`
+/// ที่ไม่ถึงทาง working texture ตอน P2-8 เป๊ะ ๆ
 fn crop_uv(slot: [f32; 4], canvas: &ItemCanvas) -> [f32; 4] {
     let [u0, v0, u1, v1] = slot;
-    let crop = canvas.crop.sanitized();
-    let (mut left, mut right) = (u0 + (u1 - u0) * crop.min.x, u0 + (u1 - u0) * crop.max.x);
-    let (mut top, mut bottom) = (v0 + (v1 - v0) * crop.min.y, v0 + (v1 - v0) * crop.max.y);
-    // ★ flip ทำที่ **uv** ไม่ใช่ที่เรขาคณิต — สลับปลายทั้งสองของช่วงแล้วจบ
-    //   ไม่ต้องมีธงใน shader ไม่ต้องแตะ texture และที่สำคัญ **`obb()` ไม่เปลี่ยน**
-    //   hit-test จึงยังตรงเป๊ะหลังพลิก (ภาพพลิกแล้วยังกินพื้นที่เดิมบนจอ)
-    if matches!(canvas.flip, Flip::Horizontal | Flip::Both) {
-        std::mem::swap(&mut left, &mut right);
-    }
-    if matches!(canvas.flip, Flip::Vertical | Flip::Both) {
-        std::mem::swap(&mut top, &mut bottom);
-    }
-    [left, top, right, bottom]
+    let [left, top, right, bottom] = refx_core::pick::source_span(canvas);
+    [
+        u0 + (u1 - u0) * left,
+        v0 + (v1 - v0) * top,
+        u0 + (u1 - u0) * right,
+        v0 + (v1 - v0) * bottom,
+    ]
 }
 
 /// สีเด่นของภาพ (ARGB จาก `Thumbnail`) → tint ของ quad
@@ -621,6 +644,10 @@ const GUIDE_STROKE: egui::Color32 = egui::Color32::from_rgb(255, 96, 160);
 /// สีของกรอบสิ่งที่ถูกเลือกและกรอบ rubber-band
 const SELECT_STROKE: egui::Color32 = egui::Color32::from_rgb(120, 190, 255);
 
+/// สีของไม้บรรทัด (P2-10) — ★ ต้องต่างจากกรอบเลือก ไกด์ และ handle ครอป
+/// ทั้งสี่อย่างวาดทับกันได้บนจอเดียว ถ้าสีซ้ำผู้ใช้จะแยกไม่ออกว่าอันไหนคืออะไร
+const MEASURE_STROKE: egui::Color32 = egui::Color32::from_rgb(120, 230, 140);
+
 /// สีพื้นของ handle มุม — ทึบเพื่อให้เห็นบนภาพสีอะไรก็ได้
 const HANDLE_FILL: egui::Color32 = egui::Color32::from_rgb(250, 250, 252);
 
@@ -647,6 +674,7 @@ impl RefxApp {
             rubber_band,
             tool,
             guides,
+            measure,
         } = view;
         let response = ui.allocate_response(ui.available_size(), egui::Sense::click_and_drag());
         let rect = response.rect;
@@ -727,6 +755,34 @@ impl RefxApp {
                 )
             };
             painter.line_segment([a, b], egui::Stroke::new(1.0, GUIDE_STROKE));
+        }
+
+        // ---- วาดไม้บรรทัด (P2-10) ----
+        //
+        // ★ เส้นอยู่ใน world (ปลายทั้งสองแปลงผ่าน `to_point`) แต่ **ตัวเลขบนป้าย
+        //   ไม่ได้มาจากพิกเซลบนจอ** มันมาจาก `Measurement` ที่เก็บ world ไว้
+        //   ซูมแล้วเส้นยาวขึ้นบนจอได้ แต่ตัวเลขต้องนิ่ง — นั่นคือทั้งหมดของเครื่องมือนี้
+        if let Some(m) = measure {
+            let (a, b) = (to_point(m.from), to_point(m.to));
+            painter.line_segment([a, b], egui::Stroke::new(1.5, MEASURE_STROKE));
+            // ขีดปลายทั้งสองข้าง ให้เห็นว่าวัดจากตรงไหนถึงตรงไหนเป๊ะ ๆ
+            for end in [a, b] {
+                painter.circle_filled(end, 3.0, MEASURE_STROKE);
+            }
+            let extent = m.extent();
+            painter.text(
+                b + egui::vec2(8.0, -8.0),
+                egui::Align2::LEFT_BOTTOM,
+                format!(
+                    "{:.1} u  ({:.1} x {:.1})  {:.1}°",
+                    m.length(),
+                    extent.x,
+                    extent.y,
+                    m.angle_deg()
+                ),
+                egui::FontId::monospace(12.0),
+                MEASURE_STROKE,
+            );
         }
 
         // ---- วาดกรอบ rubber-band ----
@@ -864,6 +920,14 @@ pub struct RefxApp {
     assets: Option<Assets>,
     /// ช่องรับสถิติ cache จาก IO thread (ไม่บล็อก UI thread — I-2)
     cache_stats_rx: Option<crossbeam_channel::Receiver<CacheStats>>,
+    /// ★ งานอ่านสีที่ยังค้างอยู่ (P2-10) — `None` = ไม่ได้รออะไร
+    ///
+    /// เก็บไว้เพื่อ **ทิ้งผลของการจิ้มครั้งเก่า**: ผู้ใช้จิ้มรัว ๆ ได้ และงานที่
+    /// ส่งก่อนอาจกลับมาทีหลัง (ไฟล์ใหญ่กว่า) ถ้าไม่เทียบคีย์ สีที่ค้างบน status bar
+    /// จะเป็นของจุดที่เขาเลิกสนใจไปแล้ว
+    pick_in_flight: Option<refx_asset::hash::ContentHash>,
+    /// ตัวนับการจิ้ม — ทำคีย์ที่ไม่ชนกับ hash ของภาพใด ๆ
+    pick_count: u64,
     /// ตัวปลุก event loop — ส่งต่อให้ worker หลังหน้าต่างพร้อม
     waker: Option<refx_platform::window::Waker>,
     /// เวลาที่ผู้ใช้ปล่อยไฟล์ลงหน้าต่าง (ใช้วัด "ลากเข้ามา → ภาพขึ้นจอ")
@@ -947,6 +1011,8 @@ impl RefxApp {
             },
             assets: None,
             cache_stats_rx: None,
+            pick_in_flight: None,
+            pick_count: 0,
             waker: None,
             drop_started: None,
             drop_expected: 0,
@@ -1176,7 +1242,31 @@ impl RefxApp {
                     );
                     ready.push((hash, image));
                 }
+                refx_asset::pool::JobResult::Sampled {
+                    hash,
+                    rgba,
+                    source_px,
+                } => {
+                    // ★ ทิ้งผลของการจิ้มครั้งเก่า — ผู้ใช้จิ้มรัว ๆ ได้ และงานที่ส่งก่อน
+                    //   อาจกลับมาทีหลัง ถ้าไม่เทียบคีย์ สีบน status bar จะเป็นของ
+                    //   จุดที่เขาเลิกสนใจไปแล้ว โดยไม่มีอะไรบอกว่ามันเป็นของเก่า
+                    if self.pick_in_flight == Some(hash) {
+                        self.pick_in_flight = None;
+                        self.shell.picked = Some(refx_core::pick::Picked { rgba, source_px });
+                        self.shell.status = text::t(self.shell.lang, Key::Ready).to_owned();
+                    }
+                }
                 refx_asset::pool::JobResult::Cancelled { .. } => {}
+                refx_asset::pool::JobResult::Failed { hash, reason }
+                    if self.pick_in_flight == Some(hash) =>
+                {
+                    // ★ ไฟล์ต้นฉบับหายไปแล้ว (ผู้ใช้ถอดไดรฟ์ / ย้ายไฟล์) —
+                    //   บอกว่า **อ่านสีไม่ได้** ไม่ใช่ "เปิดภาพไม่ได้" ซึ่งจะทำให้
+                    //   ผู้ใช้คิดว่าภาพบน board พังไปด้วยทั้งที่มันยังอยู่ครบ
+                    tracing::warn!(hash = %hash.short(), %reason, "cannot read the colour");
+                    self.pick_in_flight = None;
+                    self.shell.status = text::t(self.shell.lang, Key::ColourUnavailable).to_owned();
+                }
                 refx_asset::pool::JobResult::Failed { hash, reason } => {
                     // I-7: ภาพเสียหนึ่งไฟล์ = item ขึ้นสถานะ "โหลดไม่ได้" ไม่ใช่ crash
                     tracing::warn!(hash = %hash.short(), %reason, "cannot open the image");
@@ -1590,12 +1680,15 @@ impl RefxApp {
 
     /// เอา input ที่ widget เก็บมาไปขยับกล้องและสั่งเครื่องมือเลือก
     ///
-    /// คืน `true` เมื่อมีอะไรเปลี่ยนจนต้องวาดใหม่ — **I-1: ไม่มีอะไรเปลี่ยนต้องไม่ขอเฟรม**
-    fn apply_canvas_input(gfx: &mut Gfx, input: CanvasFrameInput) -> bool {
-        let mut changed = false;
+    /// ★ คืน `pick` ออกไปแทนที่จะยิงงานเอง เพราะฟังก์ชันนี้ยืมแค่ `gfx` ส่วน
+    /// decode pool อยู่ที่ `self.assets` — และการคืนค่าออกไปทำให้ **ไม่มีสถานะ
+    /// ค้างระหว่างเฟรม** ที่ต้องมีใครจำไปเก็บให้ถูกจังหวะ (`docs/08 §3.9` ข้อ 8)
+    fn apply_canvas_input(gfx: &mut Gfx, input: CanvasFrameInput) -> CanvasOutcome {
+        let mut out = CanvasOutcome::default();
+        let changed = &mut out.redraw;
         let rect = input.rect;
         if !rect.is_positive() {
-            return false;
+            return out;
         }
 
         // ---- กล้อง: ปุ่มกลางลาก + ล้อซูม ----
@@ -1608,7 +1701,7 @@ impl RefxApp {
             // ระยะลากเป็น point — กล้องคิดเป็น physical pixel
             gfx.camera
                 .pan_by_screen_delta(Vec2::new(input.pan_delta.x, input.pan_delta.y) * ppp);
-            changed = true;
+            *changed = true;
         }
         if input.scroll.abs() > f32::EPSILON
             && let Some(pointer) = input.pointer
@@ -1621,16 +1714,16 @@ impl RefxApp {
                 Vec2::new(rect.width(), rect.height()) * ppp,
                 factor,
             );
-            changed = true;
+            *changed = true;
         }
 
         // ---- การเลือก ----
         let Some(pointer) = input.pointer else {
-            return changed;
+            return out;
         };
         let scale = gfx.camera.zoom() / ppp;
         if scale <= 0.0 {
-            return changed;
+            return out;
         }
         let offset = pointer - rect.center();
         let world = gfx.camera.center() + Vec2::new(offset.x, offset.y) / scale;
@@ -1678,17 +1771,18 @@ impl RefxApp {
         };
 
         let Some(event) = event else {
-            return changed;
+            return out;
         };
 
         // ตัวที่กำลังถูกลากคือชุดที่เลือกอยู่ **ก่อน** ส่ง event เข้าไป
         let moved: Vec<ItemId> = gfx.selection.iter().collect();
         let outcome = gfx.select_tool.handle(ctx, &mut gfx.selection, event);
         gfx.rubber_band = outcome.rubber_band;
+        out.pick = outcome.pick;
         // ★ เส้นที่โผล่/หายต้องวาดใหม่ แม้ตำแหน่งภาพจะไม่เปลี่ยน
-        changed |= gfx.guides != outcome.guides;
+        *changed |= gfx.guides != outcome.guides;
         gfx.guides = outcome.guides;
-        changed |= outcome.needs_redraw;
+        *changed |= outcome.needs_redraw;
 
         let has_commands = !outcome.commands.is_empty();
         for command in outcome.commands {
@@ -1713,9 +1807,67 @@ impl RefxApp {
             // การแก้ครั้งใหม่ล้างสาย redo — ภาพที่คำสั่งในสายนั้นถือไว้ตายตรงนี้
             Self::collect_forgotten(gfx);
             Self::rebuild_quads(gfx);
-            changed = true;
+            *changed = true;
         }
-        changed
+        out
+    }
+    /// สั่ง worker ไปอ่านสีของ pixel ต้นฉบับหนึ่งจุด (P2-10)
+    ///
+    /// คืนคีย์ของงานที่ส่งไป — `None` เมื่อไม่มีอะไรให้อ่าน (ผู้ใช้เห็นเหตุผลบน status bar)
+    ///
+    /// ★★ **ทำไมไม่อ่านจาก `ItemRender::thumb` ที่อยู่ใน RAM แล้ว**
+    ///
+    /// thumbnail คือภาพ 128x128 ที่ถูก **บีบเป็นจัตุรัส** และเฉลี่ยมาแล้ว
+    /// ภาพ 4000x3000 หนึ่ง pixel ของ thumb จึงเท่ากับ 31x23 pixel ของจริง
+    /// สีที่ได้จะเป็นค่าเฉลี่ยของบริเวณ ไม่ใช่สีที่ผู้ใช้จิ้ม — ซึ่งดูสมเหตุสมผล
+    /// จนกว่าจะเอาไปเทียบกับต้นฉบับจริง · ROADMAP P2-10 บังคับว่าต้องเป็นสีต้นฉบับ
+    ///
+    /// ราคาคือ decode หนึ่งครั้งต่อการจิ้มหนึ่งครั้ง ซึ่งรับได้เพราะเป็นการกระทำ
+    /// ที่ผู้ใช้ตั้งใจทำทีละครั้ง (ไม่ใช่ทุกเฟรม — ดู `Tool::Picker` ใน `interact.rs`)
+    fn request_colour(
+        gfx: &Gfx,
+        assets: Option<&Assets>,
+        shell: &mut crate::shell::ShellState,
+        request: refx_core::interact::PickRequest,
+        counter: u64,
+    ) -> Option<refx_asset::hash::ContentHash> {
+        let lang = shell.lang;
+        let Some(assets) = assets else {
+            shell.status = text::t(lang, Key::ColourUnavailable).to_owned();
+            return None;
+        };
+        // ★ ต้องมี **ไฟล์** ให้กลับไปอ่าน — ภาพที่วางมาจาก clipboard ไม่มี
+        //   (HANDOFF: ภาพจาก clipboard คมได้แค่ระดับ thumbnail จนกว่าจะถึง P4-5)
+        //   ยอมบอกตรง ๆ ว่าอ่านไม่ได้ ดีกว่าแอบตอบด้วยสีที่เฉลี่ยมาจาก thumbnail
+        let path = gfx
+            .board
+            .item(request.id)
+            .and_then(|item| match &item.kind {
+                refx_core::board::ItemKind::Image(asset) => Some(asset.path.clone()),
+                _ => None,
+            })
+            .filter(|path| !path.as_os_str().is_empty());
+        let Some(path) = path else {
+            shell.status = text::t(lang, Key::ColourUnavailable).to_owned();
+            return None;
+        };
+
+        // คีย์ของตัวเอง ไม่ใช่ hash ของภาพ — ผลของ picker ต้องไม่ไปปนกับ
+        // thumbnail/working ของภาพเดียวกันที่อาจกำลังเดินอยู่ในคิว
+        let hash = refx_asset::hash::hash_bytes(format!("pick:{counter}").as_bytes());
+        assets.pool.submit(refx_asset::pool::Job {
+            hash,
+            source: refx_asset::pool::JobSource::File(path),
+            // ผู้ใช้เพิ่งกดเมื่อกี้และกำลังรอดูอยู่ — ตั้งใจที่สุดในคิว (น้อย = ก่อน)
+            priority: 0.0,
+            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            target: refx_asset::pool::JobTarget::Sample {
+                u: request.uv.x,
+                v: request.uv.y,
+            },
+        });
+        shell.status = text::t(lang, Key::ReadingColour).to_owned();
+        Some(hash)
     }
 
     /// กรอบที่มองเห็นอยู่ในหน่วย world — ขอบเขตของการค้นหาไกด์ (P2-9)
@@ -2437,6 +2589,8 @@ impl AppDelegate for RefxApp {
             assets,
             cache_stats_rx,
             loading,
+            pick_in_flight,
+            pick_count,
             ..
         } = self;
         let gfx = gfx.as_mut()?;
@@ -2508,6 +2662,10 @@ impl AppDelegate for RefxApp {
             let rubber_band = gfx.rubber_band;
             let tool = gfx.tool;
             let guides = gfx.guides.as_slice();
+            // ★ ไม้บรรทัดมีเจ้าของเดียวคือ `SelectTool` — ที่นี่แค่ **อ่าน** ไปวาด
+            //   และ shell ก็อ่านตัวเดียวกันไปแสดงบน status bar (ไม่มีสำเนาที่ต้องซิงค์)
+            let measure = gfx.select_tool.measurement();
+            shell.measured = measure;
             egui_ctx.run_ui(raw_input, |ui| {
                 canvas_points = crate::shell::draw_in_ui(ui, shell, |ui| {
                     // ช่องกลางคือ canvas — ภาพวาดด้วย wgpu ใต้ egui อีกที
@@ -2522,12 +2680,24 @@ impl AppDelegate for RefxApp {
                             rubber_band,
                             tool,
                             guides,
+                            measure,
                         },
                     );
                 });
             })
         };
-        if Self::apply_canvas_input(gfx, canvas_input) {
+        let canvas_outcome = Self::apply_canvas_input(gfx, canvas_input);
+        if canvas_outcome.redraw {
+            gfx.window.request_redraw();
+        }
+        // ★ ผู้ใช้จิ้มขอสี — ไปอ่าน **ไฟล์ต้นฉบับบน worker** ไม่ใช่ thumbnail
+        //   ที่อยู่ในมือแล้ว (ROADMAP P2-10) · ผลกลับมาทีหลังผ่าน `JobResult::Sampled`
+        if let Some(request) = canvas_outcome.pick {
+            let asked = Self::request_colour(gfx, assets.as_ref(), shell, request, *pick_count);
+            if let Some(hash) = asked {
+                *pick_count += 1;
+                *pick_in_flight = Some(hash);
+            }
             gfx.window.request_redraw();
         }
         gfx.egui_winit
@@ -2539,6 +2709,9 @@ impl AppDelegate for RefxApp {
         {
             gfx.tool = tool;
             gfx.select_tool.cancel();
+            // เส้นวัดที่ค้างอยู่หลังกลับไปเครื่องมืออื่นอ่านว่า "มีอะไรค้าง"
+            // ไม่ใช่ "นี่คือผลการวัดของฉัน"
+            gfx.select_tool.clear_measurement();
             gfx.rubber_band = None;
         }
 
@@ -2831,6 +3004,7 @@ impl AppDelegate for RefxApp {
                     gfx.tool = tool;
                     // การกดค้างที่ยังอยู่เป็นของเครื่องมือเดิม ใช้ต่อไม่ได้
                     gfx.select_tool.cancel();
+                    gfx.select_tool.clear_measurement();
                     gfx.rubber_band = None;
                     needs_redraw = true;
                 }
@@ -2869,7 +3043,12 @@ pub fn run(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::float_cmp,
+        clippy::panic
+    )]
 
     use refx_asset::pool::PoolStatsSnapshot;
 
@@ -2961,6 +3140,7 @@ mod tests {
                                 rubber_band: None,
                                 tool: Tool::Select,
                                 guides: &[],
+                                measure: None,
                             },
                         );
                         seen = got.pointer.is_some();
@@ -3041,6 +3221,7 @@ mod tests {
                             rubber_band: None,
                             tool: Tool::Select,
                             guides: &[],
+                            measure: None,
                         },
                     );
                     if got.primary_pressed {
@@ -3357,6 +3538,7 @@ mod tests {
                             rubber_band: None,
                             tool,
                             guides: &[],
+                            measure: None,
                         },
                     );
                 });
@@ -4006,5 +4188,96 @@ mod tests {
                 .file()
                 .is_some()
         );
+    }
+
+    /// ★★ **picker ต้องอ่าน pixel ตัวเดียวกับที่ shader วาดตรงนั้น** (P2-10)
+    ///
+    /// สองเส้นทางนี้เดินสวนกัน: `crop_uv` เอาช่วงของต้นฉบับไปให้ GPU วาด
+    /// ส่วน `pick::source_uv` เอาจุดบนจอย้อนกลับมาเป็นช่วงเดียวกัน
+    /// ถ้าวันหนึ่งมีคนแก้ข้างเดียว **ผู้ใช้จะจิ้มตรงที่เห็นสีหนึ่งแล้วได้อีกสีหนึ่ง**
+    /// โดยไม่มี error ที่ไหน — เทสต์นี้คือประตูที่ทำให้การเพี้ยนนั้นส่งเสียง
+    ///
+    /// ★ **สิ่งที่เทสต์นี้จับได้ และสิ่งที่มันจับไม่ได้** — ลองแล้วทั้งสองแบบ:
+    ///
+    /// | ทำให้พังตรงไหน | เทสต์จับได้ไหม |
+    /// |---|---|
+    /// | กลับแกน y ใน `source_uv` (การย้อนที่เขียนอยู่ฝั่งเดียว) | ✅ **แดงทันที** |
+    /// | ถอด `flip` ออกจาก `source_span` | ❌ **ยังเขียว** |
+    ///
+    /// แถวล่างไม่ใช่ช่องโหว่ที่ต้องอุด — มันคือผลของการที่ `crop_uv` **เรียก**
+    /// `source_span` ตัวเดียวกัน สูตรนั้นจึงมีที่เดียวและ *เพี้ยนจากกันไม่ได้เชิงโครงสร้าง*
+    /// (แข็งแรงกว่าการมีเทสต์คอยจับ) ส่วนที่ยังเขียนสองที่คือ **การย้ายกลับ**
+    /// — หมุนกลับ, สเกลกลับ, ทิศของ lerp — และนั่นคือสิ่งที่เทสต์นี้เฝ้าอยู่จริง ๆ
+    #[test]
+    fn the_picker_reads_the_same_pixel_the_shader_draws() {
+        use refx_core::board::{CropRect, Flip};
+
+        let base = ItemCanvas {
+            pos: Vec2::new(12.0, -30.0),
+            size: Vec2::new(160.0, 80.0),
+            ..ItemCanvas::default()
+        };
+        let cases = [
+            ("plain", base),
+            (
+                "flip-h",
+                ItemCanvas {
+                    flip: Flip::Horizontal,
+                    ..base
+                },
+            ),
+            (
+                "flip-both",
+                ItemCanvas {
+                    flip: Flip::Both,
+                    ..base
+                },
+            ),
+            (
+                "crop",
+                ItemCanvas {
+                    crop: CropRect {
+                        min: Vec2::new(0.2, 0.1),
+                        max: Vec2::new(0.9, 0.6),
+                    },
+                    ..base
+                },
+            ),
+            (
+                "crop+flip+rotate",
+                ItemCanvas {
+                    rotation: 0.9,
+                    flip: Flip::Vertical,
+                    crop: CropRect {
+                        min: Vec2::new(0.15, 0.35),
+                        max: Vec2::new(0.55, 0.95),
+                    },
+                    ..base
+                },
+            ),
+        ];
+
+        for (name, canvas) in cases {
+            // ช่วงที่ shader จะ sample เมื่อภาพกินทั้ง texture (ทาง working texture)
+            let [left, top, right, bottom] = crop_uv([0.0, 0.0, 1.0, 1.0], &canvas);
+            let obb = canvas.obb();
+            let [ax, ay] = obb.axes();
+
+            for (qu, qv) in [(0.0, 0.0), (0.5, 0.5), (1.0, 1.0), (0.25, 0.8)] {
+                // จุดบน world ที่ตรงกับสัดส่วน (qu, qv) ของ quad ที่วาดออกมา
+                let local = Vec2::new((qu - 0.5) * canvas.size.x, (qv - 0.5_f32) * canvas.size.y);
+                let world = obb.center + ax * local.x + ay * local.y;
+
+                let picked = refx_core::pick::source_uv(&canvas, world)
+                    .unwrap_or_else(|| panic!("{name}: จิ้มที่ ({qu}, {qv}) แล้วไม่โดนภาพ"));
+                // สิ่งที่ shader จะหยิบมาวาดที่จุดเดียวกัน
+                let drawn = Vec2::new(left + (right - left) * qu, top + (bottom - top) * qv);
+
+                assert!(
+                    (picked - drawn).length() < 1e-4,
+                    "{name} ที่ ({qu}, {qv}): picker อ่าน {picked:?} แต่ shader วาด {drawn:?}"
+                );
+            }
+        }
     }
 }

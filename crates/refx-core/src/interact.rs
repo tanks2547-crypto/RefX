@@ -112,6 +112,10 @@ pub struct Interaction {
     pub commands: Vec<Box<dyn Command>>,
     /// ★ เส้นไกด์ที่ต้องวาดตอนนี้ (P2-9) — ว่าง = ไม่มีอะไรตรงกัน
     pub guides: Vec<align::Guide>,
+    /// ★ ผู้ใช้จิ้มด้วย picker (P2-10) — ชั้นบนต้องไปอ่าน pixel **บน worker**
+    ///
+    /// เป็นเหตุการณ์ครั้งเดียว ไม่ใช่สถานะ: `None` = การกดครั้งนี้ไม่ได้จิ้มอะไร
+    pub pick: Option<PickRequest>,
     /// ★ ต้องเรียก `History::seal()` หรือไม่ — **จริงตอนปล่อยเมาส์**
     ///
     /// ถ้าไม่ seal การลากสองครั้งติดกันจะกลายเป็น undo เดียว ผู้ใช้จะงง (docs/02 §3)
@@ -125,9 +129,23 @@ impl std::fmt::Debug for Interaction {
             .field("needs_redraw", &self.needs_redraw)
             .field("commands", &self.commands.len())
             .field("guides", &self.guides.len())
+            .field("pick", &self.pick)
             .field("seal", &self.seal)
             .finish()
     }
+}
+
+/// ผู้ใช้ขอสีของจุดหนึ่งบนภาพ (P2-10)
+///
+/// ★ **ไม่มีสีอยู่ในนี้** โดยตั้งใจ — `refx-core` ไม่มี pixel ให้อ่านและห้ามแตะดิสก์
+/// ชั้นบนเอา `uv` ไปสั่ง `JobTarget::Sample` บน decode worker แล้วสีจึงกลับมาทีหลัง
+/// (I-2: decode บน UI thread ไม่ได้ · ROADMAP P2-10: ต้องเป็นสีของต้นฉบับ)
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PickRequest {
+    /// item ที่ถูกจิ้ม
+    pub id: ItemId,
+    /// ตำแหน่งในภาพต้นฉบับ สัดส่วน `0..1` (ผ่าน crop/flip/rotation มาแล้ว)
+    pub uv: Vec2,
 }
 
 /// ของที่เครื่องสถานะต้องรู้เพื่อตัดสินใจ
@@ -245,6 +263,10 @@ pub enum Tool {
     Select,
     /// `C` — ครอปแบบไม่ทำลายต้นฉบับ · ดับเบิลคลิกรีเซ็ต
     Crop,
+    /// `I` — จิ้มอ่านสีจาก **pixel ต้นฉบับ** (P2-10)
+    Picker,
+    /// `M` — ลากวัดระยะ/มุม เป็นหน่วย world (P2-10)
+    Measure,
 }
 
 /// ส่วนของกรอบที่เคอร์เซอร์จับอยู่
@@ -304,6 +326,9 @@ pub fn handles_for(tool: Tool) -> &'static [HandleDir] {
     match tool {
         Tool::Select => &HandleDir::CORNERS,
         Tool::Crop => &ALL_HANDLES,
+        // ★ picker/measure ไม่แก้เรขาคณิตของภาพเลย จึงต้อง **ไม่มี handle**
+        //   handle ที่ลากแล้วไม่มีอะไรเกิดขึ้น ผู้ใช้อ่านว่าโปรแกรมค้าง (HANDOFF §2.4 ข้อ 3)
+        Tool::Picker | Tool::Measure => &[],
     }
 }
 
@@ -384,6 +409,11 @@ enum Grab {
     Crop { dir: HandleDir, frame: Obb },
     /// จับนอก handle มุม — หมุน (กรอบ + มุมของเคอร์เซอร์ ณ ตอนเริ่มกด)
     Rotate { frame: Obb, start_angle: f32 },
+    /// ★ ลากไม้บรรทัด (P2-10) — **ไม่แตะ board เลย** ไม่มีคำสั่ง ไม่กิน undo
+    ///
+    /// เริ่มได้ทั้งบนภาพและบนที่ว่าง: การวัดจากขอบภาพหนึ่งไปอีกภาพหนึ่ง
+    /// คือสิ่งที่เครื่องมือนี้มีไว้ทำ ถ้าเริ่มบนที่ว่างไม่ได้ก็วัดข้ามภาพไม่ได้
+    Measure,
 }
 
 /// สถานะของการกดค้างหนึ่งครั้ง
@@ -412,6 +442,13 @@ struct Press {
 #[derive(Debug, Clone, Default)]
 pub struct SelectTool {
     press: Option<Press>,
+    /// ★ ไม้บรรทัดที่วางค้างอยู่ (P2-10) — **สถานะของเครื่องมือ ไม่ใช่ของเอกสาร**
+    ///
+    /// อยู่ที่นี่ไม่ใช่ใน `Interaction` เพราะมันเป็น *สถานะ* ที่ค้างข้ามเฟรม ส่วน
+    /// `Interaction` เป็น *เหตุการณ์* ของ event เดียว · ถ้าส่งผ่าน `Interaction`
+    /// ทุก event ที่ไม่เกี่ยวจะพา `None` ไปล้างของที่ค้างอยู่ทิ้ง
+    /// (เจ้าของเดียว ไม่ต้องพึ่งลำดับ — `docs/08 §3.9` ข้อ 8.1)
+    measure: Option<crate::pick::Measurement>,
 }
 
 impl SelectTool {
@@ -433,6 +470,23 @@ impl SelectTool {
     /// กรอบ rubber-band ค้างอยู่กลางจอโดยกดอะไรก็ไม่หาย
     pub fn cancel(&mut self) {
         self.press = None;
+    }
+
+    /// ไม้บรรทัดที่วางค้างอยู่ (P2-10) — `None` = ยังไม่ได้วัดอะไร
+    ///
+    /// ค้างอยู่หลังปล่อยเมาส์โดยตั้งใจ: การวัดมีประโยชน์ก็ต่อเมื่อ**อ่านตัวเลขทัน**
+    /// ถ้าหายตอนปล่อย ผู้ใช้ต้องลากค้างไว้แล้วเหลือบไปอ่าน status bar พร้อมกัน
+    #[must_use]
+    pub fn measurement(&self) -> Option<crate::pick::Measurement> {
+        self.measure
+    }
+
+    /// ลบไม้บรรทัดทิ้ง — ชั้น UI เรียกตอนสลับเครื่องมือ
+    ///
+    /// เส้นที่ค้างอยู่ตอนกลับไปเครื่องมือเลือกอ่านว่า "มีอะไรบางอย่างค้าง"
+    /// ไม่ใช่ "นี่คือผลการวัดของฉัน"
+    pub fn clear_measurement(&mut self) {
+        self.measure = None;
     }
 
     /// ป้อน event หนึ่งตัว — แก้ `selection` ให้ตรงตามที่ผู้ใช้สั่ง
@@ -478,6 +532,48 @@ impl SelectTool {
     ) -> Interaction {
         let base: Vec<ItemId> = selection.iter().collect();
         let mut out = Interaction::default();
+
+        // ★★ ไม้บรรทัดตัดสินก่อนทุกอย่าง — ไม่ต้อง hit-test ไม่แตะการเลือก
+        //    เริ่มบนที่ว่างได้ ซึ่งเป็นกรณีปกติของการวัดระยะระหว่างภาพสองใบ
+        if ctx.tool == Tool::Measure {
+            self.measure = Some(crate::pick::Measurement {
+                from: world,
+                to: world,
+            });
+            self.press = Some(Press {
+                origin: world,
+                modifiers,
+                dragging: false,
+                grab: Grab::Measure,
+                base,
+                moving: Vec::new(),
+            });
+            out.needs_redraw = true;
+            return out;
+        }
+
+        // ★★ picker ทำงาน **ตอนกดครั้งเดียว ไม่ใช่ตอนลาก** โดยตั้งใจ
+        //    การจิ้มหนึ่งครั้ง = decode ภาพต้นฉบับหนึ่งครั้ง (ดู `JobTarget::Sample`)
+        //    ถ้าให้มันทำงานต่อเนื่องระหว่างลาก จะสั่ง decode ทุกเฟรมที่ปุ่มยังลงอยู่
+        //    ซึ่งเผา CPU ของผู้ใช้ทิ้งทั้งที่เขาขอสีแค่จุดเดียว (I-2, CLAUDE.md ข้อ 3)
+        if ctx.tool == Tool::Picker {
+            if let Some(id) = ctx.index.hit_test(ctx.board, world)
+                && let Some(item) = ctx.board.item(id)
+                && let Some(uv) = crate::pick::source_uv(&item.canvas, world)
+            {
+                out.pick = Some(PickRequest { id, uv });
+                out.needs_redraw = true;
+            }
+            self.press = Some(Press {
+                origin: world,
+                modifiers,
+                dragging: false,
+                grab: Grab::Inert,
+                base,
+                moving: Vec::new(),
+            });
+            return out;
+        }
 
         // ★★ hit-test ของ handle มาก่อน hit-test ของภาพเสมอ (HANDOFF §2.4)
         //    handle มุมคร่อมตัวภาพอยู่ครึ่งหนึ่ง ถ้าถามภาพก่อนจะไม่มีวันจับ handle ติด
@@ -545,6 +641,24 @@ impl SelectTool {
             return Interaction::default();
         };
 
+        // ★ ไม้บรรทัดไม่แตะ board เลย จึงไม่ผ่าน `Command` และไม่กิน undo —
+        //   มันคือสถานะของเครื่องมือ เหมือนกล้องและการเลือก (docs/02 §2.9)
+        //   ไม่มี drag threshold ด้วย: ระยะสั้น ๆ ก็เป็นการวัดที่ถูกต้อง
+        if matches!(press.grab, Grab::Measure) {
+            let from = press.origin;
+            press.dragging = true;
+            let next = crate::pick::Measurement { from, to: world };
+            // I-1: ตัวเลขไม่เปลี่ยน = ไม่ต้องวาดใหม่
+            if self.measure == Some(next) {
+                return Interaction::default();
+            }
+            self.measure = Some(next);
+            return Interaction {
+                needs_redraw: true,
+                ..Interaction::default()
+            };
+        }
+
         // ★ ทุกอย่างที่ไม่ใช่ `Band` คือการแก้ `Board` → ต้องผ่าน `Command`
         let grab = press.grab;
         if !matches!(grab, Grab::Band) {
@@ -597,7 +711,9 @@ impl SelectTool {
                     modifiers,
                     ctx.drag_threshold,
                 ),
-                Grab::Band | Grab::Inert => Vec::new(),
+                // `Measure` ถูกจัดการไปแล้วก่อนถึงตรงนี้ — ระบุชื่อไว้ไม่ใช้ `_`
+                // เพื่อให้ Grab ตัวถัดไปที่มีคนเพิ่มต้องมาตัดสินใจตรงนี้ด้วย
+                Grab::Band | Grab::Inert | Grab::Measure => Vec::new(),
             };
             let mut out = transform(changes);
             // ★ เส้นที่โผล่/หายก็ต้องวาดใหม่ แม้ตำแหน่งจะไม่เปลี่ยน
@@ -637,6 +753,12 @@ impl SelectTool {
             needs_redraw: true,
             ..Interaction::default()
         };
+
+        // ★ ไม้บรรทัดไม่เคยสร้างคำสั่ง จึงต้องไม่ไปปิดหน้าต่าง merge ของใคร —
+        //   เส้นค้างไว้ให้อ่านตัวเลขต่อได้ (ดู `measurement()`)
+        if matches!(press.grab, Grab::Measure) {
+            return out;
+        }
 
         // จบการย้าย/สเกล/หมุน — **seal เพื่อให้การลากครั้งถัดไปเป็น undo ขั้นใหม่**
         if !matches!(press.grab, Grab::Band) {
@@ -733,7 +855,10 @@ impl SelectTool {
 fn on_image(tool: Tool) -> Grab {
     match tool {
         Tool::Select => Grab::Move,
-        Tool::Crop => Grab::Inert,
+        // ★ ครอป/picker: ลากบนตัวภาพต้องไม่ทำอะไร — พลาดไปโดนกลางภาพแล้วภาพเลื่อน
+        //   แย่กว่าการที่ลากแล้วเงียบ (HANDOFF §2.6 ข้อ 5) · measure ไม่ผ่านทางนี้เลย
+        Tool::Crop | Tool::Picker => Grab::Inert,
+        Tool::Measure => Grab::Measure,
     }
 }
 
@@ -1159,6 +1284,8 @@ mod tests {
         rotate_reach: f32,
         active_tool: Tool,
         snap_reach: f32,
+        /// ทุกครั้งที่ picker ขอสี — เก็บไว้นับ (P2-10)
+        picks: Vec<PickRequest>,
     }
 
     impl Harness {
@@ -1179,6 +1306,7 @@ mod tests {
                     // ★ เทสต์เดิมทั้งหมดปิดไกด์ไว้ — มันทดสอบการย้ายแบบดิบ
                     //   เทสต์ของไกด์เปิดเองเมื่อจะใช้
                     snap_reach: 0.0,
+                    picks: Vec::new(),
                 },
                 ids,
             )
@@ -1201,6 +1329,7 @@ mod tests {
             let outcome = self.tool.handle(ctx, &mut self.selection, event);
             self.last = outcome.rubber_band;
             self.guides = outcome.guides;
+            self.picks.extend(outcome.pick);
             let moved: Vec<ItemId> = self.selection.iter().collect();
             for command in outcome.commands {
                 self.history.apply(&mut self.board, command).unwrap();
@@ -2619,5 +2748,151 @@ mod tests {
         assert!(h.selected().is_empty() || h.selected() == vec![ids[0]]);
         assert!(h.board.z_order_is_consistent());
         assert!(!h.board.is_dirty());
+    }
+
+    // ---------- color picker (P2-10) ----------
+
+    /// จิ้มกลางภาพต้องขอสีของภาพนั้น ที่กึ่งกลางของต้นฉบับ
+    #[test]
+    fn the_picker_asks_for_the_pixel_under_the_cursor() {
+        let (mut h, ids) = Harness::new(3);
+        h.active_tool = Tool::Picker;
+        h.click(Vec2::ZERO);
+
+        assert_eq!(h.picks.len(), 1, "ได้ {:?}", h.picks);
+        assert_eq!(h.picks[0].id, ids[0]);
+        assert!((h.picks[0].uv - Vec2::splat(0.5)).length() < 1e-5);
+    }
+
+    /// ★★ **จิ้มแล้วต้องไม่ทำอะไรกับเอกสารเลย** — ไม่เลือก ไม่ย้าย ไม่ dirty
+    ///
+    /// picker เป็นเครื่องมือ *อ่าน* ถ้ามันเผลอเลือกภาพให้ด้วย ผู้ใช้ที่จิ้มดูสี
+    /// แล้วกด Delete ต่อ (ตั้งใจลบภาพอื่น) จะลบภาพผิดใบ
+    #[test]
+    fn picking_never_touches_the_document() {
+        let (mut h, _) = Harness::new(3);
+        h.active_tool = Tool::Picker;
+        let before = h.canvas_of(h.board.z_order()[0]);
+
+        h.press(Vec2::ZERO, Modifiers::default());
+        h.drag_to(Vec2::new(40.0, 40.0));
+        h.release(Vec2::new(40.0, 40.0));
+
+        assert!(h.selected().is_empty(), "picker ต้องไม่เลือกอะไร");
+        assert_eq!(h.canvas_of(h.board.z_order()[0]), before, "ภาพต้องไม่ขยับ");
+        assert!(!h.board.is_dirty());
+        assert_eq!(h.history.undo_depth(), 0, "ต้องไม่กิน undo");
+    }
+
+    /// ★★ ลากค้างไว้ต้องขอสี **ครั้งเดียว** ไม่ใช่ทุกเฟรม
+    ///
+    /// การขอสีหนึ่งครั้ง = decode ภาพต้นฉบับหนึ่งครั้ง (`JobTarget::Sample`)
+    /// ถ้ามันเกิดทุกเฟรมที่ปุ่มยังลงอยู่ เครื่องผู้ใช้จะ decode ภาพ 4000² รัว ๆ
+    /// ทั้งที่เขาขอสีจุดเดียว — เผา CPU ทิ้งแบบที่ CLAUDE.md ข้อ 3 ห้ามไว้
+    #[test]
+    fn holding_the_picker_down_asks_only_once() {
+        let (mut h, _) = Harness::new(3);
+        h.active_tool = Tool::Picker;
+
+        h.press(Vec2::ZERO, Modifiers::default());
+        for step in 0..30u8 {
+            h.drag_to(Vec2::new(f32::from(step) * 0.5, 0.0));
+        }
+        h.release(Vec2::new(15.0, 0.0));
+
+        assert_eq!(h.picks.len(), 1, "กดค้างแล้วขอสี {} ครั้ง", h.picks.len());
+    }
+
+    /// จิ้มที่ว่างต้องเงียบ — ไม่มีอะไรให้อ่านสีจาก
+    #[test]
+    fn picking_empty_space_asks_for_nothing() {
+        let (mut h, _) = Harness::new(3);
+        h.active_tool = Tool::Picker;
+        h.click(Vec2::new(0.0, 900.0));
+        assert!(h.picks.is_empty());
+    }
+
+    // ---------- measure (P2-10) ----------
+
+    /// ลากไม้บรรทัดแล้วต้องได้ระยะเป็น world และเส้นค้างไว้ให้อ่าน
+    #[test]
+    fn measuring_reports_world_distance_and_stays_after_release() {
+        let (mut h, _) = Harness::new(3);
+        h.active_tool = Tool::Measure;
+
+        h.press(Vec2::new(10.0, 10.0), Modifiers::default());
+        h.drag_to(Vec2::new(40.0, 50.0));
+        h.release(Vec2::new(40.0, 50.0));
+
+        let m = h.tool.measurement().unwrap();
+        assert_eq!(m.length(), 50.0, "3-4-5");
+        assert_eq!(m.extent(), Vec2::new(30.0, 40.0));
+        assert!(
+            h.tool.measurement().is_some(),
+            "ปล่อยแล้วเส้นต้องยังอยู่ให้อ่านตัวเลข"
+        );
+
+        h.tool.clear_measurement();
+        assert!(h.tool.measurement().is_none());
+    }
+
+    /// ★★ ไม้บรรทัดต้องไม่แตะเอกสารเลย — ไม่ย้ายภาพ ไม่กิน undo ไม่ทำให้ dirty
+    ///
+    /// ลากทับตัวภาพพอดีเป็นกรณีปกติ (วัดความกว้างของภาพ) ถ้ามันย้ายภาพไปด้วย
+    /// ผู้ใช้จะทำงานที่จัดไว้พังโดยไม่รู้ตัว
+    #[test]
+    fn measuring_across_an_image_never_moves_it() {
+        let (mut h, ids) = Harness::new(3);
+        h.active_tool = Tool::Measure;
+        let before = h.canvas_of(ids[0]);
+
+        h.press(Vec2::new(-50.0, 0.0), Modifiers::default());
+        h.drag_to(Vec2::new(0.0, 0.0));
+        h.drag_to(Vec2::new(50.0, 0.0));
+        h.release(Vec2::new(50.0, 0.0));
+
+        assert_eq!(h.canvas_of(ids[0]), before, "ภาพต้องอยู่ที่เดิมเป๊ะ");
+        assert!(!h.board.is_dirty(), "การวัดต้องไม่ทำให้เอกสาร dirty");
+        assert_eq!(h.history.undo_depth(), 0, "การวัดต้องไม่กิน undo");
+        assert!(h.selected().is_empty(), "การวัดต้องไม่เลือกอะไร");
+        assert_eq!(h.tool.measurement().unwrap().length(), 100.0);
+    }
+
+    /// การวัดครั้งใหม่ต้องแทนที่ครั้งเก่า ไม่ใช่สะสมเส้นไว้เต็มจอ
+    #[test]
+    fn a_new_measurement_replaces_the_old_one() {
+        let (mut h, _) = Harness::new(3);
+        h.active_tool = Tool::Measure;
+
+        h.press(Vec2::ZERO, Modifiers::default());
+        h.drag_to(Vec2::new(100.0, 0.0));
+        h.release(Vec2::new(100.0, 0.0));
+        assert_eq!(h.tool.measurement().unwrap().length(), 100.0);
+
+        h.press(Vec2::new(0.0, 300.0), Modifiers::default());
+        h.drag_to(Vec2::new(0.0, 320.0));
+        h.release(Vec2::new(0.0, 320.0));
+        assert_eq!(h.tool.measurement().unwrap().length(), 20.0);
+    }
+
+    /// ★ ระยะสั้นกว่า drag threshold ก็ยังเป็นการวัดที่ถูกต้อง
+    ///
+    /// การย้าย/เลือกมี threshold เพื่อแยก "คลิก" ออกจาก "ลาก" แต่การวัด 3 หน่วย
+    /// เป็นสิ่งที่ผู้ใช้ตั้งใจทำได้จริง ไม่ใช่การคลิกพลาด
+    #[test]
+    fn a_short_measurement_still_counts() {
+        let (mut h, _) = Harness::new(3);
+        h.active_tool = Tool::Measure;
+        h.press(Vec2::ZERO, Modifiers::default());
+        h.drag_to(Vec2::new(3.0, 0.0));
+        h.release(Vec2::new(3.0, 0.0));
+        assert_eq!(h.tool.measurement().unwrap().length(), 3.0);
+    }
+
+    /// เครื่องมือที่ไม่แก้เรขาคณิตต้องไม่มี handle ให้จับ
+    #[test]
+    fn read_only_tools_expose_no_handles() {
+        assert!(handles_for(Tool::Picker).is_empty());
+        assert!(handles_for(Tool::Measure).is_empty());
     }
 }

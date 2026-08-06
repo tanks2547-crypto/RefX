@@ -94,6 +94,10 @@ pub enum Key {
     ToolMove,
     /// เครื่องมือ: ครอป
     ToolCrop,
+    /// เครื่องมือ: จิ้มสี
+    ToolPicker,
+    /// เครื่องมือ: ไม้บรรทัด
+    ToolMeasure,
     /// เครื่องมือ: ขาวดำ
     ToolGrayscale,
     /// เครื่องมือ: เรียง
@@ -142,6 +146,12 @@ pub enum Key {
     DistributeY,
     /// เลือกอย่างน้อยสองภาพก่อนถึงจะจัดเรียงได้
     NothingToArrange,
+    /// กำลังอ่านสีจากไฟล์ต้นฉบับ (P2-10)
+    ReadingColour,
+    /// จิ้มโดนที่ว่าง ไม่มีภาพให้อ่านสี
+    NothingToPick,
+    /// อ่านสีจากไฟล์ต้นฉบับไม่ได้
+    ColourUnavailable,
 }
 
 /// ข้อความภาษาอังกฤษ — **ต้องมีครบทุก key เสมอ** (เป็นตัวสำรองสุดท้าย)
@@ -162,6 +172,8 @@ fn en(key: Key) -> &'static str {
         Key::ToolSelect => "Select",
         Key::ToolMove => "Move",
         Key::ToolCrop => "Crop",
+        Key::ToolPicker => "Picker",
+        Key::ToolMeasure => "Measure",
         Key::ToolGrayscale => "Grayscale",
         Key::ToolSort => "Sort",
         Key::ToolFilter => "Filter",
@@ -186,6 +198,9 @@ fn en(key: Key) -> &'static str {
         Key::DistributeX => "Distribute horizontally",
         Key::DistributeY => "Distribute vertically",
         Key::NothingToArrange => "Select at least two images to arrange them",
+        Key::ReadingColour => "Reading the colour from the original file…",
+        Key::NothingToPick => "Nothing there to pick a colour from",
+        Key::ColourUnavailable => "Could not read the colour: the original file is unavailable",
     }
 }
 
@@ -207,6 +222,8 @@ fn th(key: Key) -> Option<&'static str> {
         Key::ToolSelect => "เลือก",
         Key::ToolMove => "ย้าย",
         Key::ToolCrop => "ครอป",
+        Key::ToolPicker => "จิ้มสี",
+        Key::ToolMeasure => "ไม้บรรทัด",
         Key::ToolGrayscale => "ขาวดำ",
         Key::ToolSort => "เรียง",
         Key::ToolFilter => "กรอง",
@@ -231,6 +248,9 @@ fn th(key: Key) -> Option<&'static str> {
         Key::DistributeX => "กระจายแนวนอน",
         Key::DistributeY => "กระจายแนวตั้ง",
         Key::NothingToArrange => "เลือกอย่างน้อยสองภาพก่อนถึงจะจัดเรียงได้",
+        Key::ReadingColour => "กำลังอ่านสีจากไฟล์ต้นฉบับ…",
+        Key::NothingToPick => "ตรงนั้นไม่มีภาพให้อ่านสี",
+        Key::ColourUnavailable => "อ่านสีไม่ได้: เปิดไฟล์ต้นฉบับไม่ได้",
     })
 }
 
@@ -656,6 +676,8 @@ mod tests {
         Key::ToolSelect,
         Key::ToolMove,
         Key::ToolCrop,
+        Key::ToolPicker,
+        Key::ToolMeasure,
         Key::ToolGrayscale,
         Key::ToolSort,
         Key::ToolFilter,
@@ -680,6 +702,9 @@ mod tests {
         Key::DistributeX,
         Key::DistributeY,
         Key::NothingToArrange,
+        Key::ReadingColour,
+        Key::NothingToPick,
+        Key::ColourUnavailable,
     ];
 
     const ALL_TEMPLATES: &[Template] = &[

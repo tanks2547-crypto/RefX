@@ -122,7 +122,8 @@ impl WakeHandle {
 /// งานนี้ต้องการผลลัพธ์แบบไหน
 ///
 /// ทั้งสองแบบใช้เกราะ decode ชุดเดียวกันหมด ต่างกันแค่ขั้นย่อขนาดตอนท้าย
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// ★ ไม่ derive `Eq` เพราะ `Sample` ถือ f32 — และไม่มีใครต้องการมัน
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum JobTarget {
     /// ภาพย่อ 128 px สำหรับ atlas — ผ่าน cache.sqlite
     Thumbnail,
@@ -133,6 +134,22 @@ pub enum JobTarget {
     Working {
         /// ความกว้าง/สูงเป้าหมาย (power of two)
         size: u32,
+    },
+    /// ★★ อ่านสีของ **pixel เดียว** จากภาพต้นฉบับ — color picker (P2-10)
+    ///
+    /// **ไม่ผ่าน cache.sqlite และห้ามผ่าน** — cache เก็บ thumbnail 128 px
+    /// ที่ถูกบีบเป็นจัตุรัสแล้ว การอ่านสีจากมันคือการอ่าน**ค่าเฉลี่ยของ pixel
+    /// ต้นฉบับหลายสิบตัว** ซึ่งไม่ใช่สีที่ผู้ใช้จิ้ม (ภาพ 4000² → 1 px ของ thumb
+    /// คือ 31×23 px ของจริง) · ROADMAP P2-10 บังคับว่า **ต้องเป็นสีของต้นฉบับ**
+    ///
+    /// ยอมจ่ายค่า decode หนึ่งครั้งต่อการจิ้มหนึ่งครั้ง: มันเป็นการกระทำที่ผู้ใช้
+    /// ตั้งใจทำทีละครั้ง ไม่ใช่สิ่งที่เกิดทุกเฟรม และเกราะ/เพดาน RAM/timeout
+    /// ทั้งชุดใช้ร่วมกับเส้นทางปกติหมด (I-4)
+    Sample {
+        /// ตำแหน่งแนวนอนในภาพต้นฉบับ สัดส่วน `0..1` (จาก `refx_core::pick::source_uv`)
+        u: f32,
+        /// ตำแหน่งแนวตั้งในภาพต้นฉบับ สัดส่วน `0..1`
+        v: f32,
     },
 }
 
@@ -239,6 +256,15 @@ pub enum JobResult {
         /// เวลาที่ใช้ตั้งแต่หยิบงานจนเสร็จ
         elapsed: Duration,
     },
+    /// ★ สีของ pixel เดียวจากภาพต้นฉบับ — color picker (P2-10)
+    Sampled {
+        /// คีย์ของภาพ
+        hash: ContentHash,
+        /// สี RGBA **ของต้นฉบับ** ยังไม่ผ่าน filter ใด ๆ
+        rgba: [u8; 4],
+        /// pixel ที่อ่านมาจริง (หลังแก้ EXIF orientation แล้ว)
+        source_px: (u32, u32),
+    },
     /// ถูกยกเลิกก่อนหรือระหว่างทำ (ผู้ใช้ pan ผ่านไปแล้ว)
     Cancelled {
         /// คีย์ของภาพ
@@ -271,6 +297,7 @@ impl JobResult {
         match self {
             Self::Done { hash, .. }
             | Self::Working { hash, .. }
+            | Self::Sampled { hash, .. }
             | Self::Cancelled { hash }
             | Self::ClipboardFiles { hash, .. }
             | Self::Failed { hash, .. } => *hash,
@@ -605,6 +632,7 @@ fn worker_loop(queue: &Queue, ctx: &WorkerContext, tx: &crossbeam_channel::Sende
         match &result {
             JobResult::Done { .. }
             | JobResult::Working { .. }
+            | JobResult::Sampled { .. }
             | JobResult::ClipboardFiles { .. } => {
                 stats.completed.fetch_add(1, AtomicOrdering::Relaxed);
             }
@@ -697,6 +725,21 @@ fn run_job(job: &Job, ctx: &WorkerContext) -> JobResult {
         };
     }
 
+    // ★ picker แยกทางตรงนี้ — ใช้เกราะทุกชั้นร่วมกันมาจนถึงจุดนี้เหมือน working
+    //   อ่าน pixel เดียวแล้วทิ้งภาพทันที ไม่ย่อ ไม่เข้า cache ไม่ส่งของหนักกลับ
+    if let JobTarget::Sample { u, v } = job.target {
+        let (source_px, rgba) = sample_pixel(&image, u, v);
+        drop(image);
+        if job.cancel.load(AtomicOrdering::Relaxed) {
+            return JobResult::Cancelled { hash: job.hash };
+        }
+        return JobResult::Sampled {
+            hash: job.hash,
+            rgba,
+            source_px,
+        };
+    }
+
     // ขั้น 6: ย่อเป็น thumbnail (Lanczos3) — ทำบน worker ไม่ใช่ UI thread
     // ขั้น 7 (BC7) ถูกตัดออกจาก P1 แล้ว — docs/04 §4
     let thumb = make_thumbnail(&image);
@@ -743,6 +786,31 @@ fn run_job(job: &Job, ctx: &WorkerContext) -> JobResult {
         thumb: Box::new(thumb),
         elapsed,
     }
+}
+
+/// อ่านสีของ pixel เดียวจากภาพที่ decode มาแล้ว
+///
+/// `u`/`v` เป็นสัดส่วน `0..1` ของภาพต้นฉบับ (ผลจาก `refx_core::pick::source_uv`)
+///
+/// ★ **ปัดลงแล้ว clamp** ไม่ปัดใกล้สุด: `u = 1.0` พอดี (ผู้ใช้จิ้มขอบขวาสุด)
+/// ต้องได้ pixel สุดท้าย ไม่ใช่ pixel ที่ `width` ซึ่งอยู่นอกภาพ
+/// ค่าที่ไม่ใช่ตัวเลขตกเป็น 0 เสมอ — ห้ามให้ index หลุดขอบไม่ว่าอะไรจะเข้ามา (I-4)
+fn sample_pixel(image: &RgbaImage, u: f32, v: f32) -> ((u32, u32), [u8; 4]) {
+    let axis = |t: f32, extent: u32| -> u32 {
+        let last = extent.saturating_sub(1);
+        if !t.is_finite() {
+            return 0;
+        }
+        // คูณด้วย extent (ไม่ใช่ last) แล้ว clamp — ทำให้แต่ละ pixel กินช่วงเท่ากัน
+        let scaled = t.clamp(0.0, 1.0) * extent as f32;
+        (scaled as u32).min(last)
+    };
+    let (w, h) = (image.width(), image.height());
+    if w == 0 || h == 0 {
+        return ((0, 0), [0; 4]);
+    }
+    let (x, y) = (axis(u, w), axis(v, h));
+    ((x, y), image.get_pixel(x, y).0)
 }
 
 /// ผลของการหยิบ pixel เข้ามา
@@ -1109,11 +1177,127 @@ mod tests {
                 JobResult::Failed { .. } => failed += 1,
                 JobResult::Done { .. } => done += 1,
                 JobResult::Working { .. }
+                | JobResult::Sampled { .. }
                 | JobResult::Cancelled { .. }
                 | JobResult::ClipboardFiles { .. } => {}
             }
         }
         assert_eq!((failed, done), (1, 1), "ไฟล์เสียต้องไม่ลากไฟล์ดีลงไปด้วย");
+    }
+
+    // ---------- color picker (P2-10) ----------
+
+    /// ภาพที่แต่ละ pixel มีสีไม่ซ้ำใคร — สีบอกได้ทันทีว่าอ่านมาจากช่องไหน
+    fn write_gradient_png(tag: &str, name: &str, w: u32, h: u32) -> PathBuf {
+        let path = temp_dir(tag).join(name);
+        let mut img = RgbaImage::new(w, h);
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            #[expect(clippy::cast_possible_truncation, reason = "ภาพเทสต์เล็กกว่า 256")]
+            let (x8, y8) = (x as u8, y as u8);
+            *px = image::Rgba([x8, y8, 7, 255]);
+        }
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
+            .unwrap();
+        std::fs::write(&path, &out).unwrap();
+        path
+    }
+
+    #[test]
+    fn sampling_reads_the_pixel_the_fraction_points_at() {
+        let mut img = RgbaImage::new(4, 2);
+        for (x, y, px) in img.enumerate_pixels_mut() {
+            #[expect(clippy::cast_possible_truncation, reason = "ภาพ 4x2")]
+            let (x8, y8) = (x as u8, y as u8);
+            *px = image::Rgba([x8, y8, 0, 255]);
+        }
+        assert_eq!(sample_pixel(&img, 0.0, 0.0).0, (0, 0));
+        assert_eq!(sample_pixel(&img, 0.99, 0.99).0, (3, 1));
+        // ★ ขอบขวาสุดพอดีต้องเป็น pixel สุดท้าย ไม่ใช่ตัวที่อยู่นอกภาพ
+        assert_eq!(sample_pixel(&img, 1.0, 1.0).0, (3, 1));
+        assert_eq!(sample_pixel(&img, 1.0, 1.0).1, [3, 1, 0, 255]);
+        // แต่ละ pixel กินช่วงเท่ากัน: 1/4 ของความกว้างคือ pixel ที่ 1
+        assert_eq!(sample_pixel(&img, 0.25, 0.0).0, (1, 0));
+        assert_eq!(sample_pixel(&img, 0.5, 0.0).0, (2, 0));
+    }
+
+    /// I-4: ค่าที่พังต้องไม่ทำให้ index หลุดขอบ (จะ panic ใน `get_pixel`)
+    #[test]
+    fn sampling_survives_broken_fractions() {
+        let img = RgbaImage::from_pixel(3, 3, image::Rgba([1, 2, 3, 4]));
+        for (u, v) in [
+            (f32::NAN, 0.5),
+            (0.5, f32::INFINITY),
+            (-10.0, 0.5),
+            (99.0, 99.0),
+        ] {
+            let ((x, y), rgba) = sample_pixel(&img, u, v);
+            assert!(x < 3 && y < 3, "หลุดขอบที่ ({u}, {v}) → ({x}, {y})");
+            assert_eq!(rgba, [1, 2, 3, 4]);
+        }
+    }
+
+    /// ★★ งาน `Sample` ต้องได้สีของ **ต้นฉบับ** ไม่ใช่ค่าเฉลี่ยจาก thumbnail
+    ///
+    /// เทสต์นี้บังคับความต่างให้เห็นเป็นตัวเลข: ภาพ 256×256 ที่ไล่สีทุก pixel
+    /// ถ้าใครเผลอไปอ่านจาก thumbnail 128×128 (ซึ่งบีบเป็นจัตุรัสและเฉลี่ยมาแล้ว)
+    /// ค่าที่ได้จะเพี้ยนจากค่าที่ถูกต้องทันที
+    #[test]
+    fn a_sample_job_returns_the_true_source_pixel() {
+        let path = write_gradient_png("sample", "grad.png", 256, 256);
+        let pool = test_pool(1);
+        pool.submit(Job {
+            hash: crate::hash::hash_bytes(b"sample"),
+            source: JobSource::File(path),
+            priority: 0.0,
+            cancel: Arc::new(AtomicBool::new(false)),
+            // กลางภาพพอดี → pixel (128, 64)
+            target: JobTarget::Sample { u: 0.5, v: 0.25 },
+        });
+
+        let result = pool
+            .results()
+            .recv_timeout(Duration::from_secs(30))
+            .unwrap();
+        let JobResult::Sampled {
+            rgba, source_px, ..
+        } = result
+        else {
+            panic!("ได้ {result:?} ซึ่งไม่ใช่ Sampled");
+        };
+        assert_eq!(source_px, (128, 64));
+        assert_eq!(rgba, [128, 64, 7, 255], "ต้องเป็นสีของ pixel ต้นฉบับเป๊ะ");
+    }
+
+    /// งาน picker ต้องไม่แตะ cache — cache เก็บแต่ thumbnail ที่ถูกบีบแล้ว
+    #[test]
+    fn a_sample_job_never_answers_from_the_thumbnail_cache() {
+        let path = write_gradient_png("samplecache", "grad.png", 64, 64);
+        let pool = test_pool(1);
+        // ส่ง thumbnail ก่อนเพื่อให้ cache (ถ้ามี) อุ่น แล้วค่อยขอ sample ด้วย hash เดียวกัน
+        pool.submit(job(path.clone(), 0.0, b"same"));
+        let first = pool
+            .results()
+            .recv_timeout(Duration::from_secs(30))
+            .unwrap();
+        assert!(matches!(first, JobResult::Done { .. }), "ได้ {first:?}");
+
+        pool.submit(Job {
+            hash: crate::hash::hash_bytes(b"same"),
+            source: JobSource::File(path),
+            priority: 0.0,
+            cancel: Arc::new(AtomicBool::new(false)),
+            target: JobTarget::Sample { u: 0.0, v: 0.0 },
+        });
+        let second = pool
+            .results()
+            .recv_timeout(Duration::from_secs(30))
+            .unwrap();
+        let JobResult::Sampled { rgba, .. } = second else {
+            panic!("cache ตอบแทน picker: ได้ {second:?}");
+        };
+        assert_eq!(rgba, [0, 0, 7, 255]);
     }
 
     #[test]

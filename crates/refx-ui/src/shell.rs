@@ -142,6 +142,14 @@ pub struct ShellState {
     /// จำนวน working texture ที่ถูกไล่ออกตาม LRU — หลักฐานว่า LRU ทำงาน
     pub working_evicted: u64,
 
+    /// ★ สีที่ picker อ่านได้ล่าสุด (P2-10) — `None` = ยังไม่ได้จิ้มอะไร
+    ///
+    /// **เป็นสีของ pixel ต้นฉบับ** ไม่ได้ผ่าน grayscale/brightness/opacity ใด ๆ
+    /// จึงต่างจากสีที่เห็นบนจอได้ และนั่นคือสิ่งที่ถูกต้อง (ROADMAP P2-10)
+    pub picked: Option<refx_core::pick::Picked>,
+    /// ★ ไม้บรรทัดที่วางอยู่ (P2-10) — ตัวเลขเป็น **world unit** ไม่ใช่พิกเซลบนจอ
+    pub measured: Option<refx_core::pick::Measurement>,
+
     /// ★ ความคืบหน้าการโหลด — `None` เมื่อไม่มีงานค้าง
     ///
     /// docs/05 §6: การรอ 80 วินาทีบน cache เย็นยอมรับได้ **ก็ต่อเมื่อ** ผู้ใช้
@@ -226,6 +234,8 @@ impl Default for ShellState {
             working_used: 0,
             working_limit: 0,
             working_evicted: 0,
+            picked: None,
+            measured: None,
             loading: None,
         }
     }
@@ -305,6 +315,38 @@ pub fn draw_in_ui(
                 );
             } else {
                 ui.label(&state.status);
+            }
+            // ★ สีที่จิ้มได้ (P2-10) — ตัวอย่างสีคู่กับ hex เสมอ
+            //   ตัวเลขอย่างเดียวอ่านไม่ออกด้วยตา ส่วนสีอย่างเดียวก๊อปไปใช้ไม่ได้
+            if let Some(picked) = state.picked {
+                ui.separator();
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::Vec2::splat(14.0), egui::Sense::hover());
+                let [r, g, b, _] = picked.rgba;
+                ui.painter()
+                    .rect_filled(rect, 2.0, egui::Color32::from_rgb(r, g, b));
+                ui.painter().rect_stroke(
+                    rect,
+                    2.0,
+                    egui::Stroke::new(1.0, egui::Color32::from_gray(140)),
+                    egui::StrokeKind::Middle,
+                );
+                ui.label(picked.hex()).on_hover_text(format!(
+                    "source pixel {}, {}",
+                    picked.source_px.0, picked.source_px.1
+                ));
+            }
+            // ★ ไม้บรรทัด (P2-10) — หน่วยเป็น world ตัวเลขจึงไม่ขยับตอนซูม
+            if let Some(m) = state.measured {
+                ui.separator();
+                let extent = m.extent();
+                ui.label(format!(
+                    "{:.1} u  ({:.1} x {:.1})  {:.1}°",
+                    m.length(),
+                    extent.x,
+                    extent.y,
+                    m.angle_deg()
+                ));
             }
             ui.separator();
             ui.label(text::fill(
@@ -465,6 +507,8 @@ fn canvas_tools(ui: &mut egui::Ui, state: &mut ShellState) {
     for (tool, key, hint) in [
         (Tool::Select, Key::ToolSelect, "V"),
         (Tool::Crop, Key::ToolCrop, "C"),
+        (Tool::Picker, Key::ToolPicker, "I"),
+        (Tool::Measure, Key::ToolMeasure, "M"),
     ] {
         let label = text::t(lang, key);
         if ui
