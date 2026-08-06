@@ -36,6 +36,43 @@ pub struct Appearance {
     pub flip: refx_core::board::Flip,
 }
 
+/// ข้อมูลฝั่ง Arrange ของสิ่งที่เลือกอยู่ — **ค่าสำหรับแสดงเท่านั้น** (P3-1)
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MetaView {
+    /// ดาว 0..=5
+    pub rating: u8,
+    /// ป้ายสี — `Some(Unknown(_))` = ป้ายจากรุ่นใหม่กว่าที่รุ่นนี้ไม่รู้จัก
+    pub color_label: Option<refx_core::board::ColorLabel>,
+    /// ปักหมุด (arrange จะไม่ย้าย)
+    pub pinned: bool,
+    /// โน้ตของผู้ใช้ — ★ **คนละตัวกับ `ItemKind::Text`** ตัวนั้นเป็น item บน canvas
+    /// ส่วนตัวนี้เป็น metadata ที่ติดกับ item ใบไหนก็ได้ รวมทั้งภาพ
+    pub note: String,
+    /// ชื่อแท็กของ item นี้ เรียงตาม `TagId` (deterministic)
+    pub tags: Vec<String>,
+}
+
+/// สิ่งที่ผู้ใช้ขอแก้ในเฟรมนี้ — **`None` = ไม่ได้แตะอะไรเลย** (P3-1)
+///
+/// ★ แยกจาก [`MetaView`] ด้วยเหตุผลเดียวกับ `appearance_edit` / `note_edit`:
+/// ค่าที่ค้างอยู่ซึ่งถูกเขียนกลับทุกเฟรมจะทับสิ่งที่ undo เพิ่งคืนมา
+/// (`docs/08 §3.9` ข้อ 8.1)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MetaRequest {
+    /// ตั้งดาว
+    Rating(u8),
+    /// ตั้ง/ล้างป้ายสี
+    ColorLabel(Option<refx_core::board::ColorLabel>),
+    /// ปักหมุด
+    Pinned(bool),
+    /// แก้โน้ต
+    Note(String),
+    /// ติดแท็กชื่อนี้
+    AddTag(String),
+    /// ถอดแท็กชื่อนี้
+    RemoveTag(String),
+}
+
 /// สิ่งที่ปุ่มจัดเรียงขอให้ทำ (P2-9)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArrangeRequest {
@@ -155,6 +192,15 @@ pub struct ShellState {
     /// ผู้ใช้ออกจากช่องข้อความแล้ว → ปิดหน้าต่าง merge (undo ขั้นใหม่)
     pub note_sealed: bool,
 
+    /// ★ ข้อมูลฝั่ง Arrange ของสิ่งที่เลือกอยู่ (P3-1) — `None` = ไม่ได้เลือกอะไร
+    pub meta: Option<MetaView>,
+    /// ★★ สิ่งที่ผู้ใช้ขอแก้ในเฟรมนี้ — `None` = ไม่ได้แตะ
+    pub meta_request: Option<MetaRequest>,
+    /// ผู้ใช้ออกจากช่องโน้ตแล้ว → ปิดหน้าต่าง merge
+    pub meta_sealed: bool,
+    /// ช่องพิมพ์ชื่อแท็กใหม่ — **สถานะของ widget ล้วน ๆ** ไม่ใช่ของเอกสาร
+    pub tag_input: String,
+
     /// ★ สีที่ picker อ่านได้ล่าสุด (P2-10) — `None` = ยังไม่ได้จิ้มอะไร
     ///
     /// **เป็นสีของ pixel ต้นฉบับ** ไม่ได้ผ่าน grayscale/brightness/opacity ใด ๆ
@@ -250,6 +296,10 @@ impl Default for ShellState {
             note: None,
             note_edit: None,
             note_sealed: false,
+            meta: None,
+            meta_request: None,
+            meta_sealed: false,
+            tag_input: String::new(),
             picked: None,
             measured: None,
             loading: None,
@@ -488,11 +538,7 @@ pub fn draw_in_ui(
             // docs/03 §1: inspector ปรับตัวตาม mode
             match state.mode {
                 Mode::Canvas => canvas_inspector(ui, state),
-                Mode::Arrange => {
-                    ui.label(text::t(lang, Key::InspectorArrangeMeta));
-                    ui.label(text::t(lang, Key::InspectorArrangeGroup));
-                    ui.small("P3-1");
-                }
+                Mode::Arrange => arrange_inspector(ui, state),
             }
         });
 
@@ -553,6 +599,32 @@ fn canvas_tools(ui: &mut egui::Ui, state: &mut ShellState) {
         }
     }
 }
+
+/// ★★ สัญลักษณ์ทุกตัวที่ Arrange inspector วาด (P3-1)
+///
+/// อยู่รวมกันที่นี่เพื่อให้เทสต์ `arrange_inspector_glyphs_all_exist` ไล่ตรวจได้
+/// **ทุกครั้งที่ build** — เพิ่ม/เปลี่ยนสัญลักษณ์เมื่อไหร่ เทสต์จะแดงทันที
+/// ถ้าฟอนต์ที่เราฝังไม่มี glyph นั้น (บทเรียนจาก P2-9)
+///
+/// ★ `#[cfg(test)]` เพราะโค้ดจริงใช้ค่าคงที่แต่ละตัวโดยตรง รายการนี้มีไว้ให้เทสต์
+/// ไล่เท่านั้น · **ข้อจำกัดที่ต้องรู้:** มันกันการ *เปลี่ยนค่า* ของสัญลักษณ์ที่มีอยู่
+/// ได้แน่นอน แต่กัน "เพิ่มสัญลักษณ์ใหม่แล้วลืมมาต่อท้ายที่นี่" ไม่ได้
+/// (ต่างจาก `ARRANGE_BUTTONS` ที่ตัวมันเองคือข้อมูลที่ UI วาด จึงลืมไม่ได้เชิงโครงสร้าง)
+#[cfg(test)]
+pub(crate) const META_GLYPHS: [&str; 3] = [STAR_FULL, STAR_EMPTY, LABEL_NONE];
+
+/// ★ ดาวที่ให้แล้ว (U+2605) — ★ ตรวจแล้วว่าฟอนต์ที่ฝังมีจริง
+const STAR_FULL: &str = "\u{2605}";
+/// ดาวที่ยังไม่ให้ (U+2606)
+const STAR_EMPTY: &str = "\u{2606}";
+/// ล้างป้ายสี (U+00D7)
+///
+/// ★ ตรวจแล้วว่า U+2713 (check) กับ U+25CF (วงกลมทึบ) **ไม่มี** ในฟอนต์ที่ฝัง
+/// จึงใช้ไม่ได้ — เดาไม่ได้ ต้องตรวจ (บทเรียนจาก P2-9)
+const LABEL_NONE: &str = "\u{00D7}";
+
+// ★ ปักหมุดใช้ `checkbox` ของ egui — egui วาดเครื่องหมายเอง
+// จึงไม่ต้องพึ่ง glyph ในฟอนต์เลย (U+2713 ไม่มีในฟอนต์ที่เราฝัง)
 
 /// ★★ ปุ่มจัดเรียงทั้งแปด — **ป้ายต้องเป็นตัวอักษรที่ฟอนต์ที่เราฝังมี glyph จริง**
 ///
@@ -670,6 +742,152 @@ fn canvas_inspector(ui: &mut egui::Ui, state: &mut ShellState) {
     // ★★ เขียน "สิ่งที่ผู้ใช้ขอ" **เฉพาะตอนมีคนแตะจริง** — เจ้าของเดียว ไม่มีการทับกัน
     state.appearance_edit = touched.then_some(wanted);
     state.appearance_sealed = released;
+}
+
+/// ★ inspector ของ Arrange mode — tag / rating / color label / pinned / note (P3-1)
+///
+/// ★★ **ทุกตัวควบคุมเขียนลง `state.meta_request` เท่านั้น ไม่แตะ `Board` เลย**
+/// ชั้น `app` เป็นคนห่อเป็น `EditMeta` / `TagItems` เข้า `History` — ทางเดียวที่กฎ
+/// "ทุก mutation ผ่าน Command" ยังบังคับได้จริงเมื่อ widget เป็นคนแก้ค่า
+///
+/// ★ เขียนคำขอ **ทีละหนึ่ง** ต่อเฟรม (enum ไม่ใช่ struct) เพราะ `EditMeta`
+/// merge **ต่อ field**: ให้ดาวแล้วใส่แท็กต้องเป็นคนละขั้น undo ถ้าส่งทั้งก้อน
+/// ทุกเฟรม เราจะแยกไม่ออกว่าผู้ใช้เพิ่งแตะอะไร (docs/02 §3)
+fn arrange_inspector(ui: &mut egui::Ui, state: &mut ShellState) {
+    use refx_core::board::ColorLabel;
+
+    let lang = state.lang;
+    ui.label(text::t(lang, Key::InspectorArrangeMeta));
+    ui.separator();
+
+    let Some(meta) = state.meta.clone() else {
+        ui.label(text::t(lang, Key::InspectorNoSelection));
+        state.meta_request = None;
+        state.meta_sealed = false;
+        return;
+    };
+    let mut request = None;
+    let mut sealed = false;
+
+    // ---- ดาว ----
+    ui.label(text::t(lang, Key::Rating));
+    ui.horizontal(|ui| {
+        for star in 1..=refx_core::board::ItemMeta::MAX_RATING {
+            let filled = meta.rating >= star;
+            let glyph = if filled { STAR_FULL } else { STAR_EMPTY };
+            if ui.selectable_label(filled, glyph).clicked() {
+                // ★ กดดาวที่ให้อยู่แล้ว = ล้างเป็น 0 — ไม่งั้นลดดาวไม่ได้เลย
+                request = Some(MetaRequest::Rating(if meta.rating == star {
+                    0
+                } else {
+                    star
+                }));
+                sealed = true;
+            }
+        }
+        ui.label(format!("{}", meta.rating));
+    });
+
+    // ---- ป้ายสี ----
+    ui.separator();
+    ui.label(text::t(lang, Key::ColorLabelTitle));
+    ui.horizontal(|ui| {
+        // ล้างป้าย
+        if ui
+            .selectable_label(meta.color_label.is_none(), LABEL_NONE)
+            .on_hover_text(text::t(lang, Key::ColorLabelNone))
+            .clicked()
+        {
+            request = Some(MetaRequest::ColorLabel(None));
+            sealed = true;
+        }
+        for label in ColorLabel::CHOICES {
+            let picked = meta.color_label == Some(label);
+            let (rect, response) =
+                ui.allocate_exact_size(egui::Vec2::splat(18.0), egui::Sense::click());
+            if let Some([r, g, b]) = label.rgb() {
+                ui.painter()
+                    .rect_filled(rect, 3.0, egui::Color32::from_rgb(r, g, b));
+            }
+            if picked {
+                ui.painter().rect_stroke(
+                    rect,
+                    3.0,
+                    egui::Stroke::new(2.0, egui::Color32::WHITE),
+                    egui::StrokeKind::Middle,
+                );
+            }
+            if response.clicked() {
+                request = Some(MetaRequest::ColorLabel(Some(label)));
+                sealed = true;
+            }
+        }
+    });
+    // ★★ ป้ายที่รุ่นนี้ไม่รู้จัก — บอกตรง ๆ **ห้ามวาดเป็นสีใดสีหนึ่ง**
+    //    ถ้าเดาสีให้ ผู้ใช้จะคิดว่ามันเป็นสีจริงแล้วเผลอกดทับ ซึ่งคือการทำลาย
+    //    ค่าที่เราอุตส่าห์ถือไว้เพื่อเขียนกลับ (docs/02 §2.9)
+    if meta.color_label.is_some_and(|label| !label.is_known()) {
+        ui.small(text::t(lang, Key::ColorLabelUnknown));
+    }
+
+    // ---- ปักหมุด ----
+    ui.separator();
+    let mut pinned = meta.pinned;
+    if ui
+        .checkbox(&mut pinned, text::t(lang, Key::Pinned))
+        .changed()
+    {
+        request = Some(MetaRequest::Pinned(pinned));
+        sealed = true;
+    }
+
+    // ---- แท็ก ----
+    ui.separator();
+    ui.label(text::t(lang, Key::Tags));
+    ui.horizontal_wrapped(|ui| {
+        for name in &meta.tags {
+            // กดที่แท็ก = ถอดออก · tooltip บอกไว้เพราะเดาเองไม่ได้
+            if ui
+                .button(name)
+                .on_hover_text(text::t(lang, Key::RemoveTagHint))
+                .clicked()
+            {
+                request = Some(MetaRequest::RemoveTag(name.clone()));
+                sealed = true;
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        let field = ui.add(
+            egui::TextEdit::singleline(&mut state.tag_input)
+                .desired_width(120.0)
+                .hint_text(text::t(lang, Key::AddTagHint)),
+        );
+        // Enter หรือกดปุ่ม — ทั้งสองทางต้องได้ผลเดียวกัน
+        let entered = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if (entered || ui.button("+").clicked()) && !state.tag_input.trim().is_empty() {
+            request = Some(MetaRequest::AddTag(std::mem::take(&mut state.tag_input)));
+            sealed = true;
+        }
+    });
+
+    // ---- โน้ต ----
+    ui.separator();
+    ui.label(text::t(lang, Key::MetaNote));
+    let mut note = meta.note.clone();
+    let response = ui.add(
+        egui::TextEdit::multiline(&mut note)
+            .desired_width(f32::INFINITY)
+            .desired_rows(4)
+            .hint_text(text::t(lang, Key::NoteHint)),
+    );
+    if response.changed() {
+        request = Some(MetaRequest::Note(note));
+    }
+    sealed |= response.lost_focus();
+
+    state.meta_request = request;
+    state.meta_sealed = sealed;
 }
 
 /// ปุ่มเครื่องมือของ Arrange mode
@@ -792,6 +1010,84 @@ mod tests {
         });
         assert!(state.note_edit.is_none());
         assert!(!state.note_sealed);
+    }
+
+    /// ★★ แผง Arrange ต้อง **ไม่ขออะไร** ถ้าผู้ใช้ไม่ได้แตะมันในเฟรมนั้น (P3-1)
+    ///
+    /// เหตุผลเดียวกับแผง Canvas: ค่าที่ค้างแล้วถูกเขียนกลับทุกเฟรมจะทับสิ่งที่
+    /// undo เพิ่งคืนมา — กด Ctrl+Z แล้วดาว/แท็กเด้งกลับทันที
+    #[test]
+    fn the_arrange_panel_asks_for_nothing_when_nobody_touches_it() {
+        let ctx = egui::Context::default();
+        let mut state = ShellState {
+            mode: Mode::Arrange,
+            meta: Some(MetaView {
+                rating: 3,
+                color_label: Some(refx_core::board::ColorLabel::Blue),
+                pinned: true,
+                note: "จดไว้".to_owned(),
+                tags: vec!["portrait".to_owned()],
+            }),
+            ..ShellState::default()
+        };
+
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| {
+                let _ = draw_in_ui(ui, &mut state, |_| {});
+            });
+            assert!(
+                state.meta_request.is_none(),
+                "ไม่มีใครแตะ แต่แผง Arrange กลับขอให้เขียนลง board"
+            );
+        }
+    }
+
+    /// ไม่ได้เลือกอะไร = ต้องไม่มีคำขอค้างจากรอบก่อน
+    #[test]
+    fn deselecting_clears_a_pending_meta_request() {
+        let ctx = egui::Context::default();
+        let mut state = ShellState {
+            mode: Mode::Arrange,
+            meta: None,
+            meta_request: Some(MetaRequest::Rating(5)),
+            meta_sealed: true,
+            ..ShellState::default()
+        };
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| {
+            let _ = draw_in_ui(ui, &mut state, |_| {});
+        });
+        assert!(state.meta_request.is_none());
+        assert!(!state.meta_sealed);
+    }
+
+    /// ★★ ป้ายสีที่รุ่นนี้ไม่รู้จักต้อง **ไม่ถูกวาดเป็นสีใดสีหนึ่ง**
+    ///
+    /// ถ้าเดาสีให้ ผู้ใช้จะคิดว่ามันเป็นสีจริงแล้วเผลอกดทับ ซึ่งทำลายค่าที่
+    /// `ColorLabel::Unknown` อุตส่าห์ถือไว้เพื่อเขียนกลับ (docs/02 §2.9)
+    #[test]
+    fn an_unknown_colour_label_is_never_drawn_as_a_real_colour() {
+        let unknown = refx_core::board::ColorLabel::from_wire(200).unwrap();
+        assert!(unknown.rgb().is_none());
+        // และไม่มีปุ่มไหนบน UI สร้างค่านี้ได้
+        assert!(
+            !refx_core::board::ColorLabel::CHOICES
+                .iter()
+                .any(|choice| !choice.is_known())
+        );
     }
 
     #[test]

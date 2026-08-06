@@ -120,6 +120,21 @@ pub enum Flip {
 }
 
 /// ป้ายสีสำหรับคัดภาพในโหมด Arrange
+///
+/// ★★★ **ออกแบบให้ round-trip ได้ตั้งแต่ต้น ไม่ใช่รอไปแก้ตอน P4-1**
+///
+/// `docs/02 §2.9` บันทึกเคสนี้ไว้เป็นตัวอย่างหลักของกฎ "ทนได้ยังไม่พอ
+/// ต้องส่งคืนค่าเดิมได้":
+///
+/// > ผู้ใช้ติดป้ายสีด้วย RefX รุ่นใหม่ → เปิดด้วยรุ่นเก่า → รุ่นเก่าอ่านค่าไม่รู้จัก
+/// > เป็น `None` → ผู้ใช้ขยับภาพใบเดียวแล้วบันทึก → **ป้ายสีหายถาวร**
+///
+/// กลไกที่สร้างมากัน I-3 กลายเป็นตัวทำให้ข้อมูลหายเสียเอง · ทางแก้คือ
+/// **เก็บค่าดิบไว้แล้วเขียนกลับตามเดิม** ซึ่งที่นี่ทำด้วย [`ColorLabel::Unknown`]
+///
+/// ★ เก็บไว้ใน **ชนิดของโดเมนเอง** ไม่ใช่ใน DTO ตอน P4-1 เพราะถ้าอยู่ใน DTO
+/// การ "ลืมเขียนกลับ" เป็นไปได้เสมอ · อยู่ตรงนี้แล้วมันเดินทางไปพร้อม `ItemMeta`
+/// ทุกที่โดยไม่ต้องมีใครจำ — และ [`ColorLabel::to_wire`] คือทางเดียวที่ค่าจะออกไปลงไฟล์
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ColorLabel {
     /// แดง
@@ -134,11 +149,197 @@ pub enum ColorLabel {
     Blue,
     /// ม่วง
     Purple,
+    /// ★ ป้ายสีที่รุ่นนี้ไม่รู้จัก — **ถือค่าดิบไว้เพื่อเขียนกลับให้เหมือนเดิม**
+    ///
+    /// UI แสดงเป็น "ไม่รู้จัก" ได้ แต่ **ห้ามแปลงค่าทิ้ง** และผู้ใช้เลือกมันเองไม่ได้
+    /// (ไม่มีปุ่มไหนสร้างค่านี้ — มันมาจากไฟล์ทางเดียว)
+    ///
+    /// `NonZeroU8` เพราะ **0 คือ "ไม่มีป้าย"** ซึ่งแทนด้วย `None` อยู่แล้ว
+    /// ถ้าปล่อยให้เป็น `u8` ธรรมดา `Unknown(0)` จะเขียนออกไปเป็น "ไม่มีป้าย"
+    /// แล้วป้ายก็หายอยู่ดี — ชนิดข้อมูลปิดรูนั้นแทนที่จะต้องมีคนจำ
+    Unknown(std::num::NonZeroU8),
 }
 
-/// คีย์ของแท็ก — ตารางชื่อแท็กจริงอยู่ระดับ workspace (P2-9)
+impl ColorLabel {
+    /// ป้ายทุกสีที่ผู้ใช้ **เลือกได้จริง** — เรียงตามลำดับที่แสดงบน UI
+    ///
+    /// ไม่มี [`ColorLabel::Unknown`] อยู่ในนี้โดยตั้งใจ
+    pub const CHOICES: [Self; 6] = [
+        Self::Red,
+        Self::Orange,
+        Self::Yellow,
+        Self::Green,
+        Self::Blue,
+        Self::Purple,
+    ];
+
+    /// ค่าที่ลงไฟล์ — **ตัวเลขพวกนี้เป็นสัญญาถาวร ห้ามสลับ**
+    ///
+    /// `0` สงวนไว้ให้ "ไม่มีป้าย" (`None`) จึงไม่มีสีไหนใช้
+    #[must_use]
+    pub fn to_wire(self) -> u8 {
+        match self {
+            Self::Red => 1,
+            Self::Orange => 2,
+            Self::Yellow => 3,
+            Self::Green => 4,
+            Self::Blue => 5,
+            Self::Purple => 6,
+            Self::Unknown(raw) => raw.get(),
+        }
+    }
+
+    /// อ่านค่าจากไฟล์ — `None` = ไม่มีป้าย · ค่าที่ไม่รู้จักตกที่ [`ColorLabel::Unknown`]
+    ///
+    /// ★ **ไม่มีทางคืน `None` เพราะ "ไม่รู้จัก"** — `None` แปลว่า "ไม่มีป้าย" เท่านั้น
+    /// สองอย่างนี้ต่างกัน และการรวมมันเข้าด้วยกันคือบั๊กที่ทำให้ข้อมูลหาย
+    #[must_use]
+    pub fn from_wire(value: u8) -> Option<Self> {
+        Some(match value {
+            0 => return None,
+            1 => Self::Red,
+            2 => Self::Orange,
+            3 => Self::Yellow,
+            4 => Self::Green,
+            5 => Self::Blue,
+            6 => Self::Purple,
+            // ค่าที่เหลือมาจากรุ่นใหม่กว่า — ถือไว้ให้ครบแล้วเขียนกลับตามเดิม
+            other => Self::Unknown(std::num::NonZeroU8::new(other)?),
+        })
+    }
+
+    /// รุ่นนี้รู้จักป้ายนี้ไหม — UI ใช้ตัดสินว่าจะวาดสีจริงหรือวาดว่า "ไม่รู้จัก"
+    #[must_use]
+    pub fn is_known(self) -> bool {
+        !matches!(self, Self::Unknown(_))
+    }
+
+    /// สี RGB สำหรับวาดบน UI — `None` เมื่อรุ่นนี้ไม่รู้จักป้ายนี้
+    ///
+    /// ★ คืน `None` แทนที่จะเดาสีเทา ๆ ให้ — ชั้น UI ต้องเป็นคนตัดสินว่าจะ
+    /// แสดงยังไง และต้องแสดงให้ **ต่างจากป้ายที่รู้จัก** ไม่งั้นผู้ใช้จะคิดว่า
+    /// มันเป็นสีจริงแล้วเผลอกดทับ
+    #[must_use]
+    pub fn rgb(self) -> Option<[u8; 3]> {
+        Some(match self {
+            Self::Red => [220, 76, 70],
+            Self::Orange => [226, 140, 60],
+            Self::Yellow => [222, 200, 70],
+            Self::Green => [110, 190, 110],
+            Self::Blue => [92, 150, 230],
+            Self::Purple => [170, 120, 220],
+            Self::Unknown(_) => return None,
+        })
+    }
+}
+
+/// คีย์ของแท็ก — ชื่อจริงอยู่ใน [`TagTable`] ของ board
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TagId(pub u32);
+
+/// ตารางชื่อแท็กของ board หนึ่งใบ (P3-1)
+///
+/// ★★ **ทำไมอยู่ที่ `Board` ไม่ใช่ `Workspace`** — คอมเมนต์เดิมของ [`TagId`] เขียนว่า
+/// "ตารางชื่อแท็กจริงอยู่ระดับ workspace" แต่ `Workspace` ใน `docs/02 §2` มีแค่
+/// `boards` / `active` / `order` **ไม่มีตารางแท็ก** และ `Workspace` เองก็ยังไม่ถูก
+/// สร้าง (P4-7) — ที่อยู่ของตารางนี้จึงไม่เคยถูกระบุจริง
+///
+/// เลือก `Board` เพราะ **`Board` คือสิ่งที่ลงไฟล์ `.refx`** (P4-1): ส่งไฟล์ให้เพื่อน
+/// แล้วชื่อแท็กไปด้วย · ถ้าตารางอยู่ระดับแอป ไฟล์ที่ส่งไปจะมีแต่ `TagId` เปล่า ๆ
+/// ที่ไม่มีความหมาย = **ข้อมูลผู้ใช้หายตอนส่งต่อ** ซึ่งเป็นรูปแบบเดียวกับ I-3
+///
+/// ตอน P4-7 ทำ multi-board จะเพิ่มตารางระดับ workspace ไว้ *รวม* ชื่อข้าม board ได้
+/// — ทิศ board → workspace เป็นการเพิ่ม ส่วน workspace → board ต้อง migrate ไฟล์
+///
+/// ★ ใช้ `BTreeMap` ไม่ใช่ `HashMap` — **ลำดับต้อง deterministic** (CLAUDE.md)
+/// รายการแท็กบน UI ที่สลับที่ทุกครั้งที่เปิดคือสิ่งที่ผู้ใช้อ่านว่าโปรแกรมพัง
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TagTable {
+    names: std::collections::BTreeMap<TagId, String>,
+    /// id ถัดไปที่จะแจก — **ไม่เคยถอยหลัง** แม้แท็กจะถูกลบ
+    ///
+    /// ★ ถ้าใช้ id ซ้ำ item ที่ยังถือ id เดิมอยู่จะกลายเป็นแท็กใหม่เงียบ ๆ
+    /// (เหตุผลเดียวกับที่ `Arena` เป็น generational — HANDOFF §4 ข้อ 19)
+    next: u32,
+}
+
+/// เพดานความยาวชื่อแท็ก (อักขระ) — ค่าจากไฟล์ต้องถูกตัดก่อนเข้ามา (I-4)
+pub const MAX_TAG_LEN: usize = 64;
+
+impl TagTable {
+    /// ชื่อของแท็กนี้ — `None` ถ้าไม่มีในตาราง
+    #[must_use]
+    pub fn name(&self, id: TagId) -> Option<&str> {
+        self.names.get(&id).map(String::as_str)
+    }
+
+    /// ทุกแท็กในตาราง เรียงตาม id (deterministic เสมอ)
+    pub fn iter(&self) -> impl Iterator<Item = (TagId, &str)> {
+        self.names.iter().map(|(id, name)| (*id, name.as_str()))
+    }
+
+    /// จำนวนแท็ก
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.names.len()
+    }
+
+    /// ตารางว่างไหม
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.names.is_empty()
+    }
+
+    /// ทำให้ชื่อเป็นรูปแบบมาตรฐาน — ตัดช่องว่างหัวท้าย + จำกัดความยาว
+    ///
+    /// คืน `None` เมื่อชื่อว่างเปล่าหลังตัดแล้ว (แท็กชื่อว่างคือแท็กที่กดไม่โดน)
+    #[must_use]
+    pub fn normalize(name: &str) -> Option<String> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        // ★ ตัดตาม **อักขระ** ไม่ใช่ไบต์ — ตัดกลาง UTF-8 จะ panic (I-4)
+        //   ชื่อไทย/ญี่ปุ่นยาว 64 อักขระเป็นเรื่องปกติ
+        Some(trimmed.chars().take(MAX_TAG_LEN).collect())
+    }
+
+    /// หา id ของชื่อนี้ถ้ามีอยู่แล้ว — **เทียบแบบไม่สนตัวพิมพ์**
+    ///
+    /// ★ `Portrait` กับ `portrait` เป็นแท็กเดียวกัน: ผู้ใช้พิมพ์เองทุกครั้ง
+    /// การได้แท็กสองอันที่หน้าตาเหมือนกันคือกับดักที่ทำให้ filter หาไม่เจอ
+    #[must_use]
+    pub fn find(&self, name: &str) -> Option<TagId> {
+        let wanted = Self::normalize(name)?;
+        self.names
+            .iter()
+            .find(|(_, existing)| existing.eq_ignore_ascii_case(&wanted))
+            .map(|(id, _)| *id)
+    }
+
+    /// เพิ่มชื่อใหม่แล้วคืน id — `None` ถ้าชื่อใช้ไม่ได้
+    ///
+    /// **ไม่เช็คว่าซ้ำ** ผู้เรียกต้องถาม [`TagTable::find`] ก่อน (ตัวที่เรียกจริงคือ
+    /// `Command` ซึ่งต้องรู้ด้วยว่า "สร้างใหม่หรือเปล่า" เพื่อจะ undo ได้ถูก)
+    pub(crate) fn insert(&mut self, name: &str) -> Option<TagId> {
+        let name = Self::normalize(name)?;
+        let id = TagId(self.next);
+        self.next = self.next.checked_add(1)?;
+        self.names.insert(id, name);
+        Some(id)
+    }
+
+    /// ใส่ชื่อกลับที่ id เดิม — ใช้ตอน undo การลบ
+    pub(crate) fn restore(&mut self, id: TagId, name: String) {
+        self.next = self.next.max(id.0.saturating_add(1));
+        self.names.insert(id, name);
+    }
+
+    /// เอาแท็กออกจากตาราง คืนชื่อเดิม — ใช้ตอน undo การสร้าง
+    pub(crate) fn remove(&mut self, id: TagId) -> Option<String> {
+        self.names.remove(&id)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // ItemCanvas
@@ -563,6 +764,8 @@ pub struct Board {
     /// ล่างสุด → บนสุด **source of truth ของ z**
     pub(crate) z_order: Vec<ItemId>,
     pub(crate) groups: Arena<GroupId, Group>,
+    /// ★ ชื่อของแท็กทั้งหมดบน board นี้ (P3-1) — ดู [`TagTable`] ว่าทำไมอยู่ที่นี่
+    pub(crate) tags: TagTable,
     /// ★ **`selection` ไม่อยู่ที่นี่โดยตั้งใจ** (docs/02 §2.9) — มันเป็นสถานะชั่วคราว
     /// ของ editor ไม่ใช่ของเอกสาร ถ้าอยู่ใน `Board` การคลิกดูภาพเฉย ๆ จะทำให้
     /// เอกสาร dirty แล้วผู้ใช้จะโดนถาม "บันทึกไหม" ทั้งที่ไม่ได้แก้อะไร
@@ -593,6 +796,7 @@ impl Board {
             items: Arena::new(),
             z_order: Vec::new(),
             groups: Arena::new(),
+            tags: TagTable::default(),
             view: ViewState::default(),
             arrange: ArrangeState::default(),
             settings: BoardSettings::default(),
@@ -741,6 +945,32 @@ impl Board {
         Ok(std::mem::replace(&mut item.canvas, canvas.sanitized()))
     }
 
+    /// ตารางชื่อแท็กของ board นี้ — **อ่านอย่างเดียว** (P3-1)
+    #[must_use]
+    pub fn tags(&self) -> &TagTable {
+        &self.tags
+    }
+
+    /// เพิ่มชื่อแท็กใหม่ คืน id — `None` ถ้าชื่อใช้ไม่ได้
+    pub(crate) fn insert_tag(&mut self, name: &str) -> Option<TagId> {
+        let id = self.tags.insert(name)?;
+        self.dirty = true;
+        Some(id)
+    }
+
+    /// เอาแท็กออกจากตาราง คืนชื่อเดิม — ใช้ตอน undo การสร้างแท็ก
+    pub(crate) fn remove_tag(&mut self, id: TagId) -> Option<String> {
+        let name = self.tags.remove(id)?;
+        self.dirty = true;
+        Some(name)
+    }
+
+    /// ใส่ชื่อแท็กกลับที่ id เดิม — ใช้ตอน redo/undo
+    pub(crate) fn restore_tag(&mut self, id: TagId, name: String) {
+        self.tags.restore(id, name);
+        self.dirty = true;
+    }
+
     /// แก้เนื้อความของโน้ต คืนข้อความเดิม (P2-11)
     ///
     /// ★ คืน [`BoardError::NoSuchItem`] เมื่อ item **ไม่ใช่โน้ต** ด้วย ไม่ใช่แค่ตอน id ตาย
@@ -795,6 +1025,92 @@ pub(crate) mod tests {
     )]
 
     use super::*;
+
+    // ---------- ColorLabel: round-trip (P3-1) ----------
+
+    /// ★★★ **ค่าป้ายสีทุกค่าที่เป็นไปได้ต้องเขียนกลับได้เหมือนเดิมเป๊ะ**
+    ///
+    /// นี่คือเทสต์ที่ทำให้เคสใน `docs/02 §2.9` เกิดขึ้นไม่ได้: ผู้ใช้ติดป้ายด้วย
+    /// รุ่นใหม่ → เปิดด้วยรุ่นเก่า → ขยับภาพใบเดียวแล้วบันทึก → **ป้ายสีหายถาวร**
+    ///
+    /// ไล่ครบทั้ง 256 ค่าเพราะโดเมนมันเล็กพอที่จะไล่หมดได้จริง — ไม่ต้องสุ่ม
+    #[test]
+    fn every_possible_colour_label_survives_a_round_trip() {
+        for raw in 0..=u8::MAX {
+            let parsed = ColorLabel::from_wire(raw);
+            let written = parsed.map_or(0, ColorLabel::to_wire);
+            assert_eq!(
+                written, raw,
+                "ค่า {raw} อ่านเป็น {parsed:?} แล้วเขียนกลับได้ {written} — ข้อมูลเพี้ยน"
+            );
+        }
+    }
+
+    /// ★★ **"ไม่มีป้าย" กับ "ป้ายที่ไม่รู้จัก" ต้องไม่ใช่สิ่งเดียวกัน**
+    ///
+    /// การรวมสองอย่างนี้เข้าด้วยกันคือบั๊กทั้งหมดของเคสนั้น: ถ้าค่าที่ไม่รู้จัก
+    /// ตกเป็น `None` มันจะกลายเป็น "ผู้ใช้ตั้งใจไม่ติดป้าย" แล้วถูกเขียนทับด้วย 0
+    #[test]
+    fn an_unknown_label_is_never_confused_with_having_no_label() {
+        assert_eq!(ColorLabel::from_wire(0), None, "0 = ไม่มีป้าย");
+        for raw in 7..=u8::MAX {
+            let parsed = ColorLabel::from_wire(raw);
+            assert!(parsed.is_some(), "ค่า {raw} หายไปเป็น None");
+            assert!(!parsed.unwrap().is_known(), "ค่า {raw} ไม่ควรถูกอ้างว่ารู้จัก");
+        }
+    }
+
+    /// ★ ค่าบนสายเป็น **สัญญาถาวร** — สลับตัวเลขเมื่อไหร่ ไฟล์เก่าจะอ่านผิดสีทั้งหมด
+    #[test]
+    fn the_wire_numbers_are_pinned_forever() {
+        assert_eq!(ColorLabel::Red.to_wire(), 1);
+        assert_eq!(ColorLabel::Orange.to_wire(), 2);
+        assert_eq!(ColorLabel::Yellow.to_wire(), 3);
+        assert_eq!(ColorLabel::Green.to_wire(), 4);
+        assert_eq!(ColorLabel::Blue.to_wire(), 5);
+        assert_eq!(ColorLabel::Purple.to_wire(), 6);
+        // ★ ทุกตัวที่ผู้ใช้เลือกได้ต้องมีเลขไม่ซ้ำกันและไม่ใช่ 0
+        let mut seen: Vec<u8> = ColorLabel::CHOICES.iter().map(|c| c.to_wire()).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), ColorLabel::CHOICES.len(), "เลขบนสายซ้ำกัน");
+        assert!(!seen.contains(&0), "0 สงวนไว้ให้ \"ไม่มีป้าย\"");
+    }
+
+    /// ★ ป้ายที่ผู้ใช้เลือกได้ต้องมีสีให้วาด · ป้ายที่ไม่รู้จักต้อง **ไม่มี**
+    ///
+    /// ถ้า `Unknown` เดาสีให้ ผู้ใช้จะคิดว่ามันเป็นสีจริงแล้วเผลอกดทับ
+    /// ซึ่งคือการทำลายค่าที่เราอุตส่าห์ถือไว้
+    #[test]
+    fn only_labels_this_build_knows_have_a_colour() {
+        for label in ColorLabel::CHOICES {
+            assert!(label.is_known());
+            assert!(label.rgb().is_some(), "{label:?} ไม่มีสีให้วาด");
+        }
+        let unknown = ColorLabel::from_wire(200).unwrap();
+        assert!(unknown.rgb().is_none(), "ป้ายที่ไม่รู้จักต้องไม่เดาสีให้");
+    }
+
+    /// ★ `ItemMeta` ที่ถือป้ายไม่รู้จักต้องผ่าน `sanitized()` ไปได้โดยไม่ถูกล้าง
+    ///
+    /// `sanitized()` คือด่านที่ค่าจากไฟล์ทุกค่าต้องผ่าน (I-4) — ถ้ามันล้างป้าย
+    /// ที่ไม่รู้จักทิ้ง เกราะที่สร้างมากันข้อมูลเสียจะกลายเป็นตัวทำข้อมูลหายเสียเอง
+    #[test]
+    fn sanitizing_meta_keeps_a_label_it_does_not_understand() {
+        let raw = 199;
+        let meta = ItemMeta {
+            color_label: ColorLabel::from_wire(raw),
+            rating: 99, // ตัวนี้ต้องถูก clamp
+            ..ItemMeta::default()
+        }
+        .sanitized();
+        assert_eq!(meta.rating, ItemMeta::MAX_RATING, "rating ต้องถูก clamp");
+        assert_eq!(
+            meta.color_label.map_or(0, ColorLabel::to_wire),
+            raw,
+            "ป้ายที่ไม่รู้จักต้องรอดจาก sanitize"
+        );
+    }
 
     pub(crate) fn image_item(tag: u8) -> Item {
         Item::new(ItemKind::Image(AssetRef {

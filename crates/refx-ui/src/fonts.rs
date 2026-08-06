@@ -297,6 +297,24 @@ mod tests {
         }
     }
 
+    /// ★★ ป้ายของ Arrange inspector (P3-1) ต้องมี glyph จริงเช่นกัน
+    ///
+    /// ดาวกับวงกลมดูเป็นสัญลักษณ์สากลจน "ไม่น่าจะไม่มี" — ซึ่งเป็นความคิด
+    /// แบบเดียวกับที่ทำให้ปุ่ม align ขึ้นเป็นกล่องว่างตอน P2-9 เป๊ะ ๆ
+    #[test]
+    fn arrange_inspector_glyphs_all_exist() {
+        let ctx = ctx_with_fonts();
+        for label in crate::shell::META_GLYPHS {
+            for ch in label.chars() {
+                assert!(
+                    has_glyph(&ctx, ch),
+                    "ป้าย {label:?} ไม่มี glyph ของ {ch:?} (U+{:04X}) — จะขึ้นเป็นกล่องว่าง",
+                    ch as u32
+                );
+            }
+        }
+    }
+
     #[test]
     fn real_ui_strings_lay_out_completely() {
         use crate::text::{self, Key, Lang, Template};

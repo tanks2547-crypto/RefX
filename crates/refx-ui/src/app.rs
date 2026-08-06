@@ -11,7 +11,7 @@ use refx_asset::cache::{CacheStats, IoRequest, IoThread};
 use refx_asset::pool::DecodePool;
 use refx_core::arena::ItemId;
 use refx_core::board::{AssetRef, Board, ImageFormat, Item, ItemCanvas, ItemKind};
-use refx_core::board::{Flip, ItemFilter};
+use refx_core::board::{Flip, ItemFilter, ItemMeta};
 use refx_core::command::{
     AddItems, EditText, History, RemoveItems, ReorderZ, SetFilter, TransformItems,
 };
@@ -187,32 +187,91 @@ enum HistoryRequest {
     Redo,
 }
 
+/// อักขระ ASCII ที่คีย์ลัดควรถือว่าผู้ใช้กด — `None` ถ้าไม่ใช่ปุ่มที่มีความหมาย
+///
+/// ★★★ **logical ก่อน · physical เป็นตาข่ายรอง**
+///
+/// `logical` คือตัวอักษรที่ layout ของผู้ใช้ผลิตออกมา — Dvorak/AZERTY กด `V`
+/// ที่ตำแหน่งของเขาเองแล้วยังได้ผลถูก ซึ่งเป็นเหตุผลที่โค้ดเดิมเลือกทางนี้ และยังถูกอยู่
+///
+/// แต่ **layout ที่ไม่ใช่ละตินไม่ผลิตตัวอักษรละตินเลย**: คีย์บอร์ดไทยกด `C` ได้ `แ`
+/// รัสเซียได้ `с` กรีกได้ `ψ` — ไม่มีตัวไหนตรงกับ `"c"` ทั้งสิ้น ผลคือ
+/// **คีย์ลัดทุกตัวตายหมด** สำหรับผู้ใช้กลุ่มที่ `docs/03 §0` ระบุว่าเป็นภาษาที่สอง
+/// ของโปรแกรมนี้ · เจอตอนยืนยัน P3-1 บนเครื่องที่ layout เป็นไทย: กด `C` แล้ว
+/// เครื่องมือไม่สลับ กด `Ctrl+Z` แล้วไม่ย้อน และ **ไม่มี error ที่ไหนเลย**
+///
+/// ★ ลำดับสำคัญ: ถ้าถาม physical ก่อน Dvorak จะพัง ถ้าถาม logical อย่างเดียว
+/// ไทย/รัสเซีย/กรีกจะพัง — ต้องถามสองชั้นตามลำดับนี้เท่านั้น
+fn shortcut_char(
+    logical: &winit::keyboard::Key,
+    physical: winit::keyboard::PhysicalKey,
+) -> Option<char> {
+    use winit::keyboard::{KeyCode, PhysicalKey};
+
+    if let winit::keyboard::Key::Character(text) = logical {
+        let mut chars = text.chars();
+        // อักขระตัวเดียวและเป็น ASCII เท่านั้น — `แ` ตกลงไปใช้ physical แทน
+        if let (Some(ch), None) = (chars.next(), chars.next())
+            && ch.is_ascii()
+        {
+            return Some(ch.to_ascii_lowercase());
+        }
+    }
+
+    let PhysicalKey::Code(code) = physical else {
+        return None;
+    };
+    Some(match code {
+        KeyCode::KeyA => 'a',
+        KeyCode::KeyB => 'b',
+        KeyCode::KeyC => 'c',
+        KeyCode::KeyD => 'd',
+        KeyCode::KeyE => 'e',
+        KeyCode::KeyF => 'f',
+        KeyCode::KeyG => 'g',
+        KeyCode::KeyH => 'h',
+        KeyCode::KeyI => 'i',
+        KeyCode::KeyJ => 'j',
+        KeyCode::KeyK => 'k',
+        KeyCode::KeyL => 'l',
+        KeyCode::KeyM => 'm',
+        KeyCode::KeyN => 'n',
+        KeyCode::KeyO => 'o',
+        KeyCode::KeyP => 'p',
+        KeyCode::KeyQ => 'q',
+        KeyCode::KeyR => 'r',
+        KeyCode::KeyS => 's',
+        KeyCode::KeyT => 't',
+        KeyCode::KeyU => 'u',
+        KeyCode::KeyV => 'v',
+        KeyCode::KeyW => 'w',
+        KeyCode::KeyX => 'x',
+        KeyCode::KeyY => 'y',
+        KeyCode::KeyZ => 'z',
+        KeyCode::BracketLeft => '[',
+        KeyCode::BracketRight => ']',
+        _ => return None,
+    })
+}
+
 /// แปลงปุ่มที่กดเป็นคำขอกับประวัติ
 ///
 /// ★ รับ **Ctrl+Shift+Z เป็น redo ด้วย** ไม่ใช่แค่ Ctrl+Y — คนจำนวนมากใช้อันนั้น
 /// (ติดมาจาก Photoshop/Illustrator) ถ้าไม่รับ เขาจะคิดว่า redo ไม่มีในโปรแกรมนี้
-fn history_shortcut(
-    key: &winit::keyboard::Key,
-    modifiers: ModifiersState,
-) -> Option<HistoryRequest> {
+fn history_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> Option<HistoryRequest> {
     if !modifiers.control_key() {
         return None;
     }
-    let winit::keyboard::Key::Character(text) = key else {
-        return None;
-    };
     // ปุ่มควบคุมบางระบบส่งมาเป็นอักขระ control (Ctrl+Z = 0x1A, Ctrl+Y = 0x19)
-    if text.eq_ignore_ascii_case("z") || text.as_str() == "\u{1a}" {
-        return Some(if modifiers.shift_key() {
+    match pressed? {
+        'z' | '\u{1a}' => Some(if modifiers.shift_key() {
             HistoryRequest::Redo
         } else {
             HistoryRequest::Undo
-        });
+        }),
+        'y' | '\u{19}' => Some(HistoryRequest::Redo),
+        _ => None,
     }
-    if text.eq_ignore_ascii_case("y") || text.as_str() == "\u{19}" {
-        return Some(HistoryRequest::Redo);
-    }
-    None
 }
 
 /// แปลงปุ่มที่กดเป็นคำสั่งย้ายชั้น (P2-6)
@@ -223,50 +282,36 @@ fn history_shortcut(
 ///
 /// ★ ต้องรับ `{` `}` ด้วย: บนคีย์บอร์ดส่วนใหญ่ Shift+`[` **ส่งอักขระ `{` มาเลย**
 /// ไม่ได้ส่ง `[` พร้อมธง shift — ถ้าดูแต่ธง ปุ่มสุดหัว-สุดท้ายจะไม่ทำงานเลย
-fn zorder_shortcut(key: &winit::keyboard::Key, modifiers: ModifiersState) -> Option<ZMove> {
+fn zorder_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> Option<ZMove> {
     if modifiers.control_key() || modifiers.alt_key() {
         return None;
     }
-    let winit::keyboard::Key::Character(text) = key else {
-        return None;
-    };
     let all_the_way = modifiers.shift_key();
-    match text.as_str() {
-        "[" if all_the_way => Some(ZMove::ToBack),
-        "]" if all_the_way => Some(ZMove::ToFront),
-        "[" => Some(ZMove::Backward),
-        "]" => Some(ZMove::Forward),
-        "{" => Some(ZMove::ToBack),
-        "}" => Some(ZMove::ToFront),
+    match pressed? {
+        '[' if all_the_way => Some(ZMove::ToBack),
+        ']' if all_the_way => Some(ZMove::ToFront),
+        '[' => Some(ZMove::Backward),
+        ']' => Some(ZMove::Forward),
+        '{' => Some(ZMove::ToBack),
+        '}' => Some(ZMove::ToFront),
         _ => None,
     }
 }
 
 /// แปลงปุ่มที่กดเป็นการสลับเครื่องมือ (docs/03 §2: `V` = Select/Move · `C` = Crop)
-fn tool_shortcut(key: &winit::keyboard::Key, modifiers: ModifiersState) -> Option<Tool> {
+fn tool_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> Option<Tool> {
     if modifiers.control_key() || modifiers.alt_key() {
         return None;
     }
-    let winit::keyboard::Key::Character(text) = key else {
-        return None;
-    };
-    if text.eq_ignore_ascii_case("v") {
-        return Some(Tool::Select);
+    match pressed? {
+        'v' => Some(Tool::Select),
+        'c' => Some(Tool::Crop),
+        // docs/03 §2: `I` = color picker · `M` = measure · `T` = text note
+        'i' => Some(Tool::Picker),
+        'm' => Some(Tool::Measure),
+        't' => Some(Tool::Text),
+        _ => None,
     }
-    if text.eq_ignore_ascii_case("c") {
-        return Some(Tool::Crop);
-    }
-    // docs/03 §2: `I` = color picker · `M` = measure
-    if text.eq_ignore_ascii_case("i") {
-        return Some(Tool::Picker);
-    }
-    if text.eq_ignore_ascii_case("m") {
-        return Some(Tool::Measure);
-    }
-    if text.eq_ignore_ascii_case("t") {
-        return Some(Tool::Text);
-    }
-    None
 }
 
 /// `G` = grayscale ทั้ง board · `H` = พลิกแนวนอน (docs/03 §2, §5)
@@ -274,23 +319,15 @@ fn tool_shortcut(key: &winit::keyboard::Key, modifiers: ModifiersState) -> Optio
 /// ★ สองปุ่มนี้ทำคนละชั้นกันโดยตั้งใจ: `G` เป็น**สวิตช์การมองเห็น**ของทั้ง board
 /// (uniform ตัวเดียว ไม่กิน undo ไม่ทำให้ dirty) ส่วน `H` **แก้เอกสาร**
 /// ของภาพที่เลือก จึงผ่าน `Command` และย้อนได้ตามปกติ
-fn appearance_shortcut(
-    key: &winit::keyboard::Key,
-    modifiers: ModifiersState,
-) -> Option<AppearanceKey> {
+fn appearance_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> Option<AppearanceKey> {
     if modifiers.control_key() || modifiers.alt_key() {
         return None;
     }
-    let winit::keyboard::Key::Character(text) = key else {
-        return None;
-    };
-    if text.eq_ignore_ascii_case("g") {
-        return Some(AppearanceKey::ToggleBoardGrayscale);
+    match pressed? {
+        'g' => Some(AppearanceKey::ToggleBoardGrayscale),
+        'h' => Some(AppearanceKey::FlipHorizontal),
+        _ => None,
     }
-    if text.eq_ignore_ascii_case("h") {
-        return Some(AppearanceKey::FlipHorizontal);
-    }
-    None
 }
 
 /// ปุ่มที่แตะการแสดงผล
@@ -314,14 +351,11 @@ fn is_delete(key: &winit::keyboard::Key) -> bool {
     )
 }
 
-fn is_paste(key: &winit::keyboard::Key, modifiers: ModifiersState) -> bool {
+fn is_paste(pressed: Option<char>, modifiers: ModifiersState) -> bool {
     if !modifiers.control_key() {
         return false;
     }
-    match key {
-        winit::keyboard::Key::Character(text) => text.eq_ignore_ascii_case("v") || text == "\u{16}",
-        _ => false,
-    }
+    matches!(pressed, Some('v' | '\u{16}'))
 }
 
 /// สีพื้นหลังของ canvas — เทาเข้มแบบเดียวกับโปรแกรมวาด
@@ -2171,6 +2205,102 @@ impl RefxApp {
         gfx.window.request_redraw();
     }
 
+    /// เขียนสิ่งที่ผู้ใช้ขอในแผง Arrange ลง board ผ่าน `Command` (P3-1)
+    ///
+    /// ★ `take()` ทันทีเหมือนแผงอื่น — คำขอมีอายุหนึ่งเฟรม ถ้าค้างไว้มันจะถูกเขียนซ้ำ
+    /// ทุกเฟรมแล้วทับสิ่งที่ undo เพิ่งคืนมา (`docs/08 §3.9` ข้อ 8.1)
+    ///
+    /// ★★ ใช้ **`MetaField` ให้ตรงกับสิ่งที่แก้จริง** — `EditMeta` merge ต่อ field
+    /// ถ้าส่ง field ผิด "ให้ดาว" กับ "ใส่โน้ต" จะยุบเป็น undo เดียว แล้วผู้ใช้ที่
+    /// ย้อนโน้ตจะเสียดาวไปด้วยโดยไม่รู้ตัว (docs/02 §3)
+    fn apply_meta_request(&mut self) {
+        use crate::shell::MetaRequest;
+
+        let sealed = std::mem::take(&mut self.shell.meta_sealed);
+        let Some(request) = self.shell.meta_request.take() else {
+            if sealed && let Some(gfx) = self.gfx.as_mut() {
+                gfx.history.seal();
+            }
+            return;
+        };
+        let Some(gfx) = self.gfx.as_mut() else {
+            return;
+        };
+        let targets: Vec<ItemId> = gfx.selection.iter().collect();
+        if targets.is_empty() {
+            return;
+        }
+
+        // แท็กแตะทั้ง `ItemMeta` และตารางชื่อของ board จึงเป็นคำสั่งของตัวเอง
+        let command: Option<Box<dyn refx_core::command::Command>> = match request {
+            MetaRequest::AddTag(name) => refx_core::command::TagItems::attach(&name, targets)
+                .ok()
+                .map(|cmd| Box::new(cmd) as Box<dyn refx_core::command::Command>),
+            MetaRequest::RemoveTag(name) => refx_core::command::TagItems::detach(&name, targets)
+                .ok()
+                .map(|cmd| Box::new(cmd) as Box<dyn refx_core::command::Command>),
+            other => {
+                let (field, changes) = Self::meta_changes(gfx, &targets, &other);
+                if changes.is_empty() {
+                    // ★ ไม่มีอะไรเปลี่ยน = ไม่สร้างคำสั่ง ไม่ขอเฟรม (I-1)
+                    if sealed {
+                        gfx.history.seal();
+                    }
+                    return;
+                }
+                refx_core::command::EditMeta::new(field, changes)
+                    .ok()
+                    .map(|cmd| Box::new(cmd) as Box<dyn refx_core::command::Command>)
+            }
+        };
+        let Some(command) = command else {
+            return;
+        };
+        if let Err(err) = gfx.history.apply(&mut gfx.board, command) {
+            tracing::error!(%err, "cannot edit the item metadata");
+        }
+        if sealed {
+            gfx.history.seal();
+        }
+        gfx.window.request_redraw();
+    }
+
+    /// ประกอบ `ItemMeta` ชุดใหม่ตามคำขอ — คืนเฉพาะตัวที่ **เปลี่ยนจริง**
+    fn meta_changes(
+        gfx: &Gfx,
+        targets: &[ItemId],
+        request: &crate::shell::MetaRequest,
+    ) -> (refx_core::command::MetaField, Vec<(ItemId, ItemMeta)>) {
+        use crate::shell::MetaRequest;
+        use refx_core::command::MetaField;
+
+        let field = match request {
+            MetaRequest::Rating(_) => MetaField::Rating,
+            MetaRequest::ColorLabel(_) => MetaField::ColorLabel,
+            MetaRequest::Pinned(_) => MetaField::Pinned,
+            MetaRequest::Note(_) => MetaField::Note,
+            MetaRequest::AddTag(_) | MetaRequest::RemoveTag(_) => MetaField::Tags,
+        };
+        let changes = targets
+            .iter()
+            .filter_map(|id| {
+                let current = gfx.board.item(*id)?.meta.clone();
+                let mut next = current.clone();
+                match request {
+                    MetaRequest::Rating(value) => next.rating = *value,
+                    MetaRequest::ColorLabel(value) => next.color_label = *value,
+                    MetaRequest::Pinned(value) => next.pinned = *value,
+                    MetaRequest::Note(value) => next.note.clone_from(value),
+                    // แท็กไม่เดินทางนี้ — มันมีคำสั่งของตัวเอง
+                    MetaRequest::AddTag(_) | MetaRequest::RemoveTag(_) => return None,
+                }
+                let next = next.sanitized();
+                (next != current).then_some((*id, next))
+            })
+            .collect();
+        (field, changes)
+    }
+
     fn apply_inspector_edit(&mut self) {
         let sealed = std::mem::take(&mut self.shell.appearance_sealed);
         // ★ `take` — สิ่งที่ผู้ใช้ขอมีอายุหนึ่งเฟรม ถ้าปล่อยค้างไว้มันจะถูกเขียนซ้ำ
@@ -2735,6 +2865,8 @@ impl AppDelegate for RefxApp {
         self.apply_inspector_edit();
         // ข้อความที่ผู้ใช้พิมพ์ลงโน้ตเมื่อเฟรมที่แล้ว (P2-11)
         self.apply_note_edit();
+        // tag / rating / color label / pinned / note ฝั่ง Arrange (P3-1)
+        self.apply_meta_request();
         // ปุ่มจัดเรียงที่กดไปเมื่อเฟรมที่แล้ว (P2-9)
         if let Some(request) = self.shell.arrange_request.take() {
             self.apply_arrange(request);
@@ -2818,6 +2950,25 @@ impl AppDelegate for RefxApp {
             .and_then(|item| match &item.kind {
                 refx_core::board::ItemKind::Text(note) => Some(note.text.clone()),
                 _ => None,
+            });
+        // ★ ข้อมูลฝั่ง Arrange ของ item ตัวแรกในชุดที่เลือก (P3-1) — **ค่าสำหรับแสดง**
+        //   เหมือน `appearance`/`note`: ชั้น `app` เติมก่อนวาด แล้วอ่าน *คำขอ* กลับมา
+        shell.meta = gfx
+            .selection
+            .iter()
+            .find_map(|id| gfx.board.item(id))
+            .map(|item| crate::shell::MetaView {
+                rating: item.meta.rating,
+                color_label: item.meta.color_label,
+                pinned: item.meta.pinned,
+                note: item.meta.note.clone(),
+                // ★ เรียงตาม `TagId` เสมอ — รายการที่สลับที่ทุกเฟรมอ่านว่าโปรแกรมพัง
+                tags: item
+                    .meta
+                    .tags
+                    .iter()
+                    .filter_map(|tag| gfx.board.tags().name(*tag).map(str::to_owned))
+                    .collect(),
             });
         shell.vram_used = gfx.textures.budget().used();
         shell.working_used = gfx.working.used();
@@ -3162,12 +3313,12 @@ impl AppDelegate for RefxApp {
             WindowEvent::KeyboardInput { .. } if gfx.egui_ctx.egui_wants_keyboard_input() => {}
 
             WindowEvent::KeyboardInput { event, .. } => {
+                // ★ ตัดสินว่า "ตัวอักษรอะไร" ครั้งเดียวแล้วส่งต่อให้ทุกตัวจับคู่ —
+                //   logical ก่อน physical เป็นตาข่ายรอง (ดู `shortcut_char`)
+                let pressed = shortcut_char(&event.logical_key, event.physical_key);
                 // `repeat` = ผู้ใช้กดค้างไว้ ไม่ใช่เจตนาจะวางหลายรอบ
                 // ถ้าไม่กรอง การกดค้างหนึ่งวินาทีจะสั่งอ่าน clipboard หลายสิบครั้ง
-                if event.state.is_pressed()
-                    && !event.repeat
-                    && is_paste(&event.logical_key, gfx.modifiers)
-                {
+                if event.state.is_pressed() && !event.repeat && is_paste(pressed, gfx.modifiers) {
                     // อ่าน clipboard ที่นี่ไม่ได้ — บล็อกได้ (I-2) ทำที่ต้นเฟรมถัดไป
                     self.pending_paste = true;
                     needs_redraw = true;
@@ -3176,7 +3327,7 @@ impl AppDelegate for RefxApp {
                 //   กด Ctrl+Z ค้างแล้วย้อนเรื่อย ๆ เป็นสิ่งที่ทุกคนคาดหวัง
                 //   ส่วนการวางซ้ำ ๆ ไม่ใช่ (แถมภาพจาก clipboard ใหญ่ได้เป็นร้อย MB)
                 if event.state.is_pressed()
-                    && let Some(request) = history_shortcut(&event.logical_key, gfx.modifiers)
+                    && let Some(request) = history_shortcut(pressed, gfx.modifiers)
                 {
                     self.pending_history = Some(request);
                     needs_redraw = true;
@@ -3184,7 +3335,7 @@ impl AppDelegate for RefxApp {
                 // ★ ย้ายชั้น — กดค้างซ้ำได้เหมือน undo (กด `]` รัว ๆ จนถึงบนสุดคือท่าปกติ)
                 //   ตัวที่ถึงสุดขอบแล้วจะไม่สร้างคำสั่งเอง (`zorder::reordered` คืน `None`)
                 if event.state.is_pressed()
-                    && let Some(movement) = zorder_shortcut(&event.logical_key, gfx.modifiers)
+                    && let Some(movement) = zorder_shortcut(pressed, gfx.modifiers)
                 {
                     self.pending_zorder = Some(movement);
                     needs_redraw = true;
@@ -3199,14 +3350,14 @@ impl AppDelegate for RefxApp {
                 // ★ การแสดงผล (P2-8)
                 if event.state.is_pressed()
                     && !event.repeat
-                    && let Some(what) = appearance_shortcut(&event.logical_key, gfx.modifiers)
+                    && let Some(what) = appearance_shortcut(pressed, gfx.modifiers)
                 {
                     self.pending_appearance = Some(what);
                     needs_redraw = true;
                 }
                 // ★ สลับเครื่องมือ (P2-7) — กดค้างซ้ำไม่มีผลอยู่แล้วเพราะตั้งค่าเดิมซ้ำ
                 if event.state.is_pressed()
-                    && let Some(tool) = tool_shortcut(&event.logical_key, gfx.modifiers)
+                    && let Some(tool) = tool_shortcut(pressed, gfx.modifiers)
                     && gfx.tool != tool
                 {
                     gfx.tool = tool;
@@ -3875,21 +4026,21 @@ mod tests {
         let none = ModifiersState::empty();
         let shift = ModifiersState::SHIFT;
 
-        assert_eq!(zorder_shortcut(&key("]"), none), Some(ZMove::Forward));
-        assert_eq!(zorder_shortcut(&key("["), none), Some(ZMove::Backward));
+        assert_eq!(zorder_shortcut(pressed("]"), none), Some(ZMove::Forward));
+        assert_eq!(zorder_shortcut(pressed("["), none), Some(ZMove::Backward));
 
         // ทางที่หนึ่ง: ธง shift มาพร้อมอักขระเดิม
-        assert_eq!(zorder_shortcut(&key("]"), shift), Some(ZMove::ToFront));
-        assert_eq!(zorder_shortcut(&key("["), shift), Some(ZMove::ToBack));
+        assert_eq!(zorder_shortcut(pressed("]"), shift), Some(ZMove::ToFront));
+        assert_eq!(zorder_shortcut(pressed("["), shift), Some(ZMove::ToBack));
         // ทางที่สอง: อักขระเปลี่ยนไปเลย (พบบ่อยกว่า)
-        assert_eq!(zorder_shortcut(&key("}"), shift), Some(ZMove::ToFront));
-        assert_eq!(zorder_shortcut(&key("{"), shift), Some(ZMove::ToBack));
-        assert_eq!(zorder_shortcut(&key("}"), none), Some(ZMove::ToFront));
+        assert_eq!(zorder_shortcut(pressed("}"), shift), Some(ZMove::ToFront));
+        assert_eq!(zorder_shortcut(pressed("{"), shift), Some(ZMove::ToBack));
+        assert_eq!(zorder_shortcut(pressed("}"), none), Some(ZMove::ToFront));
 
         // Ctrl/Alt เป็นของคำสั่งอื่น ต้องไม่ถูกจับเป็นการย้ายชั้น
-        assert_eq!(zorder_shortcut(&key("]"), ModifiersState::CONTROL), None);
-        assert_eq!(zorder_shortcut(&key("]"), ModifiersState::ALT), None);
-        assert_eq!(zorder_shortcut(&key("z"), none), None);
+        assert_eq!(zorder_shortcut(pressed("]"), ModifiersState::CONTROL), None);
+        assert_eq!(zorder_shortcut(pressed("]"), ModifiersState::ALT), None);
+        assert_eq!(zorder_shortcut(pressed("z"), none), None);
     }
 
     /// แล็ปท็อปหลายรุ่นไม่มีปุ่ม `Delete` แยก — ต้องรับ `Backspace` ด้วย
@@ -3908,14 +4059,14 @@ mod tests {
     #[test]
     fn the_tool_keys_do_not_steal_the_clipboard_shortcuts() {
         let none = ModifiersState::empty();
-        assert_eq!(tool_shortcut(&key("v"), none), Some(Tool::Select));
-        assert_eq!(tool_shortcut(&key("c"), none), Some(Tool::Crop));
-        assert_eq!(tool_shortcut(&key("C"), none), Some(Tool::Crop));
+        assert_eq!(tool_shortcut(pressed("v"), none), Some(Tool::Select));
+        assert_eq!(tool_shortcut(pressed("c"), none), Some(Tool::Crop));
+        assert_eq!(tool_shortcut(pressed("C"), none), Some(Tool::Crop));
 
         // ★ Ctrl+V คือวางจาก clipboard · Ctrl+C คือคัดลอก — ห้ามกลายเป็นสลับเครื่องมือ
-        assert_eq!(tool_shortcut(&key("v"), ModifiersState::CONTROL), None);
-        assert_eq!(tool_shortcut(&key("c"), ModifiersState::CONTROL), None);
-        assert_eq!(tool_shortcut(&key("x"), none), None);
+        assert_eq!(tool_shortcut(pressed("v"), ModifiersState::CONTROL), None);
+        assert_eq!(tool_shortcut(pressed("c"), ModifiersState::CONTROL), None);
+        assert_eq!(tool_shortcut(pressed("x"), none), None);
     }
 
     /// ★★ toolbar เป็น **ภาพสะท้อน** ของเครื่องมือจริง ไม่ใช่แหล่งความจริงคู่ขนาน
@@ -4109,6 +4260,80 @@ mod tests {
         winit::keyboard::Key::Character(text.into())
     }
 
+    /// สิ่งที่ตัวจับคู่คีย์ลัดเห็นจริง ๆ เมื่อ layout ผลิตตัวอักษรนี้ออกมา
+    fn pressed(text: &str) -> Option<char> {
+        shortcut_char(
+            &key(text),
+            winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::F13),
+        )
+    }
+
+    /// ปุ่มที่ layout **ไม่ผลิตตัวอักษรละติน** — เช่นคีย์บอร์ดไทย
+    ///
+    /// logical เป็นอักษรไทย ส่วน physical ยังเป็นตำแหน่งเดิมบนคีย์บอร์ด
+    fn pressed_thai(thai: &str, code: winit::keyboard::KeyCode) -> Option<char> {
+        shortcut_char(&key(thai), winit::keyboard::PhysicalKey::Code(code))
+    }
+
+    /// ★★★ **คีย์ลัดต้องทำงานบน layout ที่ไม่ใช่ละตินด้วย**
+    ///
+    /// เจอจริงตอนยืนยัน P3-1 บนเครื่องที่ layout เป็นไทย (HKL 0x41E):
+    /// กด `C` แล้วเครื่องมือไม่สลับ กด `Ctrl+Z` แล้วไม่ย้อน
+    /// **และไม่มี error ที่ไหนเลย** — คีย์ลัดทั้งหมดตายเงียบ ๆ
+    ///
+    /// เพราะตัวจับคู่ดูแต่ **logical key** ซึ่งเป็นตัวอักษรที่ layout ผลิตออกมา
+    /// คีย์บอร์ดไทยกด `C` ได้ `แ` รัสเซียได้ `с` กรีกได้ `ψ` — ไม่มีตัวไหนตรง `"c"`
+    ///
+    /// docs/03 §0 ระบุว่าไทยคือภาษาที่สองของโปรแกรม กลุ่มนี้จึงไม่ใช่กรณีขอบ
+    #[test]
+    fn shortcuts_still_work_on_a_non_latin_keyboard_layout() {
+        use winit::keyboard::KeyCode;
+
+        let none = ModifiersState::empty();
+        let ctrl = ModifiersState::CONTROL;
+
+        // คีย์บอร์ดไทย (Kedmanee): logical เป็นอักษรไทย ส่วน physical คือตำแหน่งเดิม
+        assert_eq!(
+            tool_shortcut(pressed_thai("อ", KeyCode::KeyV), none),
+            Some(Tool::Select),
+            "กด V บน layout ไทย ต้องยังสลับเครื่องมือได้"
+        );
+        assert_eq!(
+            tool_shortcut(pressed_thai("แ", KeyCode::KeyC), none),
+            Some(Tool::Crop)
+        );
+        assert_eq!(
+            tool_shortcut(pressed_thai("ร", KeyCode::KeyI), none),
+            Some(Tool::Picker)
+        );
+        assert_eq!(
+            tool_shortcut(pressed_thai("ส", KeyCode::KeyT), none),
+            Some(Tool::Text)
+        );
+        assert_eq!(
+            history_shortcut(pressed_thai("ผ", KeyCode::KeyZ), ctrl),
+            Some(HistoryRequest::Undo),
+            "Ctrl+Z บน layout ไทย ต้องย้อนได้"
+        );
+        assert!(is_paste(pressed_thai("อ", KeyCode::KeyV), ctrl));
+        assert_eq!(
+            appearance_shortcut(pressed_thai("ฯ", KeyCode::KeyG), none),
+            Some(AppearanceKey::ToggleBoardGrayscale)
+        );
+        assert_eq!(
+            zorder_shortcut(pressed_thai("บ", KeyCode::BracketRight), none),
+            Some(ZMove::Forward)
+        );
+
+        // ★ และ layout ละตินที่สลับตำแหน่งปุ่ม (Dvorak) ต้องไม่พัง—
+        //   logical มาก่อนเสมอ คนที่กด "v" จึงได้ Select ไม่ว่าปุ่มนั้นจะอยู่ตรงตำแหน่งไหน
+        assert_eq!(
+            tool_shortcut(pressed_thai("v", KeyCode::Period), none),
+            Some(Tool::Select),
+            "layout ละตินที่สลับตำแหน่งต้องยึด logical เหมือนเดิม"
+        );
+    }
+
     /// ★ Ctrl+Shift+Z ต้องเป็น redo ไม่ใช่ undo
     ///
     /// คนจำนวนมากใช้อันนี้แทน Ctrl+Y (ติดมาจาก Photoshop/Illustrator)
@@ -4119,27 +4344,30 @@ mod tests {
         let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
 
         assert_eq!(
-            history_shortcut(&key("z"), ctrl),
+            history_shortcut(pressed("z"), ctrl),
             Some(HistoryRequest::Undo)
         );
         assert_eq!(
-            history_shortcut(&key("Z"), ctrl),
+            history_shortcut(pressed("Z"), ctrl),
             Some(HistoryRequest::Undo),
             "ตัวพิมพ์ใหญ่ก็ต้องได้ (บาง layout ส่งมาแบบนั้น)"
         );
         assert_eq!(
-            history_shortcut(&key("z"), ctrl_shift),
+            history_shortcut(pressed("z"), ctrl_shift),
             Some(HistoryRequest::Redo),
             "Ctrl+Shift+Z คือ redo ของคนจำนวนมาก"
         );
         assert_eq!(
-            history_shortcut(&key("y"), ctrl),
+            history_shortcut(pressed("y"), ctrl),
             Some(HistoryRequest::Redo)
         );
 
         // ไม่กด Ctrl = พิมพ์ตัวอักษรธรรมดา ห้ามไปย้อนงานของผู้ใช้
-        assert_eq!(history_shortcut(&key("z"), ModifiersState::empty()), None);
-        assert_eq!(history_shortcut(&key("a"), ctrl), None);
+        assert_eq!(
+            history_shortcut(pressed("z"), ModifiersState::empty()),
+            None
+        );
+        assert_eq!(history_shortcut(pressed("a"), ctrl), None);
     }
 
     /// ★ กติกาการเลื่อนกล้องหลัง undo — ทดสอบเป็นคณิตศาสตร์ล้วน ไม่ต้องเปิดหน้าต่าง
@@ -4308,20 +4536,29 @@ mod tests {
     #[test]
     fn only_ctrl_v_counts_as_paste() {
         let ctrl = ModifiersState::CONTROL;
-        assert!(is_paste(&character("v"), ctrl));
+        let seen = |text: &str| {
+            shortcut_char(
+                &character(text),
+                winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::F13),
+            )
+        };
+        assert!(is_paste(seen("v"), ctrl));
         // Shift ค้างอยู่ด้วย (Ctrl+Shift+V) ยังถือว่าเป็นการวาง
-        assert!(is_paste(&character("V"), ctrl | ModifiersState::SHIFT));
+        assert!(is_paste(seen("V"), ctrl | ModifiersState::SHIFT));
         // X11 บาง compositor ส่ง Ctrl+V มาเป็นอักขระควบคุม SYN
-        assert!(is_paste(&character("\u{16}"), ctrl));
+        assert!(is_paste(seen("\u{16}"), ctrl));
 
         // ไม่กด Ctrl = พิมพ์ตัว v เฉย ๆ ห้ามไปวางภาพให้
-        assert!(!is_paste(&character("v"), ModifiersState::empty()));
+        assert!(!is_paste(seen("v"), ModifiersState::empty()));
         // ปุ่มอื่นที่กดพร้อม Ctrl
-        assert!(!is_paste(&character("c"), ctrl));
-        assert!(!is_paste(&character("b"), ctrl));
+        assert!(!is_paste(seen("c"), ctrl));
+        assert!(!is_paste(seen("b"), ctrl));
         // ปุ่มที่ไม่ใช่ตัวอักษร
         assert!(!is_paste(
-            &winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter),
+            shortcut_char(
+                &winit::keyboard::Key::Named(winit::keyboard::NamedKey::Enter),
+                winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Enter),
+            ),
             ctrl
         ));
     }

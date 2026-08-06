@@ -22,7 +22,7 @@ use std::any::Any;
 use std::collections::VecDeque;
 
 use crate::arena::ItemId;
-use crate::board::{Board, BoardError, Item, ItemCanvas, ItemMeta};
+use crate::board::{Board, BoardError, Item, ItemCanvas, ItemMeta, TagId};
 
 /// คำสั่งทำงานไม่สำเร็จ — **board ไม่ถูกแตะเลยเมื่อได้ค่านี้**
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -778,6 +778,175 @@ impl Command for EditMeta {
                     + change.before.as_ref().map_or(0, |meta| meta.note.len())
             })
             .sum()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TagItems
+// ---------------------------------------------------------------------------
+
+/// ติด/ถอดแท็กให้ item หลายใบ พร้อม **สร้างชื่อแท็กใหม่ถ้ายังไม่มี** (P3-1)
+///
+/// ★★ **ทำไมไม่ใช้ `EditMeta` เฉย ๆ** — การติดแท็กแตะ **สองที่**: `ItemMeta.tags`
+/// ของแต่ละ item **และ** `TagTable` ของ board (ถ้าเป็นชื่อใหม่) ทั้งคู่อยู่ใน `Board`
+/// จึงต้องย้อนพร้อมกันเป็นก้อนเดียว · ถ้าแยกเป็นสองคำสั่ง ผู้ใช้กด Ctrl+Z ครั้งเดียว
+/// จะได้ item ที่ถือ `TagId` ซึ่งไม่มีชื่อในตารางแล้ว — แท็กที่กดดูแล้วว่างเปล่า
+///
+/// ★ **ชื่อที่ถูกสร้างในคำสั่งนี้เท่านั้นที่ถูกลบตอน undo** — ถ้าลบทุกครั้ง
+/// แท็กที่ผู้ใช้ใช้อยู่กับภาพอื่นจะหายไปด้วย
+#[derive(Debug)]
+pub struct TagItems {
+    /// ชื่อที่ผู้ใช้พิมพ์ (ยังไม่ normalize)
+    name: String,
+    /// ติด (`true`) หรือถอด (`false`)
+    attach: bool,
+    targets: Vec<ItemId>,
+    /// meta เดิมของแต่ละ item — เก็บตอน apply ครั้งแรก
+    before: Vec<(ItemId, ItemMeta)>,
+    /// แท็กที่ **คำสั่งนี้เป็นคนสร้าง** — `None` = ใช้ของที่มีอยู่แล้ว
+    created: Option<(TagId, String)>,
+}
+
+impl TagItems {
+    /// ติดแท็กชื่อนี้ให้ทุก id ที่ส่งมา
+    ///
+    /// # Errors
+    /// [`CmdError::Empty`] ถ้ารายการว่าง หรือชื่อว่างเปล่าหลังตัดช่องว่าง
+    pub fn attach(name: &str, targets: Vec<ItemId>) -> Result<Self, CmdError> {
+        Self::new(name, true, targets)
+    }
+
+    /// ถอดแท็กชื่อนี้ออกจากทุก id ที่ส่งมา
+    ///
+    /// # Errors
+    /// [`CmdError::Empty`] ถ้ารายการว่าง หรือชื่อว่างเปล่า
+    pub fn detach(name: &str, targets: Vec<ItemId>) -> Result<Self, CmdError> {
+        Self::new(name, false, targets)
+    }
+
+    fn new(name: &str, attach: bool, targets: Vec<ItemId>) -> Result<Self, CmdError> {
+        if targets.is_empty() {
+            return Err(CmdError::Empty);
+        }
+        let name = crate::board::TagTable::normalize(name).ok_or(CmdError::Empty)?;
+        Ok(Self {
+            name,
+            attach,
+            targets,
+            before: Vec::new(),
+            created: None,
+        })
+    }
+}
+
+impl Command for TagItems {
+    fn apply(&mut self, board: &mut Board) -> Result<(), CmdError> {
+        // ★ หา id ของแท็กก่อน — สร้างใหม่เฉพาะตอน "ติด" เท่านั้น
+        //   การถอดแท็กที่ไม่มีในตารางคือ no-op ไม่ใช่เหตุให้สร้างชื่อขึ้นมา
+        let tag: TagId = match board.tags().find(&self.name) {
+            Some(id) => id,
+            None if self.attach => {
+                // redo ต้องได้ **id เดิม** ไม่ใช่ id ใหม่ ไม่งั้น item ที่คำสั่งถัดไป
+                // ในสาย redo อ้างถึงจะชี้ไปที่แท็กที่ไม่มีอยู่ (หลักการเดียวกับ
+                // `Arena::insert_at` — HANDOFF §4 ข้อ 19)
+                match self.created.as_ref() {
+                    Some((id, name)) => {
+                        board.restore_tag(*id, name.clone());
+                        *id
+                    }
+                    None => {
+                        let id = board.insert_tag(&self.name).ok_or(CmdError::Empty)?;
+                        self.created = Some((id, self.name.clone()));
+                        id
+                    }
+                }
+            }
+            None => return Ok(()), // ถอดแท็กที่ไม่มี = ไม่มีอะไรเกิดขึ้น
+        };
+
+        // ★ เก็บของเดิมครั้งแรกครั้งเดียว — redo เรียก `apply` ซ้ำ
+        let first_time = self.before.is_empty();
+        let mut done: Vec<(ItemId, ItemMeta)> = Vec::new();
+        for id in &self.targets {
+            let Some(item) = board.item(*id) else {
+                continue;
+            };
+            let previous = item.meta.clone();
+            let mut next = previous.clone();
+            if self.attach {
+                if next.tags.contains(&tag) {
+                    continue; // ติดอยู่แล้ว
+                }
+                next.tags.push(tag);
+                // เรียงเสมอ — ลำดับแท็กต้องไม่ขึ้นกับลำดับที่ผู้ใช้กด
+                next.tags.sort_unstable();
+            } else if let Some(at) = next.tags.iter().position(|other| *other == tag) {
+                next.tags.remove(at);
+            } else {
+                continue; // ไม่ได้ติดอยู่
+            }
+            // ★ ล้มกลางคันต้องย้อนสิ่งที่ทำไปแล้วคืน — `apply` ที่คืน `Err`
+            //   ห้ามแตะ board เลย (HANDOFF §2.1 ข้อ 1)
+            if let Err(err) = board.set_meta(*id, next) {
+                for (undo_id, undo_meta) in done {
+                    let _ = board.set_meta(undo_id, undo_meta);
+                }
+                if let Some((tag_id, _)) = self.created.as_ref()
+                    && first_time
+                {
+                    board.remove_tag(*tag_id);
+                    self.created = None;
+                }
+                return Err(err.into());
+            }
+            done.push((*id, previous));
+        }
+        if first_time {
+            self.before = done;
+        }
+        Ok(())
+    }
+
+    fn undo(&mut self, board: &mut Board) -> Result<(), CmdError> {
+        for (id, meta) in &self.before {
+            board.set_meta(*id, meta.clone())?;
+        }
+        // ★ ลบชื่อแท็กออก **เฉพาะตัวที่คำสั่งนี้สร้างเอง** — ตัวที่มีอยู่ก่อนแล้ว
+        //   ยังถูกใช้กับภาพอื่นอยู่ ลบไปด้วยจะทำให้แท็กของภาพเหล่านั้นว่างเปล่า
+        if let Some((id, _)) = self.created.as_ref() {
+            board.remove_tag(*id);
+        }
+        Ok(())
+    }
+
+    /// **ไม่ merge** — ติดแท็กหนึ่งครั้ง = undo หนึ่งขั้นเสมอ
+    ///
+    /// ต่างจากการลากสไลเดอร์ที่ผู้ใช้ขยับรัว ๆ โดยมองว่าเป็นการกระทำเดียว
+    fn merge(&mut self, _next: &dyn Command) -> bool {
+        false
+    }
+
+    fn affected(&self) -> Vec<ItemId> {
+        self.targets.clone()
+    }
+
+    fn label(&self) -> &'static str {
+        if self.attach { "Add tag" } else { "Remove tag" }
+    }
+
+    fn heap_size(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.name.capacity()
+            + self.targets.capacity() * std::mem::size_of::<ItemId>()
+            + self
+                .before
+                .iter()
+                .map(|(_, meta)| std::mem::size_of::<(ItemId, ItemMeta)>() + meta.note.capacity())
+                .sum::<usize>()
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -2062,5 +2231,185 @@ mod tests {
             while history.redo(&mut board)?.is_some() {}
             prop_assert_eq!(&board, &settled);
         }
+    }
+
+    // ---------- TagItems (P3-1) ----------
+
+    fn tag_board() -> (Board, Vec<ItemId>, History) {
+        let mut board = Board::default();
+        let ids = (0..3)
+            .map(|i| board.insert_item(crate::board::tests::image_item(i)))
+            .collect();
+        board.mark_dirty(false);
+        (board, ids, History::default())
+    }
+
+    fn tags_of(board: &Board, id: ItemId) -> Vec<String> {
+        board.item(id).map_or_else(Vec::new, |item| {
+            item.meta
+                .tags
+                .iter()
+                .filter_map(|tag| board.tags().name(*tag).map(str::to_owned))
+                .collect()
+        })
+    }
+
+    /// ★★ ติดแท็กใหม่ = สร้างชื่อ + ติดให้ทุกใบ **ในขั้น undo เดียว**
+    ///
+    /// ถ้าแยกเป็นสองคำสั่ง กด Ctrl+Z ครั้งเดียวจะได้ item ที่ถือ `TagId`
+    /// ซึ่งไม่มีชื่อในตารางแล้ว — ผู้ใช้เห็นแท็กว่างเปล่าที่กดดูแล้วไม่มีอะไร
+    #[test]
+    fn tagging_creates_the_name_and_undoes_both_together() {
+        let (mut board, ids, mut history) = tag_board();
+        history
+            .apply(
+                &mut board,
+                Box::new(TagItems::attach("Portrait", ids.clone()).unwrap()),
+            )
+            .unwrap();
+
+        assert_eq!(board.tags().len(), 1);
+        for id in &ids {
+            assert_eq!(tags_of(&board, *id), vec!["Portrait".to_owned()]);
+        }
+
+        history.undo(&mut board).unwrap();
+        assert_eq!(board.tags().len(), 0, "ชื่อแท็กต้องหายไปพร้อมกัน");
+        for id in &ids {
+            assert!(tags_of(&board, *id).is_empty());
+        }
+    }
+
+    /// ★★ undo ต้อง **ไม่** ลบแท็กที่มีอยู่ก่อนแล้ว — ภาพอื่นยังใช้มันอยู่
+    #[test]
+    fn undoing_never_deletes_a_tag_that_existed_before() {
+        let (mut board, ids, mut history) = tag_board();
+        history
+            .apply(
+                &mut board,
+                Box::new(TagItems::attach("Ref", vec![ids[0]]).unwrap()),
+            )
+            .unwrap();
+        history.seal();
+        history
+            .apply(
+                &mut board,
+                Box::new(TagItems::attach("Ref", vec![ids[1]]).unwrap()),
+            )
+            .unwrap();
+
+        // ย้อนครั้งที่สอง — ชื่อต้องยังอยู่เพราะใบแรกยังใช้
+        history.undo(&mut board).unwrap();
+        assert_eq!(board.tags().len(), 1, "แท็กที่ใบอื่นยังใช้อยู่ต้องไม่ถูกลบ");
+        assert_eq!(tags_of(&board, ids[0]), vec!["Ref".to_owned()]);
+        assert!(tags_of(&board, ids[1]).is_empty());
+    }
+
+    /// ★ redo ต้องได้ **`TagId` ตัวเดิม** ไม่ใช่ id ใหม่
+    ///
+    /// หลักการเดียวกับ `Arena::insert_at` (HANDOFF §4 ข้อ 19): ถ้า redo แจก id ใหม่
+    /// คำสั่งอื่นในสายที่ถือ id เดิมจะชี้ไปที่ว่าง
+    #[test]
+    fn redoing_reuses_the_same_tag_id() {
+        let (mut board, ids, mut history) = tag_board();
+        history
+            .apply(
+                &mut board,
+                Box::new(TagItems::attach("Lighting", ids.clone()).unwrap()),
+            )
+            .unwrap();
+        let first = board.tags().find("Lighting").unwrap();
+
+        history.undo(&mut board).unwrap();
+        history.redo(&mut board).unwrap();
+
+        assert_eq!(board.tags().find("Lighting"), Some(first), "id ต้องเป็นตัวเดิม");
+        for id in &ids {
+            assert_eq!(tags_of(&board, *id), vec!["Lighting".to_owned()]);
+        }
+    }
+
+    /// ★ ชื่อเดียวกันคนละตัวพิมพ์ = แท็กเดียวกัน
+    ///
+    /// ผู้ใช้พิมพ์เองทุกครั้ง แท็กสองอันที่หน้าตาเหมือนกันคือกับดักที่ทำให้ filter หาไม่เจอ
+    #[test]
+    fn tag_names_are_matched_without_case() {
+        let (mut board, ids, mut history) = tag_board();
+        history
+            .apply(
+                &mut board,
+                Box::new(TagItems::attach("Portrait", vec![ids[0]]).unwrap()),
+            )
+            .unwrap();
+        history.seal();
+        history
+            .apply(
+                &mut board,
+                Box::new(TagItems::attach("  portrait  ", vec![ids[1]]).unwrap()),
+            )
+            .unwrap();
+        assert_eq!(board.tags().len(), 1, "ต้องไม่สร้างแท็กซ้ำ");
+        assert_eq!(tags_of(&board, ids[1]), vec!["Portrait".to_owned()]);
+    }
+
+    /// ถอดแท็กที่ไม่มีอยู่ต้องเงียบ ไม่ใช่สร้างชื่อขึ้นมา
+    #[test]
+    fn detaching_a_tag_that_does_not_exist_creates_nothing() {
+        let (mut board, ids, mut history) = tag_board();
+        history
+            .apply(
+                &mut board,
+                Box::new(TagItems::detach("nope", ids.clone()).unwrap()),
+            )
+            .unwrap();
+        assert_eq!(board.tags().len(), 0);
+    }
+
+    /// ★ ติดแท็กซ้ำต้องไม่ทำให้มีสองอันในใบเดียว
+    #[test]
+    fn attaching_twice_does_not_duplicate() {
+        let (mut board, ids, mut history) = tag_board();
+        for _ in 0..3 {
+            history
+                .apply(
+                    &mut board,
+                    Box::new(TagItems::attach("dup", vec![ids[0]]).unwrap()),
+                )
+                .unwrap();
+            history.seal();
+        }
+        assert_eq!(tags_of(&board, ids[0]), vec!["dup".to_owned()]);
+    }
+
+    /// I-4: ชื่อที่มาจากไฟล์ต้องถูกตัดความยาวและห้ามตัดกลางอักขระ UTF-8
+    #[test]
+    fn tag_names_are_clamped_without_splitting_characters() {
+        let long: String = "ก".repeat(500);
+        let normalized = crate::board::TagTable::normalize(&long).unwrap();
+        assert_eq!(normalized.chars().count(), crate::board::MAX_TAG_LEN);
+        assert!(crate::board::TagTable::normalize("   ").is_none());
+        assert!(crate::board::TagTable::normalize("").is_none());
+    }
+
+    /// ★ รายการแท็กต้องเรียงเหมือนเดิมทุกครั้ง (CLAUDE.md: ห้าม HashMap order)
+    #[test]
+    fn the_tag_list_is_always_in_the_same_order() {
+        let (mut board, ids, mut history) = tag_board();
+        for name in ["zebra", "alpha", "middle"] {
+            history
+                .apply(
+                    &mut board,
+                    Box::new(TagItems::attach(name, vec![ids[0]]).unwrap()),
+                )
+                .unwrap();
+            history.seal();
+        }
+        let first: Vec<String> = board.tags().iter().map(|(_, n)| n.to_owned()).collect();
+        for _ in 0..20 {
+            let again: Vec<String> = board.tags().iter().map(|(_, n)| n.to_owned()).collect();
+            assert_eq!(again, first);
+        }
+        // เรียงตาม id = ลำดับที่ผู้ใช้สร้าง ไม่ใช่ลำดับตัวอักษร
+        assert_eq!(first, vec!["zebra", "alpha", "middle"]);
     }
 }

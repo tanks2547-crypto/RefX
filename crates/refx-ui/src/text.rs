@@ -158,6 +158,24 @@ pub enum Key {
     Note,
     /// ข้อความจาง ๆ ในช่องโน้ตที่ยังว่าง
     NoteHint,
+    /// หัวข้อดาว
+    Rating,
+    /// หัวข้อป้ายสี
+    ColorLabelTitle,
+    /// ไม่มีป้ายสี
+    ColorLabelNone,
+    /// ป้ายสีที่รุ่นนี้ไม่รู้จัก
+    ColorLabelUnknown,
+    /// ปักหมุด
+    Pinned,
+    /// หัวข้อแท็ก
+    Tags,
+    /// คำอธิบายช่องเพิ่มแท็ก
+    AddTagHint,
+    /// คำอธิบายการถอดแท็ก
+    RemoveTagHint,
+    /// โน้ตของ metadata
+    MetaNote,
 }
 
 /// ข้อความภาษาอังกฤษ — **ต้องมีครบทุก key เสมอ** (เป็นตัวสำรองสุดท้าย)
@@ -210,6 +228,15 @@ fn en(key: Key) -> &'static str {
         Key::ColourUnavailable => "Could not read the colour: the original file is unavailable",
         Key::Note => "Note",
         Key::NoteHint => "Type a note",
+        Key::Rating => "Rating",
+        Key::ColorLabelTitle => "Colour label",
+        Key::ColorLabelNone => "No label",
+        Key::ColorLabelUnknown => "This label came from a newer version - it is kept as it is",
+        Key::Pinned => "Pinned (arrange will not move it)",
+        Key::Tags => "Tags",
+        Key::AddTagHint => "New tag",
+        Key::RemoveTagHint => "Click to remove this tag",
+        Key::MetaNote => "Note",
     }
 }
 
@@ -263,6 +290,15 @@ fn th(key: Key) -> Option<&'static str> {
         Key::ColourUnavailable => "อ่านสีไม่ได้: เปิดไฟล์ต้นฉบับไม่ได้",
         Key::Note => "โน้ต",
         Key::NoteHint => "พิมพ์โน้ตที่นี่",
+        Key::Rating => "ดาว",
+        Key::ColorLabelTitle => "ป้ายสี",
+        Key::ColorLabelNone => "ไม่มีป้าย",
+        Key::ColorLabelUnknown => "ป้ายนี้มาจากรุ่นที่ใหม่กว่า — เก็บไว้ตามเดิม",
+        Key::Pinned => "ปักหมุด (arrange จะไม่ย้าย)",
+        Key::Tags => "แท็ก",
+        Key::AddTagHint => "แท็กใหม่",
+        Key::RemoveTagHint => "กดเพื่อถอดแท็กนี้",
+        Key::MetaNote => "โน้ต",
     })
 }
 
@@ -720,6 +756,15 @@ mod tests {
         Key::ColourUnavailable,
         Key::Note,
         Key::NoteHint,
+        Key::Rating,
+        Key::ColorLabelTitle,
+        Key::ColorLabelNone,
+        Key::ColorLabelUnknown,
+        Key::Pinned,
+        Key::Tags,
+        Key::AddTagHint,
+        Key::RemoveTagHint,
+        Key::MetaNote,
     ];
 
     const ALL_TEMPLATES: &[Template] = &[
