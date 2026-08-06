@@ -19,6 +19,7 @@
 
 use refx_core::clipboard::{
     ClipboardContent, ClipboardError, ClipboardImage, ClipboardReader as CoreClipboardReader,
+    ClipboardWriter as CoreClipboardWriter,
 };
 
 /// แปลง error ของ `arboard` เป็นของเรา
@@ -48,6 +49,32 @@ impl CoreClipboardReader for SystemClipboard {
     fn read(&self) -> Result<ClipboardContent, ClipboardError> {
         read()
     }
+}
+
+impl CoreClipboardWriter for SystemClipboard {
+    fn write_text(&self, text: &str) -> Result<(), ClipboardError> {
+        write_text(text)
+    }
+}
+
+/// เขียนข้อความลง clipboard ของระบบ (P2-10 — ก๊อป hex ของสีที่จิ้มได้)
+///
+/// **ห้ามเรียกบน UI thread** (I-2) — บน Windows clipboard เป็น global lock
+/// ของทั้งระบบ `OpenClipboard` รอเจ้าของเดิมปล่อยได้นานเป็นวินาที
+///
+/// ★ `arboard` บน X11 ต้องมีโปรเซสอยู่ค้างเพื่อ *เสิร์ฟ* ค่าที่เขียนไว้ (X11 ไม่ได้
+/// เก็บ clipboard ไว้ที่ server) — `set().text()` ธรรมดาจึงหายทันทีที่ RefX ปิด
+/// ยอมรับข้อจำกัดนี้ไปก่อน: ผู้ใช้ก๊อป hex แล้วไปวางใน Photoshop ทันที
+/// ซึ่งเป็นตอนที่ RefX ยังเปิดอยู่แน่นอน (`wait()` จะบล็อกเธรดนี้ค้างไว้ตลอด
+/// จนกว่าจะมีคนก๊อปทับ ซึ่งแลกไม่คุ้มกับเธรดที่ค้างหนึ่งตัวต่อการก๊อปหนึ่งครั้ง)
+///
+/// # Errors
+/// คืน [`ClipboardError`] เมื่อเปิดหรือเขียน clipboard ไม่ได้ — ไม่ panic
+pub fn write_text(text: &str) -> Result<(), ClipboardError> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|err| translate(&err))?;
+    clipboard.set_text(text).map_err(|err| translate(&err))?;
+    tracing::debug!(len = text.len(), "wrote text to the clipboard");
+    Ok(())
 }
 
 /// อ่านสิ่งที่อยู่ใน clipboard ตอนนี้
@@ -139,6 +166,24 @@ mod tests {
             translate(&arboard::Error::ClipboardNotSupported),
             ClipboardError::Unavailable { .. }
         ));
+    }
+
+    /// ★ เขียน clipboard จริงบนเครื่องที่รันเทสต์ — ผลเป็นอะไรก็ได้ **ยกเว้น panic**
+    ///
+    /// เรียกผ่าน **trait** ด้วยเหตุผลเดียวกับตัวอ่าน: สิ่งที่ชั้น UI ใช้จริงคือ
+    /// `SystemClipboard as ClipboardWriter` ถ้าเทสต์ตรวจแต่ `write_text()`
+    /// การเสียบ trait ที่พังจะไม่มีใครจับได้ (docs/08 §3.9 ข้อ 1)
+    ///
+    /// ★★ **เขียนค่าที่ไม่มีความหมายลงไปโดยตั้งใจ** — เทสต์นี้ทับ clipboard ของ
+    /// คนที่รันมันอยู่ ซึ่งเป็นผลข้างเคียงที่หลีกไม่ได้ถ้าจะตรวจเส้นทางจริง
+    /// จึงเขียนสตริงที่บอกตัวเองว่ามาจากไหน ไม่ใช่ค่าที่ดูเหมือนของจริง
+    #[test]
+    fn writing_to_the_real_clipboard_never_panics() {
+        let writer: &dyn CoreClipboardWriter = &SystemClipboard;
+        match writer.write_text("refx-test-clipboard-write") {
+            Ok(()) => {}
+            Err(err) => assert!(!err.to_string().trim().is_empty()),
+        }
     }
 
     /// อ่าน clipboard จริงบนเครื่องที่รันเทสต์ — ผลเป็นอะไรก็ได้ **ยกเว้น panic**

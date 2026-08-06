@@ -7,6 +7,7 @@
 pub mod app; // ต่อสายทุก crate + event loop integration
 pub mod arrange; // ViewportBehavior ของ Arrange mode
 pub mod canvas; // ViewportBehavior ของ Canvas mode
+pub mod copy; // ก๊อปข้อความขึ้น clipboard บนเธรดชั่วคราว (P2-10) — ไม่ใช่ UI thread
 pub mod fonts; // ฟอนต์ที่ฝังใน binary (docs/03 §0) — ไทย + ละติน ยังไม่มี CJK
 pub mod inspector;
 pub mod keymap; // ตาราง data โหลดจาก keymap.toml — ห้าม hard-code (ADR-007)

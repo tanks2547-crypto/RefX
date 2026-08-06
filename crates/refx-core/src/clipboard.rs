@@ -87,6 +87,26 @@ pub trait ClipboardReader: Send + Sync {
     fn read(&self) -> Result<ClipboardContent, ClipboardError>;
 }
 
+/// ตัวเขียน clipboard ของจริง — ตัวที่ implement อยู่ `refx-platform` (P2-10)
+///
+/// `Send + Sync` เพราะชั้น UI ส่งมันข้ามไปเธรดชั่วคราวที่ทำหน้าที่ก๊อป
+///
+/// ★★ **ห้ามเรียกบน UI thread เหมือน [`ClipboardReader`]** (I-2) — บน Windows
+/// clipboard เป็น **global lock ของทั้งระบบ** `OpenClipboard` ต้องรอเจ้าของเดิม
+/// ปล่อย และเจ้าของอาจเป็นโปรแกรมที่กำลังค้างอยู่ · การก๊อป hex หนึ่งบรรทัด
+/// จึงทำให้ทั้งแอปค้างได้ ทั้งที่ผู้ใช้แค่จิ้มดูสี
+///
+/// ★ และ**ห้ามไปต่อคิวหลัง decode worker** ด้วย: งานก๊อปจะไปรอหลังงาน decode
+/// ที่กินครั้งละ ~150 ms ผู้ใช้กด Ctrl+V ในโปรแกรมอื่นก่อนที่ค่าจะถูกเขียนจริง
+/// — ของจริงจึงเขียนบน **เธรดชั่วคราว** ที่ `refx-ui` สร้างแล้วปล่อย
+pub trait ClipboardWriter: Send + Sync {
+    /// เขียนข้อความลง clipboard แทนที่ของเดิม
+    ///
+    /// # Errors
+    /// คืน [`ClipboardError`] เมื่อเขียนไม่สำเร็จ — **ห้าม panic** ไม่ว่าอะไรจะเกิด (I-4)
+    fn write_text(&self, text: &str) -> Result<(), ClipboardError>;
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -131,5 +151,29 @@ mod tests {
         .join()
         .unwrap();
         assert_eq!(seen, 1);
+    }
+
+    /// ★ ตัวเขียนก็ต้องส่งข้ามเธรดได้จริงเหมือนตัวอ่าน — ชั้น UI ส่งมันไปเธรด
+    /// ชั่วคราวที่ทำหน้าที่ก๊อป ถ้าไม่ `Send + Sync` ดีไซน์นี้ประกอบไม่ได้เลย
+    #[test]
+    fn a_writer_can_be_moved_to_a_throwaway_thread() {
+        #[derive(Debug, Default)]
+        struct Fake(std::sync::Mutex<String>);
+        impl ClipboardWriter for Fake {
+            fn write_text(&self, text: &str) -> Result<(), ClipboardError> {
+                self.0.lock().map_or(Ok(()), |mut slot| {
+                    slot.clear();
+                    slot.push_str(text);
+                    Ok(())
+                })
+            }
+        }
+
+        let writer: std::sync::Arc<dyn ClipboardWriter> = std::sync::Arc::new(Fake::default());
+        let moved = std::sync::Arc::clone(&writer);
+        std::thread::spawn(move || moved.write_text("#E23A2F"))
+            .join()
+            .unwrap()
+            .unwrap();
     }
 }

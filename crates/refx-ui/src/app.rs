@@ -1021,6 +1021,10 @@ pub struct RefxApp {
     pick_in_flight: Option<refx_asset::hash::ContentHash>,
     /// ตัวนับการจิ้ม — ทำคีย์ที่ไม่ชนกับ hash ของภาพใด ๆ
     pick_count: u64,
+    /// ★ ตัวก๊อป hex ขึ้น clipboard (P2-10) — เขียนบนเธรดชั่วคราว ไม่ใช่ที่นี่
+    ///
+    /// `None` เมื่อยังไม่ได้เสียบตัวเขียน (เทสต์ที่ไม่มี OS จริง)
+    copier: Option<crate::copy::Copier>,
     /// ตัวปลุก event loop — ส่งต่อให้ worker หลังหน้าต่างพร้อม
     waker: Option<refx_platform::window::Waker>,
     /// เวลาที่ผู้ใช้ปล่อยไฟล์ลงหน้าต่าง (ใช้วัด "ลากเข้ามา → ภาพขึ้นจอ")
@@ -1106,6 +1110,11 @@ impl RefxApp {
             cache_stats_rx: None,
             pick_in_flight: None,
             pick_count: 0,
+            // ★ ตัวเขียนของจริงอยู่ `refx-platform` — เสียบที่นี่เหมือนตัวอ่าน
+            //   (`refx-core` ถือแต่ trait · HANDOFF §2.0)
+            copier: Some(crate::copy::Copier::new(std::sync::Arc::new(
+                refx_platform::clipboard::SystemClipboard,
+            ))),
             waker: None,
             drop_started: None,
             drop_expected: 0,
@@ -1345,7 +1354,14 @@ impl RefxApp {
                     //   จุดที่เขาเลิกสนใจไปแล้ว โดยไม่มีอะไรบอกว่ามันเป็นของเก่า
                     if self.pick_in_flight == Some(hash) {
                         self.pick_in_flight = None;
-                        self.shell.picked = Some(refx_core::pick::Picked { rgba, source_px });
+                        let picked = refx_core::pick::Picked { rgba, source_px };
+                        // ★ docs/03 §2: picker คือ "อ่านสี **+ คัดลอก hex**"
+                        //   นักวาดก๊อป hex ไปวางใน Photoshop/Clip Studio ตลอดเวลา
+                        //   picker ที่ให้อ่านแล้วพิมพ์เองคือ picker ที่ทำงานไม่จบ
+                        if let Some(copier) = self.copier.as_ref() {
+                            copier.copy(picked.hex());
+                        }
+                        self.shell.picked = Some(picked);
                         self.shell.status = text::t(self.shell.lang, Key::Ready).to_owned();
                     }
                 }
@@ -2599,6 +2615,12 @@ impl AppDelegate for RefxApp {
             let w = waker.clone();
             assets.pool.wake_handle().connect(move || w.wake());
         }
+        // ★ ตัวก๊อปต้องปลุก UI ได้ด้วย ไม่งั้นข้อความ "ก๊อปไม่ติด" จะนอนรออยู่เฉย ๆ
+        //   จนกว่าผู้ใช้จะบังเอิญขยับเมาส์ (แอปหลับสนิทตอน idle — I-1)
+        if let Some(copier) = self.copier.as_mut() {
+            let w = waker.clone();
+            copier.set_waker(std::sync::Arc::new(move || w.wake()));
+        }
         self.waker = Some(waker);
     }
 
@@ -2718,6 +2740,15 @@ impl AppDelegate for RefxApp {
             self.apply_arrange(request);
         }
 
+        // ★ ก๊อปไม่ติด = **ความรำคาญ ไม่ใช่เหตุขัดข้อง** — ขึ้น status bar ห้ามเด้ง dialog
+        //   (ต่างจาก save ล้มซึ่งคืองานหาย) · `take` แล้วหาย ไม่ขึ้นซ้ำทุกเฟรม
+        if let Some(err) = self
+            .copier
+            .as_ref()
+            .and_then(crate::copy::Copier::take_error)
+        {
+            self.shell.status = text::clipboard_error(self.shell.lang, &err);
+        }
         // เก็บผล decode ที่เสร็จแล้วก่อนวาด (ไม่บล็อก)
         self.drain_decode_results();
         // ★ ตัดสินใจเรื่อง working texture ก่อนวาด — ใช้กล้อง/กรอบของเฟรมที่แล้ว
