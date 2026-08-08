@@ -1025,7 +1025,7 @@ Grid · Masonry · JustifiedRows · ShelfPack · Radial — ฟังก์ช�
 
 > ⚠️ บน Windows `cargo fuzz run` ล้มด้วย `STATUS_DLL_NOT_FOUND` จนกว่าจะเอา
 > `clang_rt.asan_dynamic-x86_64.dll` เข้า PATH — อยู่ที่
-> `…\VC\Tools\MSVC\<ver>in\Hostx64d\` · CI รันบน ubuntu จึงไม่เจอปัญหานี้
+> `…\VC\Tools\MSVC\<ver>\bin\Hostx64\x64\` · CI รันบน ubuntu จึงไม่เจอปัญหานี้
 
 #### ★ `respect_pinned` ที่ spec ระบุแต่ **ไม่ได้ทำ** (ตั้งใจ)
 
