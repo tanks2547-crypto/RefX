@@ -45,6 +45,9 @@
 #   kill                             stop refx and WAIT for the single-instance
 #                                    lock to be released
 #
+# Exit codes: 1 = lost focus (would produce a screenshot of another window)
+#             3 = target hung (would produce a screenshot of a dead app)
+#
 # ASCII only on purpose: Windows PowerShell 5.1 reads a BOM-less file as ANSI,
 # so non-ASCII comments come back as mojibake and can break parsing.
 param([string[]]$Steps)
@@ -67,6 +70,7 @@ public class W {
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, IntPtr pid);
   [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool attach);
   [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+  [DllImport("user32.dll")] public static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr res);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L,T,R,B; }
   [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X,Y; }
 }
@@ -77,6 +81,7 @@ $MIDDOWN = 0x0020; $MIDUP = 0x0040
 
 $script:hwnd = [IntPtr]::Zero
 $script:ox = 0; $script:oy = 0
+$script:pid2 = 0
 
 function Get-Origin {
   $p = New-Object W+POINT
@@ -84,6 +89,49 @@ function Get-Origin {
   $script:ox = $p.X; $script:oy = $p.Y
 }
 
+# ---------------------------------------------------------------------------
+# IS THE TARGET STILL ALIVE?
+# ---------------------------------------------------------------------------
+# A hung window and a window that simply ignores input are INDISTINGUISHABLE
+# from a screenshot: Windows keeps presenting the last frame either way, so
+# CopyFromScreen produces a perfectly normal-looking picture of a dead app.
+#
+# That cost several wrong conclusions in one session -- every keypress "did
+# nothing", which read as a shortcut bug, when the process had actually
+# deadlocked.  Same failure class as the silent SetForegroundWindow refusal
+# this script already guards: evidence that looks real and is not.
+#
+# WM_NULL with SMTO_ABORTIFHUNG returns 0 when the message pump is stuck.
+# Process.Responding alone is not enough -- it can lag.  Both are checked.
+function Test-Alive {
+  $res = [IntPtr]::Zero
+  $answered = [W]::SendMessageTimeout($script:hwnd, 0x0000, [IntPtr]::Zero, [IntPtr]::Zero, 0x0002, 3000, [ref]$res)
+  if ($answered -eq [IntPtr]::Zero) { return $false }
+  $proc = Get-Process -Id $script:pid2 -ErrorAction SilentlyContinue
+  if (-not $proc) { return $false }
+  $proc.Refresh()
+  return $proc.Responding
+}
+
+function Assert-Alive($what) {
+  if ($script:hwnd -eq [IntPtr]::Zero) { return }
+  if (-not (Test-Alive)) {
+    Write-Output "TARGET HUNG before '$what' - the window still paints its last frame, so a screenshot here would look normal and be a lie"
+    exit 3
+  }
+}
+
+# ---------------------------------------------------------------------------
+# ! AttachThreadInput is a hazard, use it as little as possible
+# ---------------------------------------------------------------------------
+# It is the only way to lift Windows' foreground lock, but coupling two input
+# queues can wedge BOTH threads.  RefX was seen deadlocked (Responding=False,
+# pump silent, never recovered) right after a burst of these calls, and a
+# deliberate 25-cycle burst reproduced it -- while a single cycle on a freshly
+# launched app did not.  So: only call it when focus is genuinely lost, and
+# check liveness afterwards instead of assuming it worked.
+#
+# Switching keyboard layout is NOT the cause -- see scripts/ui-layout-switch.ps1
 # Attaching our input queue to the current foreground thread is what lifts
 # Windows' foreground lock; SetForegroundWindow alone is simply ignored.
 function Force-Foreground {
@@ -103,6 +151,7 @@ function Force-Foreground {
 }
 
 function Assert-Focus($what) {
+  Assert-Alive $what
   if ([W]::GetForegroundWindow() -ne $script:hwnd) {
     if (-not (Force-Foreground)) {
       Write-Output "FOCUS LOST before '$what' - refusing to produce fake evidence"
@@ -128,6 +177,8 @@ function Key-Up($vk) { [W]::keybd_event([byte]$vk, 0, $KEYUP, [IntPtr]::Zero); S
 function Shot($path) {
   Start-Sleep -Milliseconds 350
   Assert-Focus "shot $path"
+  # check again right next to the capture - the window can die during the 350 ms wait
+  Assert-Alive "shot $path"
   $r = New-Object W+RECT
   [void][W]::GetClientRect($script:hwnd, [ref]$r)
   $w = $r.R - $r.L; $h = $r.B - $r.T
@@ -150,6 +201,7 @@ function Wait-Window($proc) {
 }
 
 function Setup-Window($proc, $note) {
+  $script:pid2 = $proc.Id
   $script:hwnd = Wait-Window $proc
   if ($script:hwnd -eq [IntPtr]::Zero) { Write-Output "NO WINDOW"; exit 1 }
   Start-Sleep -Seconds 3
@@ -174,7 +226,13 @@ foreach ($step in $Steps) {
     }
     'attach' {
       $proc = Get-Process refx -ErrorAction Stop
+      $script:pid2 = $proc.Id
       $script:hwnd = $proc.MainWindowHandle
+      # ! liveness FIRST - MoveWindow/ShowWindow/SetForegroundWindow all send
+      #   messages internally, so on a hung target they block forever and the
+      #   harness never reaches its own gate.  Ask a question with a timeout
+      #   before making any call that waits for an answer.
+      Assert-Alive "attach"
       [void][W]::ShowWindow($script:hwnd, 9)   # SW_RESTORE
       Start-Sleep -Milliseconds 400
       [void][W]::MoveWindow($script:hwnd, 0, 0, 1296, 839, $true)
