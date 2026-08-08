@@ -28,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [fuzz_decode]
+        target: [fuzz_decode, fuzz_layout]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -93,7 +93,6 @@ jobs:
           }
           check fuzz_document crates/refx-io/src/dto.rs
           check fuzz_journal  crates/refx-io/src/journal.rs
-          check fuzz_layout   crates/refx-core/src/layout.rs
           exit $status
 
   # `fuzz/` อยู่ใน `exclude` ของ workspace → `cargo clippy --all-targets` ของ CI หลัก

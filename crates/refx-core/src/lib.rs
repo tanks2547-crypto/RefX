@@ -7,6 +7,13 @@
 //! spec: docs/02-data-model.md
 // lint ทั้งหมดสืบทอดจาก [workspace.lints] ใน Cargo.toml ราก
 
+/// ★ re-export `glam` — ชนิดของมัน (`Vec2`) อยู่ใน API สาธารณะของ crate นี้
+///
+/// ผู้เรียกที่อยู่**นอก workspace** (เช่น `fuzz/` ซึ่งอยู่ใน `exclude`) จึงประกอบ
+/// ค่าส่งเข้ามาได้โดยไม่ต้องประกาศ `glam` เองแล้วเสี่ยงว่าเวอร์ชันจะไม่ตรงกัน
+/// — สองเวอร์ชันของชนิดเดียวกันคือ error ตอนคอมไพล์ที่อ่านไม่รู้เรื่องเลย
+pub use glam;
+
 pub mod align; // align / distribute + alignment guide — pure functions
 pub mod arena; // generational arena + ItemId/BoardId/GroupId
 pub mod board; // Board, Item, ItemCanvas, ItemMeta, AssetRef
