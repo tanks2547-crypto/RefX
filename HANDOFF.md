@@ -34,7 +34,7 @@
 | **P2-10** color picker + measure | ✅ **เสร็จ** ดู §2.9 · **สีที่คืนคือสีของไฟล์ ไม่ใช่สีบนจอ** พิสูจน์ด้วยตัวเลข |
 | **P2-11** text note | ✅ **เสร็จ — P2 ปิดครบทั้ง 11 task** ดู §2.10 |
 | **P3-1** `ItemMeta` + tag/rating/color label + inspector | ✅ **เสร็จ** ดู §2.11 · **`ColorLabel` round-trip ได้แล้วตั้งแต่ต้น** |
-| **P3-2** layout engine 5 ตัว | ✅ **เสร็จ** ดู §2.13 · **`fuzz_layout` ถูกต่อแล้ว** — ยิงจริง 480,938 รอบ |
+| **P3-2** layout engine 5 ตัว | ✅ **เสร็จ** ดู §2.13 · **`fuzz_layout` ถูกต่อแล้ว** — ยิงจริงบน CI **3,650,952 รอบ** |
 
 **เกณฑ์คุณภาพล่าสุดที่ผ่าน:** `fmt` / `clippy --all-targets --all-features -D warnings` (workspace + `fuzz/`) /
 `nextest 562/562` / `deny check` ครบ 4 หมวด (advisories · bans · licenses · sources) /
@@ -50,11 +50,12 @@ repo: **`github.com/tanks2547-crypto/RefX` (private)** · branch `main`
 | | windows-latest | ubuntu-latest |
 |---|---|---|
 | GPU ที่ใช้ตรวจจริง | **WARP** (Dx12/Cpu) | **lavapipe** (Vulkan/Cpu) |
-| เทสต์ | 488/488 | 488/488 |
-| binary | 15.52 MB (เครื่องพัฒนา) | — |
+| เทสต์ | 562/562 | 562/562 |
+| binary | 16.00 MB (เครื่องพัฒนา) | — |
 
-**`Fuzz (nightly)` เขียวครั้งแรก 2 ส.ค. 2026** — ทั้งสาม job (`fuzz_decode` ยิงเต็ม 15 นาที ·
-`unwired-targets` · `fuzz-lint`) บน `rustc 1.99.0-nightly (73dc9167f)` ดูเหตุใน §5 ข้อ false green
+**`Fuzz (nightly)` มีสี่ job แล้วตั้งแต่ P3-2** — `fuzz_decode` · **`fuzz_layout`** · `unwired-targets` · `fuzz-lint`
+ทั้งหมดเขียวบน nightly · ยิงเต็ม 15 นาทีต่อ target
+ดูเหตุที่เคยเขียวปลอมใน §5 ข้อ false green
 
 **เทสต์ GPU ถูกรันจริงทั้งสองแพลตฟอร์ม** — `REFX_REQUIRE_GPU=1` ทำให้ "ไม่มี adapter" = แดง
 ไม่ใช่ข้ามเงียบ ๆ · `.config/nextest.toml` ฆ่าเทสต์ที่เกิน 4 นาที เพื่อให้เทสต์ค้างเป็น
@@ -93,6 +94,12 @@ repo อยู่ใต้ git แล้ว (branch **`main`**) และ **push
 ---
 
 ## 2. ★ งานถัดไป (เรียงตามลำดับ ห้ามสลับ)
+
+> ### ★★ เริ่มที่ **P3-3 virtual scrolling**
+> 10,000 item scroll ลื่น · **วาดจริง < 60 ตัว** (ROADMAP)
+> — เป็นตัวแรกที่เอา layout engine ของ P3-2 มาใช้จริงบนจอ
+> · ตอนนี้ `refx-ui/src/arrange.rs` ยังเป็นไฟล์ TODO บรรทัดเดียว
+> และ Arrange mode ยังใช้ viewport ตัวเดียวกับ Canvas (`canvas_widget`)
 
 > **P1 ปิดครบแล้ว** — งานที่เสร็จแล้วถูกย้ายออกจากหัวข้อนี้ ดูประวัติใน git log
 > ต้นเหตุและทางแก้ของบั๊กสำคัญบันทึกไว้ใน `docs/` แล้ว ไม่ใช่ในไฟล์นี้
@@ -1021,7 +1028,15 @@ Grid · Masonry · JustifiedRows · ShelfPack · Radial — ฟังก์ช�
 (1) `fuzz_target!` ยิงจริง (2) `[[bin]]` ใน `fuzz/Cargo.toml` (3) อยู่ใน matrix
 ของ `fuzz.yml` · และเอา `check fuzz_layout` ออกจาก job `unwired-targets`
 
-**รันจริงบนเครื่องนี้: 480,938 รอบใน 61 วินาที ไม่เจอ crash**
+**รันจริงสองที่:**
+
+| ที่ | รอบ | ผล |
+|---|---|---|
+| เครื่องพัฒนา (Windows) | 480,938 / 61 วิ | ไม่เจอ crash |
+| **CI (ubuntu, nightly)** | **3,650,952 / 901 วิ** | ไม่เจอ crash |
+
+★ ตัวที่นับคือ **ของ CI** — มันยิงเต็ม 15 นาทีทุกคืน ส่วนบนเครื่องพัฒนา
+เป็นแค่การยืนยันว่าต่อสายถูกจริงก่อน push
 
 > ⚠️ บน Windows `cargo fuzz run` ล้มด้วย `STATUS_DLL_NOT_FOUND` จนกว่าจะเอา
 > `clang_rt.asan_dynamic-x86_64.dll` เข้า PATH — อยู่ที่
@@ -1164,6 +1179,7 @@ P2-4 คือจุดที่มันคุ้มแล้ว เพรา�
 | 18 | **`refx-asset` ห้าม depend `refx-platform`** (ตัดสิน 2 ส.ค. 2026) | ชั้น asset ที่รู้จัก windowing/dialog/clipboard ลาก `rfd`→`ashpd`→`zbus` เข้า fuzz จนคอมไพล์ nightly ไม่ผ่าน · ของที่ต้องถาม OS ให้ **ผู้เรียกส่งเข้ามา** หรือกลับทิศด้วย trait ใน `refx-core` | `refx-asset/Cargo.toml` (มีคอมเมนต์ห้ามไว้) + `refx-core::clipboard` |
 | 19 | **เขียน `Arena` เอง ห้ามกลับไปใช้ `slotmap`** | `slotmap` ไม่มี API ใส่ของกลับที่คีย์เดิม (คีย์ที่ลบแล้วตายถาวร) → undo ของ "ลบภาพ" จะคืน `ItemId` **ใหม่** แล้ว `z_order`/`Selection`/`ItemMeta::group` ที่ถือคีย์เก่าจะห้อยหมด = ภาพกลับมาแต่ลำดับและการเลือกหาย · ทำ I-3 ไม่ได้ตั้งแต่ต้น | `refx-core::arena::Arena::insert_at` |
 | 20 | **`Arena`/`Selection` `PartialEq` เทียบสิ่งที่ผู้ใช้สัมผัสได้ ไม่ใช่โครงข้างใน** | `Arena` เทียบ **คีย์+ค่าของสิ่งที่มีชีวิต** ไม่ใช่ `slots` ดิบ — นับช่องว่างท้าย vec ด้วยจะทำให้ undo ของ "เพิ่มภาพ" ไม่มีวันคืนสภาพได้ ทั้งที่นั่นคือการวัด*ตัวจัดสรร* · ส่วน `Selection` เทียบ **ตามลำดับ** ไม่ใช่แบบเซต เพราะ anchor ของ align ขึ้นกับลำดับคลิก | `arena.rs` / `selection.rs` + เทสต์คู่ที่อธิบายทั้งสองทิศ |
+| 21 | **ค่าคงที่เป็น "สัญญา" ต้องเป็น `pub` และเทสต์/fuzz ต้อง assert ด้วยตัวมัน ห้าม hard-code ซ้ำ** | `fuzz_layout` เขียน `size > 0.0` แทนสัญญาจริง `size >= MIN_SIDE` → **157,000 รอบไม่จับการถอดด่านสุดท้ายออก** เพราะขนาด `0.525` ก็ยัง "มากกว่าศูนย์" · **assertion ที่อ่อนกว่าสัญญา = target ที่เขียวโดยไม่ได้ตรวจอะไร** ชนิดเดียวกับ `fuzz_decode` · **ใช้กับ target อื่นทุกตัว**: เจอที่ไหน assert ด้วยเลขที่คัดมาเอง ให้เปลี่ยนไปอ้างค่าคงของสัญญาแทน | `layout::MIN_SIDE`/`MAX_SIDE` + `fuzz_layout` |
 
 ---
 
