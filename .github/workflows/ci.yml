@@ -5,6 +5,9 @@ on:
   # ★ CVE ใหม่ถูกประกาศ **หลัง** commit สุดท้ายเสมอ
   #   repo ที่ไม่มีใครแตะสองสัปดาห์ = สองสัปดาห์ที่ไม่มีใครรู้ว่า dependency
   #   มีช่องโหว่ใหม่ (docs/06 §2.5) — job `deny` จึงต้องเดินเองตามเวลาด้วย
+  #
+  #   ★★ ตั้งแต่ 10 ส.ค. 2026 ตารางนี้ยัง**เป็นรอบเดียวที่รัน Windows ด้วย**
+  #   (ดูหัวข้อ `changes` ข้างล่างว่าทำไม)
   schedule: [{ cron: "0 4 * * 1" }]   # ทุกวันจันทร์ 04:00 UTC
   workflow_dispatch:
 
@@ -13,12 +16,85 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
+  # ---------------------------------------------------------------------------
+  # ★★★ ประตูเดียวที่ตัดสินว่ารอบนี้ต้องรันของหนักไหม และรันบนอะไร
+  # ---------------------------------------------------------------------------
+  # เพิ่ม 10 ส.ค. 2026 เพราะโควตา Actions ของบัญชีหมดจน CI หยุดรันไปหลายวัน
+  # (HANDOFF §1) · สองอย่างที่กินโควตามากที่สุดและได้ผลตอบแทนน้อยที่สุด:
+  #
+  #   1. commit ที่แก้ **markdown ล้วน** จุด matrix เต็ม — วัดจากของจริง 21 จาก 78
+  #      commit ในช่วง 20 วันเป็น `.md` ล้วน · เอกสารเปลี่ยนไม่ทำให้ผลของ
+  #      clippy/nextest/ขนาด binary เปลี่ยนได้เลยแม้แต่ทางเดียว
+  #   2. runner **Windows ถูกคิดนาที ×2** และผลของมันตรงกับ Linux มาตลอด
+  #      ทุก run ที่เขียว
+  #
+  # ★ ที่ไม่ทำคือ `paths-ignore` ระดับ workflow — มันทำให้ **ไม่มี status เลย**
+  #   สำหรับ commit นั้น ซึ่งอ่านไม่ออกว่า "ไม่ต้องตรวจ" หรือ "ยังไม่ได้ตรวจ"
+  #   การข้ามด้วย `if:` ทำให้ job โผล่เป็น **skipped พร้อมเหตุผลใน log**
+  #   (docs/08 §3.9 ข้อ 2: โครงเปล่าห้ามเงียบ — ข้ามได้ แต่ต้องข้ามอย่างชัดเจน)
+  #
+  # ★★ **Windows ไม่ได้ถูกตัดทิ้ง** มันย้ายไปรอบ schedule + workflow_dispatch
+  #   เท่านั้น · เป็นแพลตฟอร์มหลักของผู้ใช้ ห้ามเอาออกถาวร — ถ้าจะแตะโค้ดที่มี
+  #   `#[cfg(windows)]` หรือเรื่อง GPU/driver ให้กด **Run workflow** เองก่อน merge
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.pick.outputs.code }}
+      os: ${{ steps.pick.outputs.os }}
+    steps:
+      # repo ทั้งก้อน 0.5 MB — clone เต็มถูกกว่าการเดาว่า commit ก่อนหน้าอยู่ไหน
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - id: pick
+        shell: bash
+        run: |
+          set -uo pipefail
+          event="${{ github.event_name }}"
+
+          # เหตุการณ์ที่ไม่ใช่ push = ตรวจเต็มเสมอ (schedule / PR / กดเอง)
+          # ★ ค่าปริยายคือ "ตรวจ" ทุกกรณีที่ยังไม่แน่ใจ — ประตูที่เดาผิดแล้วข้าม
+          #   คือประตูที่ปล่อยของเสียผ่าน ส่วนเดาผิดแล้วตรวจเกินแค่เปลืองนาที
+          code=true
+          before="${{ github.event.before }}"
+          if [ "$event" = "push" ] && [ -n "$before" ] \
+             && [ "$before" != "0000000000000000000000000000000000000000" ] \
+             && git cat-file -e "$before^{commit}" 2>/dev/null; then
+            changed=$(git diff --name-only "$before" "${{ github.sha }}")
+            if [ -z "$changed" ]; then
+              echo "::notice::push นี้ไม่มีไฟล์เปลี่ยนเลย — ตรวจเต็มไว้ก่อน"
+            elif echo "$changed" | grep -qvE '\.md$'; then
+              code=true
+            else
+              code=false
+            fi
+            echo "ไฟล์ที่เปลี่ยนใน push นี้:"
+            echo "$changed" | sed 's/^/  /'
+          fi
+
+          # ★ Windows เฉพาะรอบ schedule / กดเอง — ×2 ของโควตา และผลตรงกับ Linux มาตลอด
+          if [ "$event" = "schedule" ] || [ "$event" = "workflow_dispatch" ]; then
+            os='["ubuntu-latest","windows-latest"]'
+          else
+            os='["ubuntu-latest"]'
+          fi
+
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "os=$os"     >> "$GITHUB_OUTPUT"
+          if [ "$code" = "true" ]; then
+            echo "::notice::ตรวจเต็ม — matrix = $os"
+          else
+            echo "::notice::ข้ามการตรวจ: push นี้แตะแต่ไฟล์ .md (โค้ดไม่เปลี่ยน ผลตรวจก็เปลี่ยนไม่ได้)"
+          fi
+
   check:
-    if: github.event_name != 'schedule'
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        # ★ มาจาก `changes` เพื่อให้ **ขั้นตอนข้างล่างมีชุดเดียว** ไม่ต้องก๊อป job
+        #   ไปทำ `check-windows` แยก ซึ่งจะ drift จากกันวันแรกที่มีใครแก้ข้างเดียว
+        os: ${{ fromJSON(needs.changes.outputs.os) }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -48,24 +124,19 @@ jobs:
         shell: bash
         run: cargo nextest run -p refx-render --all-features --no-capture -E 'test(gpu_tests_run_where_they_are_required)'
 
-      # ★ docs/08 §3.9 ข้อ 7 — ต้องมีอย่างน้อยหนึ่ง job ที่ **บังคับ** ว่าต้องมี GPU จริง
+      # ★★★ docs/08 §3.9 ข้อ 11 — ต้องมีอย่างน้อยหนึ่ง job ที่ **บังคับ** ว่าต้องมี GPU จริง
       #
-      #   ถ้าปล่อยให้ทุก job "ข้ามอย่างชัดเจน" ได้เหมือนกันหมด วันที่ runner เปลี่ยน
-      #   แล้วหา adapter ไม่เจอ CI จะยังเขียวทั้งที่ไม่มีใครตรวจเส้นทางกู้ device เลย
-      #   ซึ่งเป็นรูปแบบเดียวกับ fuzz stub ที่เขียวอยู่ 5 session (docs/06 §2.5)
+      #   เดิมตัวบังคับคือ Windows (WARP) ส่วน Linux "ได้ lavapipe ก็รัน ไม่ได้ก็ข้าม"
+      #   พอ Windows ย้ายไปรอบสัปดาห์ละครั้ง **ทุก push จะไม่มีใครบังคับ GPU เลย**
+      #   ซึ่งคือสภาพที่ข้อ 11 ห้ามไว้ตรง ๆ (ทั้ง matrix ข้ามพร้อมกัน = ไม่มีใครตรวจ)
       #
-      #   เลือก Windows เป็นตัวบังคับเพราะ (ก) เป็นแพลตฟอร์มเป้าหมายหลัก
-      #   (ข) runner มี WARP (software adapter ของ D3D12) ติดมากับ OS อยู่แล้ว
-      #   ส่วน Linux ใช้ lavapipe ซึ่งเป็น dependency ที่เราลงเอง จึงยังไม่บังคับ
-      #   — ถ้ามันนิ่งพอค่อยเลื่อนขึ้นมาบังคับด้วยทีหลัง
-      - name: เทสต์ทั้งชุด (Windows — บังคับว่าต้องมี GPU จริง)
-        if: runner.os == 'Windows'
+      #   → เลื่อน Linux ขึ้นมาเป็นตัวบังคับตามที่คอมเมนต์เดิมเปิดทางไว้
+      #     ("ถ้ามันนิ่งพอค่อยเลื่อนขึ้นมาบังคับด้วยทีหลัง") · lavapipe เป็น
+      #     dependency ที่เราลงเองด้วย apt จึงเป็นของที่เราคุมได้ ไม่ใช่ของที่
+      #     runner บังเอิญมี — apt พังเมื่อไหร่ต้องแดงเสียงดัง ไม่ใช่เขียวเงียบ ๆ
+      - name: เทสต์ทั้งชุด — **บังคับว่าต้องมี GPU จริง** ทั้งสองแพลตฟอร์ม
         env:
           REFX_REQUIRE_GPU: "1"
-        run: cargo nextest run --workspace --all-features
-
-      - name: เทสต์ทั้งชุด (Linux — ได้ lavapipe ก็รัน ไม่ได้ก็ข้ามพร้อมพิมพ์เหตุผล)
-        if: runner.os == 'Linux'
         run: cargo nextest run --workspace --all-features
 
       - run: cargo build --release --all-features
@@ -90,17 +161,20 @@ jobs:
           echo "::notice::negative control ผ่าน — ตัวตรวจขนาด binary ล้มได้จริง"
 
   deny:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
 
-  # job อื่นไม่ต้องเดินตามตารางรายสัปดาห์ — โค้ดไม่เปลี่ยนผลก็ไม่เปลี่ยน
-  # มีแต่ advisory database เท่านั้นที่ขยับได้เองโดยที่ repo ไม่ขยับ
+  # advisory database ขยับเองได้โดยที่ repo ไม่ขยับ — ตารางรายสัปดาห์ข้างบน
+  # จึงยังจุด `deny` อยู่เสมอ (รอบ schedule ทำให้ `changes` คืน code=true)
 
   # I-8: พิสูจน์ว่า binary ไม่มี network stack อยู่จริง
   no-network:
-    if: github.event_name != 'schedule'
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -114,7 +188,8 @@ jobs:
 
   # ห้ามมี wgpu สองเวอร์ชัน (docs/09-crate-versions.md)
   single-wgpu:
-    if: github.event_name != 'schedule'
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
