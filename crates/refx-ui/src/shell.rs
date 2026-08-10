@@ -15,6 +15,9 @@ use refx_core::view::Mode;
 
 use crate::text::{self, Key, Lang, Template};
 
+/// สีของข้อความที่ผู้ใช้ต้องสังเกตเห็น — ตัวเดียวกับ RAM/VRAM ตอนใกล้เต็ม
+const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(230, 160, 60);
+
 /// ค่าการแสดงผลที่ inspector ปรับได้ — สำเนาของช่องใน `ItemCanvas` ที่เกี่ยวข้อง
 ///
 /// ★ เป็น **สำเนา** ไม่ใช่ `&mut ItemCanvas` โดยตั้งใจ: ทุกการแก้ `Board`
@@ -138,6 +141,12 @@ pub struct ShellState {
     pub lang: Lang,
     /// ข้อความสถานะฝั่งซ้ายของ status bar
     pub status: String,
+    /// ★ `status` เป็นเรื่องที่ผู้ใช้ต้อง **สังเกตเห็น** ไหม (P3-3)
+    ///
+    /// status bar เป็นที่รวมของทุกข้อความ ตั้งแต่ "พร้อม" ไปจนถึง "board เต็มแล้ว
+    /// อีก 6,928 ใบเข้าไม่ได้" — ถ้าทั้งหมดเป็นสีเดียวกัน ข้อความสำคัญจะกลืนหายไป
+    /// กับข้อความประจำวัน · ใช้สีเดียวกับ RAM/VRAM ตอนใกล้เต็ม (เจ้าของโทนเดียวกัน)
+    pub status_warn: bool,
     /// จำนวน item บน board (ตอนนี้คือจำนวนสี่เหลี่ยมทดสอบ)
     pub item_count: usize,
     /// ระดับซูมปัจจุบัน — แสดงบน status bar
@@ -284,6 +293,7 @@ impl Default for ShellState {
             tool_request: None,
             lang: Lang::default(),
             status: text::t(Lang::default(), Key::Ready).to_owned(),
+            status_warn: false,
             item_count: 0,
             zoom: 1.0,
             frames_drawn: 0,
@@ -391,6 +401,10 @@ pub fn draw_in_ui(
                         .desired_width(120.0)
                         .text(progress.label(lang)),
                 );
+            } else if state.status_warn {
+                // ★ ข้อความที่บอกว่า "ของที่คุณขอไม่ได้เข้ามาครบ" ต้องเห็นได้
+                //   ไม่ใช่กลืนไปกับ "พร้อม" (P3-3)
+                ui.colored_label(WARN_COLOR, &state.status);
             } else {
                 ui.label(&state.status);
             }
@@ -475,7 +489,7 @@ pub fn draw_in_ui(
             );
             if state.ram_limit > 0 && state.ram_used * 10 > state.ram_limit * 9 {
                 // ใกล้เต็ม — ให้เห็นชัดว่ากำลังตึง
-                ui.colored_label(egui::Color32::from_rgb(230, 160, 60), ram);
+                ui.colored_label(WARN_COLOR, ram);
             } else {
                 ui.label(ram);
             }
@@ -491,7 +505,7 @@ pub fn draw_in_ui(
                 ],
             );
             if state.vram_limit > 0 && state.vram_used * 10 > state.vram_limit * 9 {
-                ui.colored_label(egui::Color32::from_rgb(230, 160, 60), vram);
+                ui.colored_label(WARN_COLOR, vram);
             } else {
                 ui.label(vram);
             }

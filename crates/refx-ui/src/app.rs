@@ -112,6 +112,75 @@ fn demo_quads(count: u32, world: f32) -> Vec<QuadInstance> {
         .collect()
 }
 
+/// ผลของ "งวด" ที่ผู้ใช้ลากเข้ามาหนึ่งครั้ง (P3-3)
+///
+/// ★★★ **มีอยู่เพราะการนับที่ไม่ครบทำให้ผู้ใช้เห็นงานหายแบบเงียบ ๆ**
+///
+/// เดิมนับแค่ "ขึ้นจอแล้วกี่ใบ" เทียบกับ "ขอมากี่ใบ" — พอ board เต็ม
+/// (`ROADMAP P3-3`: เพดานจริง 3,072 ใบ = 12 layer × 256 ช่อง) ใบที่เหลือ
+/// **ไม่ถูกสร้างเป็น item เลย** สองตัวเลขจึงไม่มีวันเท่ากัน ผลคือ:
+///
+/// 1. รายงานสรุปตอนจบงวด **ไม่เคยทำงาน** (เงื่อนไขไม่มีวันเป็นจริง)
+/// 2. ผู้ใช้ลาก 10,000 ไฟล์แล้วได้ 3,072 ใบ โดยไม่มีใครบอกว่าอีก 6,928 ใบ
+///    หายไปไหน — ซึ่งอ่านได้อย่างเดียวว่าโปรแกรมทำงานหาย (ผิด I-3)
+///
+/// ตอนนี้ทุกใบที่ส่งเข้าไปต้องลงเอยที่ช่องใดช่องหนึ่งเสมอ: `added` (ขึ้นจอ) ·
+/// `rejected` (board เต็ม) · `failed` (ไฟล์เปิดไม่ได้) — [`DropBatch::settled`]
+/// จึงเป็นจริงได้แม้ทุกใบจะถูกปฏิเสธ
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct DropBatch {
+    /// จำนวนไฟล์ที่ผู้ใช้ขอให้เปิดในงวดนี้
+    requested: usize,
+    /// เพิ่มลง board แล้ว (ผู้ใช้เห็นบนจอ)
+    added: usize,
+    /// **เพิ่มไม่ได้เพราะ board เต็ม** — ใบที่ผู้ใช้ต้องได้รับแจ้ง
+    rejected: usize,
+    /// เปิดไฟล์ไม่ได้ (ไฟล์เสีย/ใหญ่เกินเพดาน/หายไป) — คนละเรื่องกับ board เต็ม
+    failed: usize,
+    /// รายงานผลของงวดนี้ไปแล้วหรือยัง (กันรายงานซ้ำทุกเฟรม)
+    reported: bool,
+}
+
+impl DropBatch {
+    /// เริ่มงวดใหม่ — ล้างตัวนับเดิมทั้งชุดในคราวเดียว
+    ///
+    /// ★ เขียนทับทั้ง struct โดยตั้งใจ: การล้างทีละฟิลด์คือที่ที่ฟิลด์ใหม่
+    /// จะถูกลืมในวันที่มีคนเพิ่มมันเข้ามา
+    fn start(&mut self, requested: usize) {
+        *self = Self {
+            requested,
+            ..Self::default()
+        };
+    }
+
+    /// งวดนี้จบแล้วหรือยัง — จบเมื่อทุกใบที่ขอมามีคำตอบแล้ว **ไม่ว่าคำตอบคืออะไร**
+    fn settled(&self) -> bool {
+        self.added + self.rejected + self.failed >= self.requested
+    }
+}
+
+/// ข้อความบอกผู้ใช้ว่างวดนี้ board รับไม่ครบ — `None` เมื่อรับครบทุกใบ
+///
+/// ★★ **`None` คือ negative control ที่ชนิดข้อมูลบังคับไว้** — ผู้เรียกไม่มีทาง
+/// แสดงข้อความนี้ตอนที่ไม่มีใบไหนตกหล่น เพราะไม่มีข้อความให้แสดง
+///
+/// ★ ต้องบอก **สิ่งที่เกิดขึ้น + สิ่งที่ทำได้ต่อ** ตาม `CLAUDE.md` — "atlas เต็ม
+/// 12 layer" เป็นภาษาของโปรแกรมเมอร์ ผู้ใช้ไม่รู้ว่า layer คืออะไรและทำอะไรกับมันไม่ได้
+fn board_full_message(lang: Lang, capacity: usize, batch: DropBatch) -> Option<String> {
+    if batch.rejected == 0 {
+        return None;
+    }
+    Some(text::fill(
+        lang,
+        Template::BoardFull,
+        &[
+            ("capacity", &capacity.to_string()),
+            ("rejected", &batch.rejected.to_string()),
+            ("requested", &batch.requested.to_string()),
+        ],
+    ))
+}
+
 /// สถิติ frame time สำหรับโหมด benchmark
 #[derive(Debug, Default)]
 struct FrameStats {
@@ -1104,12 +1173,8 @@ pub struct RefxApp {
     waker: Option<refx_platform::window::Waker>,
     /// เวลาที่ผู้ใช้ปล่อยไฟล์ลงหน้าต่าง (ใช้วัด "ลากเข้ามา → ภาพขึ้นจอ")
     drop_started: Option<std::time::Instant>,
-    /// จำนวนไฟล์ในชุดที่ลากเข้ามารอบล่าสุด
-    drop_expected: usize,
-    /// จำนวนที่ขึ้นจอแล้วในรอบนี้
-    drop_shown: usize,
-    /// รายงานเวลาของรอบนี้ไปแล้วหรือยัง
-    drop_reported: bool,
+    /// ผลของงวดที่ลากเข้ามารอบล่าสุด — ★ **ต้องบวกกันได้ครบเสมอ** ดู [`DropBatch`]
+    drop: DropBatch,
     /// ไฟล์ที่เพิ่งถูกลากเข้ามา — winit ส่งมาทีละไฟล์ จึงรวบไว้ก่อนแล้วส่งเป็นชุดเดียว
     pending_drops: Vec<std::path::PathBuf>,
     /// ผู้ใช้กด `Ctrl+V` ในรอบ event ที่ผ่านมา — ส่งงานตอนต้นเฟรมถัดไป
@@ -1194,9 +1259,11 @@ impl RefxApp {
             ))),
             waker: None,
             drop_started: None,
-            drop_expected: 0,
-            drop_shown: 0,
-            drop_reported: true,
+            // งวดว่างที่รายงานไปแล้ว = ไม่มีอะไรค้างตั้งแต่เปิดโปรแกรม
+            drop: DropBatch {
+                reported: true,
+                ..DropBatch::default()
+            },
             pending_drops: Vec::new(),
             pending_paste: false,
             pending_history: None,
@@ -1233,9 +1300,7 @@ impl RefxApp {
 
         // เริ่มจับเวลาชุดใหม่
         self.drop_started = Some(std::time::Instant::now());
-        self.drop_expected = paths.len();
-        self.drop_shown = 0;
-        self.drop_reported = false;
+        self.drop.start(paths.len());
         self.batch_from_clipboard = false;
 
         let mut submitted = Vec::with_capacity(paths.len());
@@ -1262,7 +1327,7 @@ impl RefxApp {
         self.shell.status = text::fill(
             self.shell.lang,
             Template::OpeningFiles,
-            &[("n", &self.drop_expected.to_string())],
+            &[("n", &self.drop.requested.to_string())],
         );
     }
 
@@ -1301,9 +1366,7 @@ impl RefxApp {
         });
 
         self.drop_started = Some(std::time::Instant::now());
-        self.drop_expected = 1;
-        self.drop_shown = 0;
-        self.drop_reported = false;
+        self.drop.start(1);
         self.batch_from_clipboard = true;
         self.shell.status = text::t(self.shell.lang, Key::ReadingClipboard).to_owned();
     }
@@ -1455,6 +1518,10 @@ impl RefxApp {
                 }
                 refx_asset::pool::JobResult::Failed { hash, reason } => {
                     // I-7: ภาพเสียหนึ่งไฟล์ = item ขึ้นสถานะ "โหลดไม่ได้" ไม่ใช่ crash
+                    //
+                    // ★ ต้องนับด้วย ไม่งั้นงวดที่มีไฟล์เสียแม้ใบเดียวจะ **ไม่มีวันจบ**
+                    //   แล้วรายงานสรุป (รวมทั้งข้อความ board เต็ม) ก็ไม่มีวันขึ้น
+                    self.drop.failed += 1;
                     tracing::warn!(hash = %hash.short(), %reason, "cannot open the image");
                     // ★ `reason.to_string()` เป็นอังกฤษสำหรับ log เท่านั้น (docs/03 §0)
                     //   ข้อความของผู้ใช้ประกอบจากฟิลด์ของ error แล้วแปลตามภาษา
@@ -1555,11 +1622,33 @@ impl RefxApp {
                                 slot: Some(slot),
                             },
                         );
-                        self.drop_shown += 1;
+                        self.drop.added += 1;
                     }
+                    // ★★ board เต็ม = **นับไว้แล้วรายงานทีเดียวตอนจบงวด**
+                    //
+                    //   ห้ามเขียน status ตรงนี้: ลาก 10,000 ไฟล์เข้ามาแล้ว board เต็ม
+                    //   จะเขียนทับข้อความเดิม 6,928 ครั้งด้วยข้อความที่พูดถึง "layer"
+                    //   ซึ่งผู้ใช้ทำอะไรกับมันไม่ได้ · สิ่งที่เขาต้องรู้คือ **กี่ใบ
+                    //   ที่ไม่ได้เข้าและทำอะไรต่อ** ซึ่งรู้ได้ก็ต่อเมื่อจบงวดแล้ว
+                    //
+                    //   ★ log ก็เช่นกัน — ของเดิมพิมพ์บรรทัดละใบ วัดจริงได้ 37,606
+                    //   บรรทัดจากการลากครั้งเดียว ซึ่งดัน crash log ที่มีค่าออกจาก
+                    //   ไฟล์ที่หมุนตามขนาด (เหตุผลเดียวกับ HANDOFF §4 ข้อ 9)
+                    Err(AtlasError::Full { layers } | AtlasError::NeedsResize { layers }) => {
+                        if self.drop.rejected == 0 {
+                            tracing::warn!(
+                                layers,
+                                "the board is full — the rest of this batch cannot be added"
+                            );
+                        }
+                        self.drop.rejected += 1;
+                    }
+                    // VRAM ไม่พอเป็นคนละปัญหากับ board เต็ม (ข้อความบอกตัวเลขจริง)
                     Err(err) => {
                         tracing::warn!(%err, "cannot store the thumbnail in the atlas");
+                        self.drop.failed += 1;
                         self.shell.status = text::atlas_error(self.shell.lang, &err);
+                        self.shell.status_warn = true;
                     }
                 }
             }
@@ -1568,38 +1657,55 @@ impl RefxApp {
             Self::rebuild_quads(gfx);
 
             // ★ เวลาจริงที่ผู้ใช้รู้สึก: ลากเข้ามา → ภาพขึ้นจอ
-            if !self.drop_reported
-                && self.drop_shown >= self.drop_expected
+            if !self.drop.reported
+                && self.drop.settled()
                 && let Some(started) = self.drop_started
             {
                 let elapsed = started.elapsed();
                 let ms = elapsed.as_secs_f64() * 1000.0;
-                self.drop_reported = true;
-                if self.batch_from_clipboard {
+                self.drop.reported = true;
+                // ★★★ board เต็มมาก่อนทุกข้อความ — "เปิด 3,072 ไฟล์ใน 9 วินาที"
+                //   ที่ขึ้นตอนผู้ใช้ลากมา 10,000 ไฟล์ **เป็นความจริงที่หลอก**
+                //   เขาจะอ่านว่าสำเร็จครบแล้วนับภาพเองไม่ได้ (ROADMAP P3-3)
+                let capacity = self.gfx.as_ref().map_or(0, |g| g.board.len());
+                if let Some(message) = board_full_message(self.shell.lang, capacity, self.drop) {
+                    tracing::warn!(
+                        capacity,
+                        rejected = self.drop.rejected,
+                        requested = self.drop.requested,
+                        added = self.drop.added,
+                        failed = self.drop.failed,
+                        "the board filled up before the batch finished"
+                    );
+                    self.shell.status = message;
+                    self.shell.status_warn = true;
+                } else if self.batch_from_clipboard {
                     tracing::info!(ms, "clipboard paste → image on screen");
                     self.shell.status = text::fill(
                         self.shell.lang,
                         Template::PastedImage,
                         &[("ms", &format!("{ms:.0}"))],
                     );
+                    self.shell.status_warn = false;
                 } else {
                     tracing::info!(
-                        files = self.drop_expected,
+                        files = self.drop.requested,
                         ms,
                         // ★ หลักฐานว่าการเพิ่มภาพเดินผ่าน `AddItems` เข้า `History` จริง
                         //   ไม่ใช่ push เข้า Vec ตรง ๆ เหมือนก่อนย้าย — undo ได้ทุกใบ
                         undo_depth = self.gfx.as_ref().map_or(0, |g| g.history.undo_depth()),
                         "drag & drop → every image on screen"
                     );
-                    println!("ลากไฟล์ {} ไฟล์ → ขึ้นจอครบใน {ms:.1} ms", self.drop_expected);
+                    println!("ลากไฟล์ {} ไฟล์ → ขึ้นจอครบใน {ms:.1} ms", self.drop.requested);
                     self.shell.status = text::fill(
                         self.shell.lang,
                         Template::OpenedFiles,
                         &[
-                            ("n", &self.drop_expected.to_string()),
+                            ("n", &self.drop.added.to_string()),
                             ("ms", &format!("{ms:.0}")),
                         ],
                     );
+                    self.shell.status_warn = false;
                 }
             }
         }
@@ -4596,6 +4702,124 @@ mod tests {
     }
 
     // ---------- ตัวนับความคืบหน้า (docs/05 §6 เงื่อนไขข้อ 3) ----------
+
+    // ---------- board เต็มแล้วต้องไม่เงียบ (ROADMAP P3-3) ----------
+
+    /// ★★★ ทุกใบที่ส่งเข้าไปต้องลงเอยที่ช่องใดช่องหนึ่ง **และบวกกันได้ครบ**
+    ///
+    /// เคสจริงที่ทำให้ต้องมีเทสต์นี้: ลาก 10,000 ไฟล์เข้า board ที่รับได้ 3,072 ใบ
+    /// — ของเดิมนับแค่ "ขึ้นจอกี่ใบ" เทียบกับ "ขอมากี่ใบ" ซึ่งไม่มีวันเท่ากัน
+    /// งวดจึงไม่มีวันจบ และผู้ใช้ไม่มีวันได้ยินว่าอีก 6,928 ใบหายไปไหน
+    #[test]
+    fn every_file_in_a_batch_ends_up_counted_somewhere() {
+        let mut batch = DropBatch::default();
+        batch.start(10_000);
+        assert!(!batch.settled(), "งวดที่ยังไม่มีใบไหนตอบกลับต้องยังไม่จบ");
+
+        for _ in 0..3_072 {
+            batch.added += 1;
+        }
+        assert!(
+            !batch.settled(),
+            "เพิ่มได้ 3,072 จาก 10,000 แล้วยังบอกว่าจบ — ที่เหลือหายไปโดยไม่มีใครนับ"
+        );
+
+        for _ in 0..6_928 {
+            batch.rejected += 1;
+        }
+        assert!(batch.settled(), "ทุกใบมีคำตอบแล้วแต่งวดยังไม่จบ");
+        assert_eq!(
+            batch.added + batch.rejected + batch.failed,
+            batch.requested,
+            "ตัวเลขบวกกันไม่ครบ = มีใบที่หายไปโดยไม่มีใครรู้"
+        );
+    }
+
+    /// ไฟล์เสียก็ต้องนับ ไม่งั้นงวดที่มีไฟล์เสียใบเดียวจะไม่มีวันจบ
+    #[test]
+    fn a_single_broken_file_does_not_stall_the_batch_forever() {
+        let mut batch = DropBatch::default();
+        batch.start(3);
+        batch.added += 2;
+        batch.failed += 1;
+        assert!(batch.settled());
+    }
+
+    /// เริ่มงวดใหม่ต้องล้างตัวนับเดิม **ทั้งชุด**
+    #[test]
+    fn starting_a_new_batch_forgets_the_previous_one() {
+        let mut batch = DropBatch {
+            requested: 10,
+            added: 3,
+            rejected: 7,
+            failed: 1,
+            reported: true,
+        };
+        batch.start(5);
+        assert_eq!(
+            batch,
+            DropBatch {
+                requested: 5,
+                ..DropBatch::default()
+            }
+        );
+    }
+
+    /// ★★ ข้อความต้องมีตัวเลข **ครบทั้งสาม** และบอกสิ่งที่ทำได้ต่อ — ทั้งสองภาษา
+    #[test]
+    fn the_board_full_message_names_every_number_the_user_needs() {
+        let batch = DropBatch {
+            requested: 10_000,
+            added: 3_072,
+            rejected: 6_928,
+            failed: 0,
+            reported: false,
+        };
+        for lang in [Lang::En, Lang::Th] {
+            let message = board_full_message(lang, 3_072, batch)
+                .unwrap_or_else(|| panic!("{lang:?}: ตกหล่น 6,928 ใบแต่ไม่มีข้อความ"));
+            for number in ["3072", "6928", "10000"] {
+                assert!(
+                    message.contains(number),
+                    "{lang:?}: ข้อความไม่มีเลข {number} — {message}"
+                );
+            }
+            assert!(
+                message.contains("board"),
+                "{lang:?}: ไม่ได้บอกว่าทำอะไรต่อได้ — {message}"
+            );
+        }
+    }
+
+    /// ★★★ negative control: ลากไม่เกินเพดาน → **ต้องไม่มีข้อความนี้เลย**
+    ///
+    /// ข้อความเตือนที่โผล่ตอนไม่มีอะไรผิดคือสิ่งที่ทำให้ผู้ใช้เลิกอ่าน status bar
+    /// — แล้ววันที่มีอะไรผิดจริงเขาจะไม่เห็นมันด้วย
+    #[test]
+    fn a_batch_that_fits_says_nothing_about_the_board_being_full() {
+        let batch = DropBatch {
+            requested: 200,
+            added: 200,
+            rejected: 0,
+            failed: 0,
+            reported: false,
+        };
+        for lang in [Lang::En, Lang::Th] {
+            assert!(
+                board_full_message(lang, 200, batch).is_none(),
+                "{lang:?}: ทุกใบเข้าครบแต่ยังบอกว่า board เต็ม"
+            );
+        }
+        // แม้แต่ใบที่เปิดไม่ได้ (ไฟล์เสีย) ก็ไม่ใช่ "board เต็ม" — คนละสาเหตุ คนละทางแก้
+        let broken = DropBatch {
+            requested: 5,
+            added: 4,
+            rejected: 0,
+            failed: 1,
+            reported: false,
+        };
+        assert!(board_full_message(Lang::Th, 4, broken).is_none());
+    }
 
     fn stats(submitted: u64, completed: u64, cancelled: u64, failed: u64) -> PoolStatsSnapshot {
         PoolStatsSnapshot {

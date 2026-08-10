@@ -352,6 +352,11 @@ pub enum Template {
     OpeningFiles,
     /// `{n}` `{ms}` — สรุปเวลาหลังเปิดไฟล์ครบ
     OpenedFiles,
+    /// `{capacity}` `{rejected}` `{requested}` — board เต็ม เพิ่มไม่ครบ (ROADMAP P3-3)
+    ///
+    /// ★ ต้องบอก **สิ่งที่เกิดขึ้น + สิ่งที่ทำได้ต่อ** (CLAUDE.md) — ผู้ใช้ที่ลาก
+    /// 10,000 ไฟล์แล้วได้ 3,072 ใบต้องไม่ต้องเดาเองว่าที่เหลือหายไปไหน
+    BoardFull,
     /// `{mode}` — สลับโหมดแล้ว
     SwitchedMode,
     /// `{what}` `{when}` — ฟีเจอร์ที่ยังไม่ได้ทำ
@@ -411,6 +416,9 @@ fn template_en(template: Template) -> &'static str {
         Template::Loading => "Loading {done} / {total}",
         Template::OpeningFiles => "Opening {n} files…",
         Template::OpenedFiles => "Opened {n} files in {ms} ms",
+        Template::BoardFull => {
+            "This board is full at {capacity} images — {rejected} of the {requested} you opened could not be added. Try splitting them across several boards."
+        }
         Template::SwitchedMode => "Switched to {mode} mode",
         Template::NotImplemented => "{what} is not available yet — planned for {when}",
         Template::ErrFileTooLarge => {
@@ -429,7 +437,7 @@ fn template_en(template: Template) -> &'static str {
             "RefX cannot open {format} files yet\nTry converting the image to PNG or JPEG."
         }
         Template::ErrBadHeader => {
-            "The file header could not be read — the file is damaged or incomplete
+            "The file header could not be read — the file is damaged or incomplete\n\
              Try opening it in the program that made it and saving a fresh copy."
         }
         Template::ErrDecoderPanic => {
@@ -500,6 +508,9 @@ fn template_th(template: Template) -> Option<&'static str> {
         Template::Loading => "กำลังโหลด {done} / {total}",
         Template::OpeningFiles => "กำลังเปิด {n} ไฟล์…",
         Template::OpenedFiles => "เปิด {n} ไฟล์ใน {ms} ms",
+        Template::BoardFull => {
+            "board นี้เต็มที่ {capacity} ภาพ — เพิ่มอีก {rejected} ใบจาก {requested} ใบที่เปิดเข้ามาไม่ได้ ลองแยกเป็นหลาย board"
+        }
         Template::SwitchedMode => "สลับไปโหมด {mode}",
         Template::NotImplemented => "{what} ยังทำไม่ได้ — รอ {when}",
         Template::ErrFileTooLarge => {
@@ -517,14 +528,14 @@ fn template_th(template: Template) -> Option<&'static str> {
             "RefX ยังเปิดไฟล์ชนิด {format} ไม่ได้\nลองแปลงเป็น PNG หรือ JPEG ก่อน"
         }
         Template::ErrBadHeader => {
-            "อ่านข้อมูลหัวไฟล์ไม่ได้ — ไฟล์น่าจะเสียหายหรือถูกตัดไม่ครบ
+            "อ่านข้อมูลหัวไฟล์ไม่ได้ — ไฟล์น่าจะเสียหายหรือถูกตัดไม่ครบ\n\
              ลองเปิดด้วยโปรแกรมที่สร้างไฟล์นี้แล้วบันทึกใหม่อีกครั้ง"
         }
         Template::ErrDecoderPanic => {
             "ไฟล์นี้ทำให้ตัวถอดรหัสภาพทำงานผิดพลาด — ข้ามไฟล์นี้ไป\nไฟล์อื่นยังใช้ได้ตามปกติ"
         }
         Template::ErrDecode => {
-            "เปิดภาพไม่ได้ — ไฟล์อาจเสียหายหรือถูกตัดไม่ครบ
+            "เปิดภาพไม่ได้ — ไฟล์อาจเสียหายหรือถูกตัดไม่ครบ\n\
              ลองเปิดด้วยโปรแกรมที่สร้างไฟล์นี้แล้วบันทึกใหม่อีกครั้ง"
         }
         Template::ErrReadFile => {
@@ -786,6 +797,7 @@ mod tests {
         Template::Loading,
         Template::OpeningFiles,
         Template::OpenedFiles,
+        Template::BoardFull,
         Template::SwitchedMode,
         Template::NotImplemented,
         Template::ErrFileTooLarge,
@@ -822,6 +834,37 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// ★★ ห้ามมีช่องว่างติดกันหรือขึ้นบรรทัดกลางข้อความ — **บั๊กที่มองไม่เห็นในโค้ด**
+    ///
+    /// เจอของจริงตอนทำ P3-3: ข้อความ `BoardFull` ถูกเขียนเป็นสองบรรทัดด้วย
+    /// backslash ต่อบรรทัด แล้ว `cargo fmt` ยุบให้เหลือบรรทัดเดียว **โดยเก็บ
+    /// ช่องว่างของการย่อหน้าไว้** ผลคือบน status bar มีช่องโหว่กว้าง 14 ตัวอักษร
+    /// กลางประโยค · โค้ดอ่านแล้วดูปกติทุกอย่าง เห็นได้ทางเดียวคือเปิดโปรแกรมแล้วดู
+    /// (บทเรียนเดียวกับ glyph ที่ฟอนต์ไม่มีตอน P2-9)
+    #[test]
+    fn no_string_is_secretly_padded_with_whitespace() {
+        // ★ เก็บให้ครบแล้วค่อยล้ม — ล้มที่ตัวแรกทำให้ต้องรันซ้ำทีละรอบกว่าจะเห็นทั้งหมด
+        let mut bad = Vec::new();
+        for &lang in &[Lang::En, Lang::Th] {
+            for &key in ALL_KEYS {
+                for line in t(lang, key).lines() {
+                    if line.contains("  ") {
+                        bad.push(format!("{lang:?} {key:?}: {line:?}"));
+                    }
+                }
+            }
+            for &tpl in ALL_TEMPLATES {
+                // ★ ข้อความหลายบรรทัดมีจริง (dialog) — ตรวจทีละบรรทัด ไม่ใช่ทั้งก้อน
+                for line in template(lang, tpl).lines() {
+                    if line.contains("  ") {
+                        bad.push(format!("{lang:?} {tpl:?}: {line:?}"));
+                    }
+                }
+            }
+        }
+        assert!(bad.is_empty(), "ข้อความที่มีช่องว่างติดกัน:\n{}", bad.join("\n"));
     }
 
     /// ★ สลับภาษาแล้วต้องได้คนละข้อความจริง ไม่ใช่คืนอังกฤษทั้งคู่
