@@ -843,28 +843,76 @@ mod tests {
     /// ช่องว่างของการย่อหน้าไว้** ผลคือบน status bar มีช่องโหว่กว้าง 14 ตัวอักษร
     /// กลางประโยค · โค้ดอ่านแล้วดูปกติทุกอย่าง เห็นได้ทางเดียวคือเปิดโปรแกรมแล้วดู
     /// (บทเรียนเดียวกับ glyph ที่ฟอนต์ไม่มีตอน P2-9)
+    /// ทุกอาการของ "ช่องว่างที่ไม่มีใครตั้งใจใส่" ที่ตรวจด้วยเครื่องได้
+    ///
+    /// ★ แยกเป็นฟังก์ชันเพื่อให้ทั้ง `Key` และ `Template` เดินกฎชุดเดียวกันเป๊ะ
+    /// — กฎที่เขียนสองที่คือกฎที่วันหนึ่งจะเข้มไม่เท่ากัน
+    fn padding_problem(text: &str) -> Option<&'static str> {
+        // ★ ขึ้นต้น/ลงท้ายทั้งก้อนด้วยช่องว่าง — ไม่มีเหตุผลที่ถูกต้องเลย
+        if text.starts_with(char::is_whitespace) {
+            return Some("ขึ้นต้นด้วยช่องว่าง");
+        }
+        if text.ends_with(char::is_whitespace) {
+            return Some("ลงท้ายด้วยช่องว่าง");
+        }
+        for (index, line) in text.lines().enumerate() {
+            // ★★ บรรทัดที่สองเป็นต้นไปขึ้นต้นด้วยช่องว่าง = **ย่อหน้าของโค้ดหลุดเข้ามา**
+            //    นี่คืออาการเป๊ะ ๆ ของ `ErrBadHeader`/`ErrDecode` ที่หลุดถึงจอผู้ใช้
+            //    มาตั้งแต่ตอนทำ i18n (แม้ช่องว่างตัวเดียวก็ผิด — ไม่ต้องรอให้ครบสองตัว)
+            if index > 0 && line.starts_with(char::is_whitespace) {
+                return Some("บรรทัดต่อมาขึ้นต้นด้วยช่องว่าง (ย่อหน้าของโค้ดหลุดเข้ามา)");
+            }
+            if line.contains("  ") {
+                return Some("มีช่องว่างติดกันกลางบรรทัด");
+            }
+            if line.ends_with(char::is_whitespace) {
+                return Some("บรรทัดลงท้ายด้วยช่องว่าง");
+            }
+        }
+        None
+    }
+
     #[test]
     fn no_string_is_secretly_padded_with_whitespace() {
         // ★ เก็บให้ครบแล้วค่อยล้ม — ล้มที่ตัวแรกทำให้ต้องรันซ้ำทีละรอบกว่าจะเห็นทั้งหมด
+        //   (ของจริงมีสามจุดพร้อมกันตอนประตูนี้ถูกเพิ่มเข้ามา)
         let mut bad = Vec::new();
         for &lang in &[Lang::En, Lang::Th] {
             for &key in ALL_KEYS {
-                for line in t(lang, key).lines() {
-                    if line.contains("  ") {
-                        bad.push(format!("{lang:?} {key:?}: {line:?}"));
-                    }
+                if let Some(why) = padding_problem(t(lang, key)) {
+                    bad.push(format!("{lang:?} {key:?}: {why} — {:?}", t(lang, key)));
                 }
             }
             for &tpl in ALL_TEMPLATES {
-                // ★ ข้อความหลายบรรทัดมีจริง (dialog) — ตรวจทีละบรรทัด ไม่ใช่ทั้งก้อน
-                for line in template(lang, tpl).lines() {
-                    if line.contains("  ") {
-                        bad.push(format!("{lang:?} {tpl:?}: {line:?}"));
-                    }
+                let text = template(lang, tpl);
+                if let Some(why) = padding_problem(text) {
+                    bad.push(format!("{lang:?} {tpl:?}: {why} — {text:?}"));
                 }
             }
         }
-        assert!(bad.is_empty(), "ข้อความที่มีช่องว่างติดกัน:\n{}", bad.join("\n"));
+        assert!(bad.is_empty(), "ข้อความที่มีช่องว่างเกินมา:\n{}", bad.join("\n"));
+    }
+
+    /// ★★ negative control ของประตูข้างบน — ใส่ช่องว่างกลับเข้าไปแล้วมันต้องจับได้
+    ///
+    /// ทุกแบบที่เคยหลุดจริงหรือหลุดได้ ต้องมีตัวอย่างอยู่ที่นี่ · ประตูที่ไม่มีใคร
+    /// พิสูจน์ว่าล้มเป็นคือประตูที่อาจเขียวโดยไม่ได้ตรวจอะไร (`docs/08 §3.9` ข้อ 1)
+    #[test]
+    fn the_padding_gate_catches_every_shape_of_the_bug() {
+        // รูปแบบที่เจอจริงใน `ErrBadHeader`/`ErrDecode`: newline ดิบ + ย่อหน้าของโค้ด
+        assert!(padding_problem("Damaged file\n             Try again").is_some());
+        // รูปแบบที่ `cargo fmt` ผลิตให้ตอนยุบ `\` ต่อบรรทัด: ช่องว่างกลางประโยค
+        assert!(padding_problem("6928 of the 10000 you opened     could not be added").is_some());
+        // ช่องว่างตัวเดียวหน้าบรรทัดต่อมาก็ผิด — ไม่ต้องรอให้ครบสองตัว
+        assert!(padding_problem("line one\n line two").is_some());
+        assert!(padding_problem(" leading").is_some());
+        assert!(padding_problem("trailing ").is_some());
+        assert!(padding_problem("line ends with a space \nnext").is_some());
+
+        // ...และของที่ถูกต้องต้องผ่าน ไม่งั้นประตูนี้จะจับทุกอย่างจนไม่มีความหมาย
+        assert!(padding_problem("Ready").is_none());
+        assert!(padding_problem("Damaged file\nTry again").is_none());
+        assert!(padding_problem("Opened {n} files in {ms} ms").is_none());
     }
 
     /// ★ สลับภาษาแล้วต้องได้คนละข้อความจริง ไม่ใช่คืนอังกฤษทั้งคู่

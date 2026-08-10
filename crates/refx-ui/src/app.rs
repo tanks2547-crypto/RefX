@@ -137,6 +137,12 @@ struct DropBatch {
     rejected: usize,
     /// เปิดไฟล์ไม่ได้ (ไฟล์เสีย/ใหญ่เกินเพดาน/หายไป) — คนละเรื่องกับ board เต็ม
     failed: usize,
+    /// ★ ถูกยกเลิกกลางทาง — **ผู้ใช้ pan ระหว่างที่ไฟล์ยังทยอยเข้ามา**
+    ///
+    /// P1-4 ยกเลิกงานที่ผ่านจอไปแล้วโดยตั้งใจ ซึ่งแปลว่าใบพวกนี้จะไม่มีผลกลับมา
+    /// เป็น item ตลอดไป · ถ้าไม่นับ งวดจะ **ค้างถาวร** แล้วทั้งแถบ "กำลังโหลด"
+    /// และข้อความสรุปตอนจบก็ตายไปด้วยกันเงียบ ๆ
+    cancelled: usize,
     /// รายงานผลของงวดนี้ไปแล้วหรือยัง (กันรายงานซ้ำทุกเฟรม)
     reported: bool,
 }
@@ -154,8 +160,36 @@ impl DropBatch {
     }
 
     /// งวดนี้จบแล้วหรือยัง — จบเมื่อทุกใบที่ขอมามีคำตอบแล้ว **ไม่ว่าคำตอบคืออะไร**
+    ///
+    /// ★ "ถูกยกเลิก" ก็เป็นคำตอบ — ใบนั้นจะไม่กลับมาเป็น item อีกแล้ว
     fn settled(&self) -> bool {
-        self.added + self.rejected + self.failed >= self.requested
+        self.answered() >= self.requested
+    }
+
+    /// จำนวนใบที่มีคำตอบแล้ว — **ต้องนับทุกช่องทางที่ทำให้ใบหนึ่งจบลง**
+    fn answered(&self) -> usize {
+        self.added + self.rejected + self.failed + self.cancelled
+    }
+}
+
+/// ปลดคีย์ของ working texture ที่ขอไว้แล้วไม่ได้ผลกลับมา
+///
+/// ★★ เดิม `working_pending` ถูกปลดเฉพาะตอน **สำเร็จ** เท่านั้น งานที่ถูกยกเลิก
+/// (ผู้ใช้ซูมออกก่อน) หรือล้มเหลว จึงทิ้งคีย์ค้างไว้ตลอดอายุโปรแกรม แล้ว
+/// `plan_working_textures` จะเห็นว่า "ขอไปแล้ว" ตลอดกาล → **ภาพใบนั้นจะเบลอ
+/// ถาวรทุกครั้งที่ซูมเข้า** โดยไม่มี error ที่ไหนเลย · เจอตอนเติม `target`
+/// ให้ `Cancelled`/`Failed` (ก่อนหน้านี้ชั้น UI แยกไม่ออกว่าใบไหนเป็นงานชนิดไหน
+/// จึงไม่มีทางเขียนโค้ดตรงนี้ได้เลย)
+fn gfx_working_pending_remove(
+    gfx: Option<&mut Gfx>,
+    hash: refx_asset::hash::ContentHash,
+    size: u32,
+) {
+    if let Some(gfx) = gfx {
+        gfx.working_pending.remove(&WorkingKey {
+            hash: *hash.as_bytes(),
+            size,
+        });
     }
 }
 
@@ -1505,8 +1539,33 @@ impl RefxApp {
                         self.shell.status = text::t(self.shell.lang, Key::Ready).to_owned();
                     }
                 }
-                refx_asset::pool::JobResult::Cancelled { .. } => {}
-                refx_asset::pool::JobResult::Failed { hash, reason }
+                // ★★★ งานที่ถูกยกเลิก **ต้องนับเข้างวดถ้ามันเป็นภาพที่ผู้ใช้รออยู่**
+                //
+                //   ผู้ใช้ pan ระหว่างที่ไฟล์กำลังทยอยเข้ามาเป็นเรื่องปกติมาก
+                //   (P1-4 ยกเลิกงานที่ผ่านจอไปแล้วโดยตั้งใจ) ถ้าไม่นับ งวดจะ
+                //   **ค้างถาวร**: แถบ "กำลังโหลด N/M" ไม่หาย และรายงานตอนจบ
+                //   — รวมทั้งข้อความ "board เต็ม" — ไม่มีวันขึ้นเลย
+                //
+                //   ส่วน working texture ที่ถูกยกเลิกไม่เกี่ยวกับงวดนี้เลย
+                //   นับปนเข้ามาจะทำให้งวดจบเร็วเกินจริงแล้วรายงานตัวเลขผิด
+                refx_asset::pool::JobResult::Cancelled { hash, target } => {
+                    match target {
+                        refx_asset::pool::JobTarget::Thumbnail => self.drop.cancelled += 1,
+                        // ★ ต้องปลดคีย์ออกจาก `working_pending` ด้วย ไม่งั้นภาพใบนั้น
+                        //   จะ **ไม่มีวันถูกขอภาพคมอีกเลย** ตลอดอายุโปรแกรม —
+                        //   เดิมปลดเฉพาะตอนสำเร็จ งานที่ถูกยกเลิก/ล้มจึงค้างคีย์ไว้
+                        refx_asset::pool::JobTarget::Working { size } => {
+                            gfx_working_pending_remove(self.gfx.as_mut(), hash, size);
+                        }
+                        refx_asset::pool::JobTarget::Sample { .. } => {
+                            // ผู้ใช้จิ้มแล้วเปลี่ยนใจ — ปลดสถานะ "กำลังรอสี"
+                            if self.pick_in_flight == Some(hash) {
+                                self.pick_in_flight = None;
+                            }
+                        }
+                    }
+                }
+                refx_asset::pool::JobResult::Failed { hash, reason, .. }
                     if self.pick_in_flight == Some(hash) =>
                 {
                     // ★ ไฟล์ต้นฉบับหายไปแล้ว (ผู้ใช้ถอดไดรฟ์ / ย้ายไฟล์) —
@@ -1516,12 +1575,23 @@ impl RefxApp {
                     self.pick_in_flight = None;
                     self.shell.status = text::t(self.shell.lang, Key::ColourUnavailable).to_owned();
                 }
-                refx_asset::pool::JobResult::Failed { hash, reason } => {
+                refx_asset::pool::JobResult::Failed {
+                    hash,
+                    reason,
+                    target,
+                } => {
                     // I-7: ภาพเสียหนึ่งไฟล์ = item ขึ้นสถานะ "โหลดไม่ได้" ไม่ใช่ crash
                     //
                     // ★ ต้องนับด้วย ไม่งั้นงวดที่มีไฟล์เสียแม้ใบเดียวจะ **ไม่มีวันจบ**
                     //   แล้วรายงานสรุป (รวมทั้งข้อความ board เต็ม) ก็ไม่มีวันขึ้น
-                    self.drop.failed += 1;
+                    //   — แต่ต้องนับ **เฉพาะงานของงวดนี้** เหมือนกรณี `Cancelled`
+                    match target {
+                        refx_asset::pool::JobTarget::Thumbnail => self.drop.failed += 1,
+                        refx_asset::pool::JobTarget::Working { size } => {
+                            gfx_working_pending_remove(self.gfx.as_mut(), hash, size);
+                        }
+                        refx_asset::pool::JobTarget::Sample { .. } => {}
+                    }
                     tracing::warn!(hash = %hash.short(), %reason, "cannot open the image");
                     // ★ `reason.to_string()` เป็นอังกฤษสำหรับ log เท่านั้น (docs/03 §0)
                     //   ข้อความของผู้ใช้ประกอบจากฟิลด์ของ error แล้วแปลตามภาษา
@@ -4729,7 +4799,7 @@ mod tests {
         }
         assert!(batch.settled(), "ทุกใบมีคำตอบแล้วแต่งวดยังไม่จบ");
         assert_eq!(
-            batch.added + batch.rejected + batch.failed,
+            batch.answered(),
             batch.requested,
             "ตัวเลขบวกกันไม่ครบ = มีใบที่หายไปโดยไม่มีใครรู้"
         );
@@ -4745,6 +4815,42 @@ mod tests {
         assert!(batch.settled());
     }
 
+    /// ★★★ ผู้ใช้ pan ระหว่างลากไฟล์เข้ามา → งานถูกยกเลิก → **งวดต้องยังจบได้**
+    ///
+    /// P1-4 ยกเลิกงานที่ผ่านจอไปแล้วโดยตั้งใจ และการ pan ระหว่างที่ไฟล์ทยอยเข้ามา
+    /// เป็นเรื่องปกติมาก · ถ้าใบที่ถูกยกเลิกไม่ถูกนับ งวดจะค้างถาวร แล้ว
+    /// **แถบ "กำลังโหลด" ไม่หาย และข้อความ board เต็มไม่มีวันขึ้น**
+    /// — สองอย่างที่เพิ่งทำเสร็จจะพังพร้อมกันในการใช้งานจริง
+    #[test]
+    fn panning_while_files_load_does_not_stall_the_batch_forever() {
+        let mut batch = DropBatch::default();
+        batch.start(500);
+        batch.added += 300;
+        batch.cancelled += 200; // ผู้ใช้ pan ผ่านไปแล้ว
+        assert!(
+            batch.settled(),
+            "ยกเลิก 200 ใบแล้วงวดยังไม่จบ — แถบกำลังโหลดจะค้างตลอดกาล"
+        );
+        assert_eq!(batch.answered(), batch.requested);
+    }
+
+    /// ★ งานที่ถูกยกเลิกแล้ว board เต็มด้วย → ข้อความ board เต็มต้องยังขึ้น
+    #[test]
+    fn a_cancelled_job_does_not_hide_the_board_full_message() {
+        let batch = DropBatch {
+            requested: 10_000,
+            added: 3_072,
+            rejected: 6_900,
+            failed: 0,
+            cancelled: 28,
+            reported: false,
+        };
+        assert!(batch.settled());
+        let message = board_full_message(Lang::En, 3_072, batch)
+            .expect("board เต็มแล้วแต่ไม่มีข้อความเพราะมีใบที่ถูกยกเลิกปนอยู่");
+        assert!(message.contains("6900"), "{message}");
+    }
+
     /// เริ่มงวดใหม่ต้องล้างตัวนับเดิม **ทั้งชุด**
     #[test]
     fn starting_a_new_batch_forgets_the_previous_one() {
@@ -4753,6 +4859,7 @@ mod tests {
             added: 3,
             rejected: 7,
             failed: 1,
+            cancelled: 2,
             reported: true,
         };
         batch.start(5);
@@ -4773,6 +4880,7 @@ mod tests {
             added: 3_072,
             rejected: 6_928,
             failed: 0,
+            cancelled: 0,
             reported: false,
         };
         for lang in [Lang::En, Lang::Th] {
@@ -4802,6 +4910,7 @@ mod tests {
             added: 200,
             rejected: 0,
             failed: 0,
+            cancelled: 0,
             reported: false,
         };
         for lang in [Lang::En, Lang::Th] {
@@ -4816,6 +4925,7 @@ mod tests {
             added: 4,
             rejected: 0,
             failed: 1,
+            cancelled: 0,
             reported: false,
         };
         assert!(board_full_message(Lang::Th, 4, broken).is_none());

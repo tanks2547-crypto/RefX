@@ -269,6 +269,15 @@ pub enum JobResult {
     Cancelled {
         /// คีย์ของภาพ
         hash: ContentHash,
+        /// ★★ **งานนี้เป็นงานชนิดไหน** — ผู้เรียกต้องแยกให้ออกว่าใบที่หายไป
+        /// เป็นภาพที่ผู้ใช้กำลังรออยู่ (`Thumbnail`) หรือเป็นแค่ภาพคมกว่าเดิม
+        /// (`Working`) ที่หายไปแล้วไม่มีใครเดือดร้อน
+        ///
+        /// ★ เดิมไม่มีฟิลด์นี้ ชั้น UI จึงนับงวดที่ลากเข้ามาให้จบไม่ได้เลย:
+        /// นับทุกใบที่ถูกยกเลิก = นับงาน working texture ปนเข้ามาแล้วงวดจบเร็ว
+        /// เกินจริง · ไม่นับเลย = **ผู้ใช้ pan ระหว่างลากไฟล์แล้วงวดค้างถาวร**
+        /// (แถบ "กำลังโหลด" ไม่หาย และข้อความ board เต็มไม่มีวันขึ้น)
+        target: JobTarget,
     },
     /// ★ ใน clipboard เป็น **รายชื่อไฟล์** (ก๊อปไฟล์จาก Explorer) ไม่ใช่ภาพดิบ
     ///
@@ -287,6 +296,8 @@ pub enum JobResult {
         hash: ContentHash,
         /// สาเหตุ
         reason: JobFailure,
+        /// งานนี้เป็นงานชนิดไหน — เหตุผลเดียวกับ [`JobResult::Cancelled`]
+        target: JobTarget,
     },
 }
 
@@ -298,7 +309,7 @@ impl JobResult {
             Self::Done { hash, .. }
             | Self::Working { hash, .. }
             | Self::Sampled { hash, .. }
-            | Self::Cancelled { hash }
+            | Self::Cancelled { hash, .. }
             | Self::ClipboardFiles { hash, .. }
             | Self::Failed { hash, .. } => *hash,
         }
@@ -663,7 +674,10 @@ fn run_job(job: &Job, ctx: &WorkerContext) -> JobResult {
 
     // ★ เช็คธงยกเลิก **ก่อนเริ่ม** — ผู้ใช้ pan ผ่านไปแล้วก็ไม่ต้องเสียแรงเลย
     if job.cancel.load(AtomicOrdering::Relaxed) {
-        return JobResult::Cancelled { hash: job.hash };
+        return JobResult::Cancelled {
+            hash: job.hash,
+            target: job.target,
+        };
     }
 
     let file = job.source.label();
@@ -693,11 +707,17 @@ fn run_job(job: &Job, ctx: &WorkerContext) -> JobResult {
                 paths,
             };
         }
-        Acquired::Cancelled => return JobResult::Cancelled { hash: job.hash },
+        Acquired::Cancelled => {
+            return JobResult::Cancelled {
+                hash: job.hash,
+                target: job.target,
+            };
+        }
         Acquired::Failed(reason) => {
             return JobResult::Failed {
                 hash: job.hash,
                 reason,
+                target: job.target,
             };
         }
     };
@@ -710,7 +730,10 @@ fn run_job(job: &Job, ctx: &WorkerContext) -> JobResult {
 
         // ยกเลิกกลางทางได้ — ผู้ใช้ซูมออกไปแล้วก็ไม่ต้องส่งของหนักกลับไป
         if job.cancel.load(AtomicOrdering::Relaxed) {
-            return JobResult::Cancelled { hash: job.hash };
+            return JobResult::Cancelled {
+                hash: job.hash,
+                target: job.target,
+            };
         }
         return match built {
             Some(image) => JobResult::Working {
@@ -720,7 +743,10 @@ fn run_job(job: &Job, ctx: &WorkerContext) -> JobResult {
             },
             None => {
                 tracing::warn!(file, size, "could not build the working texture");
-                JobResult::Cancelled { hash: job.hash }
+                JobResult::Cancelled {
+                    hash: job.hash,
+                    target: job.target,
+                }
             }
         };
     }
@@ -731,7 +757,10 @@ fn run_job(job: &Job, ctx: &WorkerContext) -> JobResult {
         let (source_px, rgba) = sample_pixel(&image, u, v);
         drop(image);
         if job.cancel.load(AtomicOrdering::Relaxed) {
-            return JobResult::Cancelled { hash: job.hash };
+            return JobResult::Cancelled {
+                hash: job.hash,
+                target: job.target,
+            };
         }
         return JobResult::Sampled {
             hash: job.hash,
@@ -758,12 +787,16 @@ fn run_job(job: &Job, ctx: &WorkerContext) -> JobResult {
                 file,
                 seconds: DECODE_TIMEOUT.as_secs(),
             },
+            target: job.target,
         };
     }
 
     // เช็คธงครั้งสุดท้าย — ถ้าผู้ใช้ pan ผ่านไปแล้วก็ไม่ต้องส่งภาพกลับให้เปลือง
     if job.cancel.load(AtomicOrdering::Relaxed) {
-        return JobResult::Cancelled { hash: job.hash };
+        return JobResult::Cancelled {
+            hash: job.hash,
+            target: job.target,
+        };
     }
 
     // เก็บลง cache เพื่อให้ครั้งหน้าไม่ต้อง decode อีก
@@ -1331,6 +1364,63 @@ mod tests {
         );
         assert_eq!(pool.stats().cancelled, 1);
         assert_eq!(pool.stats().completed, 0, "ต้องไม่ decode เลย");
+    }
+
+    /// ★★★ ผลของงานที่ถูกยกเลิก/ล้มเหลว **ต้องบอกได้ว่ามันเป็นงานชนิดไหน**
+    ///
+    /// ชั้น UI นับ "งวดที่ผู้ใช้ลากเข้ามา" ให้จบไม่ได้เลยถ้าแยกไม่ออกว่าใบที่หายไป
+    /// เป็นภาพที่เขากำลังรอ (`Thumbnail`) หรือเป็นภาพคมกว่าเดิม (`Working`)
+    /// ที่หายแล้วไม่มีใครเดือดร้อน:
+    ///
+    /// * นับทุกใบ → งาน working texture ปนเข้ามา งวดจบเร็วเกินจริง ตัวเลขผิด
+    /// * ไม่นับเลย → **ผู้ใช้ pan ระหว่างลากไฟล์แล้วงวดค้างถาวร** แถบ "กำลังโหลด"
+    ///   ไม่หาย และข้อความสรุปตอนจบ (รวมถึง "board เต็ม") ไม่มีวันขึ้น
+    ///
+    /// เดิม `Cancelled`/`Failed` มีแต่ `hash` ซึ่งทำให้ **เขียนโค้ดที่ถูกไม่ได้เลย**
+    #[test]
+    fn a_cancelled_job_says_what_kind_of_job_it_was() {
+        let path = write_png("kind", "k.png", 64, 64);
+        let pool = test_pool(1);
+
+        for target in [JobTarget::Thumbnail, JobTarget::Working { size: 512 }] {
+            let mut j = job(path.clone(), 0.0, b"k");
+            j.target = target;
+            j.cancel.store(true, AtomicOrdering::Relaxed);
+            pool.submit(j);
+
+            let result = pool
+                .results()
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap();
+            match result {
+                JobResult::Cancelled { target: got, .. } => {
+                    assert_eq!(got, target, "ผลของงานที่ถูกยกเลิกบอกชนิดผิด — ชั้น UI จะนับงวดผิดตาม")
+                }
+                other => panic!("ต้องได้ Cancelled แต่ได้ {other:?}"),
+            }
+        }
+    }
+
+    /// ผลของงานที่ **ล้มเหลว** ก็ต้องบอกชนิดเหมือนกัน ด้วยเหตุผลเดียวกันเป๊ะ
+    #[test]
+    fn a_failed_job_says_what_kind_of_job_it_was() {
+        let missing = temp_dir("failkind").join("does-not-exist.png");
+        let pool = test_pool(1);
+
+        let mut j = job(missing, 0.0, b"missing");
+        j.target = JobTarget::Working { size: 256 };
+        pool.submit(j);
+
+        let result = pool
+            .results()
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap();
+        match result {
+            JobResult::Failed { target, .. } => {
+                assert_eq!(target, JobTarget::Working { size: 256 });
+            }
+            other => panic!("ต้องได้ Failed แต่ได้ {other:?}"),
+        }
     }
 
     /// ★ จำลอง "pan เร็วผ่าน 500 ภาพ" — งานส่วนใหญ่ต้องถูกยกเลิกจริง
