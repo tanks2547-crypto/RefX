@@ -344,6 +344,8 @@ pub enum Template {
     WorkingTextures,
     /// จำนวน texture upload สะสม (หลักฐานเกณฑ์ P2-8)
     AtlasUploads,
+    /// `{drawn}` `{view}` `{total}` `{examined}` — virtual scrolling (หลักฐานเกณฑ์ P3-3)
+    ArrangeDrawn,
     /// `{done}` `{total}` — ความคืบหน้าการโหลด (docs/05 §6 เงื่อนไขข้อ 3)
     Loading,
     /// `{n}` — กำลังเปิดไฟล์กี่ไฟล์
@@ -405,6 +407,7 @@ fn template_en(template: Template) -> &'static str {
         Template::DecodeCancelled => "Cancelled {n}",
         Template::WorkingTextures => "Sharp {used} / {limit} · {calls} draws · {evicted} evicted",
         Template::AtlasUploads => "{uploads} uploads",
+        Template::ArrangeDrawn => "drawn {drawn} (in view {view}) of {total} · checked {examined}",
         Template::Loading => "Loading {done} / {total}",
         Template::OpeningFiles => "Opening {n} files…",
         Template::OpenedFiles => "Opened {n} files in {ms} ms",
@@ -493,6 +496,7 @@ fn template_th(template: Template) -> Option<&'static str> {
         Template::DecodeCancelled => "ยกเลิกไป {n}",
         Template::WorkingTextures => "ภาพคม {used} / {limit} · วาด {calls} ครั้ง · ไล่ออก {evicted}",
         Template::AtlasUploads => "อัป texture {uploads} ครั้ง",
+        Template::ArrangeDrawn => "วาด {drawn} (ในจอ {view}) จาก {total} · ตรวจ {examined}",
         Template::Loading => "กำลังโหลด {done} / {total}",
         Template::OpeningFiles => "กำลังเปิด {n} ไฟล์…",
         Template::OpenedFiles => "เปิด {n} ไฟล์ใน {ms} ms",
@@ -778,6 +782,7 @@ mod tests {
         Template::DecodeCancelled,
         Template::WorkingTextures,
         Template::AtlasUploads,
+        Template::ArrangeDrawn,
         Template::Loading,
         Template::OpeningFiles,
         Template::OpenedFiles,

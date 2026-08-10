@@ -20,7 +20,7 @@ use refx_core::interact::Tool;
 use refx_core::interact::{CanvasButton, CanvasContext, CanvasEvent, Modifiers, SelectTool};
 use refx_core::selection::Selection;
 use refx_core::spatial::SpatialIndex;
-use refx_core::view::Camera;
+use refx_core::view::{Camera, Mode};
 use refx_core::zorder::ZMove;
 
 use crate::shell::LoadProgress;
@@ -55,6 +55,12 @@ pub struct AppArgs {
     /// มีไว้ให้ตรวจงานแปลได้โดยไม่ต้องไปเปลี่ยนภาษาของทั้งเครื่อง
     /// และเป็นกลไกเดียวกับที่ Settings จะใช้ตอน P5-3
     pub lang: Option<Lang>,
+    /// โหมดที่เปิดขึ้นมา — `None` = Canvas ตามค่าปริยาย
+    ///
+    /// ★ มีไว้ให้ **วัดและถ่ายภาพโหมด Arrange ได้จริง** (P3-3): `--bench-seconds`
+    /// เริ่มจับเวลาตั้งแต่เฟรมแรก ถ้าต้องกดปุ่มสลับโหมดก่อน ตัวเลขที่ได้จะเป็นของ
+    /// Canvas ปนกับ Arrange โดยไม่มีทางแยกออก
+    pub mode: Option<Mode>,
     /// ไฟล์ที่จะเปิดตั้งแต่เริ่มโปรแกรม (เหมือนลากเข้ามา)
     ///
     /// ใช้ทั้งกับการเปิดจากบรรทัดคำสั่งและวัดเวลา "เปิดไฟล์ → ภาพขึ้นจอ"
@@ -428,6 +434,15 @@ struct Gfx {
     working_pending: std::collections::HashSet<WorkingKey>,
     /// batch ที่จะวาดเฟรมนี้ — เก็บไว้เป็นฟิลด์เพื่อไม่ต้องจองใหม่ทุกเฟรม
     working_quads: Vec<(WorkingKey, QuadInstance)>,
+    /// ★ มุมมอง Arrange + virtual scrolling (P3-3) — ดู `crate::arrange`
+    ///
+    /// แยกจาก `camera`/`quads` ของ Canvas ทั้งชุด เพราะสองโหมดเป็น **สอง view
+    /// บนเอกสารก้อนเดียวกัน** (ARCHITECTURE §4) สลับไปมาต้องไม่ลากตำแหน่งของกันและกัน
+    arrange: crate::arrange::ArrangeView,
+    /// instance ของแถบที่ Arrange ต้องวาดเฟรมนี้ — ★ ไม่ใช่ทั้ง board
+    ///
+    /// ถือเป็นฟิลด์เพื่อไม่จองใหม่ทุกเฟรม (CLAUDE.md: ห้ามสร้าง buffer ใหม่ทุกเฟรม)
+    arrange_quads: Vec<QuadInstance>,
     /// กล้อง pan/zoom (P0-7)
     camera: Camera,
     /// ปุ่มค้าง (Ctrl/Shift/Alt) ล่าสุด — winit ส่งมาแยก event ไม่ได้แนบมากับปุ่ม
@@ -574,6 +589,8 @@ struct CanvasView<'a> {
     guides: &'a [refx_core::align::Guide],
     /// ไม้บรรทัดที่วางอยู่ (P2-10) — `None` = ไม่มีอะไรให้วาด
     measure: Option<refx_core::pick::Measurement>,
+    /// โหมดที่กำลังวาด (P3-3) — Arrange ไม่มีของประดับชั้น egui เลย
+    mode: Mode,
 }
 
 /// สิ่งที่การประมวลผล input หนึ่งเฟรมได้ออกมา
@@ -763,9 +780,20 @@ impl RefxApp {
             tool,
             guides,
             measure,
+            mode,
         } = view;
         let response = ui.allocate_response(ui.available_size(), egui::Sense::click_and_drag());
         let rect = response.rect;
+
+        // ★ เก็บ input ให้เสร็จก่อน **แล้วค่อยวาด** — ทำให้ Arrange ออกตรงนี้ได้เลย
+        //   โดยไม่ต้องมีเงื่อนไข `if mode` โรยไว้ทุกบล็อกของการวาด (ซึ่งเป็นแบบที่
+        //   คนเพิ่มบล็อกใหม่ทีหลังจะลืมใส่ แล้วกรอบของ Canvas จะไปโผล่บน contact sheet)
+        let frame_input = Self::collect_canvas_input(ui, &response, rect);
+        if mode == Mode::Arrange {
+            // แผ่น Arrange ถูกวาดด้วย quad pipeline ทั้งหมด (ดู `plan_arrange`)
+            // ยังไม่มีของประดับชั้น egui — กรอบเลือก/handle/ไกด์เป็นของ Canvas
+            return frame_input;
+        }
 
         // world → point: renderer แปลง world → **physical pixel** ด้วยตัวคูณ `zoom`
         // การวาดทับด้วย egui อยู่ในหน่วย point จึงต้องหารด้วย pixels_per_point
@@ -924,6 +952,19 @@ impl RefxApp {
             );
         }
 
+        frame_input
+    }
+
+    /// เก็บสิ่งที่ egui รายงานในเฟรมนี้ — **ไม่วาดอะไรเลย**
+    ///
+    /// แยกออกมาเพื่อให้ทั้งสองโหมดใช้ตัวเดียวกัน (P3-3): ล้อ/ปุ่ม/เคอร์เซอร์
+    /// ถูกอ่านเหมือนกันทุกโหมด ต่างกันที่ **ใครเอาไปทำอะไร** ซึ่งอยู่ที่
+    /// `apply_canvas_input` — Canvas ซูม/เลือก · Arrange เลื่อนแผ่น
+    fn collect_canvas_input(
+        ui: &egui::Ui,
+        response: &egui::Response,
+        rect: egui::Rect,
+    ) -> CanvasFrameInput {
         let (scroll, modifiers) = ui.ctx().input(|i| {
             (
                 i.smooth_scroll_delta.y,
@@ -1128,6 +1169,7 @@ impl RefxApp {
     #[must_use]
     pub fn new(args: AppArgs) -> Self {
         let lang = args.lang.unwrap_or_else(Lang::from_system);
+        let mode = args.mode.unwrap_or_default();
         Self {
             gfx: None,
             args,
@@ -1138,6 +1180,7 @@ impl RefxApp {
                 // ★ อ่าน locale ของ OS ครั้งเดียวตอนเปิดโปรแกรม (docs/03 §0 ข้อ 3)
                 //   ไม่รู้จักภาษา → อังกฤษ · P5-3 จะให้ผู้ใช้เลือกทับได้
                 lang,
+                mode,
                 ..crate::shell::ShellState::default()
             },
             assets: None,
@@ -1826,12 +1869,15 @@ impl RefxApp {
     /// ★ คืน `pick` ออกไปแทนที่จะยิงงานเอง เพราะฟังก์ชันนี้ยืมแค่ `gfx` ส่วน
     /// decode pool อยู่ที่ `self.assets` — และการคืนค่าออกไปทำให้ **ไม่มีสถานะ
     /// ค้างระหว่างเฟรม** ที่ต้องมีใครจำไปเก็บให้ถูกจังหวะ (`docs/08 §3.9` ข้อ 8)
-    fn apply_canvas_input(gfx: &mut Gfx, input: CanvasFrameInput) -> CanvasOutcome {
+    fn apply_canvas_input(gfx: &mut Gfx, input: CanvasFrameInput, mode: Mode) -> CanvasOutcome {
         let mut out = CanvasOutcome::default();
         let changed = &mut out.redraw;
         let rect = input.rect;
         if !rect.is_positive() {
             return out;
+        }
+        if mode == Mode::Arrange {
+            return Self::apply_arrange_input(gfx, input);
         }
 
         // ---- กล้อง: ปุ่มกลางลาก + ล้อซูม ----
@@ -1963,6 +2009,27 @@ impl RefxApp {
         }
         out
     }
+    /// input ของโหมด Arrange — **ล้อคือการเลื่อน ไม่ใช่การซูม** (P3-3)
+    ///
+    /// ★ ตั้งใจให้ต่างจาก Canvas: contact sheet มีขนาดช่องที่มาจากความกว้างของจอ
+    /// ไม่ใช่จากระดับซูม · ล้อที่ซูมในตารางแบบนี้เป็นสิ่งที่ไม่มีโปรแกรมไหนทำ
+    ///
+    /// ★★ คืน `redraw = true` **เฉพาะตอนตำแหน่งขยับจริง** — หมุนล้อค้างที่สุดขอบ
+    /// ต้องไม่ทำให้โปรแกรมวาดใหม่ไปเรื่อย ๆ (I-1)
+    fn apply_arrange_input(gfx: &mut Gfx, input: CanvasFrameInput) -> CanvasOutcome {
+        let mut out = CanvasOutcome::default();
+        // ระยะจาก egui เป็น point — แผ่นคิดเป็น physical pixel เหมือนกล้องของ Canvas
+        let ppp = gfx.egui_ctx.pixels_per_point();
+        if input.scroll.abs() > f32::EPSILON {
+            out.redraw |= gfx.arrange.scroll_by(input.scroll * ppp);
+        }
+        // ปุ่มกลางลาก = เลื่อนแผ่น (ท่าเดียวกับ pan ของ Canvas ผู้ใช้จะลองท่านี้แน่ ๆ)
+        if input.pan_delta.y.abs() > f32::EPSILON {
+            out.redraw |= gfx.arrange.scroll_by(input.pan_delta.y * ppp);
+        }
+        out
+    }
+
     /// สั่ง worker ไปอ่านสีของ pixel ต้นฉบับหนึ่งจุด (P2-10)
     ///
     /// คืนคีย์ของงานที่ส่งไป — `None` เมื่อไม่มีอะไรให้อ่าน (ผู้ใช้เห็นเหตุผลบน status bar)
@@ -2662,6 +2729,73 @@ impl RefxApp {
                 gfx.quads.push(quad);
             }
         }
+        // ★ ประตูเดียวที่รู้ว่า board เปลี่ยน จึงเป็นที่เดียวที่บอกแผ่น Arrange ว่าเก่าแล้ว
+        //   (P3-4 จะเปลี่ยนไปเทียบ `board.revision` ตาม docs/03 §3)
+        //   ★★ ไม่ใช่ตาข่ายเดียว: `ArrangeView::plan` เทียบจำนวน item เองด้วย
+        //      เผื่อวันที่มีคนเพิ่มเส้นทางแก้ board แล้วไม่ผ่านที่นี่ (docs/08 §3.9 ข้อ 8)
+        gfx.arrange.invalidate();
+    }
+
+    /// เตรียมแถบที่ Arrange ต้องวาดเฟรมนี้ (P3-3)
+    ///
+    /// ★★ **นี่คือที่ที่ "10,000 ใบ วาดจริง < 60" เกิดขึ้นจริง** — `arrange_quads`
+    /// ถูกสร้างจาก `arrange.visible()` เท่านั้น ซึ่งเป็นชุดที่ทับจอ + กันชนบนล่าง
+    /// ที่เหลืออีกเกือบหมื่นใบ **ไม่ถูกแตะเลยแม้แต่ครั้งเดียวต่อเฟรม**
+    ///
+    /// ★ ใช้ `quad_for` ตัวเดียวกับ Canvas โดยยัดเรขาคณิตของแผ่นลง `ItemCanvas`
+    /// ชั่วคราว — ถ้าเขียนสูตรวาดขึ้นใหม่ที่นี่ วันหนึ่งสองทางจะเพี้ยนจากกัน
+    /// (บทเรียนเดิมของ `flip` ที่ไม่ถึงทาง working texture — HANDOFF §2.7)
+    fn plan_arrange(gfx: &mut Gfx, ppp: f32) {
+        let viewport = gfx.canvas.size;
+        let count = gfx.board.len();
+        {
+            let board = &gfx.board;
+            let render_state = &gfx.render_state;
+            gfx.arrange.plan(viewport, ppp, count, || {
+                board
+                    .items_in_z_order()
+                    .map(|(id, item)| {
+                        // ★ สัดส่วนมาจาก **ภาพต้นฉบับ** ไม่ใช่จาก `ItemCanvas`
+                        //   ผู้ใช้ที่ย่อ/ยืดภาพบน canvas ไว้ต้องยังเห็นสัดส่วนจริง
+                        //   ใน contact sheet · ไม่มี thumbnail (โน้ต) → ใช้กรอบของมันเอง
+                        let aspect = render_state
+                            .get(&id)
+                            .map(|state| {
+                                Vec2::new(
+                                    state.thumb.source_width as f32,
+                                    state.thumb.source_height as f32,
+                                )
+                            })
+                            .unwrap_or(item.canvas.size);
+                        (id, aspect)
+                    })
+                    .collect()
+            });
+        }
+
+        gfx.arrange_quads.clear();
+        for placed in gfx.arrange.visible() {
+            let Some(item) = gfx.board.item(placed.id) else {
+                continue;
+            };
+            let Some(state) = gfx.render_state.get(&placed.id) else {
+                // โน้ตข้อความไม่มี pixel ให้วาด — มันเป็น item เต็มตัวบน canvas
+                // แต่ใน contact sheet ยังไม่มีรูปแบบของตัวเอง (รอ P3-7)
+                continue;
+            };
+            // ★ `rotation` ถูกตัดออกโดยตั้งใจ: Arrange เป็นตาราง ไม่ใช่ระนาบอิสระ
+            //   ส่วน crop/flip/filter/opacity ยังติดมา เพราะนั่นคือ "ภาพของผู้ใช้"
+            //   ที่เขาแต่งไว้ — **ไม่มีอะไรถูกเขียนกลับลง board** (docs/03 §4.3)
+            let canvas = ItemCanvas {
+                pos: placed.centre(),
+                size: placed.size,
+                rotation: 0.0,
+                ..item.canvas
+            };
+            if let Some(quad) = Self::quad_for(&canvas, state) {
+                gfx.arrange_quads.push(quad);
+            }
+        }
     }
 
     /// อัด thumbnail ของทุก item กลับขึ้น atlas ที่เพิ่งสร้างใหม่
@@ -2812,6 +2946,8 @@ impl AppDelegate for RefxApp {
             working,
             working_pending: std::collections::HashSet::new(),
             working_quads: Vec::new(),
+            arrange: crate::arrange::ArrangeView::new(),
+            arrange_quads: Vec::new(),
             // เริ่มที่กลาง world ของ demo เพื่อให้เห็นสี่เหลี่ยมทันทีที่เปิด
             camera: Camera::new(Vec2::splat(2000.0), 0.25),
             canvas: CanvasRect::full(size.width, size.height),
@@ -2884,7 +3020,13 @@ impl AppDelegate for RefxApp {
         // เก็บผล decode ที่เสร็จแล้วก่อนวาด (ไม่บล็อก)
         self.drain_decode_results();
         // ★ ตัดสินใจเรื่อง working texture ก่อนวาด — ใช้กล้อง/กรอบของเฟรมที่แล้ว
-        self.plan_working_textures();
+        //
+        //   ★★ **เฉพาะโหมด Canvas** (P3-3): ใน Arrange ภาพถูกตรึงไว้ที่ขนาด
+        //   thumbnail จึงไม่มีใบไหน "ซูมเข้าจนเห็นชัด" · ถ้าปล่อยให้ทำงานที่
+        //   10,000 ใบ มันจะสั่ง decode ภาพเต็มให้ของที่ผู้ใช้ไม่ได้มองอยู่ด้วยซ้ำ
+        if self.shell.mode == Mode::Canvas {
+            self.plan_working_textures();
+        }
 
         let status = self.gfx.as_mut()?.render.acquire_frame();
 
@@ -3012,7 +3154,7 @@ impl AppDelegate for RefxApp {
             let measure = gfx.select_tool.measurement();
             shell.measured = measure;
             egui_ctx.run_ui(raw_input, |ui| {
-                canvas_points = crate::shell::draw_in_ui(ui, shell, |ui| {
+                canvas_points = crate::shell::draw_in_ui(ui, shell, |ui, mode| {
                     // ช่องกลางคือ canvas — ภาพวาดด้วย wgpu ใต้ egui อีกที
                     // ★ เป็น widget จริงแล้ว egui จึงจัดลำดับ pointer ให้เอง
                     canvas_input = Self::canvas_widget(
@@ -3026,12 +3168,15 @@ impl AppDelegate for RefxApp {
                             tool,
                             guides,
                             measure,
+                            mode,
                         },
                     );
                 });
             })
         };
-        let canvas_outcome = Self::apply_canvas_input(gfx, canvas_input);
+        // ★ `shell.mode` ตอนนี้คือโหมดที่ **ช่องกลางเพิ่งวาดไปจริง ๆ** — toolbar
+        //   ถูกวาดก่อนช่องกลางเสมอ ค่าจึงอัปเดตแล้วตั้งแต่ก่อน widget ทำงาน
+        let canvas_outcome = Self::apply_canvas_input(gfx, canvas_input, shell.mode);
         if canvas_outcome.redraw {
             gfx.window.request_redraw();
         }
@@ -3070,6 +3215,20 @@ impl AppDelegate for RefxApp {
         //   ซึ่งเยื้องจากกลางช่อง canvas ไปทางซ้ายบน แล้วภาพส่วนหนึ่งจะไปอยู่ใต้ panel
         gfx.canvas =
             CanvasRect::from_points(canvas_points, full_output.pixels_per_point, width, height);
+
+        // ★ Arrange: จัดแผ่น (ถ้าจำเป็น) แล้วเลือกเฉพาะแถบที่อยู่ในจอ — P3-3
+        //   ต้องอยู่ **หลัง** `gfx.canvas` เพราะขนาดช่องกลางคือความกว้างของแผ่น
+        if shell.mode == Mode::Arrange {
+            Self::plan_arrange(gfx, full_output.pixels_per_point);
+            // ★ ตัวเลขบน status bar เป็นหลักฐานของเกณฑ์ "วาดจริง < 60"
+            //   มันถูกวาดไปแล้วในเฟรมนี้ จึงต้องขอเฟรมอีกหนึ่งเฟรมเมื่อค่าเปลี่ยน
+            //   — ลู่เข้าเสมอ (เฟรมถัดไปค่าตรงกันแล้วก็หยุด) จึงไม่ขัด I-1
+            let counts = gfx.arrange.counts();
+            if shell.arrange != counts {
+                shell.arrange = counts;
+                gfx.window.request_redraw();
+            }
+        }
         let screen = egui_wgpu::ScreenDescriptor {
             size_in_pixels: [width, height],
             pixels_per_point: full_output.pixels_per_point,
@@ -3119,8 +3278,23 @@ impl AppDelegate for RefxApp {
             // egui-wgpu 0.34 ต้องการ RenderPass<'static>
             let mut pass = pass.forget_lifetime();
 
-            // [1] ภาพทั้งหมด (instanced quad) — วาดก่อน UI เสมอ
-            if !gfx.quads.is_empty() {
+            // [1] ภาพ (instanced quad) — วาดก่อน UI เสมอ
+            //
+            // ★★ สองโหมดใช้ **ชุด instance และกล้องคนละชุด** (P3-3):
+            //    Canvas วาดทั้ง board ตามลำดับ z · Arrange วาดเฉพาะแถบที่อยู่ในจอ
+            //    (ที่ 10,000 ใบต่างกันระหว่าง 10,000 instance กับ ~24 instance)
+            let arrange_mode = shell.mode == Mode::Arrange;
+            let instances: &[QuadInstance] = if arrange_mode {
+                &gfx.arrange_quads
+            } else {
+                &gfx.quads
+            };
+            let camera = if arrange_mode {
+                gfx.arrange.camera()
+            } else {
+                gfx.camera
+            };
+            if !instances.is_empty() {
                 // ★ จำกัดการวาดไว้ในช่อง canvas เท่านั้น ไม่ให้ล้นไปใต้ panel
                 //   egui ตั้ง viewport กลับเป็นเต็มจอเองตอนเริ่ม render() จึงไม่ต้องคืนค่า
                 pass.set_viewport(
@@ -3134,7 +3308,7 @@ impl AppDelegate for RefxApp {
                 let viewport = gfx.canvas.size;
                 gfx.pipeline.set_camera(
                     gfx.render.queue(),
-                    CameraUniform::from_affine(gfx.camera.to_clip_affine(viewport))
+                    CameraUniform::from_affine(camera.to_clip_affine(viewport))
                         // ★ สวิตช์ `G` ทั้ง board เดินทางมาถึง GPU ผ่านช่องนี้ช่องเดียว
                         .with_grayscale(shell.board_grayscale),
                 );
@@ -3145,24 +3319,31 @@ impl AppDelegate for RefxApp {
                 //   ยังมาไม่ถึง ผู้ใช้จะเห็นภาพเบลอ ไม่ใช่ช่องว่าง (docs/04 §8)
                 let mut batches: Vec<DrawBatch<'_>> = vec![DrawBatch {
                     bind_group: gfx.atlas.bind_group(),
-                    instances: &gfx.quads,
+                    instances,
                 }];
-                let sharp: Vec<QuadInstance> = gfx
-                    .working_quads
-                    .iter()
-                    // uv/layer ถูกตั้งไว้ตั้งแต่ `plan_working_textures` แล้ว (รวมกรอบ crop)
-                    .map(|(_, quad)| *quad)
-                    .collect();
-                // อัปเดต LRU ก่อน แล้วค่อยเก็บ reference ไปวาด — ยืมคนละแบบ
-                for (key, _) in &gfx.working_quads {
-                    gfx.working.touch(*key);
-                }
-                for (index, (key, _)) in gfx.working_quads.iter().enumerate() {
-                    if let Some(bind_group) = gfx.working.bind_group(*key) {
-                        batches.push(DrawBatch {
-                            bind_group,
-                            instances: &sharp[index..=index],
-                        });
+                // ★ ชั้น B เป็นของ Canvas เท่านั้น — Arrange ตรึง zoom ไว้ที่ระดับ
+                //   thumbnail จึงไม่มีวันต้องใช้ภาพคมกว่า atlas (ดู `plan_working_textures`)
+                let sharp: Vec<QuadInstance> = if arrange_mode {
+                    Vec::new()
+                } else {
+                    gfx.working_quads
+                        .iter()
+                        // uv/layer ถูกตั้งไว้ตั้งแต่ `plan_working_textures` แล้ว (รวมกรอบ crop)
+                        .map(|(_, quad)| *quad)
+                        .collect()
+                };
+                if !arrange_mode {
+                    // อัปเดต LRU ก่อน แล้วค่อยเก็บ reference ไปวาด — ยืมคนละแบบ
+                    for (key, _) in &gfx.working_quads {
+                        gfx.working.touch(*key);
+                    }
+                    for (index, (key, _)) in gfx.working_quads.iter().enumerate() {
+                        if let Some(bind_group) = gfx.working.bind_group(*key) {
+                            batches.push(DrawBatch {
+                                bind_group,
+                                instances: &sharp[index..=index],
+                            });
+                        }
                     }
                 }
                 let calls = gfx
@@ -3196,12 +3377,22 @@ impl AppDelegate for RefxApp {
                 return Some(RedrawReason::Animation);
             }
             self.bench_done = true;
-            let (quads, present) = self
-                .gfx
-                .as_ref()
-                .map_or((0, wgpu::PresentMode::AutoVsync), |g| {
-                    (g.quads.len(), g.render.present_mode())
-                });
+            // ★ ต้องรายงานจำนวน instance ที่ **วาดจริงในโหมดนี้** ไม่ใช่ `quads` เสมอ
+            //   ใน Arrange ตัวที่วาดคือแถบที่อยู่ในจอ (P3-3) — รายงาน `quads`
+            //   ตรงนั้นจะพิมพ์ "3072" ทั้งที่วาดจริง 28 ใบ ซึ่งเป็นตัวเลขที่โกหก
+            //   แล้วคนอ่านผลจะเทียบสองโหมดผิดทั้งหมด (docs/08 §3.9 ข้อ 9)
+            let arrange_mode = self.shell.mode == Mode::Arrange;
+            let (quads, present) =
+                self.gfx
+                    .as_ref()
+                    .map_or((0, wgpu::PresentMode::AutoVsync), |g| {
+                        let drawn = if arrange_mode {
+                            g.arrange_quads.len()
+                        } else {
+                            g.quads.len()
+                        };
+                        (drawn, g.render.present_mode())
+                    });
             self.stats.report(quads, present);
             return None;
         }
@@ -3488,7 +3679,7 @@ mod tests {
                     ..Default::default()
                 };
                 let _ = ctx.run_ui(input, |ui| {
-                    let _ = crate::shell::draw_in_ui(ui, &mut state, |ui| {
+                    let _ = crate::shell::draw_in_ui(ui, &mut state, |ui, _mode| {
                         let got = RefxApp::canvas_widget(
                             ui,
                             CanvasView {
@@ -3500,6 +3691,7 @@ mod tests {
                                 tool: Tool::Select,
                                 guides: &[],
                                 measure: None,
+                                mode: Mode::Canvas,
                             },
                         );
                         seen = got.pointer.is_some();
@@ -3569,7 +3761,7 @@ mod tests {
                 ..Default::default()
             };
             let _ = ctx.run_ui(input, |ui| {
-                let _ = crate::shell::draw_in_ui(ui, &mut state, |ui| {
+                let _ = crate::shell::draw_in_ui(ui, &mut state, |ui, _mode| {
                     let got = RefxApp::canvas_widget(
                         ui,
                         CanvasView {
@@ -3581,6 +3773,7 @@ mod tests {
                             tool: Tool::Select,
                             guides: &[],
                             measure: None,
+                            mode: Mode::Canvas,
                         },
                     );
                     if got.primary_pressed {
@@ -3886,7 +4079,7 @@ mod tests {
                 ..Default::default()
             };
             let output = ctx.run_ui(input, |ui| {
-                let _ = crate::shell::draw_in_ui(ui, &mut state, |ui| {
+                let _ = crate::shell::draw_in_ui(ui, &mut state, |ui, _mode| {
                     let _ = RefxApp::canvas_widget(
                         ui,
                         CanvasView {
@@ -3898,6 +4091,7 @@ mod tests {
                             tool,
                             guides: &[],
                             measure: None,
+                            mode: Mode::Canvas,
                         },
                     );
                 });

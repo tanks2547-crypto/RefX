@@ -16,7 +16,7 @@
 use libfuzzer_sys::fuzz_target;
 use refx_core::arena::{ArenaKey as _, ItemId};
 use refx_core::glam::Vec2;
-use refx_core::layout::{Engine, LayoutParams, MAX_SIDE, MIN_SIDE, layout};
+use refx_core::layout::{Engine, LayoutParams, MAX_COORD, MAX_SIDE, MIN_SIDE, layout};
 
 /// อ่าน f32 หนึ่งตัวจากไบต์ดิบ — **ตั้งใจให้ได้ `NaN`/`inf` บ่อย ๆ**
 ///
@@ -78,6 +78,13 @@ fuzz_target!(|data: &[u8]| {
         assert!(
             p.top_left.is_finite(),
             "ตำแหน่งไม่ finite: {:?} (engine {engine:?})",
+            p.top_left
+        );
+        // ★ เพดานของ *ตำแหน่ง* คือ `MAX_COORD` ไม่ใช่ `MAX_SIDE` (แยกกันตอน P3-3)
+        //   assert ด้วยค่าคงของสัญญาเสมอ ห้ามเขียนเลขซ้ำที่นี่ (HANDOFF §4 ข้อ 21)
+        assert!(
+            p.top_left.x.abs() <= MAX_COORD && p.top_left.y.abs() <= MAX_COORD,
+            "ตำแหน่งเกินเพดาน: {:?} (engine {engine:?})",
             p.top_left
         );
         // ★★ assert สัญญาจริง (`>= MIN_SIDE`) ไม่ใช่แค่ `> 0.0`

@@ -192,6 +192,12 @@ pub struct ShellState {
     /// ผู้ใช้ออกจากช่องข้อความแล้ว → ปิดหน้าต่าง merge (undo ขั้นใหม่)
     pub note_sealed: bool,
 
+    /// ★★ ตัวเลขของ virtual scrolling ในเฟรมล่าสุด (P3-3)
+    ///
+    /// เกณฑ์ของ ROADMAP คือ **"10,000 item · วาดจริง < 60 ตัว"** ซึ่งเป็นตัวเลข
+    /// ไม่ใช่คำกล่าวอ้าง — มันจึงต้องอยู่บน status bar ให้เห็นด้วยตาเหมือน
+    /// `atlas_uploads` ที่เป็นหลักฐานของเกณฑ์ P2-8 (docs/08 §3.9 ข้อ 6)
+    pub arrange: crate::arrange::Counts,
     /// ★ ข้อมูลฝั่ง Arrange ของสิ่งที่เลือกอยู่ (P3-1) — `None` = ไม่ได้เลือกอะไร
     pub meta: Option<MetaView>,
     /// ★★ สิ่งที่ผู้ใช้ขอแก้ในเฟรมนี้ — `None` = ไม่ได้แตะ
@@ -296,6 +302,7 @@ impl Default for ShellState {
             note: None,
             note_edit: None,
             note_sealed: false,
+            arrange: crate::arrange::Counts::default(),
             meta: None,
             meta_request: None,
             meta_sealed: false,
@@ -314,11 +321,16 @@ impl Default for ShellState {
 ///
 /// คืน **rect ของช่องกลาง (หน่วย point)** — ผู้เรียกต้องใช้ค่านี้ตั้ง viewport
 /// ของ render pass และเป็นกรอบอ้างอิงของกล้อง ไม่ใช่ขนาดหน้าต่างทั้งบาน
+///
+/// ★ `viewport` ได้รับ [`Mode`] **ที่จะวาดจริงในเฟรมนี้** ส่งเข้าไปด้วย (P3-3)
+/// ปุ่มสลับโหมดอยู่บน toolbar ซึ่งถูกวาด *ก่อน* ช่องกลางเสมอ ผู้เรียกที่อ่าน
+/// `state.mode` ไว้ก่อนเรียกฟังก์ชันนี้จะได้ค่า **เก่าไปหนึ่งเฟรม** ในเฟรมที่ผู้ใช้
+/// เพิ่งกดสลับ แล้ววาดของประดับของอีกโหมดทับลงไป
 #[must_use = "ต้องเอา rect ไปตั้ง viewport ของ canvas ไม่งั้นภาพจะเยื้อง"]
 pub fn draw_in_ui(
     ui: &mut egui::Ui,
     state: &mut ShellState,
-    viewport: impl FnOnce(&mut egui::Ui),
+    viewport: impl FnOnce(&mut egui::Ui, Mode),
 ) -> egui::Rect {
     // ★ อ่านครั้งเดียวต้นเฟรม — ทุก widget ข้างล่างใช้ค่าเดียวกัน
     let lang = state.lang;
@@ -420,6 +432,23 @@ pub fn draw_in_ui(
                 Template::ItemCount,
                 &[("n", &state.item_count.to_string())],
             ));
+            // ★★ หลักฐานของเกณฑ์ P3-3 ที่เห็นได้ด้วยตา — "10,000 ใบ วาดจริง < 60"
+            //    โชว์เฉพาะโหมด Arrange เพราะเป็นตัวเลขของ virtual scrolling
+            //    (Canvas วาดทั้ง board อยู่แล้ว ตัวเลขจะไม่มีความหมายที่นั่น)
+            if state.mode == Mode::Arrange {
+                ui.separator();
+                let arrange = state.arrange;
+                ui.label(text::fill(
+                    lang,
+                    Template::ArrangeDrawn,
+                    &[
+                        ("drawn", &arrange.in_band.to_string()),
+                        ("view", &arrange.in_view.to_string()),
+                        ("total", &arrange.total.to_string()),
+                        ("examined", &arrange.examined.to_string()),
+                    ],
+                ));
+            }
             ui.separator();
             ui.label(text::fill(
                 lang,
@@ -551,9 +580,10 @@ pub fn draw_in_ui(
     //   — อาการนี้เกิดจริงตั้งแต่ P0-6 และไม่มี log ไหนจับได้เลยเพราะการวาดสำเร็จหมด
     //
     //   (egui 0.34: `Frame::none()` ถูก deprecate แล้ว ต้องใช้ `Frame::NONE`)
+    let mode = state.mode;
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE)
-        .show_inside(ui, |ui| viewport(ui))
+        .show_inside(ui, |ui| viewport(ui, mode))
         .response
         .rect
 }
@@ -947,7 +977,7 @@ mod tests {
                 ..Default::default()
             };
             let _ = ctx.run_ui(input, |ui| {
-                let _ = draw_in_ui(ui, &mut state, |_| {});
+                let _ = draw_in_ui(ui, &mut state, |_, _| {});
             });
             assert!(
                 state.appearance_edit.is_none(),
@@ -978,7 +1008,7 @@ mod tests {
                 ..Default::default()
             };
             let _ = ctx.run_ui(input, |ui| {
-                let _ = draw_in_ui(ui, &mut state, |_| {});
+                let _ = draw_in_ui(ui, &mut state, |_, _| {});
             });
             assert!(
                 state.note_edit.is_none(),
@@ -1006,7 +1036,7 @@ mod tests {
             ..Default::default()
         };
         let _ = ctx.run_ui(input, |ui| {
-            let _ = draw_in_ui(ui, &mut state, |_| {});
+            let _ = draw_in_ui(ui, &mut state, |_, _| {});
         });
         assert!(state.note_edit.is_none());
         assert!(!state.note_sealed);
@@ -1040,7 +1070,7 @@ mod tests {
                 ..Default::default()
             };
             let _ = ctx.run_ui(input, |ui| {
-                let _ = draw_in_ui(ui, &mut state, |_| {});
+                let _ = draw_in_ui(ui, &mut state, |_, _| {});
             });
             assert!(
                 state.meta_request.is_none(),
@@ -1068,7 +1098,7 @@ mod tests {
             ..Default::default()
         };
         let _ = ctx.run_ui(input, |ui| {
-            let _ = draw_in_ui(ui, &mut state, |_| {});
+            let _ = draw_in_ui(ui, &mut state, |_, _| {});
         });
         assert!(state.meta_request.is_none());
         assert!(!state.meta_sealed);
@@ -1124,7 +1154,7 @@ mod tests {
                 ..Default::default()
             };
             let output = ctx.run_ui(input, |ui| {
-                canvas = draw_in_ui(ui, &mut state, |ui| {
+                canvas = draw_in_ui(ui, &mut state, |ui, _mode| {
                     ui.allocate_space(ui.available_size());
                 });
             });

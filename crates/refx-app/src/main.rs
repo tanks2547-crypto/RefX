@@ -48,6 +48,14 @@ fn parse_cli() -> Result<Cli, String> {
                     ));
                 }
             });
+        } else if let Some(value) = arg.strip_prefix("--mode=") {
+            cli.args.mode = Some(match value {
+                "canvas" => refx_core::view::Mode::Canvas,
+                "arrange" => refx_core::view::Mode::Arrange,
+                other => {
+                    return Err(format!("--mode รู้จักแค่ canvas กับ arrange แต่ได้ {other:?}"));
+                }
+            });
         } else if let Some(value) = arg.strip_prefix("--open-dir=") {
             // สแกนโฟลเดอร์ตอนเริ่มโปรแกรม (ไม่ใช่ในลูปเฟรม) — ไม่ขัด I-2
             cli.args.open_files = scan_images(std::path::Path::new(value))?;
@@ -102,6 +110,8 @@ RefX — โปรแกรมจัดการภาพ reference สำหร
       --open-dir=PATH                  เปิดไฟล์ภาพทั้งโฟลเดอร์ (เหมือนลากเข้ามา)
       --demo-quads=N                   วาดสี่เหลี่ยมสีสุ่ม N อัน (ทดสอบ pipeline/pan-zoom)
       --bench-seconds=S                วัด frame time ต่อเนื่อง S วินาทีแล้วรายงานผล
+      --mode=canvas|arrange            โหมดที่เปิดขึ้นมา (ไม่ใส่ = Canvas)
+                                       มีไว้ให้วัด/ถ่ายภาพโหมด Arrange ได้โดยไม่ต้องกดปุ่มก่อน
 
 ตัวเลือกสำหรับทดสอบ (ต้อง build ด้วย --features force-device-lost):
       --force-device-lost-after=N      จำลอง GPU device lost หลังวาดครบ N เฟรม
