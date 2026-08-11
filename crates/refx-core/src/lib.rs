@@ -25,6 +25,7 @@ pub mod interact; // เครื่องสถานะของการเ�
 pub mod layout; // layout engines — pure functions, deterministic
 pub mod panic_guard; // ธงบอก panic hook ว่า panic นี้ถูกดักไว้แล้ว (I-7)
 pub mod pick; // color picker (world → pixel ต้นฉบับ) + measure — pure functions
+pub mod query; // sort + filter ของ Arrange — pure functions, deterministic
 pub mod selection;
 pub mod spatial; // loose uniform grid: culling + hit-test
 pub mod view; // Camera, ViewState, Mode

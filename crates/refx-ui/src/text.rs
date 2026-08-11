@@ -176,6 +176,32 @@ pub enum Key {
     RemoveTagHint,
     /// โน้ตของ metadata
     MetaNote,
+
+    // ---- P3-4: sort + filter ของ Arrange ----
+    /// เรียงตามเวลาที่เพิ่ม
+    SortAddedAt,
+    /// เรียงตามชื่อไฟล์
+    SortName,
+    /// เรียงตามดาว
+    SortRating,
+    /// เรียงตามป้ายสี
+    SortColorLabel,
+    /// เรียงตามสัดส่วนภาพ
+    SortAspect,
+    /// น้อยไปมาก
+    SortAscending,
+    /// มากไปน้อย
+    SortDescending,
+    /// ไม่กรอง (ตัวเลือกในรายการ)
+    FilterAny,
+    /// ข้อความจาง ๆ ในช่องคำค้น
+    FilterSearchHint,
+    /// ล้างตัวกรองทั้งหมด
+    FilterClear,
+    /// ดาวขั้นต่ำ
+    FilterMinRating,
+    /// เฉพาะที่ปักหมุด
+    FilterPinnedOnly,
 }
 
 /// ข้อความภาษาอังกฤษ — **ต้องมีครบทุก key เสมอ** (เป็นตัวสำรองสุดท้าย)
@@ -237,6 +263,18 @@ fn en(key: Key) -> &'static str {
         Key::AddTagHint => "New tag",
         Key::RemoveTagHint => "Click to remove this tag",
         Key::MetaNote => "Note",
+        Key::SortAddedAt => "Date added",
+        Key::SortName => "File name",
+        Key::SortRating => "Rating",
+        Key::SortColorLabel => "Colour label",
+        Key::SortAspect => "Aspect ratio",
+        Key::SortAscending => "Low to high",
+        Key::SortDescending => "High to low",
+        Key::FilterAny => "Any",
+        Key::FilterSearchHint => "Search name or note",
+        Key::FilterClear => "Clear",
+        Key::FilterMinRating => "Stars",
+        Key::FilterPinnedOnly => "Pinned only",
     }
 }
 
@@ -299,6 +337,18 @@ fn th(key: Key) -> Option<&'static str> {
         Key::AddTagHint => "แท็กใหม่",
         Key::RemoveTagHint => "กดเพื่อถอดแท็กนี้",
         Key::MetaNote => "โน้ต",
+        Key::SortAddedAt => "เวลาที่เพิ่ม",
+        Key::SortName => "ชื่อไฟล์",
+        Key::SortRating => "ดาว",
+        Key::SortColorLabel => "ป้ายสี",
+        Key::SortAspect => "สัดส่วนภาพ",
+        Key::SortAscending => "น้อยไปมาก",
+        Key::SortDescending => "มากไปน้อย",
+        Key::FilterAny => "ทั้งหมด",
+        Key::FilterSearchHint => "ค้นชื่อไฟล์หรือโน้ต",
+        Key::FilterClear => "ล้าง",
+        Key::FilterMinRating => "ดาว",
+        Key::FilterPinnedOnly => "เฉพาะที่ปักหมุด",
     })
 }
 
@@ -352,6 +402,11 @@ pub enum Template {
     OpeningFiles,
     /// `{n}` `{ms}` — สรุปเวลาหลังเปิดไฟล์ครบ
     OpenedFiles,
+    /// `{shown}` `{total}` — ตัวกรองซ่อนบางใบอยู่ (P3-4)
+    ///
+    /// ★ ต้องเห็นได้เสมอตอนกรองอยู่ — ผู้ใช้ที่มองหาภาพที่ "หายไป" ต้องรู้ทันที
+    /// ว่ามันถูกกรอง ไม่ใช่หาย (ไม่งั้นเขาจะสรุปว่าโปรแกรมทำงานหาย)
+    FilterShowing,
     /// `{capacity}` `{rejected}` `{requested}` — board เต็ม เพิ่มไม่ครบ (ROADMAP P3-3)
     ///
     /// ★ ต้องบอก **สิ่งที่เกิดขึ้น + สิ่งที่ทำได้ต่อ** (CLAUDE.md) — ผู้ใช้ที่ลาก
@@ -416,6 +471,7 @@ fn template_en(template: Template) -> &'static str {
         Template::Loading => "Loading {done} / {total}",
         Template::OpeningFiles => "Opening {n} files…",
         Template::OpenedFiles => "Opened {n} files in {ms} ms",
+        Template::FilterShowing => "showing {shown} of {total}",
         Template::BoardFull => {
             "This board is full at {capacity} images — {rejected} of the {requested} you opened could not be added. Try splitting them across several boards."
         }
@@ -508,6 +564,7 @@ fn template_th(template: Template) -> Option<&'static str> {
         Template::Loading => "กำลังโหลด {done} / {total}",
         Template::OpeningFiles => "กำลังเปิด {n} ไฟล์…",
         Template::OpenedFiles => "เปิด {n} ไฟล์ใน {ms} ms",
+        Template::FilterShowing => "กรองอยู่ {shown} จาก {total}",
         Template::BoardFull => {
             "board นี้เต็มที่ {capacity} ภาพ — เพิ่มอีก {rejected} ใบจาก {requested} ใบที่เปิดเข้ามาไม่ได้ ลองแยกเป็นหลาย board"
         }
@@ -780,6 +837,18 @@ mod tests {
         Key::AddTagHint,
         Key::RemoveTagHint,
         Key::MetaNote,
+        Key::SortAddedAt,
+        Key::SortName,
+        Key::SortRating,
+        Key::SortColorLabel,
+        Key::SortAspect,
+        Key::SortAscending,
+        Key::SortDescending,
+        Key::FilterAny,
+        Key::FilterSearchHint,
+        Key::FilterClear,
+        Key::FilterMinRating,
+        Key::FilterPinnedOnly,
     ];
 
     const ALL_TEMPLATES: &[Template] = &[
@@ -797,6 +866,7 @@ mod tests {
         Template::Loading,
         Template::OpeningFiles,
         Template::OpenedFiles,
+        Template::FilterShowing,
         Template::BoardFull,
         Template::SwitchedMode,
         Template::NotImplemented,

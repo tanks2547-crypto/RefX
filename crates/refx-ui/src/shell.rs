@@ -11,6 +11,7 @@
 //! spec: docs/03-modes-and-ui.md §1
 
 use refx_core::align::{Align as A, Distribute as D};
+use refx_core::board::SortKey;
 use refx_core::view::Mode;
 
 use crate::text::{self, Key, Lang, Template};
@@ -201,6 +202,14 @@ pub struct ShellState {
     /// ผู้ใช้ออกจากช่องข้อความแล้ว → ปิดหน้าต่าง merge (undo ขั้นใหม่)
     pub note_sealed: bool,
 
+    /// ★ วิธีเรียงที่ผู้ใช้เลือก (P3-4) — **widget เป็นเจ้าของ ชั้น `app` อ่านอย่างเดียว**
+    ///
+    /// ดูเหตุผลที่มันไม่ต้องมีคู่ `_request` แบบ `tool`/`appearance` ใน `arrange_tools`
+    pub arrange_sort: SortKey,
+    /// เรียงกลับทาง
+    pub arrange_descending: bool,
+    /// ตัวกรองที่ผู้ใช้ตั้งไว้ (P3-4)
+    pub arrange_filter: refx_core::query::Filter,
     /// ★★ ตัวเลขของ virtual scrolling ในเฟรมล่าสุด (P3-3)
     ///
     /// เกณฑ์ของ ROADMAP คือ **"10,000 item · วาดจริง < 60 ตัว"** ซึ่งเป็นตัวเลข
@@ -313,6 +322,9 @@ impl Default for ShellState {
             note_edit: None,
             note_sealed: false,
             arrange: crate::arrange::Counts::default(),
+            arrange_sort: SortKey::default(),
+            arrange_descending: false,
+            arrange_filter: refx_core::query::Filter::default(),
             meta: None,
             meta_request: None,
             meta_sealed: false,
@@ -450,6 +462,22 @@ pub fn draw_in_ui(
             //    โชว์เฉพาะโหมด Arrange เพราะเป็นตัวเลขของ virtual scrolling
             //    (Canvas วาดทั้ง board อยู่แล้ว ตัวเลขจะไม่มีความหมายที่นั่น)
             if state.mode == Mode::Arrange {
+                // ★★ กรองอยู่ = ต้องเห็นได้เสมอ ผู้ใช้ที่มองหาภาพที่ "หายไป"
+                //   ต้องรู้ทันทีว่ามันถูกกรอง ไม่ใช่หาย (ไม่งั้นอ่านว่าโปรแกรมทำงานหาย)
+                if !state.arrange_filter.is_open() {
+                    ui.separator();
+                    ui.colored_label(
+                        WARN_COLOR,
+                        text::fill(
+                            lang,
+                            Template::FilterShowing,
+                            &[
+                                ("shown", &state.arrange.total.to_string()),
+                                ("total", &state.item_count.to_string()),
+                            ],
+                        ),
+                    );
+                }
                 ui.separator();
                 let arrange = state.arrange;
                 ui.label(text::fill(
@@ -934,23 +962,130 @@ fn arrange_inspector(ui: &mut egui::Ui, state: &mut ShellState) {
     state.meta_sealed = sealed;
 }
 
-/// ปุ่มเครื่องมือของ Arrange mode
+/// วิธีเรียงทั้งหมดที่ผู้ใช้เลือกได้ + ชื่อของมัน (P3-4)
+///
+/// ★ อยู่รวมกันที่นี่เหมือน `ARRANGE_BUTTONS` — เพิ่ม `SortKey` ใหม่แล้วคอมไพเลอร์
+/// ไม่ฟ้อง แต่เทสต์ `every_sort_key_can_be_picked_from_the_toolbar` ฟ้องแทน
+/// (ตัวเลือกที่มีในโค้ดแต่กดไม่ได้ = ฟีเจอร์ที่ไม่มีอยู่จริงสำหรับผู้ใช้)
+pub(crate) const SORT_CHOICES: [(SortKey, Key); 5] = [
+    (SortKey::AddedAt, Key::SortAddedAt),
+    (SortKey::Name, Key::SortName),
+    (SortKey::Rating, Key::SortRating),
+    (SortKey::ColorLabel, Key::SortColorLabel),
+    (SortKey::AspectRatio, Key::SortAspect),
+];
+
+/// ปุ่มเครื่องมือของ Arrange mode — เรียง + กรอง (P3-4)
+///
+/// ★★ **widget เขียนลง `state` ตรง ๆ ได้ที่นี่** ต่างจาก inspector ที่ต้องแยก
+/// "ค่าที่แสดง" ออกจาก "สิ่งที่ผู้ใช้ขอ" — เพราะการเรียง/กรองเป็นสถานะของ
+/// *เครื่องมือ* ที่ **ไม่มีใครอื่นเขียนเลย** (ไม่มีคีย์ลัด ไม่มี undo ไม่ได้มาจาก
+/// board) จึงไม่มีลำดับการเขียนให้ผิดได้ · ชั้น `app` อ่านไปเทียบกับของเดิม
+/// แล้วค่อยลงมือ ซึ่งทำให้ "ตั้งค่าเดิมซ้ำ" ไม่ขอเฟรมใหม่ (I-1)
 fn arrange_tools(ui: &mut egui::Ui, state: &mut ShellState) {
+    use refx_core::board::ColorLabel;
+    use refx_core::query::{Filter, LabelFilter};
+
     let lang = state.lang;
-    for (key, when) in [
-        (Key::ToolSort, "P3-2"),
-        (Key::ToolFilter, "P3-4"),
-        (Key::ToolTag, "P3-1"),
-        (Key::ToolSendToCanvas, "P3-5"),
-    ] {
-        let label = text::t(lang, key);
-        if ui.button(label).on_hover_text(when).clicked() {
-            state.status = text::fill(
-                lang,
-                Template::NotImplemented,
-                &[("what", label), ("when", when)],
+
+    // ---- เรียง ----
+    ui.label(text::t(lang, Key::ToolSort));
+    let current = SORT_CHOICES
+        .iter()
+        .find(|(key, _)| *key == state.arrange_sort)
+        .map_or(Key::SortAddedAt, |(_, label)| *label);
+    egui::ComboBox::from_id_salt("refx-sort")
+        .selected_text(text::t(lang, current))
+        .show_ui(ui, |ui| {
+            for (key, label) in SORT_CHOICES {
+                ui.selectable_value(&mut state.arrange_sort, key, text::t(lang, label));
+            }
+        });
+    // ★ ทิศทางเป็น **คำ** ไม่ใช่ลูกศร — ฟอนต์ที่ฝังไม่มี U+2191/2193
+    //   (ตรวจแล้วตอน P2-9: มีแต่ลูกศรสองหัว) และคำอ่านออกทันทีว่าทางไหน
+    let direction = if state.arrange_descending {
+        Key::SortDescending
+    } else {
+        Key::SortAscending
+    };
+    if ui.button(text::t(lang, direction)).clicked() {
+        state.arrange_descending = !state.arrange_descending;
+    }
+
+    ui.separator();
+
+    // ---- กรอง ----
+    ui.label(text::t(lang, Key::ToolFilter));
+
+    // ดาวขั้นต่ำ: กดดาวดวงที่ N = "อย่างน้อย N ดาว" · กดซ้ำดวงเดิม = ล้าง
+    for stars in 1..=refx_core::board::ItemMeta::MAX_RATING {
+        let on = state.arrange_filter.min_rating >= stars;
+        let glyph = if on { STAR_FULL } else { STAR_EMPTY };
+        if ui
+            .selectable_label(on, glyph)
+            .on_hover_text(text::t(lang, Key::FilterMinRating))
+            .clicked()
+        {
+            state.arrange_filter.min_rating = if state.arrange_filter.min_rating == stars {
+                0
+            } else {
+                stars
+            };
+        }
+    }
+
+    // ป้ายสี: ช่องสีเหมือนใน inspector — ★ ไม่ใช้ ComboBox เพราะป้ายสีไม่มี "ชื่อ"
+    // ในโปรแกรมนี้ (มีแต่สี) การตั้งชื่อให้มันที่นี่ที่เดียวจะเป็นคำที่ผู้ใช้ไม่เคยเห็น
+    if ui
+        .selectable_label(
+            state.arrange_filter.label == LabelFilter::Unlabelled,
+            LABEL_NONE,
+        )
+        .on_hover_text(text::t(lang, Key::ColorLabelNone))
+        .clicked()
+    {
+        state.arrange_filter.label = if state.arrange_filter.label == LabelFilter::Unlabelled {
+            LabelFilter::Any
+        } else {
+            LabelFilter::Unlabelled
+        };
+    }
+    for label in ColorLabel::CHOICES {
+        let picked = state.arrange_filter.label == LabelFilter::Is(label);
+        let (rect, response) =
+            ui.allocate_exact_size(egui::Vec2::splat(16.0), egui::Sense::click());
+        if let Some([r, g, b]) = label.rgb() {
+            ui.painter()
+                .rect_filled(rect, 3.0, egui::Color32::from_rgb(r, g, b));
+        }
+        if picked {
+            ui.painter().rect_stroke(
+                rect,
+                3.0,
+                egui::Stroke::new(2.0, egui::Color32::WHITE),
+                egui::StrokeKind::Middle,
             );
         }
+        if response.clicked() {
+            // กดซ้ำสีเดิม = เลิกกรอง (ไม่ต้องหาปุ่มล้าง)
+            state.arrange_filter.label = if picked {
+                LabelFilter::Any
+            } else {
+                LabelFilter::Is(label)
+            };
+        }
+    }
+
+    ui.add(
+        egui::TextEdit::singleline(&mut state.arrange_filter.text)
+            .desired_width(130.0)
+            .hint_text(text::t(lang, Key::FilterSearchHint)),
+    );
+
+    // ★ ปุ่มล้างโผล่เฉพาะตอนกรองอยู่จริง — ปุ่มที่กดแล้วไม่มีอะไรเกิดขึ้น
+    //   สอนผู้ใช้ว่าปุ่มบนแถบนี้เชื่อถือไม่ได้
+    if !state.arrange_filter.is_open() && ui.button(text::t(lang, Key::FilterClear)).clicked() {
+        state.arrange_filter = Filter::default();
     }
 }
 

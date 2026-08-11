@@ -2923,29 +2923,23 @@ impl RefxApp {
     /// (บทเรียนเดิมของ `flip` ที่ไม่ถึงทาง working texture — HANDOFF §2.7)
     fn plan_arrange(gfx: &mut Gfx, ppp: f32) {
         let viewport = gfx.canvas.size;
-        let count = gfx.board.len();
         {
             let board = &gfx.board;
             let render_state = &gfx.render_state;
-            gfx.arrange.plan(viewport, ppp, count, || {
-                board
-                    .items_in_z_order()
-                    .map(|(id, item)| {
-                        // ★ สัดส่วนมาจาก **ภาพต้นฉบับ** ไม่ใช่จาก `ItemCanvas`
-                        //   ผู้ใช้ที่ย่อ/ยืดภาพบน canvas ไว้ต้องยังเห็นสัดส่วนจริง
-                        //   ใน contact sheet · ไม่มี thumbnail (โน้ต) → ใช้กรอบของมันเอง
-                        let aspect = render_state
-                            .get(&id)
-                            .map(|state| {
-                                Vec2::new(
-                                    state.thumb.source_width as f32,
-                                    state.thumb.source_height as f32,
-                                )
-                            })
-                            .unwrap_or(item.canvas.size);
-                        (id, aspect)
+            // ★ สัดส่วนมาจาก **ภาพต้นฉบับ** ไม่ใช่จาก `ItemCanvas` — ผู้ใช้ที่ย่อ/ยืด
+            //   ภาพบน canvas ไว้ต้องยังเห็นสัดส่วนจริงใน contact sheet
+            //   · ไม่มี thumbnail (โน้ต) → ใช้กรอบของมันเอง
+            gfx.arrange.plan(board, viewport, ppp, |id| {
+                render_state
+                    .get(&id)
+                    .map(|state| {
+                        Vec2::new(
+                            state.thumb.source_width as f32,
+                            state.thumb.source_height as f32,
+                        )
                     })
-                    .collect()
+                    .or_else(|| board.item(id).map(|item| item.canvas.size))
+                    .unwrap_or(Vec2::ONE)
             });
         }
 
@@ -3395,6 +3389,18 @@ impl AppDelegate for RefxApp {
         // ★ Arrange: จัดแผ่น (ถ้าจำเป็น) แล้วเลือกเฉพาะแถบที่อยู่ในจอ — P3-3
         //   ต้องอยู่ **หลัง** `gfx.canvas` เพราะขนาดช่องกลางคือความกว้างของแผ่น
         if shell.mode == Mode::Arrange {
+            // ★ การเรียง/กรองมีเจ้าของเดียวคือ widget บน toolbar — ที่นี่แค่รับมา
+            //   แล้ว **เทียบก่อนเขียน** ตั้งค่าเดิมซ้ำจึงไม่ทำให้คำนวณใหม่ (I-1)
+            let mut changed = gfx
+                .arrange
+                .set_sort(shell.arrange_sort, shell.arrange_descending);
+            changed |= gfx.arrange.set_filter(shell.arrange_filter.clone());
+            if changed {
+                // ★ ลำดับเปลี่ยนแล้วต้องเริ่มดูจากบนสุด ไม่งั้นผู้ใช้กดเรียงใหม่
+                //   แล้วยังค้างอยู่กลางแผ่นเดิม ซึ่งอ่านว่า "กดแล้วไม่มีอะไรเกิดขึ้น"
+                gfx.arrange.scroll_to_top();
+                gfx.window.request_redraw();
+            }
             Self::plan_arrange(gfx, full_output.pixels_per_point);
             // ★ ตัวเลขบน status bar เป็นหลักฐานของเกณฑ์ "วาดจริง < 60"
             //   มันถูกวาดไปแล้วในเฟรมนี้ จึงต้องขอเฟรมอีกหนึ่งเฟรมเมื่อค่าเปลี่ยน

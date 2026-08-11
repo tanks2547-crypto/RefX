@@ -25,7 +25,9 @@
 
 use glam::Vec2;
 use refx_core::arena::ItemId;
+use refx_core::board::{Board, SortKey};
 use refx_core::layout::{Engine, LayoutParams, Placed};
+use refx_core::query::{self, Filter};
 use refx_core::view::Camera;
 
 /// ขนาดช่องที่อยากได้ (หน่วย point — คูณ `pixels_per_point` ก่อนใช้)
@@ -198,11 +200,36 @@ pub struct ArrangeView {
     scroll: f32,
     /// กรอบของ viewport ตอน [`ArrangeView::plan`] ครั้งล่าสุด (physical pixel)
     viewport: Vec2,
+    /// ★ วิธีเรียง + ตัวกรอง (P3-4)
+    ///
+    /// ★★ **อยู่ที่ชั้น UI ไม่ใช่ใน `Board`** — `Board::arrange` มี `sort`/`descending`
+    /// อยู่จริงและ persist ลง `.refx` แต่ทุกการแก้ `Board` ต้องผ่าน `Command`
+    /// (docs/08 §4 ข้อ 10) ซึ่งแปลว่า **กดเปลี่ยนวิธีเรียงแล้วกิน undo หนึ่งขั้น**
+    /// — ผู้ใช้ที่สลับไปดูแบบเรียงตามดาวแล้วกด Ctrl+Z ต้องได้ *งาน* คืน ไม่ใช่ได้
+    /// วิธีเรียงคืน (เหตุผลเดียวกับที่ `G` ทั้ง board ไม่เข้า undo — §2.7)
+    /// · และ **ตัวกรองไม่มีที่เก็บใน `Board` เลย** (docs/02 §2 ไม่มีฟิลด์นั้น)
+    /// ซึ่งเป็นหลักฐานว่ามันเป็นสถานะของ *เครื่องมือ* ไม่ใช่ของ *เอกสาร*
+    /// → ตัดสินว่าให้ทั้งคู่อยู่ด้วยกันที่นี่ · ถ้าวันหนึ่งต้องการให้ persist
+    /// ให้ทำตอน P4-1 พร้อมกับตัดสินเรื่อง undo ไปด้วยกัน
+    sort: SortKey,
+    descending: bool,
+    filter: Filter,
+    /// ลำดับของ item หลังกรอง+เรียง — **ผลที่ถูก cache ไว้ตาม `board.revision`**
+    order: Vec<ItemId>,
+    /// คีย์ของ `order` ที่คำนวณไว้
+    query_key: Option<QueryKey>,
+    /// รุ่นของ `order` — ขยับทุกครั้งที่มันถูกคำนวณใหม่ (ใช้เป็นส่วนหนึ่งของ `SheetKey`)
+    ///
+    /// ★ ต้องมี เพราะ "ลำดับเปลี่ยนแต่จำนวนเท่าเดิม" เป็นเรื่องปกติที่สุด
+    /// (กดสลับทิศการเรียง) — คีย์ที่ดูแค่จำนวนจะไม่จัดแผ่นใหม่แล้วภาพไม่ขยับเลย
+    order_generation: u64,
+    /// ★★ จำนวนครั้งที่ **กรอง+เรียงจริง** — หลักฐานของเกณฑ์ ROADMAP P3-4
+    /// ("ไม่คำนวณซ้ำเมื่อไม่มีอะไรเปลี่ยน — วัดด้วย counter")
+    queries: u64,
     /// ต้องจัดแผ่นใหม่ไหม
     ///
-    /// ★ ตั้งจาก `rebuild_quads` ซึ่งเป็น **ประตูเดียว** ที่รู้ว่า board เปลี่ยน
-    /// — P3-4 จะเปลี่ยนไปเทียบ `board.revision` ตามที่ docs/03 §3 เขียนไว้
-    /// (ตอนนี้ `Board` ยังไม่มีฟิลด์นั้น และการเพิ่มมันคือของ P3-4 ไม่ใช่ที่นี่)
+    /// ★ ตั้งจาก `rebuild_quads` · ตั้งแต่ P3-4 มี `board.revision` เป็นตาข่ายหลัก
+    /// แล้ว ตัวนี้เหลือไว้เป็นชั้นสองสำหรับการเปลี่ยนที่ไม่ผ่าน `Board`
     dirty: bool,
     /// คีย์ของแผ่นที่จัดไว้ — เปลี่ยนเมื่อไหร่ต้องจัดใหม่
     key: Option<SheetKey>,
@@ -219,6 +246,21 @@ struct SheetKey {
     engine: Engine,
     params: LayoutParams,
     count: usize,
+    /// รุ่นของลำดับที่กรอง+เรียงมาแล้ว (ดู `ArrangeView::order_generation`)
+    order_generation: u64,
+}
+
+/// สิ่งที่ทำให้ต้องกรอง+เรียงใหม่ — **นี่คือ cache ที่ docs/03 §3 สั่งไว้**
+///
+/// ★ `revision` ตัวเดียวครอบการแก้ board ทุกชนิด (เพิ่ม/ลบ/ติดดาว/ติดแท็ก/ย้ายชั้น)
+/// เพราะ `Board` บวกมันในตัวแก้ทุกตัว และมีเทสต์ `every_mutation_bumps_the_revision`
+/// บังคับไว้ — ไม่ใช่รายการเงื่อนไขที่คนเขียนต้องจำให้ครบ
+#[derive(Debug, Clone, PartialEq)]
+struct QueryKey {
+    revision: u64,
+    sort: SortKey,
+    descending: bool,
+    filter: Filter,
 }
 
 impl ArrangeView {
@@ -242,6 +284,55 @@ impl ArrangeView {
     /// board เปลี่ยน → แผ่นเดิมใช้ไม่ได้แล้ว
     pub fn invalidate(&mut self) {
         self.dirty = true;
+    }
+
+    /// วิธีเรียงที่ใช้อยู่
+    #[must_use]
+    pub fn sort(&self) -> (SortKey, bool) {
+        (self.sort, self.descending)
+    }
+
+    /// ตั้งวิธีเรียง — คืน `true` เมื่อ **เปลี่ยนจริง** (ผู้เรียกใช้ตัดสินว่าจะขอเฟรมไหม)
+    pub fn set_sort(&mut self, sort: SortKey, descending: bool) -> bool {
+        let changed = self.sort != sort || self.descending != descending;
+        self.sort = sort;
+        self.descending = descending;
+        changed
+    }
+
+    /// ตัวกรองที่ใช้อยู่
+    #[must_use]
+    pub fn filter(&self) -> &Filter {
+        &self.filter
+    }
+
+    /// ตั้งตัวกรอง — คืน `true` เมื่อเปลี่ยนจริง
+    pub fn set_filter(&mut self, filter: Filter) -> bool {
+        let changed = self.filter != filter;
+        if changed {
+            self.filter = filter;
+        }
+        changed
+    }
+
+    /// กลับไปบนสุดของแผ่น — ใช้ตอนลำดับเปลี่ยน (เรียง/กรองใหม่)
+    ///
+    /// ★ ถ้าไม่ทำ ผู้ใช้ที่เลื่อนอยู่กลางแผ่นแล้วกดเรียงใหม่จะยังเห็นกลางแผ่นเหมือนเดิม
+    /// ซึ่งอ่านว่า "กดแล้วไม่มีอะไรเกิดขึ้น" ทั้งที่ลำดับเปลี่ยนไปหมดแล้ว
+    pub fn scroll_to_top(&mut self) {
+        self.scroll = 0.0;
+    }
+
+    /// ★★ จำนวนครั้งที่ **กรอง+เรียงจริง** — เกณฑ์ ROADMAP P3-4 วัดด้วยตัวเลขนี้
+    #[must_use]
+    pub fn queries(&self) -> u64 {
+        self.queries
+    }
+
+    /// ลำดับที่ผ่านการกรอง+เรียงแล้ว (ผลที่ cache ไว้)
+    #[must_use]
+    pub fn order(&self) -> &[ItemId] {
+        &self.order
     }
 
     /// ตัวเลขของเฟรมล่าสุด
@@ -290,20 +381,19 @@ impl ArrangeView {
         moved
     }
 
-    /// เตรียมเฟรม: จัดแผ่นถ้าจำเป็น → หาชุดที่ต้องวาด → อัปเดตตัวเลข
+    /// เตรียมเฟรม: กรอง+เรียง (ถ้าจำเป็น) → จัดแผ่น (ถ้าจำเป็น) → หาชุดที่ต้องวาด
     ///
-    /// `items` ถูกเรียก **เฉพาะตอนที่ต้องจัดแผ่นใหม่จริง ๆ** — ที่ 10,000 ใบ
-    /// การสร้าง `Vec` ของ aspect ทุกเฟรมคือการเผา CPU ทิ้งระหว่างที่ผู้ใช้แค่เลื่อน
+    /// ★★ **ทั้งสองขั้นมี cache ของตัวเอง** เพราะมันเปลี่ยนคนละจังหวะกัน:
+    /// ย่อหน้าต่างทำให้ต้องจัดแผ่นใหม่แต่ไม่ต้องกรองใหม่ · ติดดาวเพิ่มหนึ่งใบ
+    /// ทำให้ต้องกรองใหม่และจัดแผ่นใหม่ · เลื่อนอย่างเดียวไม่ต้องทำทั้งคู่
     ///
-    /// ★★ **`count` เข้ามาเป็นพารามิเตอร์เพราะสัญญาต้องไม่พึ่งจังหวะของผู้เรียก**
-    /// (docs/08 §3.9 ข้อ 8) — ถ้าอาศัย [`ArrangeView::invalidate`] อย่างเดียว
-    /// วันที่มีคนเพิ่มเส้นทางที่แก้ board แล้วลืมเรียก แผ่นจะค้างอยู่รุ่นเก่า
-    /// **เงียบ ๆ** · จำนวนที่ไม่ตรงถูกจับได้ที่นี่โดยไม่ต้องมีใครจำ
+    /// `aspect` ถูกเรียก **เฉพาะตอนจัดแผ่นใหม่จริง ๆ** — ที่หลายพันใบ การสร้าง
+    /// `Vec` ของ aspect ทุกเฟรมคือการเผา CPU ทิ้งระหว่างที่ผู้ใช้แค่เลื่อน
     ///
     /// `viewport` เป็น physical pixel · `ppp` คือ `pixels_per_point` ของจอ
-    pub fn plan<F>(&mut self, viewport: Vec2, ppp: f32, count: usize, items: F)
+    pub fn plan<F>(&mut self, board: &Board, viewport: Vec2, ppp: f32, aspect: F)
     where
-        F: FnOnce() -> Vec<(ItemId, Vec2)>,
+        F: Fn(ItemId) -> Vec2,
     {
         if !viewport.is_finite() || viewport.x < 1.0 || viewport.y < 1.0 {
             return;
@@ -311,26 +401,40 @@ impl ArrangeView {
         self.viewport = viewport;
         let params = params_for(viewport, ppp);
 
-        // ---- 1. จัดแผ่น (เฉพาะเมื่อจำเป็น) ----
+        // ---- 1. กรอง + เรียง (เฉพาะเมื่อ board หรือเงื่อนไขเปลี่ยน) ----
+        //
+        // ★ `revision` เปลี่ยนเมื่อ **เนื้อหา** board เปลี่ยนเท่านั้น — เลื่อน/ซูม/
+        //   ย่อหน้าต่างไม่ทำให้มันขยับ จึงไม่มีการกรองใหม่ระหว่างที่ผู้ใช้แค่เลื่อน
+        let query_key = QueryKey {
+            revision: board.revision(),
+            sort: self.sort,
+            descending: self.descending,
+            filter: self.filter.clone(),
+        };
+        if self.query_key.as_ref() != Some(&query_key) {
+            self.order = query::select(board, &self.filter, self.sort, self.descending);
+            self.query_key = Some(query_key);
+            self.order_generation = self.order_generation.wrapping_add(1);
+            self.queries += 1;
+        }
+
+        // ---- 2. จัดแผ่น (เฉพาะเมื่อจำเป็น) ----
         let key = SheetKey {
             engine: self.engine,
             params,
-            count,
+            count: self.order.len(),
+            order_generation: self.order_generation,
         };
         if self.dirty || self.key != Some(key) {
-            let list = items();
+            let list: Vec<(ItemId, Vec2)> =
+                self.order.iter().map(|id| (*id, aspect(*id))).collect();
             self.sheet.build(&list, self.engine, params);
-            // เชื่อจำนวนจริงที่ได้มา ไม่ใช่ที่ผู้เรียกบอก — ไม่งั้นความไม่ตรงกัน
-            // จะทำให้จัดใหม่ทุกเฟรมโดยไม่มีใครรู้
-            self.key = Some(SheetKey {
-                count: list.len(),
-                ..key
-            });
+            self.key = Some(key);
             self.dirty = false;
             self.rebuilds += 1;
         }
 
-        // ---- 2. หาชุดที่ต้องวาด ----
+        // ---- 3. หาชุดที่ต้องวาด ----
         // เลื่อนใหม่ให้อยู่ในระยะเสมอ — หน้าต่างที่ถูกย่อลงทำให้ค่าเดิมเกินขอบได้
         self.scroll = self.scroll.clamp(0.0, self.max_scroll());
         let (top, bottom) = (self.scroll, self.scroll + viewport.y);
@@ -398,37 +502,77 @@ mod tests {
     )]
 
     use super::*;
-    use refx_core::arena::ArenaKey as _;
-
-    fn ids(n: u32) -> Vec<(ItemId, Vec2)> {
-        (0..n)
-            .map(|i| {
-                let aspect = match i % 3 {
-                    0 => Vec2::new(4.0, 3.0),
-                    1 => Vec2::new(3.0, 4.0),
-                    _ => Vec2::new(1.0, 1.0),
-                };
-                (ItemId::from_parts(i, 0), aspect)
-            })
-            .collect()
-    }
+    use refx_core::board::{AssetRef, ImageFormat, Item, ItemKind, ItemMeta};
+    use refx_core::command::{AddItems, EditMeta, History, MetaField};
+    use refx_core::hash::ContentHash;
+    use refx_core::query::LabelFilter;
 
     /// viewport ที่ใช้ในเทสต์ทั้งไฟล์ — ใกล้เคียงช่อง canvas จริงบนจอ 1280×800
     const VIEW: Vec2 = Vec2::new(840.0, 600.0);
 
-    fn planned(count: u32) -> ArrangeView {
+    /// สัดส่วนของใบที่ `index` — วนสามแบบให้แผ่นมีทั้งแนวตั้ง/นอน/จัตุรัส
+    fn px_size(index: u32) -> glam::UVec2 {
+        match index % 3 {
+            0 => glam::UVec2::new(400, 300),
+            1 => glam::UVec2::new(300, 400),
+            _ => glam::UVec2::new(300, 300),
+        }
+    }
+
+    fn image(index: u32) -> Item {
+        Item::new(ItemKind::Image(AssetRef {
+            hash: ContentHash::from_bytes([(index % 251) as u8; 32]),
+            path: std::path::PathBuf::from(format!("img{index:05}.png")),
+            px_size: px_size(index),
+            format: ImageFormat::Png,
+            embedded: false,
+        }))
+    }
+
+    /// board ที่มี `n` ภาพ — ผ่าน `AddItems` เหมือนเส้นทางจริง (I-3)
+    fn board_of(n: u32) -> Board {
+        let mut board = Board::default();
+        let mut history = History::default();
+        let items: Vec<Item> = (0..n).map(image).collect();
+        if let Ok(command) = AddItems::new(items) {
+            history.apply(&mut board, Box::new(command)).unwrap();
+        }
+        board
+    }
+
+    /// aspect ที่ชั้น UI ส่งให้ — อ่านจาก `AssetRef` เหมือนของจริง
+    fn aspect_of(board: &Board) -> impl Fn(ItemId) -> Vec2 + '_ {
+        move |id| {
+            board.item(id).map_or(Vec2::ONE, |item| match &item.kind {
+                ItemKind::Image(asset) => Vec2::new(asset.px_size.x as f32, asset.px_size.y as f32),
+                _ => Vec2::ONE,
+            })
+        }
+    }
+
+    fn planned(board: &Board) -> ArrangeView {
         let mut view = ArrangeView::new();
-        view.plan(VIEW, 1.0, count as usize, || ids(count));
+        view.plan(board, VIEW, 1.0, aspect_of(board));
         view
     }
 
-    /// ★★★ เกณฑ์ของ ROADMAP: 10,000 ใบ แล้ว **วาดจริงไม่ถึง 60**
+    /// ให้ดาวกับ item ผ่าน `Command` เหมือนที่ inspector ทำจริง
+    fn set_rating(board: &mut Board, history: &mut History, id: ItemId, rating: u8) {
+        let before = board.item(id).map(|item| item.meta.clone()).unwrap();
+        let after = ItemMeta { rating, ..before };
+        let command = EditMeta::new(MetaField::Rating, vec![(id, after)]).unwrap();
+        history.apply(board, Box::new(command)).unwrap();
+    }
+
+    // ---------- P3-3: virtual scrolling ----------
+
+    /// ★★★ เกณฑ์ของ ROADMAP: 3,072 ใบ (เพดานจริงของ board) แล้ว **วาดจริงไม่ถึง 60**
     #[test]
-    fn ten_thousand_items_draw_fewer_than_sixty() {
-        let view = planned(10_000);
+    fn a_full_board_draws_fewer_than_sixty() {
+        let board = board_of(3_072);
+        let view = planned(&board);
         let counts = view.counts();
         // ★ พิมพ์ตัวเลขไว้เสมอ — เกณฑ์ข้อนี้เป็น *ตัวเลข* ไม่ใช่คำว่า "มี culling"
-        //   (`cargo test -- --nocapture` หรือ `cargo nextest run --no-capture`)
         println!(
             "P3-3 @ {}x{} : total {} · ในจอ {} · วาด {} · ตรวจ {} · แผ่นสูง {:.0}",
             VIEW.x,
@@ -439,40 +583,45 @@ mod tests {
             counts.examined,
             view.sheet.content().y
         );
-        assert_eq!(counts.total, 10_000);
+        assert_eq!(counts.total, 3_072);
         assert!(
             counts.in_band < 60,
-            "วาดจริง {} ใบ — เกณฑ์ ROADMAP P3-3 คือน้อยกว่า 60 \
-             (ในจอ {} ใบ · กันชน {BUFFER_SCREENS} หน้าจอ)",
+            "วาดจริง {} ใบ — เกณฑ์ ROADMAP P3-3 คือน้อยกว่า 60 (ในจอ {} ใบ)",
             counts.in_band,
             counts.in_view
         );
         assert!(counts.in_view > 0, "จอต้องมีอะไรให้เห็นบ้าง");
     }
 
+    /// ★★ กลไกต้องรับ 10,000 ใบได้ แม้ board จริงจะตันที่ 3,072 (ROADMAP P3-3)
+    #[test]
+    fn ten_thousand_items_draw_fewer_than_sixty() {
+        let board = board_of(10_000);
+        let counts = planned(&board).counts();
+        assert_eq!(counts.total, 10_000);
+        assert!(counts.in_band < 60, "วาดจริง {} ใบ", counts.in_band);
+    }
+
     /// ★★ ต้นทุนของการหาว่าใครอยู่ในจอ **ไม่ขึ้นกับจำนวนภาพบน board**
     ///
     /// นับใบที่เปิดดูแทนการจับเวลา (docs/08 §3.9 ข้อ 5b) — เลขนี้เท่ากันทุกเครื่อง
-    /// ส่วนมิลลิวินาทีไม่เท่า · ถ้าใครเปลี่ยนการค้นกลับไปไล่ทั้งรายการ
-    /// `examined` จะกลายเป็นหลักพันแล้วเทสต์นี้แดงทันที
     ///
     /// ★★★ **ต้องเลื่อนลงไปก่อน ไม่งั้นเทสต์นี้ไม่ได้ตรวจอะไรเลย** — เวอร์ชันแรก
     /// วัดที่ `scroll = 0` ซึ่ง "ใบที่อยู่เหนือแถบ" มีศูนย์ใบพอดี การไล่ทั้งรายการ
-    /// จึงให้ตัวเลขเท่ากับ binary search เป๊ะ · negative control จับได้:
-    /// เปลี่ยน `partition_point` เป็น `start = 0` แล้ว **เทสต์ยังเขียว**
-    /// (docs/08 §3.9 ข้อ 1 — negative control ที่ไม่แดงแปลว่าเทสต์อ่อน)
+    /// จึงให้ตัวเลขเท่ากับ binary search เป๊ะ (negative control ไม่แดง = เทสต์อ่อน)
     #[test]
     fn finding_the_visible_band_does_not_scan_the_whole_board() {
-        let mut small = planned(200);
+        let small_board = board_of(200);
+        let mut small = planned(&small_board);
         small.scroll = small.max_scroll();
-        small.plan(VIEW, 1.0, 200, || ids(200));
-        let small = small.counts();
+        small.plan(&small_board, VIEW, 1.0, aspect_of(&small_board));
 
-        let mut big = planned(10_000);
+        let big_board = board_of(10_000);
+        let mut big = planned(&big_board);
         big.scroll = big.max_scroll();
-        big.plan(VIEW, 1.0, 10_000, || ids(10_000));
-        let big = big.counts();
+        big.plan(&big_board, VIEW, 1.0, aspect_of(&big_board));
 
+        let (small, big) = (small.counts(), big.counts());
         assert!(
             big.examined <= small.examined + 4,
             "ตรวจ {} ใบที่ 10,000 ภาพ เทียบกับ {} ใบที่ 200 ภาพ — การค้นไม่ควรโตตาม board",
@@ -490,39 +639,33 @@ mod tests {
     /// เลื่อนไปตรงไหนก็ต้องเห็นของ และจำนวนที่วาดต้องไม่บานตามตำแหน่ง
     #[test]
     fn scrolling_anywhere_keeps_the_drawn_count_bounded() {
-        let mut view = planned(10_000);
+        let board = board_of(3_072);
+        let mut view = planned(&board);
         let max = view.max_scroll();
-        assert!(max > 0.0, "แผ่น 10,000 ใบต้องยาวกว่าจอ");
+        assert!(max > 0.0, "แผ่น 3,072 ใบต้องยาวกว่าจอ");
         for step in 0..=10 {
             #[expect(clippy::cast_precision_loss, reason = "0..=10")]
             let target = max * (step as f32) / 10.0;
             view.scroll = target;
-            view.plan(VIEW, 1.0, 10_000, || ids(10_000));
+            view.plan(&board, VIEW, 1.0, aspect_of(&board));
             let counts = view.counts();
             assert!(
                 counts.in_band < 60,
                 "ที่ scroll {target}: วาด {} ใบ",
                 counts.in_band
             );
-            assert!(
-                counts.in_view > 0,
-                "ที่ scroll {target}: จอว่างเปล่า — แถวหายไประหว่างทาง"
-            );
+            assert!(counts.in_view > 0, "ที่ scroll {target}: จอว่างเปล่า");
         }
     }
 
-    /// ★ ชุดที่วาดต้องเป็น **ทุกใบ** ที่ทับแถบจริง ๆ — ไม่ขาดสักใบ
-    ///
-    /// เทียบกับการไล่ตรวจทั้งรายการแบบตรงไปตรงมา (ช้าแต่ถูกแน่นอน)
-    /// ถ้า binary search ถอยหลังไม่พอ ใบสูง ๆ จะหลุด แล้วผู้ใช้เห็นภาพกะพริบหาย
+    /// ★ ชุดที่วาดต้องเป็น **ทุกใบ** ที่ทับแถบจริง ๆ — เทียบกับการไล่ทั้งรายการ
     #[test]
     fn the_fast_search_finds_exactly_what_a_full_scan_would() {
-        let mut view = ArrangeView::new();
-        let list = ids(2_000);
+        let board = board_of(2_000);
+        let mut view = planned(&board);
         for scroll in [0.0f32, 137.0, 999.0, 5_000.0, 12_345.0] {
-            view.plan(VIEW, 1.0, list.len(), || list.clone());
             view.scroll = scroll.min(view.max_scroll());
-            view.plan(VIEW, 1.0, list.len(), || list.clone());
+            view.plan(&board, VIEW, 1.0, aspect_of(&board));
 
             let buffer = VIEW.y * BUFFER_SCREENS;
             let (top, bottom) = (view.scroll - buffer, view.scroll + VIEW.y + buffer);
@@ -541,34 +684,40 @@ mod tests {
     }
 
     /// ★★ ใบที่สูงกว่าทั้งจอต้องไม่หายตอนเลื่อนผ่านครึ่งล่างของมัน
-    ///
-    /// นี่คือเคสที่ `Sheet::tallest` มีอยู่เพราะมัน — ขอบบนของภาพอยู่เหนือแถบไปแล้ว
-    /// แต่ตัวภาพยังพาดลงมาถึง · ถ้าไม่ถอยหลังไปเท่าความสูงสูงสุด ภาพจะหายเงียบ ๆ
     #[test]
     fn a_very_tall_item_is_still_found_when_its_top_is_far_above() {
-        let mut view = ArrangeView::new();
         // ★ ต้องเป็น Masonry: Grid บีบทุกใบให้พอดีช่องจัตุรัส จึงไม่มีใบไหนสูงเกินจอ
-        //   ได้เลย — เคสที่ `tallest` มีไว้แก้จะไม่มีทางเกิดถ้าทดสอบด้วย Grid
+        let mut board = Board::default();
+        let mut history = History::default();
+        let mut tall = Item::new(ItemKind::Image(AssetRef {
+            hash: ContentHash::from_bytes([9; 32]),
+            path: std::path::PathBuf::from("tall.png"),
+            px_size: glam::UVec2::new(10, 400),
+            format: ImageFormat::Png,
+            embedded: false,
+        }));
+        tall.meta = ItemMeta::default();
+        let mut items = vec![tall];
+        items.extend((1..300).map(image));
+        history
+            .apply(&mut board, Box::new(AddItems::new(items).unwrap()))
+            .unwrap();
+
+        let mut view = ArrangeView::new();
         view.set_engine(Engine::Masonry);
-        // ใบแรกสูงมาก (aspect ผอมสุด ๆ) ที่เหลือปกติ
-        let list: Vec<(ItemId, Vec2)> =
-            std::iter::once((ItemId::from_parts(0, 0), Vec2::new(1.0, 40.0)))
-                .chain((1..300).map(|i| (ItemId::from_parts(i, 0), Vec2::new(4.0, 3.0))))
-                .collect();
-        view.plan(VIEW, 1.0, list.len(), || list.clone());
-        let tall = view.sheet.placed[0];
+        view.plan(&board, VIEW, 1.0, aspect_of(&board));
+        let first = view.sheet.placed[0];
         assert!(
-            tall.size.y > VIEW.y,
+            first.size.y > VIEW.y,
             "เคสนี้ต้องมีใบที่สูงกว่าจอจริง ๆ ถึงจะตรวจสิ่งที่ตั้งใจ (สูง {})",
-            tall.size.y
+            first.size.y
         );
 
-        // เลื่อนไปให้ขอบบนของมันอยู่เหนือแถบกันชนไปแล้ว แต่ตัวมันยังพาดถึงจอ
-        let inside = tall.top_left.y + tall.size.y - 10.0;
+        let inside = first.top_left.y + first.size.y - 10.0;
         view.scroll = inside.min(view.max_scroll());
-        view.plan(VIEW, 1.0, list.len(), || list.clone());
+        view.plan(&board, VIEW, 1.0, aspect_of(&board));
         assert!(
-            view.visible().iter().any(|p| p.id == tall.id),
+            view.visible().iter().any(|p| p.id == first.id),
             "ใบที่สูงกว่าจอหายไปตอนเลื่อนผ่านครึ่งล่างของมัน"
         );
     }
@@ -576,16 +725,16 @@ mod tests {
     /// ★ กันชนบน/ล่างมีจริง — ไม่ใช่วาดเฉพาะที่ตาเห็น (docs/03 §3)
     #[test]
     fn the_band_reaches_one_screen_above_and_below_the_view() {
-        let mut view = planned(2_000);
+        let board = board_of(2_000);
+        let mut view = planned(&board);
         view.scroll = view.max_scroll() * 0.5;
-        view.plan(VIEW, 1.0, 2_000, || ids(2_000));
+        view.plan(&board, VIEW, 1.0, aspect_of(&board));
         let counts = view.counts();
         assert!(
             counts.in_band > counts.in_view,
             "กันชนหายไป: วาด {} ใบ เท่ากับที่อยู่ในจอพอดี",
             counts.in_band
         );
-        // แถวเหนือจอหนึ่งหน้าจอต้องอยู่ในชุดที่วาด
         let above = view
             .visible()
             .iter()
@@ -595,47 +744,39 @@ mod tests {
     }
 
     /// ★★ แผ่นต้องไม่ถูกจัดใหม่ถ้าไม่มีอะไรเปลี่ยน — เลื่อน 100 ครั้ง = จัด 1 ครั้ง
-    ///
-    /// ที่ 10,000 ใบการจัดใหม่ทุกเฟรมคือการเผา CPU ทิ้งขณะที่ผู้ใช้แค่หมุนล้อ
-    /// (docs/03 §3 บังคับ cache ไว้กับ filter อยู่แล้วด้วยเหตุผลเดียวกัน)
     #[test]
     fn scrolling_never_recomputes_the_layout() {
-        let mut view = ArrangeView::new();
-        view.plan(VIEW, 1.0, 10_000, || ids(10_000));
+        let board = board_of(3_072);
+        let mut view = planned(&board);
         assert_eq!(view.rebuilds(), 1);
         for _ in 0..100 {
             view.scroll_by(-50.0);
-            view.plan(VIEW, 1.0, 10_000, || panic!("จัดแผ่นใหม่ทั้งที่แค่เลื่อน"));
+            view.plan(&board, VIEW, 1.0, |_| panic!("จัดแผ่นใหม่ทั้งที่แค่เลื่อน"));
         }
         assert_eq!(view.rebuilds(), 1, "แผ่นถูกจัดใหม่ระหว่างเลื่อน");
     }
 
-    /// เปลี่ยนจำนวน item / ขนาดจอ / engine แล้วต้องจัดใหม่จริง
+    /// เปลี่ยนขนาดจอ / engine แล้วต้องจัดใหม่จริง
     #[test]
     fn the_sheet_is_rebuilt_when_something_that_matters_changes() {
-        let mut view = ArrangeView::new();
-        view.plan(VIEW, 1.0, 100, || ids(100));
+        let board = board_of(100);
+        let mut view = planned(&board);
         assert_eq!(view.rebuilds(), 1);
 
-        // จอกว้างขึ้น → จำนวนคอลัมน์เปลี่ยน
-        view.plan(Vec2::new(1_600.0, 600.0), 1.0, 100, || ids(100));
+        let wide = Vec2::new(1_600.0, 600.0);
+        view.plan(&board, wide, 1.0, aspect_of(&board));
         assert_eq!(view.rebuilds(), 2, "จอกว้างขึ้นแล้วแผ่นต้องจัดใหม่");
 
-        // board เปลี่ยน
-        view.invalidate();
-        view.plan(Vec2::new(1_600.0, 600.0), 1.0, 101, || ids(101));
-        assert_eq!(view.rebuilds(), 3, "board เปลี่ยนแล้วแผ่นต้องจัดใหม่");
-
-        // engine เปลี่ยน
         view.set_engine(Engine::Masonry);
-        view.plan(Vec2::new(1_600.0, 600.0), 1.0, 101, || ids(101));
-        assert_eq!(view.rebuilds(), 4, "เปลี่ยน engine แล้วแผ่นต้องจัดใหม่");
+        view.plan(&board, wide, 1.0, aspect_of(&board));
+        assert_eq!(view.rebuilds(), 3, "เปลี่ยน engine แล้วแผ่นต้องจัดใหม่");
     }
 
     /// ★ I-1: เลื่อนจนสุดแล้วหมุนต่อ ต้องไม่รายงานว่า "มีอะไรเปลี่ยน"
     #[test]
     fn scrolling_past_the_end_asks_for_no_redraw() {
-        let mut view = planned(300);
+        let board = board_of(300);
+        let mut view = planned(&board);
         assert!(view.scroll_by(-1_000.0), "เลื่อนลงครั้งแรกต้องขยับ");
         while view.scroll_by(-1_000.0) {}
         assert!(
@@ -650,7 +791,8 @@ mod tests {
     /// แผ่นที่สั้นกว่าจอ เลื่อนไม่ได้เลย
     #[test]
     fn a_sheet_shorter_than_the_screen_does_not_scroll() {
-        let mut view = planned(3);
+        let board = board_of(3);
+        let mut view = planned(&board);
         assert_eq!(view.max_scroll(), 0.0);
         assert!(!view.scroll_by(-500.0));
     }
@@ -658,24 +800,23 @@ mod tests {
     /// board ว่าง = ไม่มีอะไรวาด และต้องไม่ panic
     #[test]
     fn an_empty_board_draws_nothing() {
-        let view = planned(0);
+        let board = Board::default();
+        let view = planned(&board);
         assert_eq!(view.counts(), Counts::default());
         assert!(view.visible().is_empty());
     }
 
     /// ★ ผลต้องเหมือนเดิมเป๊ะทุกครั้ง รวมทั้ง **ลำดับ** ที่ส่งไปวาด
-    ///
-    /// ลำดับที่สลับไปมาระหว่างเฟรมทำให้ภาพที่ซ้อนกันสลับหน้า/หลังเอง
-    /// ซึ่งผู้ใช้เห็นเป็นภาพกะพริบ และหาสาเหตุยากมาก (docs/03 §3)
     #[test]
     fn the_same_board_always_yields_the_same_window_in_the_same_order() {
-        let first: Vec<(ItemId, Vec2)> = planned(5_000)
+        let board = board_of(2_000);
+        let first: Vec<(ItemId, Vec2)> = planned(&board)
             .visible()
             .iter()
             .map(|p| (p.id, p.top_left))
             .collect();
         for _ in 0..3 {
-            let again: Vec<(ItemId, Vec2)> = planned(5_000)
+            let again: Vec<(ItemId, Vec2)> = planned(&board)
                 .visible()
                 .iter()
                 .map(|p| (p.id, p.top_left))
@@ -685,9 +826,6 @@ mod tests {
     }
 
     /// ★ จำนวนคอลัมน์มาจากความกว้างของจอ ไม่ใช่จากจำนวนภาพ
-    ///
-    /// ปล่อยให้ engine เดา (`columns = None`) ที่ 10,000 ใบจะได้ 100 คอลัมน์
-    /// ซึ่งแปลว่าภาพเล็กกว่าไอคอนและแผ่นกว้างกว่าจอ 20 เท่า
     #[test]
     fn the_column_count_follows_the_window_not_the_item_count() {
         let narrow = params_for(Vec2::new(840.0, 600.0), 1.0);
@@ -698,8 +836,8 @@ mod tests {
             narrow.columns,
             wide.columns
         );
-        // ★ และแผ่นต้องไม่กว้างเกินจอ ไม่งั้นจะต้องเลื่อนแนวนอนซึ่ง Arrange ไม่มี
-        let view = planned(10_000);
+        let board = board_of(3_072);
+        let view = planned(&board);
         assert!(
             view.sheet.content().x <= VIEW.x + 1.0,
             "แผ่นกว้าง {} เกินจอ {} — จะมีคอลัมน์ที่มองไม่เห็นตลอดกาล",
@@ -715,5 +853,155 @@ mod tests {
         let at_150 = params_for(Vec2::new(1_260.0, 900.0), 1.5);
         assert_eq!(at_100.columns, at_150.columns);
         assert!((at_150.gap / at_100.gap - 1.5).abs() < 1e-3);
+    }
+
+    // ---------- P3-4: sort + filter + cache ----------
+
+    /// ★★★ เกณฑ์ของ ROADMAP P3-4: **ไม่คำนวณซ้ำเมื่อไม่มีอะไรเปลี่ยน**
+    ///
+    /// วัดด้วย counter ที่นับ "กรอง+เรียงจริงกี่ครั้ง" — 200 เฟรมที่ไม่มีอะไรเปลี่ยน
+    /// (รวมทั้งการเลื่อน ซึ่งเป็นสิ่งที่ผู้ใช้ทำถี่ที่สุด) ต้องได้ **1 ครั้ง**
+    #[test]
+    fn nothing_changing_means_nothing_is_recomputed() {
+        let board = board_of(3_072);
+        let mut view = planned(&board);
+        assert_eq!(view.queries(), 1, "รอบแรกต้องคำนวณหนึ่งครั้ง");
+        for _ in 0..200 {
+            view.scroll_by(-30.0);
+            view.plan(&board, VIEW, 1.0, aspect_of(&board));
+        }
+        assert_eq!(
+            view.queries(),
+            1,
+            "กรอง+เรียงใหม่ {} ครั้งทั้งที่ไม่มีอะไรเปลี่ยน",
+            view.queries()
+        );
+    }
+
+    /// ★★★ negative control ของ counter — **มันต้องขยับเมื่อมีอะไรเปลี่ยนจริง**
+    ///
+    /// counter ที่คืนเลขน้อย ๆ เสมอ (เช่นลืมเรียกเลย) จะผ่านเทสต์ข้างบนได้สบาย
+    /// ทุกทางที่ทำให้ผลเปลี่ยนได้ต้องมีตัวอย่างอยู่ที่นี่
+    #[test]
+    fn the_counter_moves_for_every_way_the_result_can_change() {
+        let mut board = board_of(20);
+        let mut history = History::default();
+        let mut view = planned(&board);
+        let mut last = view.queries();
+        assert_eq!(last, 1);
+
+        let check = |view: &ArrangeView, what: &str, last: &mut u64| {
+            assert!(
+                view.queries() > *last,
+                "{what} แล้ว counter ไม่ขยับ — cache ค้างอยู่รุ่นเก่า"
+            );
+            *last = view.queries();
+        };
+
+        // 1. เปลี่ยนวิธีเรียง
+        assert!(view.set_sort(SortKey::Rating, false));
+        view.plan(&board, VIEW, 1.0, aspect_of(&board));
+        check(&view, "เปลี่ยนวิธีเรียง", &mut last);
+
+        // 2. สลับทิศ
+        assert!(view.set_sort(SortKey::Rating, true));
+        view.plan(&board, VIEW, 1.0, aspect_of(&board));
+        check(&view, "สลับทิศการเรียง", &mut last);
+
+        // 3. เปลี่ยนตัวกรอง
+        assert!(view.set_filter(Filter {
+            min_rating: 3,
+            ..Filter::default()
+        }));
+        view.plan(&board, VIEW, 1.0, aspect_of(&board));
+        check(&view, "เปลี่ยนตัวกรอง", &mut last);
+
+        // 4. board เปลี่ยน (ติดดาวหนึ่งใบ) — ★ ตัวที่ `revision` มีไว้เพื่อจับ
+        let id = board.z_order()[0];
+        set_rating(&mut board, &mut history, id, 5);
+        view.plan(&board, VIEW, 1.0, aspect_of(&board));
+        check(&view, "ติดดาวหนึ่งใบ", &mut last);
+
+        // 5. undo ก็เปลี่ยนเนื้อหาเหมือนกัน
+        history.undo(&mut board).unwrap();
+        view.plan(&board, VIEW, 1.0, aspect_of(&board));
+        check(&view, "undo", &mut last);
+    }
+
+    /// ★★ ตัวกรองต้อง **กรองจริง** และแผ่นต้องหดตาม ไม่ใช่แค่ตัวเลขบน status bar
+    #[test]
+    fn filtering_actually_shrinks_the_sheet() {
+        let mut board = board_of(60);
+        let mut history = History::default();
+        for (index, id) in board.z_order().to_vec().into_iter().enumerate() {
+            if index % 4 == 0 {
+                set_rating(&mut board, &mut history, id, 5);
+            }
+        }
+        let mut view = planned(&board);
+        let before = view.counts().total;
+        assert_eq!(before, 60);
+
+        assert!(view.set_filter(Filter {
+            min_rating: 5,
+            ..Filter::default()
+        }));
+        view.plan(&board, VIEW, 1.0, aspect_of(&board));
+        assert_eq!(view.counts().total, 15, "ควรเหลือเฉพาะใบที่ 5 ดาว");
+        assert!(
+            view.order()
+                .iter()
+                .all(|id| board.item(*id).is_some_and(|item| item.meta.rating == 5))
+        );
+
+        // ★ negative control: ล้างตัวกรองแล้วต้องกลับมาครบ ไม่ใช่หายถาวร
+        assert!(view.set_filter(Filter::default()));
+        view.plan(&board, VIEW, 1.0, aspect_of(&board));
+        assert_eq!(view.counts().total, before, "ล้างตัวกรองแล้วภาพไม่กลับมา");
+    }
+
+    /// ★ เรียงแล้ว **ลำดับบนแผ่นต้องเปลี่ยนจริง** ไม่ใช่แค่ `order` เปลี่ยน
+    ///
+    /// แผ่นถูก cache แยกจากการกรอง/เรียง — ถ้าคีย์ของแผ่นดูแค่ *จำนวน* item
+    /// การสลับทิศจะไม่ทำให้จัดใหม่ แล้วภาพบนจอจะไม่ขยับเลยทั้งที่ `order` ถูกแล้ว
+    #[test]
+    fn changing_the_sort_moves_the_images_not_just_the_list() {
+        let board = board_of(40);
+        let mut view = planned(&board);
+        let first_up = view.visible().first().map(|p| p.id);
+
+        assert!(view.set_sort(SortKey::Name, true));
+        view.plan(&board, VIEW, 1.0, aspect_of(&board));
+        let first_down = view.visible().first().map(|p| p.id);
+
+        assert_ne!(
+            first_up, first_down,
+            "สลับทิศแล้วใบแรกบนแผ่นยังเป็นใบเดิม — แผ่นไม่ได้ถูกจัดใหม่"
+        );
+        assert_eq!(view.rebuilds(), 2, "แผ่นต้องถูกจัดใหม่พอดีหนึ่งครั้ง");
+    }
+
+    /// ★ ตั้งค่าเดิมซ้ำต้องไม่นับว่าเปลี่ยน (I-1: ไม่ขอเฟรมใหม่ฟรี ๆ)
+    #[test]
+    fn setting_the_same_sort_or_filter_again_changes_nothing() {
+        let board = board_of(10);
+        let mut view = planned(&board);
+        assert!(!view.set_sort(SortKey::default(), false));
+        assert!(!view.set_filter(Filter::default()));
+        view.plan(&board, VIEW, 1.0, aspect_of(&board));
+        assert_eq!(view.queries(), 1, "ตั้งค่าเดิมซ้ำแล้วยังคำนวณใหม่");
+    }
+
+    /// ตัวกรองที่ไม่กรองอะไรต้องบอกตัวเองได้ — UI ใช้ตัดสินว่าจะเตือนผู้ใช้ไหม
+    #[test]
+    fn an_open_filter_knows_it_is_open() {
+        assert!(Filter::default().is_open());
+        assert!(
+            !Filter {
+                label: LabelFilter::Unlabelled,
+                ..Filter::default()
+            }
+            .is_open()
+        );
     }
 }

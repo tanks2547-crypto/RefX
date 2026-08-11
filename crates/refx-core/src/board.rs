@@ -681,6 +681,15 @@ pub struct Group {
 }
 
 /// วิธีเรียงในโหมด Arrange
+///
+/// ★★ **มีเท่าที่ข้อมูลรองรับจริง** — `docs/03 §3` ระบุไว้ 9 ตัว แต่สี่ตัว
+/// (`date_modified` `file_size` `dominant_hue` `canvas_order`) ยังไม่มีข้อมูล
+/// ให้เรียง: สองตัวแรกต้องเก็บ mtime/ขนาดไฟล์ลง `AssetRef` ตอน ingest ·
+/// `dominant_hue` อยู่ใน `ItemRender` ของชั้น UI ไม่ใช่ใน `Board` ·
+/// `canvas_order` คือ **P3-6** ซึ่งมีอัลกอริทึมของตัวเอง (docs/03 §4.2)
+///
+/// ไม่ใส่ variant ที่ไม่มีทางทำงาน — กับดักของคนอ่านรอบหน้า (เหตุผลเดียวกับที่
+/// P3-2 ไม่ใส่ `respect_pinned` และ P2-9 ลบ `BoardSettings::snap` ทิ้ง)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SortKey {
     /// ตามเวลาที่เพิ่ม
@@ -690,6 +699,10 @@ pub enum SortKey {
     Name,
     /// ตามดาว
     Rating,
+    /// ตามป้ายสี — ไม่มีป้ายมาก่อน แล้วเรียงตามค่าบนสาย (P3-4)
+    ColorLabel,
+    /// ตามสัดส่วน กว้าง/สูง — แนวตั้งมาก่อนแนวนอน (P3-4)
+    AspectRatio,
 }
 
 /// สถานะของโหมด Arrange
@@ -755,7 +768,7 @@ pub enum BoardError {
 ///
 /// ★ ตัวที่แก้สถานะเป็น `pub(crate)` ทั้งหมด: ชั้นบนอ่านผ่าน accessor ได้ แต่เขียน
 /// ต้องผ่าน `Command` เท่านั้น (I-3, docs/08 §4 ข้อ 10) — `&mut Board` ไม่หลุดออกไปที่อื่น
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Board {
     /// คีย์ของตัวเองใน workspace
     pub id: BoardId,
@@ -778,6 +791,51 @@ pub struct Board {
     pub(crate) arrange: ArrangeState,
     pub(crate) settings: BoardSettings,
     pub(crate) dirty: bool,
+    /// ★★ นับทุกครั้งที่ **เนื้อหา** ของ board เปลี่ยน (P3-4)
+    ///
+    /// มีไว้ให้ชั้นบน cache ผลที่คำนวณจาก board ได้โดยไม่ต้องเทียบ board ทั้งก้อน
+    /// — docs/03 §3 บังคับว่า filter ต้อง cache ผลไว้ "ตราบใดที่ `board.revision`
+    /// ไม่เปลี่ยน" เพราะที่ 1000+ ภาพ การกรองใหม่ทุกเฟรมคือการเผา CPU ฟรี
+    ///
+    /// ★ **ไม่นับรวมใน [`PartialEq`]** โดยตั้งใจ — undo ต้องคืนสภาพให้ "เท่าเดิม"
+    /// ในสายตาผู้ใช้ ส่วนเลขรุ่นเดินหน้าอย่างเดียวเสมอ ถ้านับด้วย เทสต์ที่ยืนยันว่า
+    /// undo คืนสภาพได้จะไม่มีวันผ่าน (เหตุผลเดียวกับ `Arena`/`Selection` — §4 ข้อ 20)
+    ///
+    /// ★★ **แก้ board ที่ไหน ต้องบวกที่นั่น** — `every_mutation_bumps_the_revision`
+    /// เรียกตัวแก้ทุกตัวแล้วบังคับข้อนี้ ไม่ใช่ความจำของคนเขียน
+    pub(crate) revision: u64,
+}
+
+/// ★ เทียบเฉพาะสิ่งที่ผู้ใช้สัมผัสได้ — **`revision` ไม่นับ** (§4 ข้อ 20)
+///
+/// destructure ครบทุกฟิลด์ไม่มี `..` โดยตั้งใจ: เพิ่มฟิลด์ใหม่เมื่อไหร่ ตรงนี้
+/// **คอมไพล์ไม่ผ่าน** จนกว่าจะมีคนตัดสินว่ามันเป็นส่วนหนึ่งของ "เท่าเดิม" หรือไม่
+impl PartialEq for Board {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            id,
+            name,
+            items,
+            z_order,
+            groups,
+            tags,
+            view,
+            arrange,
+            settings,
+            dirty,
+            revision: _,
+        } = self;
+        id == &other.id
+            && name == &other.name
+            && items == &other.items
+            && z_order == &other.z_order
+            && groups == &other.groups
+            && tags == &other.tags
+            && view == &other.view
+            && arrange == &other.arrange
+            && settings == &other.settings
+            && dirty == &other.dirty
+    }
 }
 
 impl Default for Board {
@@ -801,6 +859,7 @@ impl Board {
             arrange: ArrangeState::default(),
             settings: BoardSettings::default(),
             dirty: false,
+            revision: 0,
         }
     }
 
@@ -822,6 +881,15 @@ impl Board {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
+    }
+
+    /// ★ เลขรุ่นของ **เนื้อหา** board — เปลี่ยนทุกครั้งที่มีการแก้ (P3-4)
+    ///
+    /// ชั้นบนใช้เป็นคีย์ของ cache: เท่าเดิม = ไม่ต้องคำนวณใหม่ (docs/03 §3)
+    /// · ห้ามใช้เดาว่า "แก้ไปกี่ครั้ง" — undo ก็บวก และค่าจะ wrap ที่ `u64::MAX`
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// อ่าน item — `None` ถ้า id ตายไปแล้ว
@@ -902,6 +970,7 @@ impl Board {
             slot.id = id;
         }
         self.z_order.push(id);
+        self.touch();
         id
     }
 
@@ -918,6 +987,7 @@ impl Board {
         item.id = id;
         self.items.insert_at(id, item)?;
         self.z_order.insert(z_index.min(self.z_order.len()), id);
+        self.touch();
         Ok(())
     }
 
@@ -926,6 +996,7 @@ impl Board {
         let z_index = self.z_order.iter().position(|&other| other == id)?;
         let item = self.items.remove(id)?;
         self.z_order.remove(z_index);
+        self.touch();
         Some((item, z_index))
     }
 
@@ -942,7 +1013,9 @@ impl Board {
             .items
             .get_mut(id)
             .ok_or(BoardError::NoSuchItem { id })?;
-        Ok(std::mem::replace(&mut item.canvas, canvas.sanitized()))
+        let previous = std::mem::replace(&mut item.canvas, canvas.sanitized());
+        self.touch();
+        Ok(previous)
     }
 
     /// ตารางชื่อแท็กของ board นี้ — **อ่านอย่างเดียว** (P3-1)
@@ -955,6 +1028,7 @@ impl Board {
     pub(crate) fn insert_tag(&mut self, name: &str) -> Option<TagId> {
         let id = self.tags.insert(name)?;
         self.dirty = true;
+        self.touch();
         Some(id)
     }
 
@@ -962,6 +1036,7 @@ impl Board {
     pub(crate) fn remove_tag(&mut self, id: TagId) -> Option<String> {
         let name = self.tags.remove(id)?;
         self.dirty = true;
+        self.touch();
         Some(name)
     }
 
@@ -969,6 +1044,7 @@ impl Board {
     pub(crate) fn restore_tag(&mut self, id: TagId, name: String) {
         self.tags.restore(id, name);
         self.dirty = true;
+        self.touch();
     }
 
     /// แก้เนื้อความของโน้ต คืนข้อความเดิม (P2-11)
@@ -987,7 +1063,9 @@ impl Board {
         let ItemKind::Text(note) = &mut item.kind else {
             return Err(BoardError::NoSuchItem { id });
         };
-        Ok(std::mem::replace(&mut note.text, text))
+        let previous = std::mem::replace(&mut note.text, text);
+        self.touch();
+        Ok(previous)
     }
 
     /// แก้ `ItemMeta` คืนค่าเดิม
@@ -999,19 +1077,31 @@ impl Board {
             .items
             .get_mut(id)
             .ok_or(BoardError::NoSuchItem { id })?;
-        Ok(std::mem::replace(&mut item.meta, meta.sanitized()))
+        let previous = std::mem::replace(&mut item.meta, meta.sanitized());
+        self.touch();
+        Ok(previous)
     }
 
     /// เขียน z-order ทั้งชุด คืนของเดิม
     ///
     /// เก็บทั้งชุดแทน diff ตามที่ docs/02 §3 กำหนด — ถูกกว่าและไม่มีบั๊ก
     pub(crate) fn set_z_order(&mut self, order: Vec<ItemId>) -> Vec<ItemId> {
-        std::mem::replace(&mut self.z_order, order)
+        let previous = std::mem::replace(&mut self.z_order, order);
+        self.touch();
+        previous
     }
 
     /// ทำเครื่องหมายว่ามีการแก้ที่ยังไม่ได้บันทึก
+    ///
+    /// ★ **ไม่บวก `revision`** — "บันทึกแล้ว/ยังไม่บันทึก" ไม่ใช่การเปลี่ยนเนื้อหา
+    /// ถ้าบวกด้วย การกด Save จะทำให้ทุก cache ที่ผูกกับ board ถูกทิ้งฟรี ๆ
     pub(crate) fn mark_dirty(&mut self, dirty: bool) {
         self.dirty = dirty;
+    }
+
+    /// ★ บวกเลขรุ่น — เรียกจากตัวแก้ทุกตัวที่เปลี่ยน **เนื้อหา** ของ board
+    fn touch(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
     }
 }
 
@@ -1110,6 +1200,79 @@ pub(crate) mod tests {
             raw,
             "ป้ายที่ไม่รู้จักต้องรอดจาก sanitize"
         );
+    }
+
+    /// ★★★ ตัวแก้ **ทุกตัว** ต้องบวก `revision` — ไม่ใช่ความจำของคนเขียน
+    ///
+    /// cache ของชั้นบนผูกกับเลขนี้ (docs/03 §3) · ตัวแก้ที่ลืมบวกคือ cache ที่
+    /// **ค้างอยู่รุ่นเก่าโดยไม่มีอะไรส่งเสียง** — ผู้ใช้ติดดาวแล้วรายการไม่ขยับ
+    /// แล้วเขาจะสรุปว่าโปรแกรมไม่รับคำสั่ง ซึ่งหาสาเหตุยากมากเพราะทุกอย่าง "ถูก"
+    ///
+    /// เทสต์นี้เรียกตัวแก้ทุกตัวที่มีจริง ๆ ทีละตัวแล้วเทียบเลขก่อน/หลัง
+    #[test]
+    fn every_mutation_bumps_the_revision() {
+        let mut board = Board::default();
+        let mut last = board.revision();
+        let check = |board: &Board, what: &str, last: &mut u64| {
+            assert!(
+                board.revision() > *last,
+                "{what} ไม่ได้บวก revision — cache ของชั้นบนจะค้างรุ่นเก่าเงียบ ๆ"
+            );
+            *last = board.revision();
+        };
+
+        let id = board.insert_item(image_item(1));
+        check(&board, "insert_item", &mut last);
+
+        board.set_canvas(id, ItemCanvas::default()).unwrap();
+        check(&board, "set_canvas", &mut last);
+
+        board.set_meta(id, ItemMeta::default()).unwrap();
+        check(&board, "set_meta", &mut last);
+
+        let order = board.z_order().to_vec();
+        board.set_z_order(order);
+        check(&board, "set_z_order", &mut last);
+
+        let tag = board.insert_tag("แท็ก").unwrap();
+        check(&board, "insert_tag", &mut last);
+        let name = board.remove_tag(tag).unwrap();
+        check(&board, "remove_tag", &mut last);
+        board.restore_tag(tag, name);
+        check(&board, "restore_tag", &mut last);
+
+        let note = board.insert_item(Item::new(ItemKind::Text(TextNote::default())));
+        last = board.revision();
+        board.set_text(note, "ข้อความ".to_owned()).unwrap();
+        check(&board, "set_text", &mut last);
+
+        let (item, z) = board.remove_item(id).unwrap();
+        check(&board, "remove_item", &mut last);
+        board.restore_item(id, item, z).unwrap();
+        check(&board, "restore_item", &mut last);
+
+        // ★ ตรงข้าม: "บันทึกแล้ว" ไม่ใช่การเปลี่ยนเนื้อหา จึงต้อง **ไม่** บวก
+        let before = board.revision();
+        board.mark_dirty(false);
+        assert_eq!(
+            board.revision(),
+            before,
+            "mark_dirty บวก revision — การกด Save จะทิ้ง cache ทุกตัวฟรี ๆ"
+        );
+    }
+
+    /// ★★ `revision` ต้องไม่ทำให้ "undo คืนสภาพเป๊ะ" เป็นไปไม่ได้
+    ///
+    /// เลขรุ่นเดินหน้าอย่างเดียว ถ้ามันอยู่ใน `PartialEq` ด้วย เทสต์ทุกตัวที่
+    /// ยืนยันว่า undo คืนสภาพได้จะแดงทันทีและถาวร (§4 ข้อ 20)
+    #[test]
+    fn the_revision_is_not_part_of_being_equal() {
+        let mut board = Board::default();
+        let snapshot = board.clone();
+        let id = board.insert_item(image_item(7));
+        board.remove_item(id).unwrap();
+        assert_ne!(board.revision(), snapshot.revision(), "เลขรุ่นต้องขยับ");
+        assert_eq!(board, snapshot, "เนื้อหากลับมาเท่าเดิมแล้วแต่ยังไม่เท่ากัน");
     }
 
     pub(crate) fn image_item(tag: u8) -> Item {
