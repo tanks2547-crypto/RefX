@@ -13,7 +13,7 @@ use refx_core::arena::ItemId;
 use refx_core::board::{AssetRef, Board, ImageFormat, Item, ItemCanvas, ItemKind};
 use refx_core::board::{Flip, ItemFilter, ItemMeta};
 use refx_core::command::{
-    AddItems, EditText, History, RemoveItems, ReorderZ, SetFilter, TransformItems,
+    AddItems, ApplyLayout, EditText, History, RemoveItems, ReorderZ, SetFilter, TransformItems,
 };
 use refx_core::geom::Rect as WorldRect;
 use refx_core::interact::Tool;
@@ -213,6 +213,18 @@ fn board_full_message(lang: Lang, capacity: usize, batch: DropBatch) -> Option<S
             ("requested", &batch.requested.to_string()),
         ],
     ))
+}
+
+/// เวลาปัจจุบันเป็น unix millis — `0` ถ้านาฬิกาเครื่องอยู่ก่อนปี 1970
+///
+/// ★ ใช้ตอน **สร้าง item** เท่านั้น ไม่ใช่ในลูปเฟรม · docs/08 §3.9 ข้อ 5b ห้าม
+/// *assert* เวลานาฬิกาในเทสต์ ไม่ได้ห้ามบันทึกเวลาที่ผู้ใช้เพิ่มภาพ
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_millis()).ok())
+        .unwrap_or(0)
 }
 
 /// สถิติ frame time สำหรับโหมด benchmark
@@ -1488,6 +1500,7 @@ impl RefxApp {
                 refx_asset::pool::JobResult::Done {
                     hash,
                     thumb,
+                    meta,
                     elapsed,
                 } => {
                     tracing::debug!(hash = %hash.short(), ?elapsed, "image decoded");
@@ -1498,7 +1511,7 @@ impl RefxApp {
                         .get(&hash)
                         .cloned()
                         .unwrap_or(refx_asset::pool::JobSource::Clipboard);
-                    done.push((hash, source, thumb));
+                    done.push((hash, source, thumb, meta));
                 }
                 refx_asset::pool::JobResult::ClipboardFiles { hash, paths } => {
                     // ก๊อปไฟล์จาก Explorer มาวาง — เดินเส้นทางเดียวกับลากไฟล์เข้ามา
@@ -1629,7 +1642,7 @@ impl RefxApp {
         if !done.is_empty()
             && let Some(gfx) = self.gfx.as_mut()
         {
-            for (hash, source, thumb) in done {
+            for (hash, source, thumb, meta) in done {
                 match Self::upload_thumb(gfx, &thumb.pixels) {
                     Ok(slot) => {
                         // จัดเป็นตารางง่าย ๆ ไปก่อน — layout จริงมาใน P2/P3
@@ -1661,8 +1674,22 @@ impl RefxApp {
                             //   ถูกแยกไว้เป็นงานของตัวเอง (HANDOFF §6)
                             format: ImageFormat::Unknown,
                             embedded: false,
+                            // ★ มาจาก `stat` บน worker ตอน ingest — ปลดล็อกการเรียง
+                            //   ตามวันที่แก้ไข/ขนาดไฟล์ (P3-4) โดยไม่อ่านดิสก์เพิ่มบน UI thread
+                            mtime: meta.mtime_ms,
+                            file_size: meta.bytes,
                         }))
                         .at(top_left + size * 0.5, size);
+                        // ★ `added_at` **ไม่เคยมีใครเซ็ตมาก่อน** (เป็น 0 ทุกใบ) ทำให้
+                        //   การเรียงตามเวลาที่เพิ่มตกไปที่ตัวตัดสินท้ายเสมอ · ที่นี่คือ
+                        //   จุดเดียวที่ item ถูกสร้างจากไฟล์จริง จึงเป็นที่ของมัน
+                        let item = Item {
+                            meta: ItemMeta {
+                                added_at: now_ms(),
+                                ..item.meta
+                            },
+                            ..item
+                        };
 
                         // ★ ทุกการเพิ่มภาพผ่าน `AddItems` เข้า `History` → ลากไฟล์เข้ามาแล้ว undo ได้
                         let Ok(command) = AddItems::new(vec![item]) else {
@@ -2359,6 +2386,46 @@ impl RefxApp {
                 "released thumbnails the history can no longer restore"
             );
         }
+    }
+
+    /// ★★ ส่งผลของ layout ลง canvas — **จุดเดียวที่ Arrange แตะข้อมูลจริง** (P3-5)
+    ///
+    /// ทุกอย่างก่อนหน้านี้ (P3-3 virtual scrolling · P3-4 sort/filter) เป็นการ
+    /// *มองดู* ล้วน ๆ ไม่แตะ `Board` เลย · ตรงนี้คือที่ที่ผู้ใช้ตั้งใจให้มันแตะ
+    /// จึงต้องผ่าน `Command` และเป็น **undo ขั้นเดียวสำหรับทั้งกระดาน**
+    fn apply_layout_to_canvas(&mut self) {
+        let Some(gfx) = self.gfx.as_mut() else {
+            return;
+        };
+        let lang = self.shell.lang;
+        let Some(command) = ApplyLayout::from_placed(&gfx.board, gfx.arrange.placed()) else {
+            // ★ ไม่มีอะไรขยับ = บอกตรง ๆ ไม่ใช่เงียบ (ผู้ใช้กดแล้วต้องรู้ว่าเกิดอะไร)
+            self.shell.status = text::t(lang, Key::NothingToApply).to_owned();
+            return;
+        };
+        let moved = refx_core::command::Command::affected(&command);
+        if let Err(err) = gfx.history.apply(&mut gfx.board, Box::new(command)) {
+            tracing::error!(%err, "cannot arrange the images on the canvas");
+            return;
+        }
+        // ★ index ต้องตามตำแหน่งใหม่ทันที ไม่งั้นคลิกครั้งถัดไป hit-test กับที่เก่า
+        for id in &moved {
+            if let Some(item) = gfx.board.item(*id) {
+                gfx.index.insert(*id, &item.canvas);
+            }
+        }
+        Self::collect_forgotten(gfx);
+        Self::rebuild_quads(gfx);
+        // ★ พาผู้ใช้ไปดูผลด้วย — ปุ่มชื่อ "ส่งเข้า canvas" แล้วอยู่ที่เดิมคือ
+        //   การกดที่ไม่มีอะไรเกิดขึ้นในสายตาเขา (ผลอยู่อีกโหมดหนึ่ง)
+        self.shell.mode = Mode::Canvas;
+        self.shell.status = text::fill(
+            lang,
+            Template::LayoutApplied,
+            &[("n", &moved.len().to_string())],
+        );
+        self.shell.status_warn = false;
+        gfx.window.request_redraw();
     }
 
     /// `G` / `H` (P2-8)
@@ -3184,6 +3251,10 @@ impl AppDelegate for RefxApp {
         self.apply_note_edit();
         // tag / rating / color label / pinned / note ฝั่ง Arrange (P3-1)
         self.apply_meta_request();
+        // ★ ผู้ใช้กด "ส่งเข้า canvas" เมื่อเฟรมที่แล้ว (P3-5)
+        if std::mem::take(&mut self.shell.arrange_apply) {
+            self.apply_layout_to_canvas();
+        }
         // ปุ่มจัดเรียงที่กดไปเมื่อเฟรมที่แล้ว (P2-9)
         if let Some(request) = self.shell.arrange_request.take() {
             self.apply_arrange(request);
@@ -4019,6 +4090,8 @@ mod tests {
             px_size: glam::UVec2::new(100, 100),
             format: ImageFormat::Unknown,
             embedded: false,
+            mtime: 0,
+            file_size: 0,
         }))
         .at(Vec2::ZERO, Vec2::splat(100.0));
         history

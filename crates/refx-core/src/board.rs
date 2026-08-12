@@ -603,6 +603,20 @@ pub struct AssetRef {
     pub format: ImageFormat,
     /// ตัวไฟล์ฝังอยู่ใน `.refx` หรือไม่ (packed mode — P4-5)
     pub embedded: bool,
+    /// ★ เวลาที่ไฟล์ต้นฉบับถูกแก้ครั้งล่าสุด (unix **millis**) ตอนที่ ingest
+    ///
+    /// ★★ **ไม่ได้อ่านดิสก์เพิ่มเพื่อค่านี้** — มันถูกคำนวณอยู่แล้วตอน ingest
+    /// เพราะเป็นส่วนหนึ่งของ cache key `(hash, mtime, size)` (docs/02 §2.9 ข้อ 4)
+    /// เดิมถูกทิ้งหลังใช้เสร็จ ทำให้ sort "วันที่แก้ไข" ของ docs/03 §3 ทำไม่ได้
+    /// ทั้งที่ข้อมูลอยู่ในมือแล้ว
+    ///
+    /// `0` = ไม่รู้ (ภาพจาก clipboard ไม่มีไฟล์ · stat ล้มเหลว)
+    ///
+    /// > เป็นสภาพ **ณ ตอน ingest** ไฟล์ที่ถูกแก้ทีหลังจะไม่ตรง — ยอมรับได้สำหรับ
+    /// > การเรียงบน mood board และ cache key ตรวจซ้ำตอนโหลดอยู่แล้ว (docs/02 §2.3)
+    pub mtime: i64,
+    /// ขนาดไฟล์ต้นฉบับเป็นไบต์ ตอนที่ ingest — `0` = ไม่รู้ (ดู [`AssetRef::mtime`])
+    pub file_size: u64,
 }
 
 /// โน้ตข้อความบน canvas (P2-11)
@@ -682,11 +696,11 @@ pub struct Group {
 
 /// วิธีเรียงในโหมด Arrange
 ///
-/// ★★ **มีเท่าที่ข้อมูลรองรับจริง** — `docs/03 §3` ระบุไว้ 9 ตัว แต่สี่ตัว
-/// (`date_modified` `file_size` `dominant_hue` `canvas_order`) ยังไม่มีข้อมูล
-/// ให้เรียง: สองตัวแรกต้องเก็บ mtime/ขนาดไฟล์ลง `AssetRef` ตอน ingest ·
-/// `dominant_hue` อยู่ใน `ItemRender` ของชั้น UI ไม่ใช่ใน `Board` ·
-/// `canvas_order` คือ **P3-6** ซึ่งมีอัลกอริทึมของตัวเอง (docs/03 §4.2)
+/// ★★ **มีเท่าที่ข้อมูลรองรับจริง** — `docs/03 §3` ระบุไว้ 9 ตัว ตอนนี้ทำได้ 7
+/// (`date_modified`/`file_size` ปลดล็อกแล้วตอน `AssetRef` เก็บ mtime/ขนาดไฟล์)
+/// เหลือสองตัวที่ยังไม่มีข้อมูล: `dominant_hue` อยู่ใน `ItemRender` ของชั้น UI
+/// ไม่ใช่ใน `Board` · `canvas_order` คือ **P3-6** ซึ่งมีอัลกอริทึมของตัวเอง
+/// (docs/03 §4.2 — อ่านแบบหนังสือ + tolerance 50% ของความสูงเฉลี่ย)
 ///
 /// ไม่ใส่ variant ที่ไม่มีทางทำงาน — กับดักของคนอ่านรอบหน้า (เหตุผลเดียวกับที่
 /// P3-2 ไม่ใส่ `respect_pinned` และ P2-9 ลบ `BoardSettings::snap` ทิ้ง)
@@ -703,6 +717,31 @@ pub enum SortKey {
     ColorLabel,
     /// ตามสัดส่วน กว้าง/สูง — แนวตั้งมาก่อนแนวนอน (P3-4)
     AspectRatio,
+    /// ตามเวลาที่ **ไฟล์ต้นฉบับ** ถูกแก้ครั้งล่าสุด (P3-4)
+    ///
+    /// ★ คนละอย่างกับ [`SortKey::AddedAt`] ซึ่งคือเวลาที่ *ลากเข้ามาบน board*
+    /// — นักวาดที่สแกนงานเก่ามาทั้งโฟลเดอร์จะได้ลำดับต่างกันคนละเรื่อง
+    ModifiedAt,
+    /// ตามขนาดไฟล์ (ไบต์)
+    FileSize,
+}
+
+impl SortKey {
+    /// ★ ทุกวิธีเรียงที่มี — **ชั้น UI ต้องให้ผู้ใช้เลือกได้ครบทุกตัว**
+    ///
+    /// วิธีเรียงที่มีใน enum แต่ไม่มีในรายการของ toolbar = ฟีเจอร์ที่ไม่มีอยู่จริง
+    /// สำหรับผู้ใช้ · เทสต์ `every_sort_key_can_be_picked_from_the_toolbar`
+    /// (`refx-ui`) เทียบรายการนี้กับปุ่มจริง และ `all_lists_every_sort_key`
+    /// ข้างล่างบังคับว่ารายการนี้เองต้องครบ
+    pub const ALL: [Self; 7] = [
+        Self::AddedAt,
+        Self::Name,
+        Self::Rating,
+        Self::ColorLabel,
+        Self::AspectRatio,
+        Self::ModifiedAt,
+        Self::FileSize,
+    ];
 }
 
 /// สถานะของโหมด Arrange
@@ -1275,6 +1314,29 @@ pub(crate) mod tests {
         assert_eq!(board, snapshot, "เนื้อหากลับมาเท่าเดิมแล้วแต่ยังไม่เท่ากัน");
     }
 
+    /// ★★ `SortKey::ALL` ต้องครบทุก variant — บังคับด้วย `match` ที่ไม่มี `_`
+    ///
+    /// เพิ่ม variant ใหม่แล้ว **คอมไพล์ไม่ผ่านที่นี่** จนกว่าจะมีคนมาดู แล้วเขาจะ
+    /// เห็น `ALL` อยู่ข้าง ๆ พอดี · ถ้าใช้แค่ `assert_eq!(len, 7)` การเพิ่ม variant
+    /// แล้วแก้เลขให้ผ่านเป็นเรื่องที่ทำได้โดยไม่ต้องคิดอะไรเลย
+    #[test]
+    fn all_lists_every_sort_key() {
+        for key in SortKey::ALL {
+            match key {
+                SortKey::AddedAt
+                | SortKey::Name
+                | SortKey::Rating
+                | SortKey::ColorLabel
+                | SortKey::AspectRatio
+                | SortKey::ModifiedAt
+                | SortKey::FileSize => {}
+            }
+        }
+        let mut seen = SortKey::ALL.to_vec();
+        seen.dedup();
+        assert_eq!(seen.len(), SortKey::ALL.len(), "มี variant ซ้ำในรายการ");
+    }
+
     pub(crate) fn image_item(tag: u8) -> Item {
         Item::new(ItemKind::Image(AssetRef {
             hash: ContentHash::from_bytes([tag; 32]),
@@ -1282,6 +1344,8 @@ pub(crate) mod tests {
             px_size: UVec2::new(100, 80),
             format: ImageFormat::Png,
             embedded: false,
+            mtime: 0,
+            file_size: 0,
         }))
     }
 

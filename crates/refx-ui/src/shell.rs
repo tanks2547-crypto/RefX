@@ -210,6 +210,11 @@ pub struct ShellState {
     pub arrange_descending: bool,
     /// ตัวกรองที่ผู้ใช้ตั้งไว้ (P3-4)
     pub arrange_filter: refx_core::query::Filter,
+    /// ★ ผู้ใช้กด "ส่งเข้า canvas" ในเฟรมนี้ (P3-5) — ชั้น `app` มาเก็บไปแล้วล้างทิ้ง
+    ///
+    /// เป็น **คำขอ** ไม่ใช่สถานะ ด้วยเหตุผลเดียวกับ `tool_request`/`arrange_request`:
+    /// widget ไม่แก้ `Board` เอง (docs/08 §4 ข้อ 10)
+    pub arrange_apply: bool,
     /// ★★ ตัวเลขของ virtual scrolling ในเฟรมล่าสุด (P3-3)
     ///
     /// เกณฑ์ของ ROADMAP คือ **"10,000 item · วาดจริง < 60 ตัว"** ซึ่งเป็นตัวเลข
@@ -325,6 +330,7 @@ impl Default for ShellState {
             arrange_sort: SortKey::default(),
             arrange_descending: false,
             arrange_filter: refx_core::query::Filter::default(),
+            arrange_apply: false,
             meta: None,
             meta_request: None,
             meta_sealed: false,
@@ -967,12 +973,14 @@ fn arrange_inspector(ui: &mut egui::Ui, state: &mut ShellState) {
 /// ★ อยู่รวมกันที่นี่เหมือน `ARRANGE_BUTTONS` — เพิ่ม `SortKey` ใหม่แล้วคอมไพเลอร์
 /// ไม่ฟ้อง แต่เทสต์ `every_sort_key_can_be_picked_from_the_toolbar` ฟ้องแทน
 /// (ตัวเลือกที่มีในโค้ดแต่กดไม่ได้ = ฟีเจอร์ที่ไม่มีอยู่จริงสำหรับผู้ใช้)
-pub(crate) const SORT_CHOICES: [(SortKey, Key); 5] = [
+pub(crate) const SORT_CHOICES: [(SortKey, Key); 7] = [
     (SortKey::AddedAt, Key::SortAddedAt),
     (SortKey::Name, Key::SortName),
     (SortKey::Rating, Key::SortRating),
     (SortKey::ColorLabel, Key::SortColorLabel),
     (SortKey::AspectRatio, Key::SortAspect),
+    (SortKey::ModifiedAt, Key::SortModifiedAt),
+    (SortKey::FileSize, Key::SortFileSize),
 ];
 
 /// ปุ่มเครื่องมือของ Arrange mode — เรียง + กรอง (P3-4)
@@ -1074,6 +1082,17 @@ fn arrange_tools(ui: &mut egui::Ui, state: &mut ShellState) {
                 LabelFilter::Is(label)
             };
         }
+    }
+
+    ui.separator();
+
+    // ---- ส่งผลการจัดลง canvas (P3-5) ----
+    if ui
+        .button(text::t(lang, Key::ToolSendToCanvas))
+        .on_hover_text(text::t(lang, Key::SendToCanvasHint))
+        .clicked()
+    {
+        state.arrange_apply = true;
     }
 
     ui.add(
@@ -1267,6 +1286,21 @@ mod tests {
                 .iter()
                 .any(|choice| !choice.is_known())
         );
+    }
+
+    /// ★★ ทุกวิธีเรียงที่มีในโค้ด ต้อง **เลือกได้จริงบน toolbar**
+    ///
+    /// วิธีเรียงที่ไม่มีปุ่มให้กด = ฟีเจอร์ที่ไม่มีอยู่จริงสำหรับผู้ใช้
+    /// (รูปแบบเดียวกับ `arrange_button_labels_all_have_glyphs` ของ P2-9)
+    #[test]
+    fn every_sort_key_can_be_picked_from_the_toolbar() {
+        for key in SortKey::ALL {
+            assert!(
+                SORT_CHOICES.iter().any(|(choice, _)| *choice == key),
+                "{key:?} ไม่มีในรายการบน toolbar — ผู้ใช้เลือกไม่ได้"
+            );
+        }
+        assert_eq!(SORT_CHOICES.len(), SortKey::ALL.len(), "มีตัวเลือกเกินมา");
     }
 
     #[test]

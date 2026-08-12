@@ -23,6 +23,8 @@ use std::collections::VecDeque;
 
 use crate::arena::ItemId;
 use crate::board::{Board, BoardError, Item, ItemCanvas, ItemMeta, TagId};
+use crate::geom::Rect;
+use crate::layout::Placed;
 
 /// คำสั่งทำงานไม่สำเร็จ — **board ไม่ถูกแตะเลยเมื่อได้ค่านี้**
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -492,6 +494,135 @@ impl Command for SetCrop {
 
     fn label(&self) -> &'static str {
         "Crop"
+    }
+
+    fn heap_size(&self) -> usize {
+        self.inner.heap_size()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ApplyLayout
+// ---------------------------------------------------------------------------
+
+/// เอาผลของ layout engine ลง canvas ทั้งชุด (P3-5 · docs/03 §4.1)
+///
+/// ★★★ **นี่คือจุดเดียวที่ผลของ Arrange ไปแตะข้อมูลจริง** — ก่อนหน้านี้ layout
+/// เป็นแค่สิ่งที่วาดบนแผ่น contact sheet เท่านั้น (P3-3/P3-4 ไม่แตะ `Board` เลย)
+///
+/// ★ **ต้องเป็น undo ขั้นเดียวสำหรับทั้งกระดาน** (เกณฑ์ ROADMAP P3-5) — ผู้ใช้กด
+/// "จัดลง canvas" ที่ 3,000 ภาพแล้วไม่ชอบ ต้องกด Ctrl+Z ครั้งเดียวได้ของเดิมคืนครบ
+/// ไม่ใช่กด 3,000 ครั้ง · `TransformItems` เก็บค่าเดิมของทุกใบไว้อยู่แล้ว
+/// จึงยืมมาทั้งดุ้นเหมือนที่ [`SetCrop`] ทำ
+///
+/// ★★ **`merge` คืน `false` เสมอ** ต่างจากคำสั่งอื่น — การจัดสองครั้งติดกันคือ
+/// สองการตัดสินใจของผู้ใช้ (เขาลองแบบ Grid แล้วลองแบบ Masonry) ถ้ายุบเป็นขั้นเดียว
+/// กด Ctrl+Z แล้วจะข้ามกลับไปสภาพก่อนจัดครั้งแรกเลย ซึ่งไม่ใช่สิ่งที่เขาขอ
+#[derive(Debug)]
+pub struct ApplyLayout {
+    inner: TransformItems,
+}
+
+impl ApplyLayout {
+    /// ตั้ง `ItemCanvas` ชุดใหม่ให้ทุกใบที่ layout จัดให้
+    ///
+    /// # Errors
+    /// [`CmdError::Empty`] ถ้ารายการว่าง (ไม่มีใบไหนขยับ = ไม่ต้องกิน undo)
+    pub fn new(changes: Vec<(ItemId, ItemCanvas)>) -> Result<Self, CmdError> {
+        Ok(Self {
+            inner: TransformItems::new(changes)?,
+        })
+    }
+
+    /// สร้างคำสั่งจากผลของ layout engine — `None` เมื่อ **ไม่มีใบไหนขยับจริง**
+    ///
+    /// คืน `None` แทน `Err` เพราะ "กดแล้วทุกอย่างอยู่ที่เดิมอยู่แล้ว" ไม่ใช่ความ
+    /// ผิดพลาด — แค่ต้องไม่กิน undo เปล่า ๆ (หลักการเดียวกับ `zorder::reordered`)
+    ///
+    /// ★★★ **ใบที่ปักหมุดและใบที่ล็อกไว้ไม่ถูกแตะ**
+    ///
+    /// `docs/03 §4.1` เขียนว่า "ไม่ขยับภาพที่ `pinned = true` (layout จะจัดรอบมันแทน)"
+    /// — **ครึ่งแรกทำแล้ว ครึ่งหลังยังไม่ได้ทำ**: การจัดของที่เหลือให้ *หลบ* ภาพที่
+    /// ปักหมุดต้องมีการตรวจการทับกันในตัว engine ซึ่งไม่มีตัวไหนรองรับ (P3-2
+    /// จึงตัด `respect_pinned` ทิ้งเพราะ input ของมันไม่มีทั้งธง pin และกรอบจริง)
+    /// ตอนนี้ผลคือ **ของที่จัดใหม่อาจไปวางทับใบที่ปักหมุดได้** ซึ่งผู้ใช้แก้เองได้
+    /// ด้วยการลาก — ต่างจากการ *ย้ายใบที่เขาสั่งไม่ให้ย้าย* ซึ่งแก้กลับเองไม่ได้เลย
+    ///
+    /// ★ ใบที่ `locked` ก็ไม่ถูกแตะด้วยเหตุผลเดียวกัน (ล็อก = ห้ามแก้ — `SelectTool`
+    /// เคารพอยู่แล้ว การจัดทั้งกระดานต้องไม่เป็นทางลัดที่ข้ามมันไปได้)
+    ///
+    /// ★★ **กลุ่มอยู่ที่เดิม**: จุดกึ่งกลางของกรอบรวม *หลัง* จัด ถูกเลื่อนให้ตรงกับ
+    /// จุดกึ่งกลางของกรอบรวม *ก่อน* จัด · `Placed` เริ่มที่ `(0,0)` เสมอ ถ้าเอาไปใส่
+    /// ตรง ๆ ภาพทั้งกระดานจะกระโดดไปมุมซ้ายบนของ world แล้วผู้ใช้จะหาไม่เจอ
+    /// (docs/03 §4.1 มีตัวเลือก "กลางจอ canvas" กับ "ต่อท้ายด้านล่าง" ด้วย —
+    /// ยังไม่ได้ทำ ดู HANDOFF)
+    #[must_use]
+    pub fn from_placed(board: &Board, placed: &[Placed]) -> Option<Self> {
+        // 1. คัดเฉพาะใบที่ขยับได้จริง
+        let movable: Vec<(ItemId, ItemCanvas, Placed)> = placed
+            .iter()
+            .filter_map(|slot| {
+                let item = board.item(slot.id)?;
+                (!item.meta.pinned && !item.canvas.locked).then_some((slot.id, item.canvas, *slot))
+            })
+            .collect();
+        if movable.is_empty() {
+            return None;
+        }
+
+        // 2. กรอบรวมก่อน/หลัง แล้วเลื่อนให้กึ่งกลางตรงกัน
+        let mut before = Rect::EMPTY;
+        let mut after = Rect::EMPTY;
+        for (_, canvas, slot) in &movable {
+            before = before.union(canvas.world_bounds());
+            after = after.union(Rect::from_corners(slot.top_left, slot.top_left + slot.size));
+        }
+        let offset = before.center() - after.center();
+
+        // 3. ใบที่ค่าไม่เปลี่ยนเลยไม่ต้องเข้าคำสั่ง — undo ที่ไม่ทำอะไรคือ undo ที่หลอก
+        let changes: Vec<(ItemId, ItemCanvas)> = movable
+            .into_iter()
+            .filter_map(|(id, canvas, slot)| {
+                let next = ItemCanvas {
+                    pos: slot.centre() + offset,
+                    size: slot.size,
+                    // ★ การจัดวางเป็นเรื่องของ **ตำแหน่งกับขนาด** เท่านั้น
+                    //   crop/flip/filter/opacity/rotation ของผู้ใช้ต้องไม่ถูกล้าง
+                    ..canvas
+                }
+                .sanitized();
+                (next != canvas).then_some((id, next))
+            })
+            .collect();
+
+        Self::new(changes).ok()
+    }
+}
+
+impl Command for ApplyLayout {
+    fn apply(&mut self, board: &mut Board) -> Result<(), CmdError> {
+        self.inner.apply(board)
+    }
+
+    fn undo(&mut self, board: &mut Board) -> Result<(), CmdError> {
+        self.inner.undo(board)
+    }
+
+    /// ★ ไม่รวมกับอะไรเลย — ดูเหตุผลที่หัวโครงสร้าง
+    fn merge(&mut self, _next: &dyn Command) -> bool {
+        false
+    }
+
+    fn affected(&self) -> Vec<ItemId> {
+        self.inner.affected()
+    }
+
+    fn label(&self) -> &'static str {
+        "Apply layout"
     }
 
     fn heap_size(&self) -> usize {
@@ -1355,6 +1486,244 @@ mod tests {
             pos: Vec2::new(x, y),
             ..ItemCanvas::default()
         }
+    }
+
+    // ---------- P3-5: ApplyLayout (Arrange → Canvas) ----------
+
+    /// board ที่มีภาพ `n` ใบวางกระจัดกระจาย
+    fn scattered(n: u32) -> (Board, History, Vec<ItemId>) {
+        let mut board = Board::default();
+        let mut history = History::default();
+        let items: Vec<Item> = (0..n)
+            .map(|i| {
+                #[expect(clippy::cast_precision_loss, reason = "จำนวนน้อยในเทสต์")]
+                let f = i as f32;
+                crate::board::tests::image_item(u8::try_from(i % 250).unwrap_or(0))
+                    .at(Vec2::new(f * 37.0, f * 11.0), Vec2::new(80.0, 60.0))
+            })
+            .collect();
+        history
+            .apply(&mut board, Box::new(AddItems::new(items).unwrap()))
+            .unwrap();
+        let ids = board.z_order().to_vec();
+        (board, history, ids)
+    }
+
+    fn grid_for(board: &Board) -> Vec<Placed> {
+        let items: Vec<(ItemId, Vec2)> = board
+            .z_order()
+            .iter()
+            .map(|id| (*id, Vec2::new(4.0, 3.0)))
+            .collect();
+        crate::layout::layout(
+            crate::layout::Engine::Grid,
+            &items,
+            crate::layout::LayoutParams {
+                width: 800.0,
+                gap: 12.0,
+                columns: Some(4),
+                target_row_height: 200.0,
+            },
+        )
+    }
+
+    /// ★★★ เกณฑ์ ROADMAP P3-5: **undo ครั้งเดียวคืนสภาพเดิมครบ**
+    ///
+    /// จัด 40 ใบใหม่ทั้งกระดานแล้วกด Ctrl+Z หนึ่งครั้ง ต้องได้ board ที่ *เท่ากันทุก
+    /// ตัวอักษร* กับก่อนจัด — ไม่ใช่ "ใกล้เคียง" (`Board: PartialEq` เทียบทุกอย่าง
+    /// ที่ผู้ใช้สัมผัสได้ · `revision` ไม่นับเพราะมันเดินหน้าอย่างเดียว — §4 ข้อ 20)
+    #[test]
+    fn one_undo_puts_every_item_back_exactly() {
+        let (mut board, mut history, _) = scattered(40);
+        let snapshot = board.clone();
+
+        let command = ApplyLayout::from_placed(&board, &grid_for(&board)).unwrap();
+        history.apply(&mut board, Box::new(command)).unwrap();
+        assert_ne!(board, snapshot, "จัดแล้วต้องมีอะไรขยับจริง");
+        assert_eq!(history.undo_depth(), 2, "การจัดต้องเป็น undo ขั้นเดียว");
+
+        history.undo(&mut board).unwrap();
+        assert_eq!(board, snapshot, "undo ครั้งเดียวแล้วยังไม่เหมือนเดิม");
+    }
+
+    /// ★★ ใบที่ **ปักหมุด** และใบที่ **ล็อก** ต้องไม่ขยับแม้แต่หน่วยเดียว
+    #[test]
+    fn pinned_and_locked_items_are_never_moved() {
+        let (mut board, mut history, ids) = scattered(6);
+        let pinned = ids[1];
+        let locked = ids[3];
+        let meta = ItemMeta {
+            pinned: true,
+            ..board.item(pinned).unwrap().meta.clone()
+        };
+        history
+            .apply(
+                &mut board,
+                Box::new(EditMeta::new(MetaField::Pinned, vec![(pinned, meta)]).unwrap()),
+            )
+            .unwrap();
+        let locked_canvas = ItemCanvas {
+            locked: true,
+            ..board.item(locked).unwrap().canvas
+        };
+        history
+            .apply(
+                &mut board,
+                Box::new(TransformItems::new(vec![(locked, locked_canvas)]).unwrap()),
+            )
+            .unwrap();
+
+        let before: Vec<ItemCanvas> = ids
+            .iter()
+            .map(|id| board.item(*id).unwrap().canvas)
+            .collect();
+        let command = ApplyLayout::from_placed(&board, &grid_for(&board)).unwrap();
+        history.apply(&mut board, Box::new(command)).unwrap();
+
+        for (index, id) in ids.iter().enumerate() {
+            let now = board.item(*id).unwrap().canvas;
+            if *id == pinned || *id == locked {
+                assert_eq!(now, before[index], "ใบที่ปักหมุด/ล็อกถูกย้าย");
+            } else {
+                assert_ne!(now, before[index], "ใบปกติต้องถูกจัดใหม่");
+            }
+        }
+    }
+
+    /// ★ กลุ่มต้องอยู่ที่เดิม — ไม่กระโดดไปมุมซ้ายบนของ world
+    ///
+    /// `Placed` เริ่มที่ `(0,0)` เสมอ ถ้าเอาไปใส่ตรง ๆ ภาพทั้งกระดานจะย้ายไปที่
+    /// ที่ผู้ใช้ไม่ได้มองอยู่ แล้วเขาจะอ่านว่า "กดแล้วภาพหายหมด"
+    #[test]
+    fn the_group_keeps_the_place_it_already_occupied() {
+        let (mut board, mut history, ids) = scattered(9);
+        let centre_of = |board: &Board| {
+            ids.iter().fold(Rect::EMPTY, |acc, id| {
+                acc.union(board.item(*id).unwrap().canvas.world_bounds())
+            })
+        };
+        let before = centre_of(&board).center();
+
+        let command = ApplyLayout::from_placed(&board, &grid_for(&board)).unwrap();
+        history.apply(&mut board, Box::new(command)).unwrap();
+        let after = centre_of(&board).center();
+
+        assert!(
+            (before - after).length() < 0.5,
+            "กรอบรวมย้ายจาก {before:?} ไป {after:?}"
+        );
+    }
+
+    /// ★ การจัดวางแตะแค่ตำแหน่ง/ขนาด — ของที่ผู้ใช้แต่งไว้ต้องไม่ถูกล้าง
+    #[test]
+    fn applying_a_layout_keeps_crop_flip_and_filters() {
+        let (mut board, mut history, ids) = scattered(4);
+        let id = ids[0];
+        let dressed = ItemCanvas {
+            opacity: 0.5,
+            flip: crate::board::Flip::Horizontal,
+            rotation: 0.3,
+            ..board.item(id).unwrap().canvas
+        };
+        history
+            .apply(
+                &mut board,
+                Box::new(TransformItems::new(vec![(id, dressed)]).unwrap()),
+            )
+            .unwrap();
+
+        let command = ApplyLayout::from_placed(&board, &grid_for(&board)).unwrap();
+        history.apply(&mut board, Box::new(command)).unwrap();
+
+        let now = board.item(id).unwrap().canvas;
+        assert!((now.opacity - 0.5).abs() < 1e-6, "opacity หาย");
+        assert_eq!(now.flip, crate::board::Flip::Horizontal, "flip หาย");
+        assert!((now.rotation - 0.3).abs() < 1e-6, "การหมุนหาย");
+    }
+
+    /// ★ จัดแล้วทุกใบอยู่ที่เดิมอยู่แล้ว = **ไม่มีคำสั่ง** (ไม่กิน undo เปล่า)
+    #[test]
+    fn a_layout_that_changes_nothing_produces_no_command() {
+        let (mut board, mut history, _) = scattered(5);
+        let placed = grid_for(&board);
+        let command = ApplyLayout::from_placed(&board, &placed).unwrap();
+        history.apply(&mut board, Box::new(command)).unwrap();
+        let depth = history.undo_depth();
+
+        // จัดซ้ำด้วยผลเดิมเป๊ะ — ไม่มีอะไรขยับแล้ว
+        assert!(
+            ApplyLayout::from_placed(&board, &placed).is_none(),
+            "จัดซ้ำแล้วยังสร้างคำสั่งที่ไม่ทำอะไร"
+        );
+        assert_eq!(history.undo_depth(), depth);
+    }
+
+    /// board ที่มีแต่ใบที่ปักหมุด → ไม่มีอะไรให้จัด
+    #[test]
+    fn a_board_of_pinned_items_yields_no_command() {
+        let (mut board, mut history, ids) = scattered(3);
+        for id in &ids {
+            let meta = ItemMeta {
+                pinned: true,
+                ..board.item(*id).unwrap().meta.clone()
+            };
+            history
+                .apply(
+                    &mut board,
+                    Box::new(EditMeta::new(MetaField::Pinned, vec![(*id, meta)]).unwrap()),
+                )
+                .unwrap();
+        }
+        assert!(ApplyLayout::from_placed(&board, &grid_for(&board)).is_none());
+    }
+
+    /// ★★ จัดสองครั้งติดกัน = **สอง** ขั้น undo ไม่ใช่ขั้นเดียว
+    ///
+    /// ผู้ใช้ลอง Grid แล้วลอง Masonry ต่อ = สองการตัดสินใจ · ถ้ายุบเป็นขั้นเดียว
+    /// กด Ctrl+Z จะข้ามกลับไปสภาพก่อนจัดครั้งแรกเลย ซึ่งเขาไม่ได้ขอ
+    #[test]
+    fn two_layouts_in_a_row_are_two_undo_steps() {
+        let (mut board, mut history, _) = scattered(8);
+        let before = history.undo_depth();
+
+        let grid = ApplyLayout::from_placed(&board, &grid_for(&board)).unwrap();
+        history.apply(&mut board, Box::new(grid)).unwrap();
+
+        let items: Vec<(ItemId, Vec2)> = board
+            .z_order()
+            .iter()
+            .map(|id| (*id, Vec2::new(3.0, 4.0)))
+            .collect();
+        let masonry = crate::layout::layout(
+            crate::layout::Engine::Masonry,
+            &items,
+            crate::layout::LayoutParams::default(),
+        );
+        let second = ApplyLayout::from_placed(&board, &masonry).unwrap();
+        history.apply(&mut board, Box::new(second)).unwrap();
+
+        assert_eq!(history.undo_depth(), before + 2, "สองการจัดถูกยุบเป็นขั้นเดียว");
+    }
+
+    /// id ที่ตายแล้วต้องไม่ทำให้ล้ม — layout อาจมาจากเฟรมก่อนที่ผู้ใช้เพิ่งลบภาพ
+    #[test]
+    fn a_layout_that_mentions_a_dead_id_still_works() {
+        let (mut board, mut history, ids) = scattered(4);
+        let mut placed = grid_for(&board);
+        history
+            .apply(
+                &mut board,
+                Box::new(RemoveItems::new(vec![ids[0]]).unwrap()),
+            )
+            .unwrap();
+        placed.push(Placed {
+            id: ids[0],
+            top_left: Vec2::ZERO,
+            size: Vec2::splat(10.0),
+        });
+        let command = ApplyLayout::from_placed(&board, &placed).expect("ที่เหลือยังจัดได้");
+        history.apply(&mut board, Box::new(command)).unwrap();
+        assert!(board.item(ids[0]).is_none(), "ใบที่ลบไปแล้วต้องไม่ฟื้น");
     }
 
     // ---------- พื้นฐาน ----------

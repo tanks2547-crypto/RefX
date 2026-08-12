@@ -188,6 +188,10 @@ pub enum Key {
     SortColorLabel,
     /// เรียงตามสัดส่วนภาพ
     SortAspect,
+    /// เรียงตามวันที่แก้ไขไฟล์
+    SortModifiedAt,
+    /// เรียงตามขนาดไฟล์
+    SortFileSize,
     /// น้อยไปมาก
     SortAscending,
     /// มากไปน้อย
@@ -202,6 +206,10 @@ pub enum Key {
     FilterMinRating,
     /// เฉพาะที่ปักหมุด
     FilterPinnedOnly,
+    /// คำอธิบายปุ่มส่งเข้า canvas (P3-5)
+    SendToCanvasHint,
+    /// กดส่งเข้า canvas แล้วไม่มีอะไรขยับ
+    NothingToApply,
 }
 
 /// ข้อความภาษาอังกฤษ — **ต้องมีครบทุก key เสมอ** (เป็นตัวสำรองสุดท้าย)
@@ -268,6 +276,8 @@ fn en(key: Key) -> &'static str {
         Key::SortRating => "Rating",
         Key::SortColorLabel => "Colour label",
         Key::SortAspect => "Aspect ratio",
+        Key::SortModifiedAt => "Date modified",
+        Key::SortFileSize => "File size",
         Key::SortAscending => "Low to high",
         Key::SortDescending => "High to low",
         Key::FilterAny => "Any",
@@ -275,6 +285,10 @@ fn en(key: Key) -> &'static str {
         Key::FilterClear => "Clear",
         Key::FilterMinRating => "Stars",
         Key::FilterPinnedOnly => "Pinned only",
+        Key::SendToCanvasHint => {
+            "Move these images on the canvas to match this arrangement (one undo puts them back)"
+        }
+        Key::NothingToApply => "Nothing moved — the images are already arranged like this",
     }
 }
 
@@ -342,6 +356,8 @@ fn th(key: Key) -> Option<&'static str> {
         Key::SortRating => "ดาว",
         Key::SortColorLabel => "ป้ายสี",
         Key::SortAspect => "สัดส่วนภาพ",
+        Key::SortModifiedAt => "วันที่แก้ไข",
+        Key::SortFileSize => "ขนาดไฟล์",
         Key::SortAscending => "น้อยไปมาก",
         Key::SortDescending => "มากไปน้อย",
         Key::FilterAny => "ทั้งหมด",
@@ -349,6 +365,8 @@ fn th(key: Key) -> Option<&'static str> {
         Key::FilterClear => "ล้าง",
         Key::FilterMinRating => "ดาว",
         Key::FilterPinnedOnly => "เฉพาะที่ปักหมุด",
+        Key::SendToCanvasHint => "ย้ายภาพบน canvas ให้เรียงแบบนี้ (กด Ctrl+Z ครั้งเดียวคืนสภาพเดิม)",
+        Key::NothingToApply => "ไม่มีอะไรขยับ — ภาพเรียงแบบนี้อยู่แล้ว",
     })
 }
 
@@ -402,6 +420,8 @@ pub enum Template {
     OpeningFiles,
     /// `{n}` `{ms}` — สรุปเวลาหลังเปิดไฟล์ครบ
     OpenedFiles,
+    /// `{n}` — จัดลง canvas แล้วกี่ใบ (P3-5)
+    LayoutApplied,
     /// `{shown}` `{total}` — ตัวกรองซ่อนบางใบอยู่ (P3-4)
     ///
     /// ★ ต้องเห็นได้เสมอตอนกรองอยู่ — ผู้ใช้ที่มองหาภาพที่ "หายไป" ต้องรู้ทันที
@@ -471,6 +491,7 @@ fn template_en(template: Template) -> &'static str {
         Template::Loading => "Loading {done} / {total}",
         Template::OpeningFiles => "Opening {n} files…",
         Template::OpenedFiles => "Opened {n} files in {ms} ms",
+        Template::LayoutApplied => "Arranged {n} images on the canvas",
         Template::FilterShowing => "showing {shown} of {total}",
         Template::BoardFull => {
             "This board is full at {capacity} images — {rejected} of the {requested} you opened could not be added. Try splitting them across several boards."
@@ -564,6 +585,7 @@ fn template_th(template: Template) -> Option<&'static str> {
         Template::Loading => "กำลังโหลด {done} / {total}",
         Template::OpeningFiles => "กำลังเปิด {n} ไฟล์…",
         Template::OpenedFiles => "เปิด {n} ไฟล์ใน {ms} ms",
+        Template::LayoutApplied => "จัด {n} ภาพลง canvas แล้ว",
         Template::FilterShowing => "กรองอยู่ {shown} จาก {total}",
         Template::BoardFull => {
             "board นี้เต็มที่ {capacity} ภาพ — เพิ่มอีก {rejected} ใบจาก {requested} ใบที่เปิดเข้ามาไม่ได้ ลองแยกเป็นหลาย board"
@@ -842,6 +864,8 @@ mod tests {
         Key::SortRating,
         Key::SortColorLabel,
         Key::SortAspect,
+        Key::SortModifiedAt,
+        Key::SortFileSize,
         Key::SortAscending,
         Key::SortDescending,
         Key::FilterAny,
@@ -849,6 +873,8 @@ mod tests {
         Key::FilterClear,
         Key::FilterMinRating,
         Key::FilterPinnedOnly,
+        Key::SendToCanvasHint,
+        Key::NothingToApply,
     ];
 
     const ALL_TEMPLATES: &[Template] = &[
@@ -866,6 +892,7 @@ mod tests {
         Template::Loading,
         Template::OpeningFiles,
         Template::OpenedFiles,
+        Template::LayoutApplied,
         Template::FilterShowing,
         Template::BoardFull,
         Template::SwitchedMode,

@@ -119,6 +119,44 @@ impl WakeHandle {
     }
 }
 
+/// ข้อมูลของ **ไฟล์** ที่ item ต้องเก็บไว้ — ไม่ใช่ข้อมูลของ *ภาพ* (P3-4)
+///
+/// ★ แยกจาก [`Thumbnail`] โดยตั้งใจ: นั่นคือผลของการ *ถอดรหัสภาพ* ส่วนนี่คือ
+/// สิ่งที่ระบบไฟล์บอก · ภาพจาก clipboard มี `Thumbnail` แต่ไม่มี `SourceMeta`
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SourceMeta {
+    /// เวลาที่ไฟล์ถูกแก้ครั้งล่าสุด (unix **millis**) — `0` = ไม่รู้
+    ///
+    /// millis เพราะ `docs/02 §2.3` กำหนดหน่วยนี้ให้ `AssetRef::mtime`
+    /// (cache key ใช้ **วินาที** ซึ่งเป็นคนละค่ากันโดยตั้งใจ — ดู `PathFingerprint`)
+    pub mtime_ms: i64,
+    /// ขนาดไฟล์เป็นไบต์ — `0` = ไม่รู้
+    pub bytes: u64,
+}
+
+impl SourceMeta {
+    /// อ่านจากระบบไฟล์ — ★ **อยู่บน worker เท่านั้น** (I-2)
+    ///
+    /// อ่านไม่ได้ = ค่าศูนย์ ไม่ใช่ error: การเรียงตามวันที่เป็นของแถม
+    /// ส่วนภาพต้องขึ้นจอให้ได้เสมอ (I-3)
+    #[must_use]
+    pub fn read(path: &std::path::Path) -> Self {
+        let Ok(meta) = std::fs::metadata(path) else {
+            return Self::default();
+        };
+        let mtime_ms = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .and_then(|d| i64::try_from(d.as_millis()).ok())
+            .unwrap_or(0);
+        Self {
+            mtime_ms,
+            bytes: meta.len(),
+        }
+    }
+}
+
 /// งานนี้ต้องการผลลัพธ์แบบไหน
 ///
 /// ทั้งสองแบบใช้เกราะ decode ชุดเดียวกันหมด ต่างกันแค่ขั้นย่อขนาดตอนท้าย
@@ -244,6 +282,8 @@ pub enum JobResult {
         ///
         /// ส่ง thumbnail ไม่ใช่ภาพเต็ม — ภาพ 4000² คือ 64 MB ส่วน thumbnail คือ 64 KB
         thumb: Box<Thumbnail>,
+        /// ★ mtime + ขนาดของ **ไฟล์ต้นฉบับ** (P3-4) — ศูนย์เมื่อไม่มีไฟล์ (clipboard)
+        meta: SourceMeta,
         /// เวลาที่ใช้ตั้งแต่หยิบงานจนเสร็จ
         elapsed: Duration,
     },
@@ -682,6 +722,12 @@ fn run_job(job: &Job, ctx: &WorkerContext) -> JobResult {
 
     let file = job.source.label();
 
+    // ★ mtime + ขนาดของไฟล์ต้นฉบับ (P3-4) — **อ่านบน worker เท่านั้น** (I-2)
+    //   ต้องอ่านก่อนแยกทาง cache เพราะเส้นทาง cache hit ก็ต้องได้ค่านี้เหมือนกัน
+    //   · ราคาคือ `stat` หนึ่งครั้งต่อไฟล์ (ไมโครวินาที) ซึ่งเกิดตอน ingest
+    //     ครั้งเดียวต่อภาพ ไม่ใช่ต่อเฟรม
+    let meta = job.source.file().map(SourceMeta::read).unwrap_or_default();
+
     // ★ ถาม cache ก่อน — เจอแล้วไม่ต้องอ่านไฟล์ ไม่ต้อง decode เลย
     //   นี่คือเส้นทางที่ผู้ใช้เจอทุกวัน (เปิดไฟล์เดิมซ้ำ ๆ)
     //   working texture ข้ามขั้นนี้ — cache เก็บแต่ thumbnail 128 px (docs/05 §5)
@@ -694,6 +740,7 @@ fn run_job(job: &Job, ctx: &WorkerContext) -> JobResult {
         return JobResult::Done {
             hash: job.hash,
             thumb,
+            meta,
             elapsed: started.elapsed(),
         };
     }
@@ -817,6 +864,7 @@ fn run_job(job: &Job, ctx: &WorkerContext) -> JobResult {
     JobResult::Done {
         hash: job.hash,
         thumb: Box::new(thumb),
+        meta,
         elapsed,
     }
 }

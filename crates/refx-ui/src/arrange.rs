@@ -353,6 +353,15 @@ impl ArrangeView {
         self.scroll
     }
 
+    /// ★ ผลของ layout **ทั้งแผ่น** ไม่ใช่แค่ที่อยู่ในจอ (P3-5)
+    ///
+    /// ปุ่ม "ส่งเข้า canvas" ต้องได้ทุกใบที่ผ่านตัวกรอง ไม่ใช่เฉพาะที่ตาเห็นตอนกด
+    /// — ผู้ใช้ที่เลื่อนอยู่กลางแผ่นแล้วกดปุ่ม ย่อมหมายถึงทั้งแผ่น
+    #[must_use]
+    pub fn placed(&self) -> &[Placed] {
+        &self.sheet.placed
+    }
+
     /// ชุดที่ต้องวาดเฟรมนี้ (เรียงจากบนลงล่าง)
     #[must_use]
     pub fn visible(&self) -> &[Placed] {
@@ -526,6 +535,8 @@ mod tests {
             px_size: px_size(index),
             format: ImageFormat::Png,
             embedded: false,
+            mtime: 0,
+            file_size: 0,
         }))
     }
 
@@ -695,6 +706,8 @@ mod tests {
             px_size: glam::UVec2::new(10, 400),
             format: ImageFormat::Png,
             embedded: false,
+            mtime: 0,
+            file_size: 0,
         }));
         tall.meta = ItemMeta::default();
         let mut items = vec![tall];

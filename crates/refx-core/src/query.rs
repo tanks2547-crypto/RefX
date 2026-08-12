@@ -196,6 +196,9 @@ fn compare(board: &Board, a: ItemId, b: ItemId, sort: SortKey) -> std::cmp::Orde
         //   ไม่ใช่ลำดับของ variant ที่ใครสลับได้
         SortKey::ColorLabel => label_order(left).cmp(&label_order(right)),
         SortKey::AspectRatio => aspect(left).total_cmp(&aspect(right)),
+        // ★ ของที่ไม่ใช่ภาพ (โน้ต) ไม่มีไฟล์ → ค่า 0 มาก่อนเสมอ
+        SortKey::ModifiedAt => source_mtime(left).cmp(&source_mtime(right)),
+        SortKey::FileSize => source_bytes(left).cmp(&source_bytes(right)),
     }
 }
 
@@ -213,6 +216,22 @@ fn sort_name(item: &crate::board::Item) -> String {
             .file_name()
             .map(|name| name.to_string_lossy().to_lowercase())
             .unwrap_or_default(),
+    }
+}
+
+/// เวลาที่ไฟล์ต้นฉบับถูกแก้ (unix millis) — `0` เมื่อไม่มีไฟล์หรืออ่านไม่ได้
+fn source_mtime(item: &crate::board::Item) -> i64 {
+    match &item.kind {
+        ItemKind::Image(asset) => asset.mtime,
+        _ => 0,
+    }
+}
+
+/// ขนาดไฟล์ต้นฉบับ (ไบต์) — `0` เมื่อไม่มีไฟล์
+fn source_bytes(item: &crate::board::Item) -> u64 {
+    match &item.kind {
+        ItemKind::Image(asset) => asset.file_size,
+        _ => 0,
     }
 }
 
@@ -252,6 +271,8 @@ mod tests {
             px_size: UVec2::new(w, h),
             format: ImageFormat::Png,
             embedded: false,
+            mtime: 0,
+            file_size: 0,
         }))
     }
 
@@ -569,6 +590,57 @@ mod tests {
             ItemId::from_parts(9, 9),
             &Filter::default()
         ));
+    }
+
+    /// ★★ เรียงตาม **วันที่แก้ไขไฟล์** กับ **ขนาดไฟล์** — สองตัวที่เพิ่งปลดล็อก
+    ///
+    /// ข้อมูลถูกคำนวณอยู่แล้วตอน ingest (เป็นส่วนหนึ่งของ cache key) แค่เดิมถูกทิ้ง
+    /// · `ModifiedAt` **ไม่ใช่** `AddedAt`: สแกนงานเก่าเข้ามาทั้งโฟลเดอร์วันนี้
+    /// = เพิ่มพร้อมกันหมด แต่วันที่แก้ไขไฟล์ต่างกันเป็นปี
+    #[test]
+    fn sorting_by_file_date_and_size_uses_what_ingest_already_measured() {
+        let mut board = Board::default();
+        // (ชื่อ, mtime, ขนาด) — จงใจให้สามลำดับนี้ไม่ตรงกันเลยสักคู่
+        for (name, mtime, bytes) in [
+            ("new-small.png", 3_000i64, 10u64),
+            ("old-big.png", 1_000, 30),
+            ("mid.png", 2_000, 20),
+        ] {
+            let mut item = image_named(name, 10, 10);
+            if let ItemKind::Image(asset) = &mut item.kind {
+                asset.mtime = mtime;
+                asset.file_size = bytes;
+            }
+            board.insert_item(item);
+        }
+        let by = |key| names(&board, &select(&board, &Filter::default(), key, false));
+        assert_eq!(
+            by(SortKey::ModifiedAt),
+            vec!["old-big.png", "mid.png", "new-small.png"]
+        );
+        assert_eq!(
+            by(SortKey::FileSize),
+            vec!["new-small.png", "mid.png", "old-big.png"]
+        );
+        // ★ และต้องต่างจากลำดับที่เพิ่มเข้ามา ไม่งั้นเทสต์นี้ผ่านได้ฟรี ๆ
+        assert_ne!(by(SortKey::ModifiedAt), by(SortKey::AddedAt));
+        assert_ne!(by(SortKey::FileSize), by(SortKey::AddedAt));
+    }
+
+    /// โน้ต (ไม่มีไฟล์) ต้องไม่ทำให้การเรียงตามไฟล์พัง — ค่าศูนย์มาก่อน
+    #[test]
+    fn items_without_a_file_sort_first_by_file_date() {
+        let mut board = Board::default();
+        let note = board.insert_item(Item::new(ItemKind::Text(TextNote::default())));
+        let mut picture = image_named("a.png", 10, 10);
+        if let ItemKind::Image(asset) = &mut picture.kind {
+            asset.mtime = 5_000;
+        }
+        let picture = board.insert_item(picture);
+        assert_eq!(
+            select(&board, &Filter::default(), SortKey::ModifiedAt, false),
+            vec![note, picture]
+        );
     }
 
     /// ★ ผลต้องเหมือนเดิมเป๊ะทุกครั้ง (docs/03 §3)

@@ -185,8 +185,25 @@ function Shot($path) {
   $bmp = New-Object System.Drawing.Bitmap $w, $h
   $g = [System.Drawing.Graphics]::FromImage($bmp)
   $g.CopyFromScreen($script:ox, $script:oy, 0, 0, (New-Object System.Drawing.Size $w, $h))
+  $g.Dispose()
+  # ---------------------------------------------------------------------------
+  # CHECK FOCUS AGAIN, AFTER the pixels are copied  (added 12 Aug 2026)
+  # ---------------------------------------------------------------------------
+  # The check above happens BEFORE the copy, which leaves a window of a few
+  # hundred milliseconds where another program can come to the front.  That is
+  # not hypothetical: a screenshot taken during this audit came back showing a
+  # completely different application, and the pre-check had passed.  Same class
+  # of lie the foreground check was added for -- just a smaller window.
+  #
+  # So: verify after the copy too, and throw the bitmap away rather than save a
+  # picture of somebody else's window under an evidence file name.
+  if ([W]::GetForegroundWindow() -ne $script:hwnd) {
+    $bmp.Dispose()
+    Write-Output "FOCUS LOST during capture of '$path' - discarded, no file written"
+    exit 1
+  }
   $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
-  $g.Dispose(); $bmp.Dispose()
+  $bmp.Dispose()
   Write-Output "shot $path ($w x $h)"
 }
 

@@ -190,7 +190,17 @@ pub struct AssetRef {
     pub px_size: UVec2,           // ขนาดจริงหลังแก้ EXIF orientation แล้ว
     pub format: ImageFormat,
     pub embedded: bool,           // true = ตัวไฟล์ฝังอยู่ใน .refx (packed mode)
+
+    // ★ เพิ่ม 10 ส.ค. 2026 — สองค่านี้ **ถูกคำนวณอยู่แล้ว** ตอน ingest
+    // เพราะเป็นส่วนหนึ่งของ cache key `(hash, mtime, size)` (§2.9 ข้อ 4)
+    // แต่เดิมถูกทิ้งหลังใช้เสร็จ ทำให้ sort by "วันที่แก้ไข" กับ "ขนาดไฟล์"
+    // ใน docs/03 §3 ทำไม่ได้ทั้งที่ข้อมูลอยู่ในมือแล้ว
+    pub mtime: i64,               // unix millis ของไฟล์ต้นฉบับ ตอนที่ ingest
+    pub file_size: u64,           // ไบต์
 }
+
+> ค่าทั้งสองเป็นสภาพ ณ ตอน ingest — ถ้าไฟล์ถูกแก้ทีหลังจะไม่ตรง
+> ยอมรับได้สำหรับการเรียงบน mood board และ cache key ตรวจซ้ำตอนโหลดอยู่แล้ว
 ```
 
 ภาพเดียวกันวางซ้ำ 10 ครั้ง = 10 `Item` แต่ **1 `AssetRef` เดียว 1 texture เดียว** ประหยัด RAM/VRAM ทันที
