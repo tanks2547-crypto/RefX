@@ -724,6 +724,12 @@ pub enum SortKey {
     ModifiedAt,
     /// ตามขนาดไฟล์ (ไบต์)
     FileSize,
+    /// ★ ตามตำแหน่งบน canvas — อ่านแบบหนังสือ บน→ล่าง ซ้าย→ขวา (P3-6)
+    ///
+    /// ★★ ตัวเดียวในกลุ่มที่ **ไม่ใช่การเปรียบเทียบรายคู่** — การตัดสินว่าสองใบ
+    /// อยู่แถวเดียวกันไหมต้องรู้ความสูงเฉลี่ยของทั้งชุดก่อน (docs/03 §4.2)
+    /// จึงมีเส้นทางของตัวเองใน `query::select` ไม่ได้อยู่ใน `compare`
+    CanvasOrder,
 }
 
 impl SortKey {
@@ -733,7 +739,7 @@ impl SortKey {
     /// สำหรับผู้ใช้ · เทสต์ `every_sort_key_can_be_picked_from_the_toolbar`
     /// (`refx-ui`) เทียบรายการนี้กับปุ่มจริง และ `all_lists_every_sort_key`
     /// ข้างล่างบังคับว่ารายการนี้เองต้องครบ
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::AddedAt,
         Self::Name,
         Self::Rating,
@@ -741,6 +747,7 @@ impl SortKey {
         Self::AspectRatio,
         Self::ModifiedAt,
         Self::FileSize,
+        Self::CanvasOrder,
     ];
 }
 
@@ -1329,12 +1336,185 @@ pub(crate) mod tests {
                 | SortKey::ColorLabel
                 | SortKey::AspectRatio
                 | SortKey::ModifiedAt
-                | SortKey::FileSize => {}
+                | SortKey::FileSize
+                | SortKey::CanvasOrder => {}
             }
         }
         let mut seen = SortKey::ALL.to_vec();
         seen.dedup();
         assert_eq!(seen.len(), SortKey::ALL.len(), "มี variant ซ้ำในรายการ");
+    }
+
+    /// ใครเป็นคนเขียนค่าจริงลงฟิลด์นี้
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Writer {
+        /// มีเส้นทางจริงในโปรแกรมที่เขียนค่าที่ไม่ใช่ค่าปริยายลงไป
+        Real,
+        /// **ยังไม่มีใครเขียนเลย** — ค่าคงเป็นค่าปริยายตลอดอายุโปรแกรม
+        ///
+        /// ไม่ใช่บั๊กเสมอไป (ของที่รอคิวอยู่) แต่ต้องเป็นสิ่งที่มีคนเซ็นรับรองไว้
+        /// ไม่ใช่สิ่งที่ไม่มีใครรู้ — เหตุผลอยู่ในสตริง
+        NoneYet(&'static str),
+    }
+
+    /// ★★★ ฟิลด์ที่ **ไม่มีโค้ดไหนเขียนค่าจริงลงไปเลย** ต้องเป็นของที่มีคนรู้
+    ///
+    /// รูปแบบนี้เกิดมาแล้วสามครั้งและทุกครั้งเงียบสนิท:
+    ///
+    /// | ฟิลด์ | อาการ |
+    /// |---|---|
+    /// | คอลัมน์ `format` ใน `cache.sqlite` | เขียน `0` ตายตัวมาตลอด |
+    /// | `AssetRef::format` | เป็น `Unknown` เสมอ |
+    /// | `ItemMeta::added_at` | เป็น `0` ทุกใบ → เรียง "เวลาที่เพิ่ม" ไม่มีความหมาย |
+    ///
+    /// ต่างจาก audit สองรอบก่อน (enum ที่ขาดทางออก §2.2b · ฟิลด์ที่ไม่ถึง shader
+    /// §2.2d) ตรงที่ **คอมไพเลอร์ช่วยไม่ได้เลย**: ฟิลด์มีอยู่ อ่านได้ ใช้งานได้
+    /// แค่ค่าที่อยู่ข้างในไม่เคยมาจากผู้ใช้
+    ///
+    /// ประตูนี้ปิดสองชั้นแบบเดียวกับ `no_item_canvas_field_reaches_the_gpu_without_us_knowing`:
+    ///
+    /// 1. **destructure ครบทุกฟิลด์ ไม่มี `..`** → เพิ่มฟิลด์ใหม่เมื่อไหร่
+    ///    **คอมไพล์ไม่ผ่าน** จนกว่าจะมีคนตัดสินว่ามันมีคนเขียนหรือยัง
+    /// 2. ตารางอยู่ในเทสต์เป็นข้อมูล ไม่ใช่ในคอมเมนต์ที่ลอยอยู่เฉย ๆ
+    ///
+    /// ★ ที่ทำไม่ได้และต้องรู้ไว้: **มันตรวจไม่ได้ว่าโค้ดยัง*เขียน*อยู่จริงไหม**
+    /// ถ้าวันหนึ่งมีคนลบเส้นทางที่เขียน `rating` ทิ้ง ตารางนี้จะยังบอกว่า `Real`
+    /// — กันได้แค่ฟิลด์ **ใหม่** ที่โผล่มาโดยไม่มีใครถามว่าใครจะเขียนมัน
+    #[test]
+    fn no_field_stays_unwritten_without_us_knowing() {
+        use Writer::{NoneYet, Real};
+
+        let ItemCanvas {
+            pos: _,
+            size: _,
+            rotation: _,
+            flip: _,
+            opacity: _,
+            crop: _,
+            locked: _,
+            visible: _,
+            filter: _,
+        } = ItemCanvas::default();
+        let canvas = [
+            ("pos", Real),      // ลากย้าย (P2-5)
+            ("size", Real),     // handle สเกล (P2-5)
+            ("rotation", Real), // ลากนอกมุม (P2-5)
+            ("flip", Real),     // ปุ่ม H + inspector (P2-8)
+            ("opacity", Real),  // inspector (P2-8)
+            ("crop", Real),     // เครื่องมือครอป (P2-7)
+            ("filter", Real),   // inspector (P2-8)
+            (
+                "locked",
+                NoneYet("ยังไม่มีปุ่มล็อกภาพ — โค้ดที่ *อ่าน* มีครบแล้ว (SelectTool, ApplyLayout) รอ UI"),
+            ),
+            (
+                "visible",
+                NoneYet("ยังไม่มีปุ่มซ่อนภาพ — `.refx` จะพาค่ามาตอน P4-1 (§2.2d)"),
+            ),
+        ];
+
+        let ItemMeta {
+            tags: _,
+            rating: _,
+            color_label: _,
+            group: _,
+            note: _,
+            added_at: _,
+            pinned: _,
+        } = ItemMeta::default();
+        let meta = [
+            ("tags", Real),        // แผง Arrange (P3-1)
+            ("rating", Real),      // ดาวในแผง Arrange (P3-1)
+            ("color_label", Real), // ป้ายสีในแผง Arrange (P3-1)
+            ("note", Real),        // ช่องโน้ตในแผง Arrange (P3-1)
+            ("pinned", Real),      // checkbox ปักหมุด (P3-1)
+            ("added_at", Real),    // ตั้งตอนสร้าง item (P3-4 — ก่อนหน้านี้เป็น 0 ทุกใบ)
+            ("group", NoneYet("กลุ่มยังไม่มีใครสร้างได้ — P3-7")),
+        ];
+
+        let AssetRef {
+            hash: _,
+            path: _,
+            px_size: _,
+            format: _,
+            embedded: _,
+            mtime: _,
+            file_size: _,
+        } = match image_item(0).kind {
+            ItemKind::Image(asset) => asset,
+            _ => unreachable!("image_item สร้าง ItemKind::Image เสมอ"),
+        };
+        let asset = [
+            ("hash", Real),
+            ("path", Real),
+            ("px_size", Real),
+            ("mtime", Real),     // stat บน worker ตอน ingest (P3-4)
+            ("file_size", Real), // เหมือนกัน
+            (
+                "format",
+                NoneYet(
+                    "เป็น Unknown เสมอ — ต้องร้อยจาก image::guess_format ผ่าน decode → Thumbnail → ThumbEntry พร้อมตัดสินคอลัมน์ `format` ใน cache.sqlite (§6)",
+                ),
+            ),
+            ("embedded", NoneYet("packed mode — P4-5")),
+        ];
+
+        let BoardSettings { background: _ } = BoardSettings::default();
+        let settings = [(
+            "background",
+            NoneYet(
+                "ยังไม่มี UI ให้เปลี่ยนสีพื้น — แต่ **มีคนอ่านแล้ว** ตั้งแต่ 12 ส.ค. (render pass ใช้ค่านี้แทนค่าคงที่)",
+            ),
+        )];
+
+        let ArrangeState {
+            sort: _,
+            descending: _,
+        } = ArrangeState::default();
+        let arrange = [
+            (
+                "sort",
+                NoneYet(
+                    "P3-4 ตัดสินให้การเรียงอยู่ที่ชั้น UI ไม่ใช่ในเอกสาร (§2.17) — ตัวนี้จะมีคนเขียนก็ต่อเมื่อ P4-1 ตัดสินว่าต้อง persist",
+                ),
+            ),
+            ("descending", NoneYet("เหตุผลเดียวกับ `sort`")),
+        ];
+
+        let Group {
+            name: _,
+            collapsed: _,
+        } = Group::default();
+        let group = [
+            ("name", NoneYet("ยังไม่มีใครสร้างกลุ่มได้ — P3-7")),
+            ("collapsed", NoneYet("P3-7")),
+        ];
+
+        // ★ รายงานออกมาเสมอ ไม่ว่าเทสต์จะผ่านหรือไม่ (`--nocapture`) — ตัวเลขที่
+        //   ต้องไปเปิดโค้ดอ่านถึงจะรู้ คือตัวเลขที่ไม่มีใครดู
+        let all = [
+            ("ItemCanvas", &canvas[..]),
+            ("ItemMeta", &meta[..]),
+            ("AssetRef", &asset[..]),
+            ("BoardSettings", &settings[..]),
+            ("ArrangeState", &arrange[..]),
+            ("Group", &group[..]),
+        ];
+        let mut waiting = 0;
+        for (owner, fields) in all {
+            for (field, writer) in fields {
+                if let NoneYet(why) = writer {
+                    waiting += 1;
+                    println!("ยังไม่มีใครเขียน: {owner}::{field} — {why}");
+                }
+            }
+        }
+        println!("รวมฟิลด์ที่ยังไม่มีใครเขียน: {waiting}");
+        assert!(
+            waiting <= 10,
+            "ฟิลด์ที่ไม่มีใครเขียนเพิ่มขึ้นเป็น {waiting} — เพิ่มฟิลด์ใหม่ต้องมีคนเขียน \
+             หรือมีเหตุผลว่าทำไมยัง"
+        );
     }
 
     pub(crate) fn image_item(tag: u8) -> Item {

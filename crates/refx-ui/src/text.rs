@@ -192,6 +192,8 @@ pub enum Key {
     SortModifiedAt,
     /// เรียงตามขนาดไฟล์
     SortFileSize,
+    /// เรียงตามตำแหน่งบน canvas (P3-6)
+    SortCanvasOrder,
     /// น้อยไปมาก
     SortAscending,
     /// มากไปน้อย
@@ -278,6 +280,7 @@ fn en(key: Key) -> &'static str {
         Key::SortAspect => "Aspect ratio",
         Key::SortModifiedAt => "Date modified",
         Key::SortFileSize => "File size",
+        Key::SortCanvasOrder => "Canvas order",
         Key::SortAscending => "Low to high",
         Key::SortDescending => "High to low",
         Key::FilterAny => "Any",
@@ -358,6 +361,7 @@ fn th(key: Key) -> Option<&'static str> {
         Key::SortAspect => "สัดส่วนภาพ",
         Key::SortModifiedAt => "วันที่แก้ไข",
         Key::SortFileSize => "ขนาดไฟล์",
+        Key::SortCanvasOrder => "ตำแหน่งบน canvas",
         Key::SortAscending => "น้อยไปมาก",
         Key::SortDescending => "มากไปน้อย",
         Key::FilterAny => "ทั้งหมด",
@@ -866,6 +870,7 @@ mod tests {
         Key::SortAspect,
         Key::SortModifiedAt,
         Key::SortFileSize,
+        Key::SortCanvasOrder,
         Key::SortAscending,
         Key::SortDescending,
         Key::FilterAny,

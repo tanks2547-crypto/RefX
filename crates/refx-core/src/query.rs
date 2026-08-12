@@ -16,6 +16,7 @@
 
 use crate::arena::ItemId;
 use crate::board::{Board, ColorLabel, ItemKind, SortKey, TagId};
+use glam::Vec2;
 
 /// เลือกป้ายสีแบบไหน
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -164,6 +165,12 @@ pub fn select(board: &Board, filter: &Filter, sort: SortKey, descending: bool) -
         .map(|(index, id)| (index, *id))
         .collect();
 
+    // ★ เรียงตามตำแหน่งบน canvas ไม่ใช่การเทียบรายคู่ — แยกเส้นทาง (P3-6)
+    if sort == SortKey::CanvasOrder {
+        canvas_reading_order(board, &mut rows, descending);
+        return rows.into_iter().map(|(_, id)| id).collect();
+    }
+
     rows.sort_by(|(a_index, a), (b_index, b)| {
         compare(board, *a, *b, sort)
             // ★ ตัวตัดสินท้าย **ต้องไม่กลับด้านตาม `descending`** — ไม่งั้นสอง item
@@ -179,6 +186,83 @@ pub fn select(board: &Board, filter: &Filter, sort: SortKey, descending: bool) -
         });
     }
     rows.into_iter().map(|(_, id)| id).collect()
+}
+
+/// สัดส่วนของความสูงเฉลี่ยที่ยังถือว่า "อยู่แถวเดียวกัน" (docs/03 §4.2)
+///
+/// ★★ **ค่านี้คือทั้งหมดของ "เรียงแบบอ่านหนังสือ"** — mood board ไม่มีใครวางภาพ
+/// ให้ขอบบนตรงกันเป๊ะ การเทียบ `y` ตรง ๆ จะได้ลำดับที่กระโดดไปมาระหว่างสองภาพ
+/// ที่ตาเห็นว่าอยู่แถวเดียวกันชัด ๆ เพราะมันต่างกันสองพิกเซล
+pub const ROW_TOLERANCE: f32 = 0.5;
+
+/// เรียงแบบ "อ่านหนังสือ" จากตำแหน่งบน canvas — บน→ล่าง ซ้าย→ขวา (P3-6)
+///
+/// ★ **ไม่ใช่ตัวเปรียบเทียบรายคู่** จึงอยู่นอก [`compare`]: การตัดสินว่าสองใบ
+/// อยู่แถวเดียวกันไหมต้องรู้ความสูงเฉลี่ยของ *ทั้งชุด* ก่อน — ฟังก์ชันเปรียบเทียบ
+/// ที่เห็นทีละสองใบเขียนกฎนี้ไม่ได้เลย (และถ้าฝืนเขียน ผลจะไม่ transitive
+/// ซึ่งทำให้ `sort_by` ให้ผลที่ไม่มีความหมาย)
+fn canvas_reading_order(board: &Board, rows: &mut Vec<(usize, ItemId)>, descending: bool) {
+    // 1. กรอบจริงของแต่ละใบ (AABB ของ OBB — ภาพที่หมุนใช้กรอบที่คลุมมันจริง)
+    let bounds: Vec<(usize, ItemId, Vec2, f32)> = rows
+        .iter()
+        .filter_map(|(index, id)| {
+            let item = board.item(*id)?;
+            let rect = item.canvas.world_bounds();
+            Some((*index, *id, rect.center(), rect.max.y - rect.min.y))
+        })
+        .collect();
+    if bounds.is_empty() {
+        return;
+    }
+
+    // 2. ความสูงเฉลี่ยของชุดนี้ → ระยะที่ยังนับว่าแถวเดียวกัน
+    #[expect(clippy::cast_precision_loss, reason = "จำนวนภาพจริงอยู่ในช่วงที่ f32 แทนได้")]
+    let average = bounds.iter().map(|(_, _, _, h)| *h).sum::<f32>() / bounds.len() as f32;
+    // ★ ความสูงเป็น 0 หรือ NaN ได้ (ไฟล์เสีย/undo กลางคัน) — ระยะ 0 แปลว่า
+    //   "ทุกใบคนละแถว" ซึ่งยังให้ผลที่เรียงตาม y ได้ ไม่ใช่ผลที่พัง (I-4)
+    let tolerance = if average.is_finite() && average > 0.0 {
+        average * ROW_TOLERANCE
+    } else {
+        0.0
+    };
+
+    // 3. เรียงตาม y ก่อน (เสมอกันตัดสินด้วย x แล้วด้วยดัชนี — deterministic)
+    let mut by_y = bounds;
+    by_y.sort_by(|a, b| {
+        a.2.y
+            .total_cmp(&b.2.y)
+            .then(a.2.x.total_cmp(&b.2.x))
+            .then(a.0.cmp(&b.0))
+    });
+
+    // 4. ไล่จากบนลงล่าง เปิดแถวใหม่เมื่อห่างจาก **ขอบบนของแถวปัจจุบัน** เกินระยะ
+    //
+    //    ★ ใช้ y ของใบแรกในแถวเป็นหมุด ไม่ใช่ค่าเฉลี่ยที่ขยับไปเรื่อย ๆ —
+    //      ค่าเฉลี่ยที่เลื่อนตามทำให้ภาพที่วางไล่ระดับลงมาทีละนิดกลายเป็นแถวเดียว
+    //      ยาวเหยียด ทั้งที่ใบแรกกับใบสุดท้ายห่างกันครึ่งจอ
+    let mut row_of: Vec<(ItemId, u32, f32, usize)> = Vec::with_capacity(by_y.len());
+    let mut row = 0u32;
+    let mut anchor = by_y[0].2.y;
+    for (index, id, centre, _) in by_y {
+        if centre.y - anchor > tolerance {
+            row += 1;
+            anchor = centre.y;
+        }
+        row_of.push((id, row, centre.x, index));
+    }
+
+    // 5. ลำดับสุดท้าย: แถว → ซ้ายไปขวา → ดัชนีเดิม
+    row_of.sort_by(|a, b| {
+        let order = a.1.cmp(&b.1).then(a.2.total_cmp(&b.2));
+        // ★ ตัวตัดสินท้าย **ไม่กลับด้าน** ตาม `descending` ด้วยเหตุผลเดียวกับ
+        //   `select`: ของที่ทับกันสนิทต้องไม่สลับที่กันเองเวลากดสลับทิศ
+        if descending { order.reverse() } else { order }.then(a.3.cmp(&b.3))
+    });
+
+    *rows = row_of
+        .into_iter()
+        .map(|(id, _, _, index)| (index, id))
+        .collect();
 }
 
 /// เทียบสองใบตามคีย์ที่เลือก — **ไม่รวมตัวตัดสินท้าย** (ผู้เรียกใส่เอง)
@@ -199,6 +283,9 @@ fn compare(board: &Board, a: ItemId, b: ItemId, sort: SortKey) -> std::cmp::Orde
         // ★ ของที่ไม่ใช่ภาพ (โน้ต) ไม่มีไฟล์ → ค่า 0 มาก่อนเสมอ
         SortKey::ModifiedAt => source_mtime(left).cmp(&source_mtime(right)),
         SortKey::FileSize => source_bytes(left).cmp(&source_bytes(right)),
+        // ★ ไม่มีทางมาถึงที่นี่ — `select` แยกเส้นทางไปแล้ว · เขียน `Equal`
+        //   ไว้เพื่อให้ `match` ครบโดยไม่ต้องมี `_` (variant ใหม่ต้องมาคิดที่นี่)
+        SortKey::CanvasOrder => Ordering::Equal,
     }
 }
 
@@ -641,6 +728,125 @@ mod tests {
             select(&board, &Filter::default(), SortKey::ModifiedAt, false),
             vec![note, picture]
         );
+    }
+
+    // ---------- P3-6: เรียงตามตำแหน่งบน canvas ----------
+
+    /// วางภาพขนาด 100×80 ที่จุดกึ่งกลางที่กำหนด แล้วคืน id ตามลำดับที่วาง
+    fn placed_at(spots: &[(f32, f32)]) -> (Board, Vec<ItemId>) {
+        let mut board = Board::default();
+        let ids = spots
+            .iter()
+            .enumerate()
+            .map(|(i, (x, y))| {
+                let item = image_named(&format!("{i}.png"), 100, 80)
+                    .at(Vec2::new(*x, *y), Vec2::new(100.0, 80.0));
+                board.insert_item(item)
+            })
+            .collect();
+        (board, ids)
+    }
+
+    fn order_of(board: &Board, ids: &[ItemId], descending: bool) -> Vec<usize> {
+        select(board, &Filter::default(), SortKey::CanvasOrder, descending)
+            .into_iter()
+            .map(|id| ids.iter().position(|other| *other == id).unwrap())
+            .collect()
+    }
+
+    /// ★★★ อ่านแบบหนังสือ: บน→ล่าง ซ้าย→ขวา และ **ทนต่อการวางไม่ตรงแถว**
+    ///
+    /// mood board ไม่มีใครวางภาพให้ขอบบนตรงกันเป๊ะ — ถ้าเทียบ `y` ตรง ๆ
+    /// ภาพสองใบที่ตาเห็นว่าอยู่แถวเดียวกันจะสลับลำดับกันเพราะต่างกันไม่กี่พิกเซล
+    #[test]
+    fn canvas_order_reads_like_a_page_even_when_rows_are_not_perfectly_aligned() {
+        // แถวบนสามใบ (y เยื้องกันได้ถึง 20 ซึ่งน้อยกว่าครึ่งของความสูง 80)
+        // แถวล่างสองใบ อยู่ห่างลงไปมาก
+        let (board, ids) = placed_at(&[
+            (300.0, 12.0),  // 0: แถวบน ขวาสุด
+            (100.0, 0.0),   // 1: แถวบน ซ้ายสุด
+            (900.0, 300.0), // 2: แถวล่าง ขวา
+            (200.0, 20.0),  // 3: แถวบน กลาง
+            (400.0, 292.0), // 4: แถวล่าง ซ้าย
+        ]);
+        assert_eq!(order_of(&board, &ids, false), vec![1, 3, 0, 4, 2]);
+    }
+
+    /// ★ ห่างเกินครึ่งของความสูงเฉลี่ย = คนละแถว แม้จะอยู่คอลัมน์เดียวกัน
+    #[test]
+    fn a_gap_bigger_than_half_the_average_height_starts_a_new_row() {
+        // ความสูง 80 → ระยะยอมรับ 40
+        let (board, ids) = placed_at(&[(0.0, 0.0), (500.0, 39.0), (500.0, 41.0)]);
+        // ใบที่ 1 ยังอยู่แถวเดียวกับใบที่ 0 (ห่าง 39) ส่วนใบที่ 2 ขึ้นแถวใหม่
+        assert_eq!(order_of(&board, &ids, false), vec![0, 1, 2]);
+
+        let (board, ids) = placed_at(&[(500.0, 0.0), (0.0, 41.0)]);
+        // ห่าง 41 = คนละแถว → ใบล่างมาทีหลังแม้จะอยู่ซ้ายกว่า
+        assert_eq!(order_of(&board, &ids, false), vec![0, 1]);
+    }
+
+    /// ★★ ภาพที่ไล่ระดับลงมาทีละนิดต้องไม่กลายเป็นแถวเดียวยาวเหยียด
+    ///
+    /// ถ้าใช้ค่าเฉลี่ยที่เลื่อนตามแทนหมุดของแถว ใบแรกกับใบสุดท้ายจะห่างกันครึ่งจอ
+    /// แต่ยังถูกนับเป็นแถวเดียวกัน
+    #[test]
+    fn a_staircase_does_not_collapse_into_one_row() {
+        let spots: Vec<(f32, f32)> = (0..10u8)
+            .map(|i| (f32::from(i) * 10.0, f32::from(i) * 30.0))
+            .collect();
+        let (board, ids) = placed_at(&spots);
+        // แต่ละใบห่างกัน 30 (< 40) แต่สะสมแล้ว 270 — ต้องไม่ใช่แถวเดียว
+        let order = order_of(&board, &ids, false);
+        assert_eq!(order, (0..10).collect::<Vec<_>>());
+        // ★★ เคสที่แยก "แถวเดียว" ออกจาก "หลายแถว" ได้จริง: ให้ x สวนทางกับ y
+        //   ถ้ายุบเป็นแถวเดียว ผลจะเป็นการเรียงตาม x ล้วน = [9, 8, …, 0]
+        let spots: Vec<(f32, f32)> = (0..10u8)
+            .map(|i| (300.0 - f32::from(i) * 10.0, f32::from(i) * 30.0))
+            .collect();
+        let (board, ids) = placed_at(&spots);
+        let order = order_of(&board, &ids, false);
+        let pure_x: Vec<usize> = (0..10).rev().collect();
+        assert_ne!(order, pure_x, "ยุบเป็นแถวเดียวแล้วเรียงตาม x ล้วน");
+        // ★ ใบท้าย ๆ (อยู่ล่างสุด) ต้องมาหลังใบแรก ๆ เสมอ — นั่นคือ "อ่านลงล่าง"
+        let position = |item: usize| order.iter().position(|i| *i == item).unwrap();
+        assert!(position(9) > position(0), "ใบล่างสุดมาก่อนใบบนสุด");
+        assert!(position(8) > position(1));
+
+        // ★ และผลจริงคือจับคู่ทีละสองแถวตามระยะ 40 (30 อยู่ในระยะ · 60 ไม่อยู่)
+        //   ในแถวเดียวกันเรียงซ้ายไปขวา ซึ่งที่นี่คือใบที่ y มากกว่า (x น้อยกว่า)
+        assert_eq!(order, vec![1, 0, 3, 2, 5, 4, 7, 6, 9, 8]);
+    }
+
+    /// กลับทิศ = อ่านย้อนจากล่างขวา
+    #[test]
+    fn reversing_canvas_order_reads_from_the_bottom_right() {
+        let (board, ids) = placed_at(&[(100.0, 0.0), (300.0, 0.0), (100.0, 300.0)]);
+        assert_eq!(order_of(&board, &ids, false), vec![0, 1, 2]);
+        assert_eq!(order_of(&board, &ids, true), vec![2, 1, 0]);
+    }
+
+    /// ผลต้องคงที่ และไม่พังกับ board ว่าง/ใบเดียว
+    #[test]
+    fn canvas_order_is_deterministic_and_survives_edge_cases() {
+        let empty = Board::default();
+        assert!(select(&empty, &Filter::default(), SortKey::CanvasOrder, false).is_empty());
+
+        let (board, ids) = placed_at(&[(5.0, 5.0)]);
+        assert_eq!(order_of(&board, &ids, false), vec![0]);
+
+        let (board, ids) = placed_at(&[(100.0, 0.0), (0.0, 0.0), (50.0, 0.0)]);
+        let first = order_of(&board, &ids, false);
+        for _ in 0..5 {
+            assert_eq!(order_of(&board, &ids, false), first);
+        }
+    }
+
+    /// ★ ภาพที่ทับกันสนิทต้องไม่สลับที่กันเองเวลากดสลับทิศ
+    #[test]
+    fn items_stacked_on_top_of_each_other_keep_their_order_both_ways() {
+        let (board, ids) = placed_at(&[(0.0, 0.0), (0.0, 0.0), (0.0, 0.0)]);
+        assert_eq!(order_of(&board, &ids, false), vec![0, 1, 2]);
+        assert_eq!(order_of(&board, &ids, true), vec![0, 1, 2]);
     }
 
     /// ★ ผลต้องเหมือนเดิมเป๊ะทุกครั้ง (docs/03 §3)

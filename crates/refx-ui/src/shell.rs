@@ -973,7 +973,7 @@ fn arrange_inspector(ui: &mut egui::Ui, state: &mut ShellState) {
 /// ★ อยู่รวมกันที่นี่เหมือน `ARRANGE_BUTTONS` — เพิ่ม `SortKey` ใหม่แล้วคอมไพเลอร์
 /// ไม่ฟ้อง แต่เทสต์ `every_sort_key_can_be_picked_from_the_toolbar` ฟ้องแทน
 /// (ตัวเลือกที่มีในโค้ดแต่กดไม่ได้ = ฟีเจอร์ที่ไม่มีอยู่จริงสำหรับผู้ใช้)
-pub(crate) const SORT_CHOICES: [(SortKey, Key); 7] = [
+pub(crate) const SORT_CHOICES: [(SortKey, Key); 8] = [
     (SortKey::AddedAt, Key::SortAddedAt),
     (SortKey::Name, Key::SortName),
     (SortKey::Rating, Key::SortRating),
@@ -981,6 +981,7 @@ pub(crate) const SORT_CHOICES: [(SortKey, Key); 7] = [
     (SortKey::AspectRatio, Key::SortAspect),
     (SortKey::ModifiedAt, Key::SortModifiedAt),
     (SortKey::FileSize, Key::SortFileSize),
+    (SortKey::CanvasOrder, Key::SortCanvasOrder),
 ];
 
 /// ปุ่มเครื่องมือของ Arrange mode — เรียง + กรอง (P3-4)

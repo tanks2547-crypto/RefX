@@ -479,14 +479,23 @@ fn is_paste(pressed: Option<char>, modifiers: ModifiersState) -> bool {
     matches!(pressed, Some('v' | '\u{16}'))
 }
 
-/// สีพื้นหลังของ canvas — เทาเข้มแบบเดียวกับโปรแกรมวาด
-/// (ค่า linear เพราะ surface เป็น sRGB, GPU แปลง gamma ให้เอง)
-const CLEAR_COLOR: wgpu::Color = wgpu::Color {
-    r: 0.05,
-    g: 0.06,
-    b: 0.08,
-    a: 1.0,
-};
+/// สีพื้นหลังของ canvas จาก `BoardSettings` — ★ **ค่านี้เคยเป็นค่าคงที่**
+///
+/// `BoardSettings::background` มีอยู่ใน `Board` และ persist ลง `.refx` ตั้งแต่ P2-1
+/// แต่ **ไม่มีใครอ่านมันเลย** — render pass ใช้ค่าคงที่ในไฟล์นี้แทน · ฟิลด์ที่ทั้ง
+/// ไม่มีคนเขียนและไม่มีคนอ่าน คือฟิลด์ที่หลอกคนอ่านโค้ดว่าฟีเจอร์นี้มีอยู่แล้ว
+/// (เจอตอน audit ฟิลด์ที่ไม่มีใครเขียน 12 ส.ค. 2026)
+///
+/// ค่าเป็น **linear** เพราะ surface เป็น sRGB — GPU แปลง gamma ให้เอง
+fn clear_colour(board: &Board) -> wgpu::Color {
+    let [r, g, b] = board.settings().background;
+    wgpu::Color {
+        r: f64::from(r),
+        g: f64::from(g),
+        b: f64::from(b),
+        a: 1.0,
+    }
+}
 
 /// สถานะกราฟิกทั้งหมด — เกิดหลังหน้าต่างพร้อมเท่านั้น
 struct Gfx {
@@ -3530,7 +3539,7 @@ impl AppDelegate for RefxApp {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(CLEAR_COLOR),
+                        load: wgpu::LoadOp::Clear(clear_colour(&gfx.board)),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
