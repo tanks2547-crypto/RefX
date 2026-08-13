@@ -511,8 +511,9 @@ mod tests {
     )]
 
     use super::*;
+    use crate::shell::SORT_CHOICES;
     use refx_core::board::{AssetRef, ImageFormat, Item, ItemKind, ItemMeta};
-    use refx_core::command::{AddItems, EditMeta, History, MetaField};
+    use refx_core::command::{AddItems, EditMeta, GroupItems, History, MetaField, SetGroup};
     use refx_core::hash::ContentHash;
     use refx_core::query::LabelFilter;
 
@@ -1016,5 +1017,126 @@ mod tests {
             }
             .is_open()
         );
+    }
+    // ---------- P3-8: สลับ mode 100 ครั้งแล้ว board ต้องเท่าเดิมเป๊ะ ----------
+
+    /// ★★★ **สลับโหมด 100 ครั้ง แล้ว `Board` ทั้งก้อนต้องเหมือนเดิมเป๊ะ** (P3-8)
+    ///
+    /// docs/03 §4.3 เรียกข้อนี้ว่า "หลักที่ห้ามละเมิด" และ docs/02 §2.2 เรียกการที่
+    /// `ItemCanvas` กับ `ItemMeta` อยู่คู่กันตลอดชีวิตของ item ว่า **ข้อกำหนดหลัก
+    /// ของดีไซน์สองโหมดทั้งหมด** — เทสต์นี้คือตัวที่พิสูจน์ทั้งสองข้อพร้อมกัน
+    ///
+    /// ★★ **เทียบ `Board` ทั้งก้อน ไม่ใช่เช็คแค่ `dirty`** · `dirty` เป็นแค่ธง
+    /// ที่ `History` คำนวณจากความลึกของ stack — มันจะยัง `false` อยู่ดีถ้ามีใคร
+    /// แก้ board **นอกเส้นทาง `Command`** ซึ่งคือสภาพที่แย่ที่สุดที่เป็นไปได้
+    /// (ข้อมูลเปลี่ยนโดยไม่มีทางย้อน และไม่มีอะไรบอกว่าต้องบันทึก) การเช็ค
+    /// แค่ธงจึงเขียวได้ทั้งที่งานของผู้ใช้เพี้ยนไปแล้ว
+    ///
+    /// ★★★ **และเทียบ `revision` ด้วย ซึ่ง `PartialEq` ของ `Board` ไม่นับ**
+    /// (§4 ข้อ 20 — undo ต้องคืนสภาพให้ "เท่าเดิม" ในสายตาผู้ใช้ ส่วนเลขรุ่น
+    /// เดินหน้าอย่างเดียว) · นั่นทำให้ `revision` เป็นเครื่องมือที่ **แรงกว่า**
+    /// `PartialEq` ตรงนี้พอดี: มันจับแม้แต่การเขียนที่ถูกเขียนกลับเป็นค่าเดิม
+    /// ซึ่ง `==` มองไม่เห็นเลย ทุกตัวแก้ของ `Board` บวกมันหมด (`touch()`)
+    #[test]
+    fn a_hundred_mode_switches_leave_the_board_exactly_as_it_was() {
+        let mut board = board_of(40);
+        let mut history = History::default();
+
+        // ให้ board มีของครบทุกฝั่ง ไม่ใช่ board เปล่า ๆ ที่พิสูจน์อะไรไม่ได้:
+        // ฝั่ง Arrange (ดาว) + ฝั่ง Canvas (ตำแหน่ง/ขนาดจาก AddItems) + กลุ่ม
+        let ids: Vec<ItemId> = board.z_order().to_vec();
+        for (n, id) in ids.iter().take(6).enumerate() {
+            set_rating(
+                &mut board,
+                &mut history,
+                *id,
+                u8::try_from(n % 6).unwrap_or(0),
+            );
+        }
+        history
+            .apply(
+                &mut board,
+                Box::new(GroupItems::new(ids[..4].to_vec(), "Group").unwrap()),
+            )
+            .unwrap();
+        history.seal();
+        // ยุบกลุ่มไว้ด้วย — เส้นทางที่ `select` ต้องทำงานเพิ่ม (P3-7)
+        let group_id = board.item(ids[0]).unwrap().meta.group.unwrap();
+        let current = board.group(group_id).unwrap().clone();
+        history
+            .apply(
+                &mut board,
+                Box::new(SetGroup::set_collapsed(group_id, &current, true)),
+            )
+            .unwrap();
+        history.seal();
+        // จุดเริ่ม = "เพิ่งบันทึกเสร็จ" ตามที่ ROADMAP บรรยาย (`dirty` ยัง false)
+        history.mark_saved(&mut board);
+        assert!(!board.is_dirty(), "จุดเริ่มต้องสะอาด ไม่งั้นเทสต์ไม่ได้พิสูจน์อะไร");
+
+        let before = board.clone();
+        let revision_before = board.revision();
+
+        // ★ ของจริงถือ `ArrangeView` ตัวเดิมข้ามการสลับโหมด (มันอยู่ใน `Gfx`)
+        //   สร้างใหม่ทุกครอบจะพลาด cache ที่เป็นตัวเสี่ยงจริง
+        let mut view = ArrangeView::new();
+
+        for round in 0..100 {
+            if round % 2 == 0 {
+                // ---- เข้าโหมด Arrange: กรอง + เรียง + จัดแผ่น + หาชุดที่ต้องวาด ----
+                //     วนวิธีเรียงไปด้วย เพื่อให้ผ่านทุกเส้นทางของ `query::select`
+                //     รวมทั้ง `CanvasOrder` ที่อ่านเรขาคณิตฝั่ง Canvas มาใช้ (P3-6)
+                let (key, _) = SORT_CHOICES[round / 2 % SORT_CHOICES.len()];
+                view.set_sort(key, round % 4 == 0);
+                view.plan(&board, VIEW, 1.0, aspect_of(&board));
+                let _ = view.visible();
+            } else {
+                // ---- กลับโหมด Canvas: สิ่งที่ `rebuild_quads` อ่านทุกเฟรม ----
+                let _: Vec<ItemId> = board.items_in_z_order().map(|(id, _)| id).collect();
+            }
+        }
+
+        // ★ สามข้อ เรียงจาก **แข็งไปอ่อน** — ตัวแรกคือตัวที่จับได้กว้างที่สุด
+        //
+        // ★★★ ทำไม `revision` ถึงต้องมา *ก่อน* และทำไม `dirty` กับ `==` ไม่พอ:
+        //     `apply` แล้ว `undo` ในเฟรมเดียว จะคืน `dirty` เป็น false และคืน
+        //     ทุกค่าจน `==` ผ่าน — **แต่ `revision` ขยับสองครั้ง**
+        //
+        //     ยืนยันด้วย negative control แล้ว (ฉีดคู่ apply+undo เข้าไปในลูป):
+        //     `revision` แดง · `dirty` กับ `==` **เขียวทั้งคู่** · และเมื่อปิด
+        //     `revision` ทิ้ง ตัวที่จับได้เป็นตัวถัดไปคือ `redo_depth` ข้างล่าง
+        //     ซึ่งจับได้เพราะ *การฉีดนั้นใช้ `undo`* เท่านั้น
+        //
+        //     ★ ที่ยังพิสูจน์ไม่ได้จากในเครทนี้: การเขียนที่ **ไม่ผ่าน `History`
+        //       เลย** ซึ่งจะรอดทั้ง `dirty` และ `redo_depth` เหลือ `revision`
+        //       เป็นตาข่ายเดียว · เขียนเทสต์ให้ทำแบบนั้นไม่ได้เพราะตัวแก้ของ
+        //       `Board` เป็น `pub(crate)` ของ `refx-core` — ซึ่งก็คือกำแพงที่
+        //       ทำให้สภาพนั้นเกิดยากอยู่แล้ว จึงบันทึกไว้ว่ารู้ ไม่ใช่อ้างว่าตรวจแล้ว
+        assert_eq!(
+            board.revision(),
+            revision_before,
+            "ไม่มีตัวแก้ของ Board ตัวไหนควรถูกเรียกเลยระหว่างสลับโหมด — \
+             revision ที่ขยับแปลว่ามีคนเขียน แม้จะเขียนแล้วย้อนกลับจนธง dirty \
+             และ `==` มองไม่เห็นก็ตาม"
+        );
+        assert!(!board.is_dirty(), "สลับโหมดแล้ว dirty กลายเป็น true");
+        assert_eq!(board, before, "สลับโหมดแล้ว board ไม่เหมือนเดิม");
+
+        // ★★ และข้อมูลของ **ทั้งสองฝั่ง** ต้องยังอยู่คู่กัน (docs/02 §2.2)
+        //    — "เท่าเดิม" ต้องไม่ได้มาจากการที่ทั้งสองฝั่งว่างเปล่าเหมือนกัน
+        for id in &ids {
+            let item = board.item(*id).expect("item หายไประหว่างสลับโหมด");
+            let was = before.item(*id).unwrap();
+            assert_eq!(item.canvas, was.canvas, "ฝั่ง Canvas ของ {id:?} เปลี่ยน");
+            assert_eq!(item.meta, was.meta, "ฝั่ง Arrange ของ {id:?} เปลี่ยน");
+        }
+        assert_eq!(board.groups().len(), 1, "กลุ่มหายหรือถูกสร้างเพิ่มระหว่างสลับโหมด");
+        assert!(
+            board.group(group_id).is_some_and(|g| g.collapsed),
+            "สถานะยุบของกลุ่มต้องอยู่เหมือนเดิม"
+        );
+        // ★ และ history ต้องไม่โตขึ้นเลย — คำสั่งที่เกิดใหม่คือหลักฐานตรง ๆ
+        //   ว่ามีการแก้เอกสารระหว่างสลับโหมด
+        assert_eq!(history.redo_depth(), 0);
     }
 }

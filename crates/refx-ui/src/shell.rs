@@ -1504,4 +1504,145 @@ mod tests {
             "ต้องเว้นที่ให้ status bar ด้านล่าง: {canvas:?}"
         );
     }
+    // ---------- P3-8: สลับ mode แล้วข้อมูลต้องไม่เปลี่ยน ----------
+
+    /// ★ ช่องทางทั้งหมดที่ shell ใช้ "ขอให้เขียนลง `Board`" — คืน `true` ถ้ามีอันไหนดังอยู่
+    ///
+    /// ★★★ **destructure `ShellState` ครบทุกฟิลด์ ไม่มี `..` โดยตั้งใจ**
+    ///
+    /// docs/03 §4.3 บังคับว่า "สลับ mode ห้ามแก้ข้อมูล" ซึ่งเป็นข้อกำหนดหลัก
+    /// ของดีไซน์สองโหมดทั้งหมด · แต่กฎแบบนั้นพังได้ทุกครั้งที่มีคนเพิ่ม
+    /// **ช่องทางใหม่** ระหว่าง shell กับ `app` แล้วลืมคิดถึงการสลับโหมด
+    ///
+    /// การไล่ชื่อฟิลด์เอาไว้เฉย ๆ กันไม่ได้ เพราะฟิลด์ที่ 45 จะไม่มีใครมาเติม
+    /// → ตรงนี้จึงบังคับตอน **คอมไพล์**: เพิ่มฟิลด์ใหม่ใน `ShellState` เมื่อไหร่
+    /// ไฟล์นี้จะไม่ผ่านจนกว่าจะมีคนตัดสินว่ามันเป็น "คำขอแก้เอกสาร" หรือ
+    /// "สถานะของมุมมอง" (หลักการเดียวกับ §4 ข้อ 16 และประตูของ `ItemCanvas`)
+    fn asks_to_touch_the_document(state: &ShellState) -> bool {
+        let ShellState {
+            // ---- ช่องทางที่ทำให้ `Board` เปลี่ยนได้จริง ----
+            //      (แต่ละตัวมี `App::apply_*` ของตัวเองที่ห่อเป็น `Command`)
+            appearance_edit,
+            appearance_sealed: _, // แค่ปิดหน้าต่าง merge ไม่ได้แก้อะไรเอง
+            arrange_request,
+            tool_request: _, // เปลี่ยนเครื่องมือ ไม่ใช่เอกสาร
+            note_edit,
+            note_sealed: _,
+            arrange_apply,
+            meta_request,
+            meta_sealed: _,
+            group_request,
+            group_sealed: _,
+
+            // ---- สถานะของ *มุมมอง* — เปลี่ยนได้ตามใจ ไม่แตะเอกสาร ----
+            mode: _,
+            appearance: _,      // ค่าสำหรับแสดงของ inspector
+            board_grayscale: _, // สวิตช์การมองเห็นทั้ง board (P2-8) ไม่ลงไฟล์
+            tool: _,
+            lang: _,
+            status: _,
+            status_warn: _,
+            arrange_sort: _,       // P3-4 ตัดสินให้การเรียงอยู่ชั้น UI (§2.17)
+            arrange_descending: _, // เหมือนกัน
+            arrange_filter: _,     // เหมือนกัน
+            arrange: _,            // ตัวนับของ virtual scrolling
+            note: _,               // ค่าสำหรับแสดง
+            meta: _,               // ค่าสำหรับแสดง
+            group: _,              // ค่าสำหรับแสดง
+            tag_input: _,          // ข้อความในช่องพิมพ์ ยังไม่ได้กด +
+            picked: _,             // สีที่ picker อ่านได้
+            measured: _,           // ไม้บรรทัด
+            loading: _,
+
+            // ---- ตัวเลขที่โชว์บน status bar ----
+            atlas_uploads: _,
+            item_count: _,
+            zoom: _,
+            frames_drawn: _,
+            ram_used: _,
+            ram_limit: _,
+            vram_used: _,
+            vram_limit: _,
+            cache_thumbs: _,
+            cache_bytes: _,
+            decode_queued: _,
+            decode_cancelled: _,
+            draw_calls: _,
+            working_used: _,
+            working_limit: _,
+            working_evicted: _,
+        } = state;
+
+        appearance_edit.is_some()
+            || arrange_request.is_some()
+            || note_edit.is_some()
+            || meta_request.is_some()
+            || group_request.is_some()
+            || *arrange_apply
+    }
+
+    /// ★★★ **สลับ mode 100 ครั้งแล้วต้องไม่มีคำขอแก้เอกสารสักครั้งเดียว** (P3-8)
+    ///
+    /// docs/03 §4.3: "การกด `Canvas ⇄ Arrange` เป็นการเปลี่ยน view ล้วน ๆ
+    /// ไม่สร้าง Command ไม่ทำให้ `dirty = true`" — ข้อมูลจะเปลี่ยนก็ต่อเมื่อผู้ใช้
+    /// กดปุ่มสะพาน (`Send to Canvas` / `Sort by canvas order`) อย่างจงใจเท่านั้น
+    ///
+    /// ★★ **นี่คือด่านที่ `Board` เปลี่ยนได้เท่านั้น** — `ArrangeView::plan` และ
+    /// `query::select` รับ `&Board` คอมไพเลอร์จึงกันการเขียนให้แล้ว ทางเดียว
+    /// ที่เหลือคือ shell เขียน "คำขอ" ค้างไว้แล้ว `app` ห่อเป็น `Command`
+    /// ในเฟรมถัดไป · ถ้าไม่มีคำขอ ก็ไม่มี `Command` ก็ไม่มีอะไรเปลี่ยน
+    ///
+    /// ★ วาดด้วย **สถานะที่มีของให้แตะครบ** (เลือกอยู่ · มีกลุ่ม · มีโน้ต)
+    /// ไม่ใช่ `default()` เปล่า ๆ — แผงที่ไม่มีอะไรให้วาดพิสูจน์อะไรไม่ได้เลย
+    #[test]
+    fn switching_mode_a_hundred_times_never_asks_to_change_the_document() {
+        use refx_core::arena::ArenaKey as _;
+        let ctx = egui::Context::default();
+        let mut state = ShellState {
+            mode: Mode::Canvas,
+            meta: Some(MetaView {
+                rating: 3,
+                color_label: Some(refx_core::board::ColorLabel::Blue),
+                pinned: true,
+                note: "จดไว้".to_owned(),
+                tags: vec!["portrait".to_owned()],
+            }),
+            note: Some("โน้ตบน canvas".to_owned()),
+            group: Some(GroupView::One {
+                id: refx_core::arena::GroupId::from_parts(0, 0),
+                name: "Group 1".to_owned(),
+                collapsed: true,
+                members: 3,
+            }),
+            ..ShellState::default()
+        };
+
+        for round in 0..100 {
+            state.mode = if round % 2 == 0 {
+                Mode::Arrange
+            } else {
+                Mode::Canvas
+            };
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| {
+                let _ = draw_in_ui(ui, &mut state, |_, _| {});
+            });
+            assert!(
+                !asks_to_touch_the_document(&state),
+                "รอบที่ {round} ({:?}) แผงขอให้เขียนลง board ทั้งที่ผู้ใช้แค่สลับโหมด",
+                state.mode
+            );
+        }
+
+        // ★ และสิ่งที่แผงแสดงต้องยังอยู่ครบ — "ไม่ขอแก้" ต้องไม่ได้มาจากการที่
+        //   แผงเงียบไปเพราะมันลืมของที่เลือกไว้
+        assert!(state.meta.is_some(), "ของที่เลือกหายไประหว่างสลับโหมด");
+        assert!(state.group.is_some(), "กลุ่มหายไประหว่างสลับโหมด");
+    }
 }
