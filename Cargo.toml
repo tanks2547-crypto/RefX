@@ -48,7 +48,33 @@ wgpu       = "29.0.4"
 winit      = "0.30"
 egui       = "0.34.3"
 egui-wgpu  = "0.34.3"
-egui-winit = "0.34.3"
+# ★ `default-features = false` เพื่อถอด feature `links` ตัวเดียว — ที่เหลือคือ
+#   รายการ `default` ของ egui-winit 0.34.3 เป๊ะ ๆ (clipboard · wayland · x11 ·
+#   winit/default) เทียบจาก [features] ในไฟล์ของมันเอง ไม่ใช่จากความจำ
+#
+#   `links` ดึง `webbrowser` เข้ามา ซึ่งเป็นต้นทางของ RUSTSEC-2026-0257 และเป็น
+#   โค้ดที่ **RefX ไม่เคยเรียกเลย**: ไม่มี hyperlink สักที่ในโปรเจกต์ และ I-8
+#   ห้าม network อยู่แล้ว สิ่งเดียวที่หายไปคือ `open_url_in_browser()` ของ
+#   egui-winit ซึ่งกลายเป็น log::warn แทนการเปิดเบราว์เซอร์
+#
+#   ★ ห้ามเขียนเป็น `features = [...]` โดยไม่มี `default-features = false`
+#     — จะได้ `links` กลับมาเงียบ ๆ ทั้งที่ดูเหมือนระบุครบแล้ว
+#   ★ `clipboard` ต้องอยู่ ไม่งั้น Ctrl+V (P1-8) พังทั้ง Windows และ Linux
+#     ส่วน `wayland`/`x11` ขาดตัวใดตัวหนึ่ง = พังเฉพาะบางเดสก์ท็อปบน Linux
+#     (clipboard ของ Wayland มาทาง smithay-clipboard ที่ feature `clipboard` ดึง
+#      และ `clipboard.rs` ยังมี `cfg(feature = "wayland")` แยกอีกชั้น)
+#
+#   ★★ `winit/default` ที่อยู่ในรายการ `default` ของ egui-winit **เขียนตรงนี้ไม่ได้**
+#      cargo ห้าม slash ในรายการ feature ของ dependency (ใช้ได้เฉพาะใน [features]
+#      ของ crate ตัวเอง) · ไม่ใช่ปัญหาเพราะ **เราเปิด default ของ winit เองอยู่แล้ว**
+#      ผ่าน `winit = "0.30"` ข้างบน ซึ่ง refx-platform/refx-ui/refx-app พึ่งอยู่ทั้งสามตัว
+#      แล้ว cargo รวม feature ทั้งกราฟให้ — ยืนยันด้วยการ diff feature ที่ resolve
+#      ได้จริงทั้ง Windows/Linux แล้วว่า winit ได้ feature ชุดเดิมเป๊ะ ไม่ใช่การเดา
+egui-winit = { version = "0.34.3", default-features = false, features = [
+    "clipboard",
+    "wayland",
+    "x11",
+] }
 
 # --- image decode: pure Rust เท่านั้น (docs/06-security.md) ---------------
 #
