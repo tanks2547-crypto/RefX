@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 refx-core.workspace = true
+glam.workspace      = true
 postcard.workspace  = true
 zstd.workspace      = true
 serde.workspace     = true
@@ -21,3 +22,4 @@ tracing.workspace   = true
 
 [dev-dependencies]
 proptest.workspace = true
+smallvec.workspace = true

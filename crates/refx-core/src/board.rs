@@ -102,10 +102,58 @@ pub enum MissingReason {
     ///
     /// อ่านเจอค่าที่ไม่รู้จักต้องตกมาที่นี่ **ห้าม error ทิ้งทั้งไฟล์** — board ที่
     /// จัดมาสามชั่วโมงเปิดไม่ได้เพราะ item เดียวมีรหัสเหตุผลแปลก ๆ คืองานหาย (I-3)
-    Unknown,
+    ///
+    /// ★★ **ถือค่าดิบไว้** (P4-1) เหมือน [`ColorLabel::Unknown`] / [`Flip::Unknown`]
+    /// — เดิมเป็น variant เปล่าซึ่ง "ทนได้" แต่เขียนกลับไม่ได้ · เหตุผลที่ item
+    /// เปิดไม่ได้เป็นสิ่งที่ผู้ใช้เอาไป relink ต่อ การเขียนทับด้วยรหัสอื่นทำให้
+    /// ข้อความที่รุ่นใหม่จะบอกเขาหายไป
+    Unknown(std::num::NonZeroU8),
+}
+
+impl MissingReason {
+    /// ค่าที่ลงไฟล์ — **ตัวเลขพวกนี้เป็นสัญญาถาวร ห้ามสลับ**
+    #[must_use]
+    pub fn to_wire(self) -> u8 {
+        match self {
+            Self::FileNotFound => 1,
+            Self::TooLarge => 2,
+            Self::UnsupportedFormat => 3,
+            Self::Damaged => 4,
+            Self::Unreadable => 5,
+            Self::Unknown(raw) => raw.get(),
+        }
+    }
+
+    /// อ่านค่าจากไฟล์ — ค่าที่ไม่รู้จักถูกถือไว้ดิบ ๆ
+    ///
+    /// `0` ไม่ใช่รหัสของใคร จึงตกเป็น [`MissingReason::Unreadable`] ซึ่งเป็น
+    /// เหตุผลที่กว้างที่สุดและไม่ชี้นำผู้ใช้ผิดทาง
+    #[must_use]
+    pub fn from_wire(value: u8) -> Self {
+        match value {
+            1 => Self::FileNotFound,
+            2 => Self::TooLarge,
+            3 => Self::UnsupportedFormat,
+            4 => Self::Damaged,
+            5 => Self::Unreadable,
+            other => std::num::NonZeroU8::new(other).map_or(Self::Unreadable, Self::Unknown),
+        }
+    }
+
+    /// รุ่นนี้รู้จักเหตุผลนี้ไหม
+    #[must_use]
+    pub fn is_known(self) -> bool {
+        !matches!(self, Self::Unknown(_))
+    }
 }
 
 /// การพลิกภาพ
+///
+/// ★★★ มี [`Flip::Unknown`] ด้วยเหตุผลเดียวกับ [`ColorLabel::Unknown`] เป๊ะ ๆ
+/// — `docs/02 §2.9` ระบุ `Flip` ไว้ในแถว "ค่าเดี่ยว ๆ" ที่ต้อง **เก็บค่าดิบไว้
+/// แล้วเขียนกลับตามเดิม** ไม่ใช่แค่ทนได้ · §2.2b เคยวางแผนว่าให้ตกเป็น `None`
+/// แล้ว "เสียการพลิกแต่ภาพยังอยู่" ซึ่ง **ถูกยกระดับไปแล้ว** โดย §2.9:
+/// การพลิกคือสิ่งที่ผู้ใช้ตั้งใจสั่ง การเขียนกลับเป็น "ไม่พลิก" คือทำงานเขาหาย
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Flip {
     /// ไม่พลิก
@@ -117,6 +165,48 @@ pub enum Flip {
     Vertical,
     /// พลิกทั้งสองแกน
     Both,
+    /// ★ ค่าที่รุ่นนี้ไม่รู้จัก — **ถือค่าดิบไว้เพื่อเขียนกลับให้เหมือนเดิม**
+    ///
+    /// วาดเหมือน [`Flip::None`] (ไม่รู้จักก็พลิกไม่ถูกอยู่ดี) แต่ **ห้ามแปลงค่าทิ้ง**
+    /// · ผู้ใช้เลือกมันเองไม่ได้ — มันมาจากไฟล์ทางเดียว
+    ///
+    /// `NonZeroU8` เพราะ `0` คือ [`Flip::None`] อยู่แล้ว ถ้าปล่อยให้เป็น `u8`
+    /// ธรรมดา `Unknown(0)` จะเขียนออกไปเป็น "ไม่พลิก" แล้วค่าก็หายอยู่ดี
+    /// — ชนิดข้อมูลปิดรูนั้นแทนที่จะต้องมีคนจำ
+    Unknown(std::num::NonZeroU8),
+}
+
+impl Flip {
+    /// ค่าที่ลงไฟล์ — **ตัวเลขพวกนี้เป็นสัญญาถาวร ห้ามสลับ**
+    #[must_use]
+    pub fn to_wire(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::Horizontal => 1,
+            Self::Vertical => 2,
+            Self::Both => 3,
+            Self::Unknown(raw) => raw.get(),
+        }
+    }
+
+    /// อ่านค่าจากไฟล์ — ค่าที่ไม่รู้จักตกที่ [`Flip::Unknown`] **ไม่ใช่ `None`**
+    #[must_use]
+    pub fn from_wire(value: u8) -> Self {
+        match value {
+            0 => Self::None,
+            1 => Self::Horizontal,
+            2 => Self::Vertical,
+            3 => Self::Both,
+            // มาจากรุ่นใหม่กว่า — ถือไว้ให้ครบแล้วเขียนกลับตามเดิม
+            other => std::num::NonZeroU8::new(other).map_or(Self::None, Self::Unknown),
+        }
+    }
+
+    /// รุ่นนี้รู้จักค่านี้ไหม — ชั้น UI ใช้ตัดสินว่าจะไฮไลต์ปุ่มไหน
+    #[must_use]
+    pub fn is_known(self) -> bool {
+        !matches!(self, Self::Unknown(_))
+    }
 }
 
 /// ป้ายสีสำหรับคัดภาพในโหมด Arrange
@@ -1054,6 +1144,25 @@ impl Board {
             .all(|&id| self.items.contains(id) && seen.insert(id))
     }
 
+    /// ★★★ เขียนกล้อง/โหมดที่ **ใช้อยู่จริง** ลง `Board` (P4-1)
+    ///
+    /// **นี่คือข้อยกเว้นข้อหนึ่งในสองข้อที่ `docs/02 §2.9` อนุญาตไว้** — `view`
+    /// อยู่ใน `Board` และ persist ลง `.refx` (เปิดไฟล์มาแล้วกลับมุมมองเดิม)
+    /// แต่ **ไม่ผ่าน `Command` · ไม่ทำให้ `dirty` · ไม่บวก `revision`**
+    ///
+    /// | ทำไมไม่ผ่าน `Command` | ลาก pan 200 เฟรมแล้วกด Ctrl+Z ต้องย้อนการแก้ครั้งล่าสุด ไม่ใช่ย้อนกล้อง |
+    /// | ทำไมไม่ `dirty` | เลื่อนดูภาพเฉย ๆ แล้วโดนถาม "บันทึกไหม" คือสิ่งที่ §2.9 ยกมาเป็นตัวอย่างของความรู้สึก "เชื่อถือไม่ได้" |
+    /// | **ทำไมไม่บวก `revision`** | `revision` คือคีย์ cache ของ filter/sort (P3-4) · ถ้ากล้องขยับแล้วบวก การ pan หนึ่งครั้งจะสั่งกรอง+เรียงใหม่ทั้ง board ทุกเฟรม = เผา CPU ตรงกับที่ §2.17 เพิ่งแก้ไป |
+    ///
+    /// ★★ **หนี้ที่ข้อนี้ปิด** (§6 แถวแรก): ก่อนหน้านี้ไม่มีโค้ดไหนเขียน `view`
+    /// เลยสักบรรทัด กล้องจริงอยู่ที่ `Gfx::camera` · การเลื่อนของ Arrange อยู่ที่
+    /// `ArrangeView::scroll` · โหมดอยู่ที่ `ShellState::mode` — ทั้งสามแยกกันอยู่
+    /// คนละที่ · **การเขียน DTO ให้ `ViewState` แล้วเทสต์ round-trip ผ่านหมด
+    /// จะดู "เสร็จ" ทั้งที่สิ่งที่ถูกบันทึกคือกล้องค่าปริยายเสมอ**
+    pub fn set_view(&mut self, view: ViewState) {
+        self.view = view;
+    }
+
     // ---- เขียน: `pub(crate)` เท่านั้น — ทางเข้าคือ `Command` ----
 
     /// ใส่ item ใหม่ วางไว้ **บนสุด** ของ z-order
@@ -1242,6 +1351,117 @@ impl Board {
     /// ★ บวกเลขรุ่น — เรียกจากตัวแก้ทุกตัวที่เปลี่ยน **เนื้อหา** ของ board
     fn touch(&mut self) {
         self.revision = self.revision.wrapping_add(1);
+    }
+}
+
+/// ส่วนประกอบของ board ที่อ่านมาจากไฟล์ — ทางเข้าของ `refx-io` (P4-1)
+///
+/// ★★★ **ทำไมเป็น "สร้างใหม่" ไม่ใช่ "แก้ board ที่มีอยู่"**
+///
+/// `docs/08 §4` ข้อ 10 บังคับว่าทุก *mutation* ของ `Board` ผ่าน `Command`
+/// ซึ่งเป็นเหตุผลที่ตัวแก้ทุกตัวเป็น `pub(crate)` — `refx-io` จึงแตะไม่ได้เลย
+/// **และนั่นถูกแล้ว** · การเปิดไฟล์ไม่ใช่การแก้ board มันคือการ *สร้าง* board
+/// ใบใหม่ทั้งใบ (ไม่มีอะไรให้ undo เพราะยังไม่มีใครแก้อะไร) จึงเป็นคนละเรื่องกัน
+/// และไม่ต้องเจาะรูให้ `&mut Board` หลุดออกไป
+#[derive(Debug, Clone, Default)]
+pub struct BoardParts {
+    /// ชื่อ board
+    pub name: String,
+    /// กลุ่มทั้งหมด **เรียงตามลำดับในไฟล์** — `ItemParts::group` อ้างด้วยดัชนีนี้
+    pub groups: Vec<Group>,
+    /// item เรียง **ล่างสุด → บนสุด** (ลำดับ z ตามที่อยู่ในไฟล์)
+    pub items: Vec<ItemParts>,
+    /// ชื่อแท็กพร้อม id เดิม — id ต้องคงเดิมเพราะ `ItemMeta::tags` ถืออยู่
+    pub tags: Vec<(TagId, String)>,
+    /// ตั้งค่าระดับ board
+    pub settings: BoardSettings,
+    /// กล้อง/โหมดที่บันทึกไว้
+    pub view: ViewState,
+}
+
+/// item หนึ่งใบจากไฟล์ พร้อมกลุ่มที่มันสังกัด
+#[derive(Debug, Clone)]
+pub struct ItemParts {
+    /// ตัว item — `meta.group` ที่ติดมาถูก **มองข้าม** ค่าจริงมาจาก `group`
+    pub item: Item,
+    /// ★ **ดัชนีใน [`BoardParts::groups`] ไม่ใช่ `GroupId`**
+    ///
+    /// `GroupId` เป็นคีย์ของ arena ซึ่งเป็นเรื่อง *ภายในของ runtime* — ค่าที่ลงไฟล์
+    /// ต้องเป็นดัชนีที่มีความหมายในตัวไฟล์เอง ไม่งั้นไฟล์จะผูกกับรายละเอียดของ
+    /// ตัวจัดสรร แล้ววันที่ `Arena` เปลี่ยนวิธีแจกคีย์ ไฟล์เก่าทั้งหมดจะชี้ผิด
+    pub group: Option<usize>,
+}
+
+impl Board {
+    /// สร้าง board จากสิ่งที่อ่านมาจากไฟล์ (P4-1)
+    ///
+    /// ★ ค่าที่ไม่ถูกต้องถูก **ตัดให้อยู่ในช่วง** ไม่ใช่ปฏิเสธทั้งไฟล์ (I-4 + I-3):
+    /// `sanitized()` ของ `ItemCanvas`/`ItemMeta` ทำงานเหมือนเส้นทางปกติทุกประการ
+    /// เพราะมันคือ `insert_item` ตัวเดียวกัน · ดัชนีกลุ่มที่ชี้นอกช่วงกลายเป็น
+    /// "ไม่มีกลุ่ม" แทนที่จะทำให้ทั้ง board เปิดไม่ได้
+    ///
+    /// `dirty` เป็น `false` เสมอ — ไฟล์ที่เพิ่งเปิดยังไม่มีการแก้ที่ยังไม่บันทึก
+    #[must_use]
+    pub fn load(id: BoardId, parts: BoardParts) -> Self {
+        let mut board = Self::new(id, parts.name);
+
+        // 1. กลุ่มก่อน — ต้องมี `GroupId` จริงก่อนจึงจะผูก item เข้าได้
+        let group_ids: Vec<GroupId> = parts
+            .groups
+            .into_iter()
+            .map(|group| board.groups.insert(group))
+            .collect();
+
+        // 2. ชื่อแท็ก — คง id เดิมไว้ เพราะ `ItemMeta::tags` ถือค่าเหล่านั้นอยู่
+        for (id, name) in parts.tags {
+            board.tags.restore(id, name);
+        }
+
+        // 3. item ตามลำดับ z ที่อยู่ในไฟล์
+        for ItemParts { mut item, group } in parts.items {
+            item.meta.group = group.and_then(|index| group_ids.get(index).copied());
+            board.insert_item(item);
+        }
+
+        board.settings = parts.settings;
+        board.view = parts.view;
+        // ★ เพิ่งอ่านมาจากไฟล์ = ยังไม่มีอะไรที่ต้องบันทึก
+        board.dirty = false;
+        // เลขรุ่นเริ่มที่ 0 เสมอ — มันเป็นของ runtime ไม่ใช่ของไฟล์
+        board.revision = 0;
+        board
+    }
+
+    /// สิ่งที่ต้องเขียนลงไฟล์ — คู่ของ [`Board::load`] (P4-1)
+    ///
+    /// ★ คืน **ดัชนี** ของกลุ่มไม่ใช่ `GroupId` ด้วยเหตุผลเดียวกับ [`ItemParts::group`]
+    #[must_use]
+    pub fn to_parts(&self) -> BoardParts {
+        let group_ids: Vec<GroupId> = self.groups.keys().collect();
+        BoardParts {
+            name: self.name.clone(),
+            groups: group_ids
+                .iter()
+                .filter_map(|id| self.groups.get(*id).cloned())
+                .collect(),
+            items: self
+                .items_in_z_order()
+                .map(|(_, item)| ItemParts {
+                    item: item.clone(),
+                    group: item
+                        .meta
+                        .group
+                        .and_then(|want| group_ids.iter().position(|id| *id == want)),
+                })
+                .collect(),
+            tags: self
+                .tags
+                .iter()
+                .map(|(id, name)| (id, name.to_owned()))
+                .collect(),
+            settings: self.settings,
+            view: self.view,
+        }
     }
 }
 
@@ -1846,13 +2066,51 @@ pub(crate) mod tests {
     /// อ่านเจอแล้วต้องตกมาที่นี่ ห้ามทิ้งทั้งไฟล์ (I-3)
     #[test]
     fn missing_reason_has_a_landing_spot_for_values_from_newer_versions() {
+        let unknown = MissingReason::from_wire(200);
         let mut board = Board::default();
         board.insert_item(Item::new(ItemKind::Missing {
             original_path: PathBuf::new(),
-            reason: MissingReason::Unknown,
+            reason: unknown,
         }));
         assert_eq!(board.len(), 1);
-        assert_ne!(MissingReason::Unknown, MissingReason::FileNotFound);
+        assert_ne!(unknown, MissingReason::FileNotFound);
+        // ★ ยกระดับตอน P4-1: "ทนได้" ไม่พอ ต้อง **เขียนกลับได้เหมือนเดิม** (§2.9)
+        assert!(!unknown.is_known());
+        assert_eq!(unknown.to_wire(), 200, "เหตุผลที่ไม่รู้จักต้องเขียนกลับได้ครบ");
+    }
+
+    /// ★★★ ทุกค่าที่เป็นไปได้ของ enum ที่ลงไฟล์ ต้องเขียนกลับได้เหมือนเดิมเป๊ะ
+    ///
+    /// ไล่ครบทั้ง 256 ค่าเพราะโดเมนเล็กพอจะไล่หมดได้จริง — แบบเดียวกับที่
+    /// `every_possible_colour_label_survives_a_round_trip` ทำกับ `ColorLabel`
+    ///
+    /// ★ `Flip` กับ `MissingReason` ถูกยกระดับตอน P4-1 · `Mode` **จงใจไม่อยู่ในนี้**
+    /// เพราะมันเป็นมุมมองไม่ใช่เนื้อหา (ดู `Mode::from_wire`) — และการที่มันไม่อยู่
+    /// ต้องเป็นสิ่งที่มีคนเซ็นรับรอง ไม่ใช่สิ่งที่ลืม
+    #[test]
+    fn every_wire_value_of_a_persisted_enum_round_trips() {
+        for raw in 0..=u8::MAX {
+            let flip = Flip::from_wire(raw);
+            assert_eq!(flip.to_wire(), raw, "Flip {raw} เขียนกลับไม่ตรง ({flip:?})");
+        }
+        for raw in 1..=u8::MAX {
+            let reason = MissingReason::from_wire(raw);
+            assert_eq!(
+                reason.to_wire(),
+                raw,
+                "MissingReason {raw} เขียนกลับไม่ตรง ({reason:?})"
+            );
+        }
+        // ★ `0` ไม่ใช่รหัสของเหตุผลไหน — ต้องตกที่ค่าที่กว้างที่สุดอย่างตั้งใจ
+        assert_eq!(MissingReason::from_wire(0), MissingReason::Unreadable);
+
+        // เลขของค่าที่รู้จักเป็นสัญญาถาวร — สลับเมื่อไหร่ไฟล์เก่าอ่านผิดทั้งหมด
+        assert_eq!(Flip::None.to_wire(), 0);
+        assert_eq!(Flip::Horizontal.to_wire(), 1);
+        assert_eq!(Flip::Vertical.to_wire(), 2);
+        assert_eq!(Flip::Both.to_wire(), 3);
+        assert_eq!(MissingReason::FileNotFound.to_wire(), 1);
+        assert_eq!(MissingReason::Unreadable.to_wire(), 5);
     }
 
     /// ตัวตรวจ invariant ต้องจับได้จริงทั้งสองทิศ ไม่ใช่คืน `true` เสมอ

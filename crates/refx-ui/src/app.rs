@@ -537,6 +537,33 @@ fn is_paste(pressed: Option<char>, modifiers: ModifiersState) -> bool {
     matches!(pressed, Some('v' | '\u{16}'))
 }
 
+/// ★★★ กล้อง/โหมดที่ **ใช้อยู่จริง** ประกอบเป็น `ViewState` ที่จะลงไฟล์ (P4-1)
+///
+/// **นี่คือครึ่งที่ `HANDOFF §6` แถวแรกเตือนว่าจะถูกลืม** — `Board::view` ตั้งใจให้
+/// persist ลง `.refx` มาตั้งแต่ P2-1 แต่ **ไม่มีโค้ดไหนเขียนมันเลยสักบรรทัด**
+/// เพราะของจริงกระจายอยู่สามที่คนละชั้นกัน:
+///
+/// | ของจริงอยู่ไหน | ใครถือ |
+/// |---|---|
+/// | กล้องของ Canvas | `Gfx::camera` |
+/// | การเลื่อนของ Arrange | `ArrangeView::scroll` (ผ่าน `camera()`) |
+/// | โหมดที่เปิดอยู่ | `ShellState::mode` |
+///
+/// ★★ กับดักที่ต้องรู้: **การเขียน DTO ให้ `ViewState` แล้วเทสต์ round-trip
+/// ผ่านหมด จะดู "เสร็จ" ทั้งที่สิ่งที่ถูกบันทึกคือกล้องค่าปริยายเสมอ** ผู้ใช้
+/// เปิดไฟล์แล้วมุมมองไม่กลับมา โดยไม่มี error ที่ไหนเลย
+///
+/// ★ แยกเป็นฟังก์ชันบริสุทธิ์เพื่อ **เทสต์ได้โดยไม่ต้องมีหน้าต่าง** — ชั้นที่
+/// ประกอบค่านี้คือชั้นเดียวที่มีข้อมูลครบทั้งสามที่ (docs/08 §3.9 ข้อ 8.1:
+/// ย้ายการตัดสินเข้าไปในฝั่งที่มีข้อมูลครบ แทนที่จะบอกให้ผู้เรียกทำเอง)
+fn live_view(canvas: Camera, arrange: Camera, mode: Mode) -> refx_core::view::ViewState {
+    refx_core::view::ViewState {
+        canvas,
+        arrange,
+        mode,
+    }
+}
+
 /// สีพื้นหลังของ canvas จาก `BoardSettings` — ★ **ค่านี้เคยเป็นค่าคงที่**
 ///
 /// `BoardSettings::background` มีอยู่ใน `Board` และ persist ลง `.refx` ตั้งแต่ P2-1
@@ -2523,6 +2550,12 @@ impl RefxApp {
                             Flip::Horizontal => Flip::None,
                             Flip::Vertical => Flip::Both,
                             Flip::Both => Flip::Vertical,
+                            // ★ ค่าที่รุ่นนี้ไม่รู้จัก (มาจากไฟล์ของรุ่นใหม่กว่า —
+                            //   docs/02 §2.9) · การกด `H` คือ **ผู้ใช้สั่งทับเอง**
+                            //   ซึ่งเป็นจังหวะเดียวที่เขียนทับค่าที่ถือไว้ได้อย่างถูกต้อง
+                            //   — กฎ "ห้ามแปลงค่าทิ้ง" ห้ามการหายแบบ *เงียบ ๆ*
+                            //   ไม่ได้ห้ามผู้ใช้เปลี่ยนค่าด้วยตัวเอง
+                            Flip::Unknown(_) => Flip::Horizontal,
                         };
                         (id, ItemCanvas { flip, ..canvas })
                     })
@@ -3572,6 +3605,17 @@ impl AppDelegate for RefxApp {
                 }
             }
         };
+        // ★★★ ซิงค์กล้อง/โหมดที่ใช้อยู่จริงเข้า `Board` (P4-1 — หนี้ §6 แถวแรก)
+        //
+        //   **ไม่ผ่าน `Command` · ไม่ทำให้ `dirty` · ไม่บวก `revision`** ตาม
+        //   ข้อยกเว้นที่ docs/02 §2.9 อนุญาตไว้ (ดู `Board::set_view`)
+        //
+        //   ★ ทำ **ทุกเฟรม** ไม่ใช่ตอน save เพราะ "ถูกเฉพาะถ้าผู้เรียกเรียก
+        //     ถูกจังหวะ" คือกับดักที่ docs/08 §3.9 ข้อ 8 บันทึกไว้ (เคสจริง:
+        //     `take_forgotten` ของ P2-6) · ราคาคือคัดลอก float ห้าตัว ไม่มี
+        //     การจองหน่วยความจำ และ **ไม่ขอเฟรมเพิ่ม** จึงไม่แตะ I-1
+        gfx.board
+            .set_view(live_view(gfx.camera, gfx.arrange.camera(), shell.mode));
         shell.vram_used = gfx.textures.budget().used();
         shell.working_used = gfx.working.used();
         shell.working_limit = gfx.working.limit();
@@ -4745,6 +4789,44 @@ mod tests {
         assert_eq!(tool_shortcut(pressed("v"), ModifiersState::CONTROL), None);
         assert_eq!(tool_shortcut(pressed("c"), ModifiersState::CONTROL), None);
         assert_eq!(tool_shortcut(pressed("x"), none), None);
+    }
+
+    /// ★★★ `Board::view` ต้องได้กล้อง **ตัวจริง** ไม่ใช่ค่าปริยาย (P4-1)
+    ///
+    /// `HANDOFF §6` แถวแรกเตือนกับดักนี้ไว้ตรง ๆ: `ViewState` ตั้งใจให้ persist
+    /// ลง `.refx` มาตั้งแต่ P2-1 แต่ไม่มีใครเขียนมันเลย เพราะของจริงกระจายอยู่
+    /// สามที่ (`Gfx::camera` · `ArrangeView` · `ShellState::mode`)
+    /// → เขียน DTO อย่างเดียวจะได้ไฟล์ที่บันทึกกล้องค่าปริยายเสมอ **โดยไม่มี
+    /// error ที่ไหนเลย** ผู้ใช้แค่เปิดไฟล์แล้วมุมมองไม่กลับมา
+    ///
+    /// ★ ข้อที่จับกับดักได้คือข้อสุดท้าย: ผลลัพธ์ต้อง **ต่างจาก `default()`**
+    #[test]
+    fn the_view_that_gets_saved_is_the_live_camera_not_the_default_one() {
+        let canvas = Camera::new(Vec2::new(900.0, -250.0), 2.5);
+        let arrange = Camera::new(Vec2::new(420.0, 3000.0), 1.0);
+
+        let view = live_view(canvas, arrange, Mode::Arrange);
+
+        assert_eq!(view.canvas.center(), Vec2::new(900.0, -250.0));
+        assert_eq!(view.canvas.zoom(), 2.5);
+        assert_eq!(view.arrange.center().y, 3000.0);
+        assert_eq!(view.mode, Mode::Arrange);
+        assert_ne!(
+            view,
+            refx_core::view::ViewState::default(),
+            "ประกอบแล้วได้ค่าปริยาย = กับดักที่ §6 เตือนไว้เกิดขึ้นแล้ว"
+        );
+
+        // ★ และเขียนลง board ได้จริงโดย **ไม่แตะ dirty และไม่แตะ revision**
+        //   (ข้อยกเว้นที่ docs/02 §2.9 อนุญาต — ลาก pan 200 เฟรมแล้ว Ctrl+Z
+        //    ต้องย้อนการแก้ครั้งล่าสุด ไม่ใช่ย้อนกล้อง · และ revision เป็นคีย์
+        //    cache ของ filter/sort ถ้ากล้องขยับแล้วบวก จะกรองใหม่ทุกเฟรม)
+        let mut board = refx_core::board::Board::default();
+        let revision = board.revision();
+        board.set_view(view);
+        assert_eq!(*board.view(), view);
+        assert!(!board.is_dirty(), "การเลื่อนกล้องต้องไม่ทำให้เอกสาร dirty");
+        assert_eq!(board.revision(), revision, "กล้องขยับต้องไม่ทิ้ง cache ทั้ง board");
     }
 
     /// ★★★ คำสั่งที่ "ไม่ได้แตะ item ไหนเลย" ต้องไม่ล้างการเลือกตอน undo (P3-7)

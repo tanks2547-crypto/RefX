@@ -804,10 +804,12 @@ dependencies = [
 name = "refx-fuzz"
 version = "0.0.0"
 dependencies = [
+ "crc32fast",
  "libfuzzer-sys",
  "refx-asset",
  "refx-core",
  "refx-io",
+ "zstd",
 ]
 
 [[package]]
@@ -815,6 +817,7 @@ name = "refx-io"
 version = "0.1.0"
 dependencies = [
  "crc32fast",
+ "glam",
  "notify",
  "postcard",
  "refx-core",

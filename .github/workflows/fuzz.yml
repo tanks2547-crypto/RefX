@@ -32,7 +32,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [fuzz_decode, fuzz_layout]
+        target: [fuzz_decode, fuzz_layout, fuzz_document]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly

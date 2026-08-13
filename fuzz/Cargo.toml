@@ -12,6 +12,9 @@ libfuzzer-sys = "0.4"
 refx-asset = { path = "../crates/refx-asset" }
 refx-core  = { path = "../crates/refx-core" }
 refx-io    = { path = "../crates/refx-io" }
+# ต้องใช้ประกอบหัวไฟล์ที่ถูกต้องให้ fuzzer (ดูคอมเมนต์ใน fuzz_document.rs)
+crc32fast  = "1"
+zstd       = "0.13"
 
 [[bin]]
 name = "fuzz_decode"
@@ -25,13 +28,20 @@ path = "fuzz_targets/fuzz_layout.rs"
 test = false
 doc  = false
 
-# ★ `fuzz_document` / `fuzz_journal` **จงใจไม่ลงทะเบียนที่นี่**
+[[bin]]
+name = "fuzz_document"
+path = "fuzz_targets/fuzz_document.rs"
+test = false
+doc  = false
+
+# ★ `fuzz_journal` **จงใจไม่ลงทะเบียนที่นี่**
 #
-# โค้ดที่ควรยิง (`refx_io::dto`, `refx_io::journal`) ยังเป็นไฟล์ TODO บรรทัดเดียว
-# การ build แล้วรันมันจึงได้แต่ "เขียวแบบว่างเปล่า" ซึ่งคือบั๊กที่ `fuzz_decode`
+# โค้ดที่ควรยิง (`refx_io::journal`) ยังเป็นไฟล์ TODO บรรทัดเดียว การ build
+# แล้วรันมันจึงได้แต่ "เขียวแบบว่างเปล่า" ซึ่งคือบั๊กที่ `fuzz_decode`
 # เป็นมา 5 session (docs/06 §2.5)
 #
 # ลงทะเบียนกลับพร้อมกับตอนที่ต่อ target จริงเท่านั้น —
 # job `unwired-targets` ใน `.github/workflows/fuzz.yml` จะล้มถ้าลืม
 #
 # ★ `fuzz_layout` ถูกต่อแล้วตอน P3-2 — `refx_core::layout` มีของจริงแล้ว
+# ★ `fuzz_document` ถูกต่อแล้วตอน P4-1 — `refx_io::dto` มีของจริงแล้ว
