@@ -212,6 +212,23 @@ pub enum Key {
     SendToCanvasHint,
     /// กดส่งเข้า canvas แล้วไม่มีอะไรขยับ
     NothingToApply,
+
+    // ---- P3-7: group / ungroup ----
+    /// หัวข้อกลุ่มในแผง Arrange
+    GroupTitle,
+    /// สิ่งที่เลือกไม่ได้อยู่ในกลุ่มไหน
+    GroupNone,
+    /// ★ คำตั้งต้นของชื่อกลุ่มอัตโนมัติ — ถูก **persist ลงไฟล์** จึงเป็นข้อมูล
+    /// ของผู้ใช้ ไม่ใช่ป้ายบนหน้าจอ (ตั้งตอนสร้างด้วยภาษาที่ผู้ใช้ใช้อยู่ตอนนั้น)
+    GroupDefaultName,
+    /// คำอธิบายช่องเปลี่ยนชื่อกลุ่ม
+    GroupRenameHint,
+    /// ปุ่มยุบ/กางกลุ่ม
+    GroupCollapsed,
+    /// คำอธิบายปุ่มยุบ
+    GroupCollapsedHint,
+    /// สิ่งที่เลือกอยู่คนละกลุ่มกัน
+    GroupMixed,
 }
 
 /// ข้อความภาษาอังกฤษ — **ต้องมีครบทุก key เสมอ** (เป็นตัวสำรองสุดท้าย)
@@ -291,6 +308,13 @@ fn en(key: Key) -> &'static str {
         Key::SendToCanvasHint => {
             "Move these images on the canvas to match this arrangement (one undo puts them back)"
         }
+        Key::GroupTitle => "Group",
+        Key::GroupNone => "Not in a group",
+        Key::GroupDefaultName => "Group",
+        Key::GroupRenameHint => "Rename this group",
+        Key::GroupCollapsed => "Collapsed",
+        Key::GroupCollapsedHint => "Show this group as a single tile in Arrange",
+        Key::GroupMixed => "Selection spans several groups",
         Key::NothingToApply => "Nothing moved — the images are already arranged like this",
     }
 }
@@ -370,6 +394,13 @@ fn th(key: Key) -> Option<&'static str> {
         Key::FilterMinRating => "ดาว",
         Key::FilterPinnedOnly => "เฉพาะที่ปักหมุด",
         Key::SendToCanvasHint => "ย้ายภาพบน canvas ให้เรียงแบบนี้ (กด Ctrl+Z ครั้งเดียวคืนสภาพเดิม)",
+        Key::GroupTitle => "กลุ่ม",
+        Key::GroupNone => "ไม่ได้อยู่ในกลุ่มไหน",
+        Key::GroupDefaultName => "กลุ่ม",
+        Key::GroupRenameHint => "เปลี่ยนชื่อกลุ่มนี้",
+        Key::GroupCollapsed => "ยุบอยู่",
+        Key::GroupCollapsedHint => "ยุบกลุ่มนี้ให้เหลือใบเดียวในโหมด Arrange",
+        Key::GroupMixed => "สิ่งที่เลือกอยู่คนละกลุ่มกัน",
         Key::NothingToApply => "ไม่มีอะไรขยับ — ภาพเรียงแบบนี้อยู่แล้ว",
     })
 }
@@ -398,6 +429,8 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 pub enum Template {
     /// `{n}` — จำนวน item บน board
     ItemCount,
+    /// `{n}` — จำนวนสมาชิกของกลุ่มที่เลือกอยู่ (P3-7)
+    GroupMembers,
     /// `{pct}` — ระดับซูมเป็นเปอร์เซ็นต์
     Zoom,
     /// `{n}` — จำนวนเฟรมที่วาดไปแล้ว (ตัวชี้วัด I-1 ที่เห็นด้วยตา)
@@ -482,6 +515,7 @@ pub enum Template {
 fn template_en(template: Template) -> &'static str {
     match template {
         Template::ItemCount => "{n} items",
+        Template::GroupMembers => "{n} in this group",
         Template::Zoom => "Zoom {pct}%",
         Template::FramesDrawn => "Frames {n}",
         Template::Ram => "RAM {used} / {limit}",
@@ -576,6 +610,7 @@ Drag in a PNG, JPEG, WebP, GIF, BMP, TGA or TIFF instead."
 fn template_th(template: Template) -> Option<&'static str> {
     Some(match template {
         Template::ItemCount => "{n} รายการ",
+        Template::GroupMembers => "{n} ใบในกลุ่มนี้",
         Template::Zoom => "ซูม {pct}%",
         Template::FramesDrawn => "เฟรมที่วาด {n}",
         Template::Ram => "RAM {used} / {limit}",
@@ -880,10 +915,18 @@ mod tests {
         Key::FilterPinnedOnly,
         Key::SendToCanvasHint,
         Key::NothingToApply,
+        Key::GroupTitle,
+        Key::GroupNone,
+        Key::GroupDefaultName,
+        Key::GroupRenameHint,
+        Key::GroupCollapsed,
+        Key::GroupCollapsedHint,
+        Key::GroupMixed,
     ];
 
     const ALL_TEMPLATES: &[Template] = &[
         Template::ItemCount,
+        Template::GroupMembers,
         Template::Zoom,
         Template::FramesDrawn,
         Template::Ram,

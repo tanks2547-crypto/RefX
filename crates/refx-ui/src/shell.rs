@@ -56,6 +56,39 @@ pub struct MetaView {
     pub tags: Vec<String>,
 }
 
+/// กลุ่มของสิ่งที่เลือกอยู่ — **ค่าสำหรับแสดงเท่านั้น** (P3-7)
+///
+/// ★ `None` ทั้งก้อน = ไม่ได้เลือกอะไร · `Mixed` = เลือกข้ามหลายกลุ่ม
+/// ซึ่งต้องแยกจาก "ไม่ได้อยู่ในกลุ่มไหน" ให้ขาด ไม่งั้นช่องเปลี่ยนชื่อจะโผล่มา
+/// แล้วเขียนทับกลุ่มที่ผู้ใช้ไม่ได้ตั้งใจแตะ
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GroupView {
+    /// ทุกใบที่เลือกไม่ได้อยู่ในกลุ่มไหนเลย
+    Loose,
+    /// ทุกใบที่เลือกอยู่ในกลุ่มเดียวกัน
+    One {
+        /// คีย์ของกลุ่ม
+        id: refx_core::arena::GroupId,
+        /// ชื่อที่ผู้ใช้ตั้ง
+        name: String,
+        /// ยุบอยู่หรือไม่
+        collapsed: bool,
+        /// จำนวนสมาชิกทั้งหมดของกลุ่ม (ไม่ใช่จำนวนที่เลือก)
+        members: usize,
+    },
+    /// เลือกข้ามหลายกลุ่ม (หรือกลุ่มปนกับใบที่ไม่มีกลุ่ม)
+    Mixed,
+}
+
+/// สิ่งที่ผู้ใช้ขอทำกับกลุ่มในเฟรมนี้ (P3-7)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GroupRequest {
+    /// เปลี่ยนชื่อกลุ่มนี้
+    Rename(refx_core::arena::GroupId, String),
+    /// ยุบ/กางกลุ่มนี้
+    Collapsed(refx_core::arena::GroupId, bool),
+}
+
 /// สิ่งที่ผู้ใช้ขอแก้ในเฟรมนี้ — **`None` = ไม่ได้แตะอะไรเลย** (P3-1)
 ///
 /// ★ แยกจาก [`MetaView`] ด้วยเหตุผลเดียวกับ `appearance_edit` / `note_edit`:
@@ -229,6 +262,12 @@ pub struct ShellState {
     pub meta_sealed: bool,
     /// ช่องพิมพ์ชื่อแท็กใหม่ — **สถานะของ widget ล้วน ๆ** ไม่ใช่ของเอกสาร
     pub tag_input: String,
+    /// ★ กลุ่มของสิ่งที่เลือกอยู่ (P3-7) — `None` = ไม่ได้เลือกอะไร
+    pub group: Option<GroupView>,
+    /// ★★ สิ่งที่ผู้ใช้ขอทำกับกลุ่มในเฟรมนี้ — `None` = ไม่ได้แตะ
+    pub group_request: Option<GroupRequest>,
+    /// ผู้ใช้ออกจากช่องชื่อกลุ่มแล้ว → ปิดหน้าต่าง merge
+    pub group_sealed: bool,
 
     /// ★ สีที่ picker อ่านได้ล่าสุด (P2-10) — `None` = ยังไม่ได้จิ้มอะไร
     ///
@@ -335,6 +374,9 @@ impl Default for ShellState {
             meta_request: None,
             meta_sealed: false,
             tag_input: String::new(),
+            group: None,
+            group_request: None,
+            group_sealed: false,
             picked: None,
             measured: None,
             loading: None,
@@ -842,6 +884,10 @@ fn arrange_inspector(ui: &mut egui::Ui, state: &mut ShellState) {
         ui.label(text::t(lang, Key::InspectorNoSelection));
         state.meta_request = None;
         state.meta_sealed = false;
+        // ★ ต้องล้างคำขอของกลุ่มด้วย ไม่งั้นคำขอของเฟรมก่อนค้างอยู่แล้วถูกเขียนซ้ำ
+        //   ทุกเฟรม → ทับสิ่งที่ undo เพิ่งคืนมา (docs/08 §3.9 ข้อ 8.1)
+        state.group_request = None;
+        state.group_sealed = false;
         return;
     };
     let mut request = None;
@@ -966,6 +1012,68 @@ fn arrange_inspector(ui: &mut egui::Ui, state: &mut ShellState) {
 
     state.meta_request = request;
     state.meta_sealed = sealed;
+
+    // ---- กลุ่ม (P3-7) ----
+    ui.separator();
+    group_section(ui, state);
+}
+
+/// ★ ส่วนของกลุ่มในแผง Arrange (P3-7)
+///
+/// ★★ **ช่องเปลี่ยนชื่อโผล่เฉพาะตอนที่เลือกอยู่ในกลุ่มเดียวกันทั้งหมด**
+/// — ถ้าโผล่ตอน `Mixed` ด้วย การพิมพ์ครั้งเดียวจะเขียนทับชื่อของกลุ่มที่ผู้ใช้
+/// แค่บังเอิญเลือกติดมา ซึ่งเป็นการแก้ข้อมูลที่เขาไม่ได้สั่ง
+///
+/// เขียนลง `state.group_request` เท่านั้น ไม่แตะ `Board` เลย — เหมือนทุกแผงอื่น
+fn group_section(ui: &mut egui::Ui, state: &mut ShellState) {
+    let lang = state.lang;
+    ui.label(text::t(lang, Key::GroupTitle));
+
+    let mut request = None;
+    let mut sealed = false;
+    match state.group.clone() {
+        None | Some(GroupView::Loose) => {
+            ui.small(text::t(lang, Key::GroupNone));
+        }
+        Some(GroupView::Mixed) => {
+            ui.small(text::t(lang, Key::GroupMixed));
+        }
+        Some(GroupView::One {
+            id,
+            name,
+            collapsed,
+            members,
+        }) => {
+            let mut edited = name.clone();
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut edited)
+                    .desired_width(f32::INFINITY)
+                    .hint_text(text::t(lang, Key::GroupRenameHint)),
+            );
+            if response.changed() {
+                request = Some(GroupRequest::Rename(id, edited));
+            }
+            sealed |= response.lost_focus();
+
+            let mut folded = collapsed;
+            if ui
+                .checkbox(&mut folded, text::t(lang, Key::GroupCollapsed))
+                .on_hover_text(text::t(lang, Key::GroupCollapsedHint))
+                .changed()
+            {
+                request = Some(GroupRequest::Collapsed(id, folded));
+                sealed = true;
+            }
+            ui.small(text::fill(
+                lang,
+                Template::GroupMembers,
+                &[("n", &members.to_string())],
+            ));
+        }
+    }
+
+    state.group_request = request;
+    state.group_sealed = sealed;
 }
 
 /// วิธีเรียงทั้งหมดที่ผู้ใช้เลือกได้ + ชื่อของมัน (P3-4)

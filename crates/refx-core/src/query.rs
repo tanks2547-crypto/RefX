@@ -168,7 +168,9 @@ pub fn select(board: &Board, filter: &Filter, sort: SortKey, descending: bool) -
     // ★ เรียงตามตำแหน่งบน canvas ไม่ใช่การเทียบรายคู่ — แยกเส้นทาง (P3-6)
     if sort == SortKey::CanvasOrder {
         canvas_reading_order(board, &mut rows, descending);
-        return rows.into_iter().map(|(_, id)| id).collect();
+        let mut ordered: Vec<ItemId> = rows.into_iter().map(|(_, id)| id).collect();
+        fold_collapsed_groups(board, &mut ordered);
+        return ordered;
     }
 
     rows.sort_by(|(a_index, a), (b_index, b)| {
@@ -185,7 +187,49 @@ pub fn select(board: &Board, filter: &Filter, sort: SortKey, descending: bool) -
                 .then(a_index.cmp(b_index))
         });
     }
-    rows.into_iter().map(|(_, id)| id).collect()
+    let mut ordered: Vec<ItemId> = rows.into_iter().map(|(_, id)| id).collect();
+    fold_collapsed_groups(board, &mut ordered);
+    ordered
+}
+
+/// ★ กลุ่มที่ยุบอยู่เหลือสมาชิกโผล่ในแผ่นแค่ **ใบเดียว** (P3-7)
+///
+/// ★★ ตัวแทนคือ **ใบแรกที่เจอในลำดับที่เรียงเสร็จแล้ว** ไม่ใช่ใบแรกใน z-order
+/// — ผู้ใช้ที่เรียงตามดาวแล้วยุบกลุ่ม คาดหวังว่าจะเห็นใบที่ดาวสูงสุดของกลุ่ม
+/// เป็นหน้ากลุ่ม ไม่ใช่ใบที่บังเอิญถูกลากเข้ามาก่อน · เรียกหลังเรียงเสร็จเสมอ
+/// ทั้งสองเส้นทาง จึง deterministic ตามลำดับที่เรียงมาแล้ว
+///
+/// ★ ทำที่นี่ ไม่ใช่ใน [`matches`] เพราะการยุบ **ไม่ใช่การกรอง**: ตัวกรอง
+/// ตัดสินทีละใบโดยไม่ต้องรู้จักใบอื่น แต่ "ใบไหนได้เป็นตัวแทน" ต้องรู้ทั้งชุด
+/// (ปัญหารูปเดียวกับ `canvas_reading_order` ของ P3-6)
+///
+/// > กลุ่มที่ยุบอยู่แต่ตัวแทนถูกตัวกรองตัดทิ้งไปแล้ว จะ **ไม่โผล่เลย** ซึ่งถูก:
+/// > ตัวกรองเป็นคำสั่งของผู้ใช้ที่ตรงกว่า และการฝืนดึงใบที่ถูกกรองออกกลับมา
+/// > จะทำให้ตัวกรองโกหก
+fn fold_collapsed_groups(board: &Board, ordered: &mut Vec<ItemId>) {
+    // ทางลัดที่ทำให้ราคาของฟีเจอร์นี้เป็นศูนย์ตราบใดที่ยังไม่มีใครยุบกลุ่ม
+    if !board.groups().values().any(|group| group.collapsed) {
+        return;
+    }
+    let mut shown: smallvec::SmallVec<[crate::arena::GroupId; 4]> = smallvec::SmallVec::new();
+    ordered.retain(|id| {
+        let Some(item) = board.item(*id) else {
+            return false;
+        };
+        let Some(group_id) = item.meta.group else {
+            return true;
+        };
+        // id ที่ห้อยอยู่ (กลุ่มถูกลบไปแล้ว) ถือว่าไม่ได้ยุบ — ห้ามซ่อนภาพของผู้ใช้
+        // เพราะข้อมูลไม่ครบ (I-3)
+        if !board.group(group_id).is_some_and(|group| group.collapsed) {
+            return true;
+        }
+        if shown.contains(&group_id) {
+            return false;
+        }
+        shown.push(group_id);
+        true
+    });
 }
 
 /// สัดส่วนของความสูงเฉลี่ยที่ยังถือว่า "อยู่แถวเดียวกัน" (docs/03 §4.2)

@@ -685,12 +685,18 @@ impl Item {
 // Group / ArrangeState / BoardSettings
 // ---------------------------------------------------------------------------
 
-/// กลุ่มของ item ในโหมด Arrange
+/// กลุ่มของ item ในโหมด Arrange (P3-7)
+///
+/// ★ **กลุ่มไม่มีรายชื่อสมาชิกของตัวเอง** — ความเป็นสมาชิกอยู่ที่
+/// [`ItemMeta::group`] ฝั่งเดียว · ถ้าเก็บสองที่ (กลุ่มถือรายชื่อ *และ* item ถือ
+/// id กลุ่ม) ทั้งสองจะ drift กันได้ แล้ว undo ต้องคืนให้ตรงกันทั้งคู่พอดี
+/// ซึ่งเป็นแหล่งความจริงที่สองแบบเดียวกับที่ §2.2 เสียเวลาทั้ง session ไปแก้
+/// · แลกมาด้วยการหาสมาชิกที่เป็น O(n) ซึ่งที่เพดาน 3,072 ใบไม่มีความหมาย
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Group {
     /// ชื่อกลุ่มที่ผู้ใช้ตั้ง
     pub name: String,
-    /// ยุบอยู่หรือไม่
+    /// ยุบอยู่หรือไม่ — ยุบแล้ว Arrange แสดงสมาชิกเหลือใบเดียว (ดู `query::select`)
     pub collapsed: bool,
 }
 
@@ -804,6 +810,12 @@ pub enum BoardError {
     NoSuchItem {
         /// id ที่หาไม่เจอ
         id: ItemId,
+    },
+    /// อ้างกลุ่มที่ไม่มีอยู่ (หรือ id ตายไปแล้ว) — P3-7
+    #[error("no such group: {id:?}")]
+    NoSuchGroup {
+        /// id ที่หาไม่เจอ
+        id: GroupId,
     },
     /// ใส่ item กลับที่เดิมไม่ได้เพราะช่องมีคนอยู่
     #[error(transparent)]
@@ -981,6 +993,43 @@ impl Board {
         &self.groups
     }
 
+    /// อ่านกลุ่มหนึ่ง — `None` ถ้า id ตายไปแล้ว (P3-7)
+    #[must_use]
+    pub fn group(&self, id: GroupId) -> Option<&Group> {
+        self.groups.get(id)
+    }
+
+    /// สมาชิกของกลุ่มหนึ่ง เรียงตาม **ลำดับ z** (ล่างสุด → บนสุด) — P3-7
+    ///
+    /// ★ เดินจาก `z_order` ไม่ใช่จาก `items` โดยตั้งใจ: `Arena::iter` เรียงตาม
+    /// ช่องภายในซึ่งเป็นรายละเอียดของตัวจัดสรร ส่วน `z_order` คือลำดับที่ผู้ใช้
+    /// มองเห็น · ทั้งคู่ deterministic แต่มีตัวเดียวที่*มีความหมาย*กับผู้ใช้
+    pub fn group_members(&self, id: GroupId) -> impl Iterator<Item = ItemId> {
+        self.items_in_z_order()
+            .filter(move |(_, item)| item.meta.group == Some(id))
+            .map(|(item_id, _)| item_id)
+    }
+
+    /// ชื่อกลุ่มที่ยังไม่มีใครใช้ ในรูป `"{base} {n}"` โดย `n` เริ่มที่ 1 (P3-7)
+    ///
+    /// ★ **ไม่ใช่ `groups.len() + 1`** — สร้างสามกลุ่มแล้วลบกลุ่มกลางทิ้ง
+    /// จะได้ชื่อซ้ำกับกลุ่มที่ยังอยู่ · ไล่หาเลขที่ว่างจริงแทน
+    ///
+    /// `base` มาจากชั้น UI เพราะมันเป็น**ข้อความที่ผู้ใช้เห็นและถูก persist**
+    /// จึงต้องเป็นภาษาที่ผู้ใช้ตั้งไว้ ซึ่ง `refx-core` ไม่รู้จัก (docs/03 §0)
+    #[must_use]
+    pub fn unused_group_name(&self, base: &str) -> String {
+        // `len() + 1` เป็นเพดานที่พอเสมอ: ถ้าเลข 1..=len ถูกใช้หมด เลข len+1 ต้องว่าง
+        for n in 1..=self.groups.len() + 1 {
+            let candidate = format!("{base} {n}");
+            if !self.groups.values().any(|group| group.name == candidate) {
+                return candidate;
+            }
+        }
+        // ไปไม่ถึงจากตรรกะข้างบน แต่คืนค่าที่ใช้ได้ดีกว่า panic (I-7)
+        base.to_owned()
+    }
+
     /// มีการแก้ที่ยังไม่ได้บันทึกหรือไม่
     #[must_use]
     pub fn is_dirty(&self) -> bool {
@@ -1091,6 +1140,51 @@ impl Board {
         self.tags.restore(id, name);
         self.dirty = true;
         self.touch();
+    }
+
+    /// สร้างกลุ่มใหม่ คืน id (P3-7)
+    pub(crate) fn insert_group(&mut self, group: Group) -> GroupId {
+        let id = self.groups.insert(group);
+        self.touch();
+        id
+    }
+
+    /// ใส่กลุ่มกลับที่ **คีย์เดิม** — เส้นทางของ undo/redo
+    ///
+    /// ★ ต้องได้ `GroupId` เดิมด้วยเหตุผลเดียวกับ `Arena::insert_at` ของ item
+    /// (§4 ข้อ 19): `ItemMeta::group` ของสมาชิกถือคีย์นี้อยู่ ถ้า redo แจกคีย์ใหม่
+    /// สมาชิกทั้งกลุ่มจะชี้ไปที่กลุ่มที่ไม่มีอยู่ — กลุ่มที่กดดูแล้วว่างเปล่า
+    ///
+    /// # Errors
+    /// [`BoardError::Arena`] ถ้าช่องนั้นมีคนอยู่ — board ไม่ถูกแตะเลย
+    pub(crate) fn restore_group(&mut self, id: GroupId, group: Group) -> Result<(), BoardError> {
+        self.groups.insert_at(id, group)?;
+        self.touch();
+        Ok(())
+    }
+
+    /// เอากลุ่มออก คืนตัวมัน (ไว้ให้ undo ใส่กลับ) — P3-7
+    ///
+    /// ★ **ไม่แตะ `ItemMeta::group` ของสมาชิก** โดยตั้งใจ — ผู้เรียกต้องจัดการเอง
+    /// ในคำสั่งเดียวกัน ไม่งั้น undo จะต้องเดาว่าใครเคยอยู่ในกลุ่มนี้บ้าง
+    pub(crate) fn remove_group(&mut self, id: GroupId) -> Option<Group> {
+        let group = self.groups.remove(id)?;
+        self.touch();
+        Some(group)
+    }
+
+    /// เขียนทับกลุ่มทั้งก้อน คืนของเดิม — ทางเข้าของการเปลี่ยนชื่อและการยุบ (P3-7)
+    ///
+    /// # Errors
+    /// [`BoardError::NoSuchGroup`] ถ้า id ตายไปแล้ว **โดยไม่แตะอะไรเลย**
+    pub(crate) fn set_group(&mut self, id: GroupId, group: Group) -> Result<Group, BoardError> {
+        let slot = self
+            .groups
+            .get_mut(id)
+            .ok_or(BoardError::NoSuchGroup { id })?;
+        let previous = std::mem::replace(slot, group);
+        self.touch();
+        Ok(previous)
     }
 
     /// แก้เนื้อความของโน้ต คืนข้อความเดิม (P2-11)
@@ -1429,7 +1523,7 @@ pub(crate) mod tests {
             ("note", Real),        // ช่องโน้ตในแผง Arrange (P3-1)
             ("pinned", Real),      // checkbox ปักหมุด (P3-1)
             ("added_at", Real),    // ตั้งตอนสร้าง item (P3-4 — ก่อนหน้านี้เป็น 0 ทุกใบ)
-            ("group", NoneYet("กลุ่มยังไม่มีใครสร้างได้ — P3-7")),
+            ("group", Real),       // Ctrl+G / Ctrl+Shift+G -> GroupItems / Ungroup (P3-7)
         ];
 
         let AssetRef {
@@ -1486,8 +1580,10 @@ pub(crate) mod tests {
             collapsed: _,
         } = Group::default();
         let group = [
-            ("name", NoneYet("ยังไม่มีใครสร้างกลุ่มได้ — P3-7")),
-            ("collapsed", NoneYet("P3-7")),
+            // ตั้งชื่ออัตโนมัติตอน `GroupItems` สร้างกลุ่ม + ช่องเปลี่ยนชื่อในแผง Arrange (P3-7)
+            ("name", Real),
+            // ปุ่มยุบในแผง Arrange -> `SetGroup::set_collapsed` (P3-7)
+            ("collapsed", Real),
         ];
 
         // ★ รายงานออกมาเสมอ ไม่ว่าเทสต์จะผ่านหรือไม่ (`--nocapture`) — ตัวเลขที่
@@ -1511,7 +1607,7 @@ pub(crate) mod tests {
         }
         println!("รวมฟิลด์ที่ยังไม่มีใครเขียน: {waiting}");
         assert!(
-            waiting <= 10,
+            waiting <= 7,
             "ฟิลด์ที่ไม่มีใครเขียนเพิ่มขึ้นเป็น {waiting} — เพิ่มฟิลด์ใหม่ต้องมีคนเขียน \
              หรือมีเหตุผลว่าทำไมยัง"
         );

@@ -451,6 +451,64 @@ fn appearance_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> Opti
     }
 }
 
+/// `Ctrl+G` = จัดกลุ่ม · `Ctrl+Shift+G` = แยกกลุ่ม (docs/03 §5, P3-7)
+///
+/// ★ ต้องอยู่หลัง `control_key()` เพราะ `G` เปล่า ๆ เป็น grayscale ของทั้ง board
+/// อยู่แล้ว (`appearance_shortcut`) — สองตัวนี้แยกกันด้วย Ctrl ตัวเดียว
+/// จึงต้องเป็นคนละฟังก์ชันที่ตรวจ modifier ของตัวเองอย่างเคร่งครัดทั้งคู่
+///
+/// ★★ รับอักขระ control `0x07` ด้วย: บางระบบส่ง `Ctrl+G` มาเป็น BEL ไม่ใช่ `'g'`
+/// พร้อมธง ctrl — รูปแบบเดียวกับที่ `Ctrl+Z`/`Ctrl+V` เจอมาแล้ว
+fn group_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> Option<GroupRequest> {
+    if !modifiers.control_key() || modifiers.alt_key() {
+        return None;
+    }
+    match pressed? {
+        'g' | '\u{7}' => Some(if modifiers.shift_key() {
+            GroupRequest::Ungroup
+        } else {
+            GroupRequest::Group
+        }),
+        _ => None,
+    }
+}
+
+/// การเลือกควรเป็นอะไรหลัง undo/redo — `None` = **อย่าแตะการเลือกเดิม**
+///
+/// ★★★ **"ไม่ได้แตะ item ไหนเลย" ≠ "ให้ล้างการเลือก"** (แยกออกมาตอน P3-7)
+///
+/// `ReorderZ::affected()` คืนรายการว่างพร้อมคอมเมนต์ในตัวมันเองว่า "ปล่อยให้
+/// selection เดิมอยู่ต่อ" แต่เส้นทาง undo เดิม `restore(vec![])` ซึ่งคือการ **ล้าง**
+/// — สัญญาที่ `refx-core` ประกาศไว้จึงไม่เคยถูกทำตามเลยบนเส้นทางนั้น
+/// · อาการที่ทำให้เจอตอน P3-7: กดยุบกลุ่มแล้ว Ctrl+Z → **แผงกลุ่มหายไปทั้งแผง**
+/// เพราะไม่มีอะไรถูกเลือกอีกแล้ว ผู้ใช้จึงกดกางกลับทันทีไม่ได้
+///
+/// ★ ต้องแยกสองกรณีนี้ให้ขาด และเป็นเหตุผลที่ต้องดู `affected` **ก่อนกรอง**:
+///
+/// | คำสั่งรายงาน | แปลว่า | ทำ |
+/// |---|---|---|
+/// | รายการว่าง | ไม่ได้แตะ item ไหน (`ReorderZ`, `SetGroup`) | ปล่อยการเลือกไว้ |
+/// | มี id แต่ตายหมด | undo ของการเพิ่มภาพ — ของหายไปจริง | ล้าง |
+/// | มี id ที่ยังอยู่ | เลือกของที่เพิ่งเปลี่ยนให้ผู้ใช้เห็น | ตั้งตามนั้น |
+fn selection_after_history(
+    affected: &[ItemId],
+    alive: impl Fn(ItemId) -> bool,
+) -> Option<Vec<ItemId>> {
+    if affected.is_empty() {
+        return None;
+    }
+    Some(affected.iter().copied().filter(|id| alive(*id)).collect())
+}
+
+/// ผู้ใช้ขออะไรกับกลุ่ม (P3-7)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroupRequest {
+    /// `Ctrl+G` — รวมสิ่งที่เลือกเป็นกลุ่มใหม่
+    Group,
+    /// `Ctrl+Shift+G` — เอาสิ่งที่เลือกออกจากกลุ่ม
+    Ungroup,
+}
+
 /// ปุ่มที่แตะการแสดงผล
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AppearanceKey {
@@ -1249,6 +1307,8 @@ pub struct RefxApp {
     pending_delete: bool,
     /// ผู้ใช้กด `G`/`H` ในรอบ event ที่ผ่านมา (P2-8)
     pending_appearance: Option<AppearanceKey>,
+    /// ผู้ใช้กด `Ctrl+G` / `Ctrl+Shift+G` ในรอบ event ที่ผ่านมา (P3-7)
+    pending_group: Option<GroupRequest>,
     /// ★ กันการกด `Ctrl+V` รัว ๆ ให้เหลือทีละครั้ง — ภาพจาก clipboard ใหญ่ได้
     /// ระดับ 6000×4000 (96 MB) และ `arboard` จอง RAM ก้อนนั้นก่อนที่เพดานของเรา
     /// จะได้ตรวจ ถ้าปล่อยให้ซ้อนกันสิบใบคือแย่ง RAM กับ Photoshop ตรง ๆ
@@ -1325,6 +1385,7 @@ impl RefxApp {
             pending_zorder: None,
             pending_delete: false,
             pending_appearance: None,
+            pending_group: None,
             paste_in_flight: None,
             paste_count: 0,
             batch_from_clipboard: false,
@@ -2535,6 +2596,84 @@ impl RefxApp {
         gfx.window.request_redraw();
     }
 
+    /// `Ctrl+G` / `Ctrl+Shift+G` — จัดกลุ่ม / แยกกลุ่มสิ่งที่เลือก (P3-7)
+    ///
+    /// ★ คำสั่งที่ **ไม่มีอะไรเปลี่ยน** คืน `CmdError::Empty` มา แล้วเราไม่ขอเฟรม
+    /// (I-1) และไม่ทิ้งขั้นเปล่าไว้ใน undo stack — กด `Ctrl+G` ซ้ำบนกลุ่มเดิม
+    /// จึงเงียบสนิทแทนที่จะสร้างกลุ่มที่หน้าตาเหมือนเดิมทับไปเรื่อย ๆ
+    fn apply_group_request(&mut self, request: GroupRequest) {
+        let base = text::t(self.shell.lang, text::Key::GroupDefaultName);
+        let Some(gfx) = self.gfx.as_mut() else {
+            return;
+        };
+        let targets: Vec<ItemId> = gfx.selection.iter().collect();
+        if targets.is_empty() {
+            return;
+        }
+        let command: Option<Box<dyn refx_core::command::Command>> = match request {
+            GroupRequest::Group => refx_core::command::GroupItems::new(targets, base)
+                .ok()
+                .map(|cmd| Box::new(cmd) as Box<dyn refx_core::command::Command>),
+            GroupRequest::Ungroup => refx_core::command::Ungroup::new(targets)
+                .ok()
+                .map(|cmd| Box::new(cmd) as Box<dyn refx_core::command::Command>),
+        };
+        let Some(command) = command else {
+            return;
+        };
+        match gfx.history.apply(&mut gfx.board, command) {
+            Ok(()) => {}
+            // ไม่มีอะไรเปลี่ยน — ไม่ใช่ error ที่ผู้ใช้ต้องเห็น
+            Err(refx_core::command::CmdError::Empty) => return,
+            Err(err) => {
+                tracing::error!(%err, "cannot change the grouping");
+                return;
+            }
+        }
+        // ★ จัดกลุ่มหนึ่งครั้ง = undo หนึ่งขั้น — ปิดหน้าต่าง merge ทันที
+        gfx.history.seal();
+        gfx.window.request_redraw();
+    }
+
+    /// เปลี่ยนชื่อ / ยุบกลุ่มจากแผง Arrange (P3-7)
+    fn apply_group_panel_request(&mut self) {
+        use crate::shell::GroupRequest as PanelRequest;
+
+        let sealed = std::mem::take(&mut self.shell.group_sealed);
+        let Some(request) = self.shell.group_request.take() else {
+            if sealed && let Some(gfx) = self.gfx.as_mut() {
+                gfx.history.seal();
+            }
+            return;
+        };
+        let Some(gfx) = self.gfx.as_mut() else {
+            return;
+        };
+        let (id, current) = match &request {
+            PanelRequest::Rename(id, _) | PanelRequest::Collapsed(id, _) => {
+                let Some(group) = gfx.board.group(*id) else {
+                    return; // กลุ่มหายไประหว่างเฟรม (undo) — ไม่มีอะไรให้แก้
+                };
+                (*id, group.clone())
+            }
+        };
+        let command = match request {
+            PanelRequest::Rename(_, name) => {
+                refx_core::command::SetGroup::rename(id, &current, name)
+            }
+            PanelRequest::Collapsed(_, collapsed) => {
+                refx_core::command::SetGroup::set_collapsed(id, &current, collapsed)
+            }
+        };
+        if let Err(err) = gfx.history.apply(&mut gfx.board, Box::new(command)) {
+            tracing::error!(%err, "cannot edit the group");
+        }
+        if sealed {
+            gfx.history.seal();
+        }
+        gfx.window.request_redraw();
+    }
+
     /// เขียนสิ่งที่ผู้ใช้ขอในแผง Arrange ลง board ผ่าน `Command` (P3-1)
     ///
     /// ★ `take()` ทันทีเหมือนแผงอื่น — คำขอมีอายุหนึ่งเฟรม ถ้าค้างไว้มันจะถูกเขียนซ้ำ
@@ -2860,10 +2999,24 @@ impl RefxApp {
         // ★ เลือกของที่เพิ่งเปลี่ยนให้ผู้ใช้ (docs/02 §2.9)
         //   การเลือกไม่ได้ถูก undo — มันตามผลลัพธ์ที่คำสั่งรายงานกลับมา
         //   id ที่หายไปแล้ว (undo ของการเพิ่ม) ต้องกรองทิ้ง ไม่งั้น selection ถือของว่าง
-        let live: Vec<ItemId> = affected
-            .into_iter()
-            .filter(|id| gfx.board.item(*id).is_some())
-            .collect();
+        //
+        // ★★★ **"ไม่ได้แตะ item ไหนเลย" ≠ "ให้ล้างการเลือก"** (แก้ตอน P3-7)
+        //
+        //    `ReorderZ::affected()` คืน `Vec::new()` พร้อมคอมเมนต์ในตัวมันเองว่า
+        //    "ปล่อยให้ selection เดิมอยู่ต่อ" แต่โค้ดตรงนี้กลับ `restore(vec![])`
+        //    ซึ่งคือการ **ล้าง** — สัญญาที่ `refx-core` ประกาศไว้ไม่เคยถูกทำตามบน
+        //    เส้นทาง undo เลย · อาการที่เห็นตอน P3-7: กดยุบกลุ่มแล้ว Ctrl+Z
+        //    → แผงกลุ่มหายไปทั้งแผง เพราะไม่มีอะไรถูกเลือกอีกแล้ว
+        //
+        //    ตรรกะอยู่ใน `selection_after_history` เพื่อให้เทสต์ได้โดยไม่ต้องมีหน้าต่าง
+        let Some(live) = selection_after_history(&affected, |id| gfx.board.item(id).is_some())
+        else {
+            // คำสั่งบอกว่าไม่ได้แตะ item ไหนเลย — การเลือกเดิมยังใช้ได้ตามเดิม
+            gfx.select_tool.cancel();
+            gfx.rubber_band = None;
+            gfx.window.request_redraw();
+            return;
+        };
         gfx.selection.restore(live.clone(), live.last().copied());
         // การลากที่ค้างอยู่ (ถ้ามี) ใช้ไม่ได้แล้วเพราะ board เปลี่ยนไปใต้มือ
         gfx.select_tool.cancel();
@@ -3254,12 +3407,18 @@ impl AppDelegate for RefxApp {
         if let Some(what) = self.pending_appearance.take() {
             self.apply_appearance_key(what);
         }
+        // `Ctrl+G` / `Ctrl+Shift+G` ที่กดไปเมื่อกี้ (P3-7)
+        if let Some(request) = self.pending_group.take() {
+            self.apply_group_request(request);
+        }
         // ค่าที่ผู้ใช้ปรับใน inspector เมื่อเฟรมที่แล้ว
         self.apply_inspector_edit();
         // ข้อความที่ผู้ใช้พิมพ์ลงโน้ตเมื่อเฟรมที่แล้ว (P2-11)
         self.apply_note_edit();
         // tag / rating / color label / pinned / note ฝั่ง Arrange (P3-1)
         self.apply_meta_request();
+        // เปลี่ยนชื่อ / ยุบกลุ่มที่ผู้ใช้แตะในแผง Arrange เมื่อเฟรมที่แล้ว (P3-7)
+        self.apply_group_panel_request();
         // ★ ผู้ใช้กด "ส่งเข้า canvas" เมื่อเฟรมที่แล้ว (P3-5)
         if std::mem::take(&mut self.shell.arrange_apply) {
             self.apply_layout_to_canvas();
@@ -3373,6 +3532,46 @@ impl AppDelegate for RefxApp {
                     .filter_map(|tag| gfx.board.tags().name(*tag).map(str::to_owned))
                     .collect(),
             });
+        // ★ กลุ่มของสิ่งที่เลือกอยู่ (P3-7) — **ค่าสำหรับแสดง** เหมือน `meta`
+        //   ★★ ต้องแยก "ไม่ได้อยู่ในกลุ่มไหน" ออกจาก "เลือกข้ามหลายกลุ่ม" ให้ขาด
+        //      ไม่งั้นช่องเปลี่ยนชื่อจะโผล่มาแล้วเขียนทับกลุ่มที่ผู้ใช้ไม่ได้ตั้งใจแตะ
+        shell.group = {
+            let mut seen: Option<Option<refx_core::arena::GroupId>> = None;
+            let mut mixed = false;
+            for id in gfx.selection.iter() {
+                let Some(item) = gfx.board.item(id) else {
+                    continue;
+                };
+                match seen {
+                    None => seen = Some(item.meta.group),
+                    Some(first) if first != item.meta.group => {
+                        mixed = true;
+                        break;
+                    }
+                    Some(_) => {}
+                }
+            }
+            match (mixed, seen) {
+                (true, _) => Some(crate::shell::GroupView::Mixed),
+                (false, None) => None,
+                (false, Some(None)) => Some(crate::shell::GroupView::Loose),
+                (false, Some(Some(group_id))) => {
+                    gfx.board.group(group_id).map_or(
+                        // id ที่ห้อยอยู่อ่านเป็น "ไม่มีกลุ่ม" — ห้ามโชว์ช่องเปลี่ยนชื่อ
+                        // ของกลุ่มที่ไม่มีอยู่
+                        Some(crate::shell::GroupView::Loose),
+                        |group| {
+                            Some(crate::shell::GroupView::One {
+                                id: group_id,
+                                name: group.name.clone(),
+                                collapsed: group.collapsed,
+                                members: gfx.board.group_members(group_id).count(),
+                            })
+                        },
+                    )
+                }
+            }
+        };
         shell.vram_used = gfx.textures.budget().used();
         shell.working_used = gfx.working.used();
         shell.working_limit = gfx.working.limit();
@@ -3817,6 +4016,16 @@ impl AppDelegate for RefxApp {
                     && let Some(what) = appearance_shortcut(pressed, gfx.modifiers)
                 {
                     self.pending_appearance = Some(what);
+                    needs_redraw = true;
+                }
+                // ★ จัดกลุ่ม / แยกกลุ่ม (P3-7) — **ห้ามซ้ำตอนกดค้าง** เหมือน Delete
+                //   กดค้างหนึ่งวินาที = สร้างกลุ่มใหม่ทับกันหลายสิบชั้นใน undo stack
+                //   ทั้งที่ผู้ใช้ตั้งใจกดครั้งเดียว
+                if event.state.is_pressed()
+                    && !event.repeat
+                    && let Some(request) = group_shortcut(pressed, gfx.modifiers)
+                {
+                    self.pending_group = Some(request);
                     needs_redraw = true;
                 }
                 // ★ สลับเครื่องมือ (P2-7) — กดค้างซ้ำไม่มีผลอยู่แล้วเพราะตั้งค่าเดิมซ้ำ
@@ -4538,6 +4747,87 @@ mod tests {
         assert_eq!(tool_shortcut(pressed("x"), none), None);
     }
 
+    /// ★★★ คำสั่งที่ "ไม่ได้แตะ item ไหนเลย" ต้องไม่ล้างการเลือกตอน undo (P3-7)
+    ///
+    /// สัญญาถูกประกาศไว้ใน `ReorderZ::affected()` ตั้งแต่ P2-6 แต่เส้นทาง undo
+    /// ไม่เคยทำตาม — เจอตอน P3-7 เพราะ `SetGroup` ก็คืนรายการว่างเหมือนกัน
+    /// แล้วอาการโผล่ชัด: กดยุบกลุ่ม → Ctrl+Z → แผงกลุ่มหายทั้งแผง
+    #[test]
+    fn undo_only_clears_the_selection_when_the_items_really_went_away() {
+        use refx_core::arena::ArenaKey as _;
+        let a = ItemId::from_parts(0, 0);
+        let b = ItemId::from_parts(1, 0);
+
+        // ไม่ได้แตะใครเลย → อย่าแตะการเลือก
+        assert_eq!(selection_after_history(&[], |_| true), None);
+
+        // แตะของที่ยังอยู่ → เลือกตามนั้น
+        assert_eq!(selection_after_history(&[a, b], |_| true), Some(vec![a, b]));
+
+        // ★ รายงาน id มาแต่ตายหมด (undo ของการเพิ่มภาพ) → ต้องล้างจริง ๆ
+        //   นี่คือกรณีที่แยกไม่ออกถ้าไปเช็ครายการ *หลัง* กรองแทนที่จะเช็คก่อน
+        assert_eq!(
+            selection_after_history(&[a, b], |_| false),
+            Some(Vec::new())
+        );
+
+        // ปนกัน → เหลือเฉพาะตัวที่ยังอยู่
+        assert_eq!(
+            selection_after_history(&[a, b], |id| id == a),
+            Some(vec![a])
+        );
+    }
+
+    /// ★★★ `G` กับ `Ctrl+G` ต้องไม่ทับกัน — ต่างกันแค่ modifier ตัวเดียว (P3-7)
+    ///
+    /// `G` เปล่า ๆ = grayscale ทั้ง board (**การมองเห็น** ไม่กิน undo ไม่ dirty)
+    /// ส่วน `Ctrl+G` = จัดกลุ่ม (**เอกสาร** ผ่าน `Command`) — สองอย่างนี้อยู่คนละ
+    /// ชั้นกันโดยสิ้นเชิง ถ้าตัวใดตัวหนึ่งไม่ตรวจ modifier ของตัวเองอย่างเคร่งครัด
+    /// การกดปุ่มเดียวจะทำทั้งสองอย่างพร้อมกัน แล้วผู้ใช้ที่ตั้งใจเช็ค value
+    /// จะได้กลุ่มใหม่แถมมาโดยไม่รู้ตัว
+    #[test]
+    fn grayscale_and_grouping_never_fire_on_the_same_keypress() {
+        let none = ModifiersState::empty();
+        let ctrl = ModifiersState::CONTROL;
+        let ctrl_shift = ctrl | ModifiersState::SHIFT;
+
+        // G เปล่า = grayscale เท่านั้น
+        assert_eq!(
+            appearance_shortcut(pressed("g"), none),
+            Some(AppearanceKey::ToggleBoardGrayscale)
+        );
+        assert_eq!(group_shortcut(pressed("g"), none), None);
+
+        // Ctrl+G = จัดกลุ่มเท่านั้น
+        assert_eq!(
+            group_shortcut(pressed("g"), ctrl),
+            Some(GroupRequest::Group)
+        );
+        assert_eq!(
+            appearance_shortcut(pressed("g"), ctrl),
+            None,
+            "Ctrl+G ห้ามสลับ grayscale ไปด้วย"
+        );
+
+        // Ctrl+Shift+G = แยกกลุ่ม
+        assert_eq!(
+            group_shortcut(pressed("g"), ctrl_shift),
+            Some(GroupRequest::Ungroup)
+        );
+        assert_eq!(appearance_shortcut(pressed("g"), ctrl_shift), None);
+
+        // ★ บางระบบส่ง Ctrl+G มาเป็นอักขระ control (BEL) ไม่ใช่ 'g' พร้อมธง
+        assert_eq!(
+            group_shortcut(pressed("\u{7}"), ctrl),
+            Some(GroupRequest::Group)
+        );
+
+        // ปุ่มอื่นที่กด Ctrl ค้างต้องไม่กลายเป็นการจัดกลุ่ม
+        for other in ["a", "z", "v", "h"] {
+            assert_eq!(group_shortcut(pressed(other), ctrl), None, "Ctrl+{other}");
+        }
+    }
+
     /// ★★ toolbar เป็น **ภาพสะท้อน** ของเครื่องมือจริง ไม่ใช่แหล่งความจริงคู่ขนาน
     ///
     /// เคยพลาดจริงตอนทำ P2-7: `ShellState` ถือ `tool` เป็นสถานะของตัวเอง แล้วชั้นแอป
@@ -4792,6 +5082,19 @@ mod tests {
         assert_eq!(
             zorder_shortcut(pressed_thai("บ", KeyCode::BracketRight), none),
             Some(ZMove::Forward)
+        );
+        // P3-7 — ปุ่ม G บน layout ไทยส่ง `ฯ` มา ไม่ใช่ `g`
+        assert_eq!(
+            group_shortcut(pressed_thai("ฯ", KeyCode::KeyG), ctrl),
+            Some(GroupRequest::Group),
+            "Ctrl+G บน layout ไทย ต้องจัดกลุ่มได้"
+        );
+        assert_eq!(
+            group_shortcut(
+                pressed_thai("ฯ", KeyCode::KeyG),
+                ctrl | ModifiersState::SHIFT
+            ),
+            Some(GroupRequest::Ungroup)
         );
 
         // ★ และ layout ละตินที่สลับตำแหน่งปุ่ม (Dvorak) ต้องไม่พัง—

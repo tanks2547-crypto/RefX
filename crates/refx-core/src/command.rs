@@ -21,8 +21,8 @@
 use std::any::Any;
 use std::collections::VecDeque;
 
-use crate::arena::ItemId;
-use crate::board::{Board, BoardError, Item, ItemCanvas, ItemMeta, TagId};
+use crate::arena::{GroupId, ItemId};
+use crate::board::{Board, BoardError, Group, Item, ItemCanvas, ItemMeta, TagId};
 use crate::geom::Rect;
 use crate::layout::Placed;
 
@@ -1169,6 +1169,442 @@ impl Command for EditText {
 }
 
 // ---------------------------------------------------------------------------
+// GroupItems / Ungroup / SetGroup  (P3-7)
+// ---------------------------------------------------------------------------
+
+/// ★ เก็บกวาดกลุ่มที่ไม่มีสมาชิกเหลือแล้ว คืนรายการที่ถูกเอาออก (พร้อมตัวมันเอง)
+///
+/// ★★ **ทำไมต้องเก็บกวาด** — กลุ่มไม่มีรายชื่อสมาชิกของตัวเอง (ดู [`Group`])
+/// กลุ่มที่สมาชิกย้ายออกหมดจึงเป็นแถวที่ผู้ใช้กดแล้วไม่มีอะไรอยู่ข้างใน และ
+/// ไม่มีทางลบมันได้เลยเพราะไม่มีสมาชิกให้เลือกไปสั่ง ungroup — ขยะที่สะสมทุกครั้ง
+/// ที่ผู้ใช้จัดกลุ่มใหม่ และถูก persist ลง `.refx` ไปด้วย
+///
+/// คืนค่าเพื่อให้ `undo` ใส่กลับที่ **คีย์เดิม** ได้ (ดู `Board::restore_group`)
+fn sweep_empty_groups(board: &mut Board, candidates: &[GroupId]) -> Vec<(GroupId, Group)> {
+    let mut swept = Vec::new();
+    for id in candidates {
+        if board.group(*id).is_none() || board.group_members(*id).next().is_some() {
+            continue;
+        }
+        if let Some(group) = board.remove_group(*id) {
+            swept.push((*id, group));
+        }
+    }
+    swept
+}
+
+/// ใส่กลุ่มที่ถูกเก็บกวาดไปกลับคืนที่คีย์เดิม — คู่ของ [`sweep_empty_groups`]
+fn restore_swept(board: &mut Board, swept: &[(GroupId, Group)]) {
+    // ★ ย้อนลำดับที่เอาออก เพื่อให้ผลเหมือนเดิมเป๊ะเมื่อมีหลายกลุ่ม
+    for (id, group) in swept.iter().rev() {
+        let _ = board.restore_group(*id, group.clone());
+    }
+}
+
+/// รวม item ที่เลือกไว้เป็นกลุ่มใหม่หนึ่งกลุ่ม (`Ctrl+G` — docs/03 §5)
+///
+/// ★★ **ทำไมไม่ใช่ `EditMeta` เฉย ๆ** — เหตุผลเดียวกับ [`TagItems`]: การจัดกลุ่ม
+/// แตะ **สองที่** คือ `ItemMeta.group` ของแต่ละใบ **และ** `Board::groups`
+/// ทั้งคู่อยู่ใน `Board` จึงต้องย้อนพร้อมกันเป็นก้อนเดียว · ถ้าแยกเป็นสองคำสั่ง
+/// ผู้ใช้กด Ctrl+Z ครั้งเดียวจะได้ item ที่ถือ `GroupId` ซึ่งไม่มีกลุ่มอยู่แล้ว
+///
+/// ★ **ย้ายเข้ากลุ่มใหม่ ไม่ใช่ซ้อนกลุ่ม** — `ItemMeta::group` เป็น `Option<GroupId>`
+/// ตัวเดียว ไม่ใช่ต้นไม้ · item อยู่ได้ทีละกลุ่มตามที่ `docs/02 §2.2` กำหนดไว้
+#[derive(Debug)]
+pub struct GroupItems {
+    targets: Vec<ItemId>,
+    /// ชื่อที่จะใช้ตอนสร้าง — คำนวณจาก board ตอน apply ครั้งแรก
+    name: String,
+    /// กลุ่มที่ **คำสั่งนี้เป็นคนสร้าง** — เก็บไว้ให้ redo ใช้ id เดิม
+    created: Option<(GroupId, Group)>,
+    /// meta เดิมของแต่ละใบ — เก็บตอน apply ครั้งแรก
+    before: Vec<(ItemId, ItemMeta)>,
+    /// กลุ่มเดิมที่ว่างลงเพราะการย้ายครั้งนี้ แล้วถูกเก็บกวาด
+    swept: Vec<(GroupId, Group)>,
+}
+
+impl GroupItems {
+    /// รวม item เหล่านี้เป็นกลุ่มใหม่ · `name_base` คือคำตั้งต้นของชื่ออัตโนมัติ
+    /// (ชั้น UI ส่งมาเป็นภาษาของผู้ใช้ — ดู `Board::unused_group_name`)
+    ///
+    /// # Errors
+    /// [`CmdError::Empty`] ถ้ารายการว่าง
+    pub fn new(targets: Vec<ItemId>, name_base: &str) -> Result<Self, CmdError> {
+        if targets.is_empty() {
+            return Err(CmdError::Empty);
+        }
+        Ok(Self {
+            targets,
+            name: name_base.to_owned(),
+            created: None,
+            before: Vec::new(),
+            swept: Vec::new(),
+        })
+    }
+
+    /// id ของกลุ่มที่สร้าง — ใช้ได้หลัง `apply` แล้วเท่านั้น
+    #[must_use]
+    pub fn group_id(&self) -> Option<GroupId> {
+        self.created.as_ref().map(|(id, _)| *id)
+    }
+
+    /// ★ การจัดกลุ่มครั้งนี้เปลี่ยนอะไรจริงหรือไม่
+    ///
+    /// "ทุกใบอยู่ในกลุ่มเดียวกันอยู่แล้ว **และ** กลุ่มนั้นไม่มีสมาชิกอื่น" =
+    /// กด `Ctrl+G` ซ้ำบนสิ่งที่จัดกลุ่มไว้แล้ว · ถ้ายอมให้ผ่าน ผู้ใช้จะได้กลุ่มใหม่
+    /// ที่หน้าตาเหมือนเดิมทุกอย่าง + undo stack ที่มีขั้นซึ่งกดแล้วไม่มีอะไรขยับ
+    fn changes_anything(&self, board: &Board) -> bool {
+        let mut existing: Option<GroupId> = None;
+        for id in &self.targets {
+            let Some(item) = board.item(*id) else {
+                continue;
+            };
+            match (item.meta.group, existing) {
+                (None, _) => return true,
+                (Some(group), None) => existing = Some(group),
+                (Some(group), Some(seen)) if group != seen => return true,
+                (Some(_), Some(_)) => {}
+            }
+        }
+        let Some(group) = existing else {
+            return false; // ไม่มี target ไหนอยู่บน board เลย
+        };
+        // กลุ่มเดิมมีสมาชิกที่ไม่ได้ถูกเลือกอยู่ด้วย → การจัดกลุ่มแยกออกมามีความหมาย
+        board
+            .group_members(group)
+            .any(|member| !self.targets.contains(&member))
+    }
+}
+
+impl Command for GroupItems {
+    fn apply(&mut self, board: &mut Board) -> Result<(), CmdError> {
+        let first_time = self.created.is_none();
+        if first_time && !self.changes_anything(board) {
+            return Err(CmdError::Empty);
+        }
+
+        // ★ redo ต้องได้ **id เดิม** ไม่งั้น `ItemMeta::group` ที่คำสั่งถัดไปในสาย
+        //   redo เขียนไว้จะชี้ไปที่กลุ่มที่ไม่มีอยู่ (§4 ข้อ 19)
+        let group_id = match self.created.as_ref() {
+            Some((id, group)) => {
+                board.restore_group(*id, group.clone())?;
+                *id
+            }
+            None => {
+                let group = Group {
+                    name: board.unused_group_name(&self.name),
+                    collapsed: false,
+                };
+                let id = board.insert_group(group.clone());
+                self.created = Some((id, group));
+                id
+            }
+        };
+
+        // กลุ่มเดิมของทุกใบ — ผู้สมัครให้เก็บกวาดหลังย้ายเสร็จ
+        let mut vacated: Vec<GroupId> = Vec::new();
+        let mut done: Vec<(ItemId, ItemMeta)> = Vec::new();
+        for id in &self.targets {
+            let Some(item) = board.item(*id) else {
+                continue;
+            };
+            let previous = item.meta.clone();
+            if previous.group == Some(group_id) {
+                continue;
+            }
+            if let Some(old) = previous.group
+                && !vacated.contains(&old)
+            {
+                vacated.push(old);
+            }
+            let mut next = previous.clone();
+            next.group = Some(group_id);
+            // ★ ล้มกลางคันต้องคืนทุกอย่างที่ทำไปแล้ว — `apply` ที่คืน `Err`
+            //   ห้ามแตะ board เลย (§2.1 ข้อ 1)
+            if let Err(err) = board.set_meta(*id, next) {
+                for (undo_id, undo_meta) in done {
+                    let _ = board.set_meta(undo_id, undo_meta);
+                }
+                board.remove_group(group_id);
+                if first_time {
+                    self.created = None;
+                }
+                return Err(err.into());
+            }
+            done.push((*id, previous));
+        }
+
+        self.swept = sweep_empty_groups(board, &vacated);
+        if first_time {
+            self.before = done;
+        }
+        Ok(())
+    }
+
+    fn undo(&mut self, board: &mut Board) -> Result<(), CmdError> {
+        // ★ ลำดับสำคัญ: ใส่กลุ่มเดิมกลับ **ก่อน** คืน meta ที่ชี้ไปหามัน
+        //   ไม่งั้นระหว่างสองขั้นจะมี item ที่ถือ id ของกลุ่มที่ยังไม่มีอยู่
+        restore_swept(board, &self.swept);
+        for (id, meta) in &self.before {
+            board.set_meta(*id, meta.clone())?;
+        }
+        if let Some((id, _)) = self.created.as_ref() {
+            board.remove_group(*id);
+        }
+        Ok(())
+    }
+
+    /// **ไม่ merge** — จัดกลุ่มหนึ่งครั้ง = undo หนึ่งขั้นเสมอ (เหมือน [`TagItems`])
+    fn merge(&mut self, _next: &dyn Command) -> bool {
+        false
+    }
+
+    fn affected(&self) -> Vec<ItemId> {
+        self.targets.clone()
+    }
+
+    fn label(&self) -> &'static str {
+        "Group items"
+    }
+
+    fn heap_size(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.name.capacity()
+            + self.targets.capacity() * std::mem::size_of::<ItemId>()
+            + self
+                .created
+                .as_ref()
+                .map_or(0, |(_, group)| group.name.capacity())
+            + self
+                .before
+                .iter()
+                .map(|(_, meta)| std::mem::size_of::<(ItemId, ItemMeta)>() + meta.note.capacity())
+                .sum::<usize>()
+            + self
+                .swept
+                .iter()
+                .map(|(_, group)| std::mem::size_of::<(GroupId, Group)>() + group.name.capacity())
+                .sum::<usize>()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// เอา item ที่เลือกไว้ออกจากกลุ่มของมัน (`Ctrl+Shift+G` — docs/03 §5)
+///
+/// ★ กลุ่มที่ไม่เหลือสมาชิกถูกเก็บกวาดทิ้ง และ undo ใส่กลับที่คีย์เดิม
+#[derive(Debug)]
+pub struct Ungroup {
+    targets: Vec<ItemId>,
+    before: Vec<(ItemId, ItemMeta)>,
+    swept: Vec<(GroupId, Group)>,
+}
+
+impl Ungroup {
+    /// เอาออกจากกลุ่ม
+    ///
+    /// # Errors
+    /// [`CmdError::Empty`] ถ้ารายการว่าง
+    pub fn new(targets: Vec<ItemId>) -> Result<Self, CmdError> {
+        if targets.is_empty() {
+            return Err(CmdError::Empty);
+        }
+        Ok(Self {
+            targets,
+            before: Vec::new(),
+            swept: Vec::new(),
+        })
+    }
+}
+
+impl Command for Ungroup {
+    fn apply(&mut self, board: &mut Board) -> Result<(), CmdError> {
+        let first_time = self.before.is_empty();
+        let mut vacated: Vec<GroupId> = Vec::new();
+        let mut done: Vec<(ItemId, ItemMeta)> = Vec::new();
+        for id in &self.targets {
+            let Some(item) = board.item(*id) else {
+                continue;
+            };
+            let previous = item.meta.clone();
+            let Some(old) = previous.group else {
+                continue; // ไม่ได้อยู่ในกลุ่มไหนอยู่แล้ว
+            };
+            if !vacated.contains(&old) {
+                vacated.push(old);
+            }
+            let mut next = previous.clone();
+            next.group = None;
+            if let Err(err) = board.set_meta(*id, next) {
+                for (undo_id, undo_meta) in done {
+                    let _ = board.set_meta(undo_id, undo_meta);
+                }
+                return Err(err.into());
+            }
+            done.push((*id, previous));
+        }
+        // ★ ไม่มีใครอยู่ในกลุ่มเลย = ไม่มีอะไรให้ทำ — กัน undo stack ที่มีขั้นเปล่า
+        if first_time && done.is_empty() {
+            return Err(CmdError::Empty);
+        }
+        self.swept = sweep_empty_groups(board, &vacated);
+        if first_time {
+            self.before = done;
+        }
+        Ok(())
+    }
+
+    fn undo(&mut self, board: &mut Board) -> Result<(), CmdError> {
+        restore_swept(board, &self.swept);
+        for (id, meta) in &self.before {
+            board.set_meta(*id, meta.clone())?;
+        }
+        Ok(())
+    }
+
+    fn affected(&self) -> Vec<ItemId> {
+        self.targets.clone()
+    }
+
+    fn label(&self) -> &'static str {
+        "Ungroup items"
+    }
+
+    fn heap_size(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.targets.capacity() * std::mem::size_of::<ItemId>()
+            + self
+                .before
+                .iter()
+                .map(|(_, meta)| std::mem::size_of::<(ItemId, ItemMeta)>() + meta.note.capacity())
+                .sum::<usize>()
+            + self
+                .swept
+                .iter()
+                .map(|(_, group)| std::mem::size_of::<(GroupId, Group)>() + group.name.capacity())
+                .sum::<usize>()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// ช่องของ [`Group`] ที่คำสั่งกำลังแก้ — ใช้ตัดสินว่า merge ได้ไหม
+///
+/// เหตุผลเดียวกับ [`MetaField`]: พิมพ์ชื่อกลุ่มรัว ๆ ควรเป็น undo ขั้นเดียว
+/// แต่ "เปลี่ยนชื่อ" แล้ว "ยุบ" ต้องแยกขั้น ไม่งั้นย้อนการยุบแล้วชื่อหายไปด้วย
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupField {
+    /// ชื่อกลุ่ม
+    Name,
+    /// ยุบ/กาง
+    Collapsed,
+}
+
+/// เปลี่ยนชื่อหรือยุบ/กางกลุ่ม (P3-7)
+///
+/// ★★ **ทำไมการยุบต้องผ่าน `Command`** — `Group::collapsed` อยู่ใน `Board` จึงเป็น
+/// *เอกสาร* ตาม `docs/08 §4` ข้อ 10 · ข้อยกเว้นที่โปรเจกต์นี้ยอมมีแค่สองข้อคือ
+/// `view` กับ `dirty` และ HANDOFF สั่งไว้ว่าเจอข้อที่สามให้ **หยุดถาม**
+/// ไม่ใช่เจาะรูเพิ่มเอง · ผลข้างเคียงที่ยอมรับ: กดยุบแล้วเอกสาร dirty และ
+/// Ctrl+Z ย้อนการยุบได้ ซึ่งสม่ำเสมอกับทุกอย่างอื่นที่ persist ลงไฟล์
+#[derive(Debug)]
+pub struct SetGroup {
+    id: GroupId,
+    field: GroupField,
+    after: Group,
+    /// ค่าเดิม — เก็บ **ตอน apply ครั้งแรกเท่านั้น** เพื่อให้ redo ไม่เขียนทับ
+    before: Option<Group>,
+}
+
+impl SetGroup {
+    /// ตั้งชื่อใหม่
+    #[must_use]
+    pub fn rename(id: GroupId, current: &Group, name: String) -> Self {
+        Self {
+            id,
+            field: GroupField::Name,
+            after: Group {
+                name,
+                collapsed: current.collapsed,
+            },
+            before: None,
+        }
+    }
+
+    /// ยุบหรือกาง
+    #[must_use]
+    pub fn set_collapsed(id: GroupId, current: &Group, collapsed: bool) -> Self {
+        Self {
+            id,
+            field: GroupField::Collapsed,
+            after: Group {
+                name: current.name.clone(),
+                collapsed,
+            },
+            before: None,
+        }
+    }
+}
+
+impl Command for SetGroup {
+    fn apply(&mut self, board: &mut Board) -> Result<(), CmdError> {
+        let previous = board.set_group(self.id, self.after.clone())?;
+        if self.before.is_none() {
+            self.before = Some(previous);
+        }
+        Ok(())
+    }
+
+    fn undo(&mut self, board: &mut Board) -> Result<(), CmdError> {
+        let Some(before) = self.before.clone() else {
+            return Ok(()); // ยังไม่เคย apply — ไม่มีอะไรให้คืน
+        };
+        board.set_group(self.id, before)?;
+        Ok(())
+    }
+
+    fn merge(&mut self, next: &dyn Command) -> bool {
+        let Some(next) = next.as_any().downcast_ref::<Self>() else {
+            return false;
+        };
+        if next.id != self.id || next.field != self.field {
+            return false;
+        }
+        self.after.clone_from(&next.after);
+        true
+    }
+
+    /// ★ **ไม่แตะ item สักใบ** — การเปลี่ยนชื่อ/ยุบกลุ่มไม่ควรไปตั้ง selection ใหม่
+    fn affected(&self) -> Vec<ItemId> {
+        Vec::new()
+    }
+
+    fn label(&self) -> &'static str {
+        match self.field {
+            GroupField::Name => "Rename group",
+            GroupField::Collapsed => "Collapse group",
+        }
+    }
+
+    fn heap_size(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.after.name.capacity()
+            + self
+                .before
+                .as_ref()
+                .map_or(0, |group| group.name.capacity())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+// ---------------------------------------------------------------------------
 // History
 // ---------------------------------------------------------------------------
 
@@ -1471,7 +1907,7 @@ mod tests {
 
     use super::*;
     use crate::board::tests::image_item;
-    use crate::board::{ColorLabel, TagId};
+    use crate::board::{ColorLabel, SortKey, TagId};
 
     fn board_with(n: u8) -> (Board, Vec<ItemId>) {
         let mut board = Board::default();
@@ -2780,5 +3216,306 @@ mod tests {
         }
         // เรียงตาม id = ลำดับที่ผู้ใช้สร้าง ไม่ใช่ลำดับตัวอักษร
         assert_eq!(first, vec!["zebra", "alpha", "middle"]);
+    }
+    // ---------- P3-7: group / ungroup ----------
+
+    /// board สามใบ + `History` สะอาด
+    fn group_board() -> (Board, Vec<ItemId>, History) {
+        let (board, ids) = board_with(3);
+        (board, ids, History::default())
+    }
+
+    /// จัดกลุ่มผ่าน `History` แล้วคืน `GroupId` ที่เพิ่งสร้าง
+    fn grouped(
+        board: &mut Board,
+        history: &mut History,
+        targets: Vec<ItemId>,
+    ) -> crate::arena::GroupId {
+        let first = targets[0];
+        history
+            .apply(board, Box::new(GroupItems::new(targets, "Group").unwrap()))
+            .unwrap();
+        history.seal();
+        board.item(first).unwrap().meta.group.unwrap()
+    }
+
+    /// ★★★ จัดกลุ่มแล้ว undo ต้องคืน **ทั้ง board** ให้เท่าเดิมเป๊ะ
+    ///
+    /// ไม่ใช่แค่ `ItemMeta::group` — กลุ่มที่ถูกสร้างต้องหายไปจาก `Board::groups`
+    /// ด้วย ไม่งั้นผู้ใช้กด Ctrl+Z แล้วยังเหลือกลุ่มเปล่าค้างอยู่ในแผงตลอดไป
+    #[test]
+    fn undoing_a_group_leaves_no_trace_of_it() {
+        let (mut board, ids, mut history) = group_board();
+        let before = board.clone();
+
+        history
+            .apply(
+                &mut board,
+                Box::new(GroupItems::new(vec![ids[0], ids[1]], "Group").unwrap()),
+            )
+            .unwrap();
+        assert_eq!(board.groups().len(), 1, "ต้องมีกลุ่มเดียวหลังจัดกลุ่ม");
+        assert!(board.item(ids[0]).unwrap().meta.group.is_some());
+
+        history.undo(&mut board).unwrap();
+        assert_eq!(board, before, "undo ต้องคืนสภาพเป๊ะ รวมถึงกลุ่มที่สร้างขึ้น");
+        assert_eq!(board.groups().len(), 0);
+    }
+
+    /// ★★ redo ต้องได้ **`GroupId` เดิม** ไม่ใช่ id ใหม่
+    ///
+    /// เหตุผลเดียวกับ `Arena::insert_at` ของ item (§4 ข้อ 19): `ItemMeta::group`
+    /// ถือคีย์นี้อยู่ ถ้า redo แจกคีย์ใหม่ สมาชิกจะชี้ไปที่กลุ่มที่ไม่มีอยู่
+    #[test]
+    fn redo_puts_the_group_back_at_the_same_key() {
+        let (mut board, ids, mut history) = group_board();
+        history
+            .apply(
+                &mut board,
+                Box::new(GroupItems::new(vec![ids[0], ids[1]], "Group").unwrap()),
+            )
+            .unwrap();
+        let first = board.item(ids[0]).unwrap().meta.group.unwrap();
+
+        history.undo(&mut board).unwrap();
+        history.redo(&mut board).unwrap();
+
+        let again = board.item(ids[0]).unwrap().meta.group.unwrap();
+        assert_eq!(again, first, "redo แจก GroupId ใหม่ = สมาชิกห้อย");
+        assert!(board.group(again).is_some(), "กลุ่มต้องมีอยู่จริงหลัง redo");
+        assert_eq!(board.item(ids[1]).unwrap().meta.group, Some(first));
+    }
+
+    /// ★★★ ย้ายสมาชิกออกจนกลุ่มเดิมว่าง → กลุ่มเดิมต้องถูกเก็บกวาด
+    /// **และ undo ต้องเอามันกลับมาที่คีย์เดิม**
+    ///
+    /// กลุ่มเปล่าลบเองไม่ได้เลย (ไม่มีสมาชิกให้เลือกไปสั่ง ungroup) จึงเป็นขยะ
+    /// ถาวรที่ถูก persist ลง `.refx` ไปด้วย
+    #[test]
+    fn a_group_left_empty_is_swept_and_comes_back_on_undo() {
+        let (mut board, ids, mut history) = group_board();
+        let first = grouped(&mut board, &mut history, vec![ids[0], ids[1]]);
+        let before = board.clone();
+
+        // ★ ต้องดึงใบที่สาม (ยังไม่มีกลุ่ม) เข้ามาด้วย ไม่งั้นคำสั่งถูกปฏิเสธเป็น
+        //   Empty เพราะชุดนี้ *เป็น* กลุ่มเดิมอยู่แล้วพอดี (ดู `changes_anything`)
+        //   — ผลข้างเคียงที่ตั้งใจ และเป็นเหตุผลที่เทสต์นี้ใช้ทั้งสามใบ
+        history
+            .apply(
+                &mut board,
+                Box::new(GroupItems::new(vec![ids[0], ids[1], ids[2]], "Group").unwrap()),
+            )
+            .unwrap();
+        assert_eq!(board.groups().len(), 1, "กลุ่มเดิมที่ว่างต้องถูกเก็บกวาด");
+        assert!(board.group(first).is_none());
+
+        history.undo(&mut board).unwrap();
+        assert_eq!(board, before, "undo ต้องคืนกลุ่มที่ถูกเก็บกวาดกลับมาทั้งก้อน");
+        assert!(board.group(first).is_some(), "ต้องกลับมาที่ GroupId เดิม");
+    }
+
+    /// กลุ่มเดิมที่ยัง **เหลือสมาชิกคนอื่น** ต้องไม่ถูกเก็บกวาด
+    #[test]
+    fn a_group_that_still_has_members_survives() {
+        let (mut board, ids, mut history) = group_board();
+        let first = grouped(&mut board, &mut history, vec![ids[0], ids[1], ids[2]]);
+
+        history
+            .apply(
+                &mut board,
+                Box::new(GroupItems::new(vec![ids[0]], "Group").unwrap()),
+            )
+            .unwrap();
+
+        assert!(board.group(first).is_some(), "ยังเหลือสองใบ ห้ามลบ");
+        assert_eq!(board.groups().len(), 2);
+        assert_eq!(board.item(ids[1]).unwrap().meta.group, Some(first));
+    }
+
+    /// ★ กด `Ctrl+G` ซ้ำบนสิ่งที่จัดกลุ่มไว้แล้ว = ไม่มีอะไรเปลี่ยน = ไม่สร้างคำสั่ง
+    ///
+    /// ถ้าปล่อยผ่าน undo stack จะมีขั้นที่กดแล้วผู้ใช้ไม่เห็นอะไรขยับเลย
+    #[test]
+    fn regrouping_the_exact_same_group_is_refused() {
+        let (mut board, ids, mut history) = group_board();
+        grouped(&mut board, &mut history, vec![ids[0], ids[1]]);
+
+        let mut cmd = GroupItems::new(vec![ids[0], ids[1]], "Group").unwrap();
+        assert_eq!(cmd.apply(&mut board), Err(CmdError::Empty));
+
+        // ★ แต่ถ้ากลุ่มเดิมมีสมาชิกคนอื่นอยู่ด้วย การแยกออกมามีความหมายจริง
+        let mut split = GroupItems::new(vec![ids[0]], "Group").unwrap();
+        assert!(split.apply(&mut board).is_ok());
+    }
+
+    /// ungroup แล้ว undo ต้องคืนทั้งสมาชิกและกลุ่มที่ถูกเก็บกวาด
+    #[test]
+    fn ungrouping_then_undoing_restores_everything() {
+        let (mut board, ids, mut history) = group_board();
+        grouped(&mut board, &mut history, vec![ids[0], ids[1]]);
+        let before = board.clone();
+
+        history
+            .apply(
+                &mut board,
+                Box::new(Ungroup::new(vec![ids[0], ids[1]]).unwrap()),
+            )
+            .unwrap();
+        assert_eq!(board.item(ids[0]).unwrap().meta.group, None);
+        assert_eq!(board.groups().len(), 0, "กลุ่มที่ว่างลงต้องถูกเก็บกวาด");
+
+        history.undo(&mut board).unwrap();
+        assert_eq!(board, before, "undo ของ ungroup ต้องคืนสภาพเป๊ะ");
+    }
+
+    /// ungroup สิ่งที่ไม่ได้อยู่ในกลุ่มไหนเลย = ไม่มีอะไรให้ทำ
+    #[test]
+    fn ungrouping_loose_items_is_refused() {
+        let (mut board, ids, _history) = group_board();
+        let mut cmd = Ungroup::new(vec![ids[0], ids[1]]).unwrap();
+        assert_eq!(cmd.apply(&mut board), Err(CmdError::Empty));
+    }
+
+    /// ★ เปลี่ยนชื่อรัว ๆ ยุบเป็น undo ขั้นเดียว แต่ **ห้ามยุบข้ามช่อง**
+    ///
+    /// ถ้า merge ข้ามช่อง การกดยุบหลังเปลี่ยนชื่อจะทำให้ Ctrl+Z ครั้งเดียว
+    /// เสียชื่อที่พิมพ์ไปด้วย ทั้งที่ผู้ใช้ตั้งใจย้อนแค่การยุบ
+    #[test]
+    fn renaming_merges_but_never_across_fields() {
+        let (mut board, ids, mut history) = group_board();
+        let id = grouped(&mut board, &mut history, vec![ids[0], ids[1]]);
+        let depth = history.undo_depth();
+
+        for name in ["a", "ab", "abc"] {
+            let current = board.group(id).unwrap().clone();
+            history
+                .apply(
+                    &mut board,
+                    Box::new(SetGroup::rename(id, &current, name.to_owned())),
+                )
+                .unwrap();
+        }
+        assert_eq!(history.undo_depth(), depth + 1, "พิมพ์ชื่อรัว ๆ = undo ขั้นเดียว");
+        assert_eq!(board.group(id).unwrap().name, "abc");
+
+        // ยุบ = ขั้นใหม่ ไม่ใช่ขั้นเดิม
+        let current = board.group(id).unwrap().clone();
+        history
+            .apply(
+                &mut board,
+                Box::new(SetGroup::set_collapsed(id, &current, true)),
+            )
+            .unwrap();
+        assert_eq!(history.undo_depth(), depth + 2, "ยุบต้องเป็นคนละขั้นกับเปลี่ยนชื่อ");
+
+        history.undo(&mut board).unwrap();
+        let after = board.group(id).unwrap();
+        assert!(!after.collapsed, "ย้อนการยุบ");
+        assert_eq!(after.name, "abc", "ย้อนการยุบต้องไม่กินชื่อไปด้วย");
+    }
+
+    /// ★★★ กลุ่มที่ยุบอยู่โผล่ในแผ่น Arrange **ใบเดียว** และกางแล้วกลับมาครบ
+    ///
+    /// นี่คือสิ่งที่ทำให้ `Group::collapsed` เป็นฟิลด์ที่ *ทำงาน* ไม่ใช่ฟิลด์ที่
+    /// ถูกเขียนแล้วไม่มีใครอ่าน — ปุ่มที่กดแล้วไม่มีอะไรเกิดขึ้นโกหกผู้ใช้
+    #[test]
+    fn a_collapsed_group_shows_exactly_one_tile() {
+        use crate::query::{Filter, select};
+
+        let (mut board, ids, mut history) = group_board();
+        let id = grouped(&mut board, &mut history, vec![ids[0], ids[1]]);
+        let filter = Filter::default();
+
+        let open = select(&board, &filter, SortKey::AddedAt, false);
+        assert_eq!(open.len(), 3, "ยังไม่ยุบ = เห็นครบทุกใบ");
+
+        let current = board.group(id).unwrap().clone();
+        history
+            .apply(
+                &mut board,
+                Box::new(SetGroup::set_collapsed(id, &current, true)),
+            )
+            .unwrap();
+
+        let folded = select(&board, &filter, SortKey::AddedAt, false);
+        assert_eq!(folded.len(), 2, "ยุบแล้วสมาชิกสองใบเหลือหน้ากลุ่มใบเดียว");
+        assert!(folded.contains(&ids[2]), "ใบนอกกลุ่มห้ามหาย");
+        assert_eq!(
+            folded.iter().filter(|id| ids[..2].contains(id)).count(),
+            1,
+            "ต้องเหลือสมาชิกใบเดียวพอดี"
+        );
+
+        history.undo(&mut board).unwrap();
+        assert_eq!(
+            select(&board, &filter, SortKey::AddedAt, false).len(),
+            3,
+            "กางแล้วต้องกลับมาครบ"
+        );
+    }
+
+    /// ★ `GroupId` ที่ห้อยอยู่ (กลุ่มถูกลบไปแล้ว) ต้อง **ไม่ทำให้ภาพหาย**
+    ///
+    /// ข้อมูลไม่ครบต้องแปลว่า "แสดงตามปกติ" ไม่ใช่ "ซ่อน" — ภาพที่หายไปเงียบ ๆ
+    /// อ่านได้อย่างเดียวว่างานหาย (I-3)
+    /// ★★ **ต้องมีกลุ่มที่ยุบอยู่จริงอีกกลุ่มค้างไว้ด้วย** ไม่งั้นเทสต์นี้จับอะไรไม่ได้เลย
+    ///
+    /// `fold_collapsed_groups` มีทางลัดที่ออกทันทีเมื่อ **ไม่มีกลุ่มไหนยุบอยู่เลย**
+    /// — ถ้าเทสต์ลบกลุ่มเดียวที่มีทิ้งไป ทางลัดจะทำงานแล้วผลลัพธ์จะถูก "โดยบังเอิญ"
+    /// ไม่ว่าโค้ดตัดสินใจเรื่อง id ที่ห้อยอยู่ถูกหรือผิด · negative control ยืนยันแล้ว:
+    /// รุ่นที่ลบกลุ่มเดียวทิ้งยัง**เขียว**ทั้งที่ใส่บั๊กเข้าไปแล้ว รุ่นนี้แดงทันที
+    /// (docs/08 §3.9 ข้อ 1 — "เทสต์อ่อน" ไม่ใช่ "ดีไซน์ทำให้พังแบบนั้นไม่ได้")
+    #[test]
+    fn a_dangling_group_id_never_hides_an_item() {
+        use crate::query::{Filter, select};
+
+        let (mut board, ids, mut history) = group_board();
+        let doomed = grouped(&mut board, &mut history, vec![ids[0], ids[1]]);
+        let survivor = grouped(&mut board, &mut history, vec![ids[2]]);
+        for id in [doomed, survivor] {
+            let current = board.group(id).unwrap().clone();
+            history
+                .apply(
+                    &mut board,
+                    Box::new(SetGroup::set_collapsed(id, &current, true)),
+                )
+                .unwrap();
+            history.seal();
+        }
+        // ลบกลุ่มทิ้งโดยที่สมาชิกยังถือ id เดิมอยู่ — สภาพที่ไฟล์เสียหายพามาได้
+        board.remove_group(doomed);
+
+        let shown = select(&board, &Filter::default(), SortKey::AddedAt, false);
+        assert_eq!(
+            shown.len(),
+            3,
+            "กลุ่มที่ไม่มีอยู่ห้ามซ่อนสมาชิก — ต้องเห็นทั้งสองใบที่ห้อย + ใบของกลุ่มที่ยังยุบอยู่"
+        );
+        assert!(shown.contains(&ids[0]) && shown.contains(&ids[1]));
+    }
+
+    /// ★ ชื่ออัตโนมัติต้องไม่ชนกับกลุ่มที่ยังอยู่ แม้จะลบกลุ่มกลางทิ้งไปแล้ว
+    #[test]
+    fn the_generated_name_never_collides_with_a_living_group() {
+        let (mut board, ids, mut history) = group_board();
+        let a = grouped(&mut board, &mut history, vec![ids[0]]);
+        let b = grouped(&mut board, &mut history, vec![ids[1]]);
+        assert_eq!(board.group(a).unwrap().name, "Group 1");
+        assert_eq!(board.group(b).unwrap().name, "Group 2");
+
+        // ลบ "Group 1" ทิ้ง แล้วถามชื่อว่าง — ต้องได้ 1 คืน ไม่ใช่ 3
+        board.remove_group(a);
+        assert_eq!(board.unused_group_name("Group"), "Group 1");
+        // และห้ามคืนชื่อที่กลุ่มที่ยังอยู่ใช้อยู่
+        assert_ne!(board.unused_group_name("Group"), "Group 2");
+    }
+
+    /// สมาชิกของกลุ่มต้องเรียงตามลำดับ z เสมอ ไม่ใช่ลำดับที่ผู้ใช้กดเลือก
+    #[test]
+    fn group_members_follow_z_order() {
+        let (mut board, ids, mut history) = group_board();
+        let id = grouped(&mut board, &mut history, vec![ids[2], ids[0]]);
+        let members: Vec<ItemId> = board.group_members(id).collect();
+        assert_eq!(members, vec![ids[0], ids[2]], "ต้องเป็นลำดับ z ไม่ใช่ลำดับที่กด");
     }
 }
