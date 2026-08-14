@@ -79,19 +79,49 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: ตรวจว่า target ที่ยังไม่ต่อ ยังไม่มีโค้ดให้ยิงจริง
+      # ★★★ **ตรวจสภาพจริงของทั้งสองฝั่ง ไม่ใช่สมมติว่าฝั่งไหนเป็นยังไง**
+      #
+      #   รุ่นแรกเขียนไว้ว่า "target สองตัวนี้ยังไม่ต่อ — ล้มถ้า module มีโค้ด"
+      #   ซึ่งถูกตอนที่เขียน แต่พอ P4-1 ต่อ `fuzz_document` **ครบทั้งสามจุดแล้ว**
+      #   มันยังล้มอยู่ดี เพราะมันไม่เคยถามว่า "ต่อหรือยัง" มันจำมาว่า "ยังไม่ต่อ"
+      #   → ประตูที่ต้องมีคนมาแก้ตามทุกครั้งคือประตูที่จะค้างสักวัน
+      #
+      #   รุ่นนี้ **อ่านสภาพจากไฟล์จริงทั้งสองฝั่ง** แล้วบังคับความสัมพันธ์:
+      #     module มีโค้ด  <=>  target ถูกต่อครบสามจุด
+      #   จึงจับได้ทั้งสองทิศ และไม่มีรายชื่อที่ต้องมาอัปเดตด้วยมืออีก
+      - name: โค้ดที่ยิงได้กับ target ที่ต่อไว้ ต้องตรงกันเสมอ
         run: |
           set -uo pipefail
           status=0
           check() {
             target="$1"; module="$2"
-            # ยังเป็นไฟล์ TODO บรรทัดเดียว = ยังไม่มีอะไรให้ยิง ข้ามได้อย่างถูกต้อง
+
+            # ฝั่ง (ก) มีโค้ดให้ยิงหรือยัง — ไฟล์ TODO บรรทัดเดียว = ยังไม่มี
             lines=$(grep -cve '^[[:space:]]*$' "$module" || true)
-            if [ "${lines:-0}" -le 2 ]; then
-              echo "::notice::ข้าม $target — $module ยังไม่มีโค้ด ($lines บรรทัด)"
-            else
+            has_code=0
+            [ "${lines:-0}" -gt 2 ] && has_code=1
+
+            # ฝั่ง (ข) ต่อครบสามจุดหรือยัง (ไฟล์ target + [[bin]] + matrix)
+            wired=1
+            [ -f "fuzz/fuzz_targets/$target.rs" ] || wired=0
+            grep -q "name = \"$target\"" fuzz/Cargo.toml || wired=0
+            grep -q "$target" .github/workflows/fuzz.yml || wired=0
+            # target ที่มีแต่ไฟล์ว่าง ๆ ไม่นับว่าต่อ
+            tlines=$(grep -cve '^[[:space:]]*$' "fuzz/fuzz_targets/$target.rs" 2>/dev/null || echo 0)
+            [ "${tlines:-0}" -gt 12 ] || wired=0
+
+            if [ "$has_code" = "1" ] && [ "$wired" = "1" ]; then
+              echo "::notice::$target ต่อแล้วและ $module มีโค้ด ($lines บรรทัด) — ตรงกัน"
+            elif [ "$has_code" = "0" ] && [ "$wired" = "0" ]; then
+              echo "::notice::ข้าม $target — $module ยังไม่มีโค้ด ($lines บรรทัด) และ target ยังไม่ถูกต่อ"
+            elif [ "$has_code" = "1" ]; then
               echo "::error::$module มีโค้ดแล้ว ($lines บรรทัด) แต่ $target ยังไม่ถูกต่อ"
               echo "::error::ต้อง (1) ต่อ fuzz/fuzz_targets/$target.rs (2) ลงทะเบียน [[bin]] ใน fuzz/Cargo.toml (3) ใส่ $target ใน matrix ของไฟล์นี้"
+              status=1
+            else
+              # ★ ทิศกลับ: ต่อ target ไว้แต่ไม่มีโค้ดให้ยิง = fuzz ที่เขียวโดยไม่ตรวจอะไร
+              #   ซึ่งเป็นบั๊กเดิมของ fuzz_decode ที่ job นี้เกิดมาเพื่อกัน
+              echo "::error::$target ถูกต่อไว้แล้ว แต่ $module ยังไม่มีโค้ด ($lines บรรทัด) — fuzz จะเขียวโดยไม่ได้ยิงอะไร"
               status=1
             fi
           }
