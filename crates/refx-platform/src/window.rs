@@ -128,6 +128,25 @@ pub trait AppDelegate {
         true
     }
 
+    /// ★ delegate ขอปิดโปรแกรม **ด้วยตัวเอง** — `true` = ออกจาก event loop
+    ///
+    /// ต่างจาก [`AppDelegate::on_close_requested`] ตรงที่อันนั้นตอบ *คำถาม*
+    /// ของผู้ใช้ ณ ตอนนั้น ส่วนอันนี้คือการ **ขอปิดทีหลัง** ซึ่งจำเป็นเมื่อ
+    /// การตัดสินใจต้องรออะไรสักอย่างก่อน
+    ///
+    /// เคสจริงที่ทำให้ต้องมี (P4-2): ผู้ใช้เลือก "บันทึกแล้วปิด" —
+    /// การบันทึกเกิดบนเธรดอื่น (I-2) ผลจึงกลับมาหลายเฟรมถัดไป **หลังจาก**
+    /// `on_close_requested` ตอบไปแล้วว่า "ยังไม่ปิด" · ถ้าไม่มีทางนี้
+    /// ธงที่ตั้งไว้จะไม่มีใครอ่าน แล้วโปรแกรมจะบันทึกสำเร็จแต่ไม่ปิด
+    /// (เจอจริงตอนทดสอบบนของจริง — ไม่มีเทสต์ไหนจับได้เพราะมันคือ
+    /// การประกอบระหว่างชั้น ซึ่ง `docs/08 §3.9` ข้อ 5 บอกว่ามีแต่การรันจริงที่เห็น)
+    ///
+    /// ★ ถูกถามใน `about_to_wait` ซึ่งเกิดก่อนหลับทุกครั้ง **ไม่ใช่การวนเช็ค**
+    /// จึงไม่แตะ I-1
+    fn wants_exit(&self) -> bool {
+        false
+    }
+
     /// ขอให้ปลุก event loop ตอนเวลาที่กำหนด — `None` = หลับจนกว่าจะมี input
     ///
     /// ใช้กับสิ่งที่ต้องเกิดตามเวลาโดยไม่มี input มาก่อน เช่น
@@ -307,6 +326,11 @@ impl<D: AppDelegate> ApplicationHandler<WakeEvent> for WindowHost<D> {
     /// ★ I-1: มีแค่สองทางเลือกคือ [`ControlFlow::Wait`] กับ [`ControlFlow::WaitUntil`]
     /// **ไม่มี `Poll` เด็ดขาด** ทั้งสองแบบเธรดหลับจริง ไม่กิน CPU
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // ★ delegate ขอปิดเอง (เช่น "บันทึกแล้วปิด" ที่เพิ่งบันทึกเสร็จ)
+        if self.delegate.wants_exit() {
+            event_loop.exit();
+            return;
+        }
         let Some(deadline) = self.delegate.wake_deadline() else {
             event_loop.set_control_flow(ControlFlow::Wait);
             return;

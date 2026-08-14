@@ -17,8 +17,12 @@
 //! 1. เขียน <doc>.refx.tmp  แล้ว fsync            ← ของใหม่อยู่บนดิสก์จริงแล้ว
 //! 2. สำเนาไฟล์เดิมเป็น <doc>.refx.bak (atomic)   ← รุ่นก่อนหน้ายังกลับไปหาได้
 //! 3. rename tmp -> <doc>.refx                    ← สลับตัวจริง (atomic)
-//! 4. fsync โฟลเดอร์                              ← ให้ตัว rename เองทนไฟดับ
 //! ```
+//!
+//! ★★ ขั้นที่ทำให้ **ตัว rename เอง** ทนไฟดับ (fsync โฟลเดอร์บน Unix ·
+//! `MOVEFILE_WRITE_THROUGH` บน Windows) อยู่ใน [`RenameFn`] ที่ผู้เรียกส่งเข้ามา
+//! — มันต้องใช้ `unsafe` บน Windows จึงอยู่ที่ `refx-platform` ได้ที่เดียว (I-5)
+//! และ `refx-io` พึ่ง crate นั้นไม่ได้ (ดู [`RenameFn`] ว่าทำไม)
 //!
 //! ★ **fsync ที่ขั้น 1 ต้องมาก่อน rename เสมอ** — ถ้า rename ก่อนแล้วค่อย fsync
 //! ไฟฟ้าดับตรงกลางจะได้ชื่อไฟล์ใหม่ที่ชี้ไปยังเนื้อหาที่ยังไม่ลงดิสก์ =
@@ -39,6 +43,36 @@ pub const TMP_SUFFIX: &str = "refx.tmp";
 pub const BAK_SUFFIX: &str = "refx.bak";
 /// ไฟล์ชั่วคราวของตัวสำรอง (ทำให้ `.bak` ถูกสลับแบบ atomic เหมือนกัน)
 const BAK_TMP_SUFFIX: &str = "refx.bak.tmp";
+
+/// วิธีสลับไฟล์ที่ [`save_atomic`] จะใช้
+///
+/// ★★★ **ทำไมเป็นพารามิเตอร์ ไม่ใช่เรียก `refx-platform` ตรง ๆ**
+///
+/// การทำให้ตัว `rename` เองทนไฟดับบน Windows ต้องใช้ `MOVEFILE_WRITE_THROUGH`
+/// ซึ่งต้องเรียก Win32 = ต้องมี `unsafe` = ต้องอยู่ใน `refx-platform` (I-5)
+/// — **แต่ `refx-io` พึ่ง `refx-platform` ไม่ได้**: มันลาก `rfd`/`arboard`/`winit`
+/// มาด้วย แล้ว `fuzz/` (ซึ่งพึ่ง `refx-io`) จะต้องคอมไพล์ทั้งกอง GUI ด้วย nightly
+/// แล้วแตกที่ `zbus` — **เป็นความพังตัวเดียวกับที่ §4 ข้อ 18 เกิดมาเพื่อกัน**
+///
+/// จึงกลับทิศแบบเดียวกับ `ClipboardReader` (§2.0): ชั้นที่รู้จัก OS เป็นคน
+/// **ส่งวิธีเข้ามา** · `refx-ui` (ซึ่งพึ่ง `refx-platform` อยู่แล้ว) ส่ง
+/// `refx_platform::fsops::rename_durable` ให้
+///
+/// ★ **ไม่มีค่าปริยาย** โดยตั้งใจ — ถ้ามี การลืมส่งจะกลายเป็นการลดความทนทาน
+/// แบบเงียบ ๆ ซึ่งเป็นกับดัก "ถูกเฉพาะเมื่อผู้เรียกเรียกถูก" ที่ `docs/08 §3.9`
+/// ข้อ 8 บันทึกไว้ · บังคับให้ทุกจุดเรียกตัดสินใจเอง
+pub type RenameFn = fn(&Path, &Path) -> std::io::Result<()>;
+
+/// สลับไฟล์ด้วย `std::fs::rename` เฉย ๆ — **ไม่มีหลักประกันความทนทานของตัว rename**
+///
+/// ★ ใช้ในเทสต์และในเส้นทางที่ไม่มีชั้น platform · โค้ดที่ผู้ใช้จริงใช้ต้องส่ง
+/// `refx_platform::fsops::rename_durable` เข้ามาแทน
+///
+/// # Errors
+/// คืน error ของระบบไฟล์ตามเดิม
+pub fn plain_rename(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::rename(from, to)
+}
 
 /// บันทึกไม่สำเร็จ
 ///
@@ -95,7 +129,7 @@ pub fn backup_path(doc: &Path) -> PathBuf {
 /// # Errors
 /// [`SaveError`] — เมื่อถูกปฏิเสธเพราะเวอร์ชัน, แปลงไม่ได้, หรือระบบไฟล์ล้ม
 /// · **ไฟล์เดิมยังอยู่ครบเสมอ** ไม่ว่าล้มที่ขั้นไหน
-pub fn save_atomic(doc: &Path, board: &Board) -> Result<(), SaveError> {
+pub fn save_atomic(doc: &Path, board: &Board, rename: RenameFn) -> Result<(), SaveError> {
     // ---- 0. ถ้ามีไฟล์เดิมอยู่ ต้องอ่านหัวมันก่อนว่าเราทับได้ไหม ----
     //
     // ★★ อ่าน **แค่หัวไฟล์** ไม่ใช่ทั้งไฟล์ — สองเหตุผล:
@@ -120,17 +154,14 @@ pub fn save_atomic(doc: &Path, board: &Board) -> Result<(), SaveError> {
 
     // ---- 2. สำรองไฟล์เดิมไว้ (ถ้ามี) ----
     if existed {
-        backup(doc)?;
+        backup(doc, rename)?;
     }
 
     // ---- 3. สลับตัวจริง — atomic ----
     //
     // ★ `fs::rename` บน Windows ใช้ `MoveFileEx` พร้อม `MOVEFILE_REPLACE_EXISTING`
     //   จึงทับไฟล์ที่มีอยู่ได้และเป็น atomic เหมือนบน Unix
-    std::fs::rename(&tmp, doc).map_err(|err| SaveError::io("replace", doc, err))?;
-
-    // ---- 4. ให้ตัว rename เองทนไฟดับ ----
-    sync_parent_dir(doc);
+    rename(&tmp, doc).map_err(|err| SaveError::io("replace", doc, err))?;
     Ok(())
 }
 
@@ -178,7 +209,7 @@ fn write_and_sync(path: &Path, bytes: &[u8]) -> Result<(), SaveError> {
 /// ★ สำเนาด้วย `fs::copy` **ไม่ใช่การอ่านทั้งไฟล์เข้า RAM แล้วเขียนออก** —
 /// `.refx` แบบ packed (P4-5) ใหญ่ระดับ GB ได้ · `fs::copy` ให้ OS จัดการเอง
 /// (บน Windows ใช้ `CopyFileEx` ซึ่งไม่สูบทั้งไฟล์เข้าโปรเซสเรา)
-fn backup(doc: &Path) -> Result<(), SaveError> {
+fn backup(doc: &Path, rename: RenameFn) -> Result<(), SaveError> {
     let bak_tmp = doc.with_extension(BAK_TMP_SUFFIX);
     std::fs::copy(doc, &bak_tmp).map_err(|err| SaveError::io("back up", doc, err))?;
     // ★ fsync สำเนาก่อนตั้งชื่อจริง ด้วยเหตุผลเดียวกับไฟล์หลัก
@@ -186,37 +217,8 @@ fn backup(doc: &Path) -> Result<(), SaveError> {
         let _ = handle.sync_all();
     }
     let bak = backup_path(doc);
-    std::fs::rename(&bak_tmp, &bak).map_err(|err| SaveError::io("replace", &bak, err))?;
+    rename(&bak_tmp, &bak).map_err(|err| SaveError::io("replace", &bak, err))?;
     Ok(())
-}
-
-/// fsync โฟลเดอร์ที่ไฟล์อยู่ — ทำให้ตัว **rename** เองทนไฟดับ
-///
-/// ★★ ไฟล์ที่ fsync แล้วยังหายได้ ถ้า *ชื่อ* ของมันยังไม่ลงดิสก์: rename เป็น
-/// การแก้ directory entry ซึ่งเป็นคนละ metadata กับตัวไฟล์ (docs/07 §4)
-///
-/// ★ **บน Windows ทำไม่ได้ผ่าน std** — `File::open` บนโฟลเดอร์ล้มทันที
-/// (ต้องใช้ `FILE_FLAG_BACKUP_SEMANTICS` ซึ่งต้องเรียก Win32 ตรง ๆ = ต้องมี
-/// `unsafe` ที่ I-5 ห้ามนอก `refx-platform`) · NTFS บันทึกการเปลี่ยน metadata
-/// ผ่าน journal ของตัวเองอยู่แล้ว จึงยอมรับความเสี่ยงที่เหลือไปก่อน
-/// — **บันทึกไว้ว่าเป็นช่องที่รู้ตัว ไม่ใช่ช่องที่ลืม**
-///
-/// ล้มแล้ว **ไม่คืน error** โดยตั้งใจ: ถึงจุดนี้ไฟล์ใหม่อยู่ในตำแหน่งที่ถูกแล้ว
-/// การบอกผู้ใช้ว่า "บันทึกไม่สำเร็จ" ทั้งที่งานอยู่ครบจะทำให้เขากดบันทึกซ้ำ
-/// หรือแย่กว่านั้นคือคิดว่างานหาย
-fn sync_parent_dir(doc: &Path) {
-    #[cfg(unix)]
-    {
-        if let Some(dir) = doc.parent()
-            && let Ok(handle) = std::fs::File::open(dir)
-        {
-            let _ = handle.sync_all();
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = doc;
-    }
 }
 
 #[cfg(test)]
@@ -283,7 +285,7 @@ mod tests {
         let doc = dir.join("work.refx");
         let board = board_named("first", 3);
 
-        save_atomic(&doc, &board).unwrap();
+        save_atomic(&doc, &board, plain_rename).unwrap();
 
         let back = dto::decode(&read_all(&doc).unwrap(), board_id()).unwrap();
         assert_eq!(back, board);
@@ -306,8 +308,8 @@ mod tests {
 
         let old = board_named("old", 2);
         let new = board_named("new", 5);
-        save_atomic(&doc, &old).unwrap();
-        save_atomic(&doc, &new).unwrap();
+        save_atomic(&doc, &old, plain_rename).unwrap();
+        save_atomic(&doc, &new, plain_rename).unwrap();
 
         let current = dto::decode(&read_all(&doc).unwrap(), board_id()).unwrap();
         let backup = dto::decode(&read_all(backup_path(&doc)).unwrap(), board_id()).unwrap();
@@ -336,7 +338,7 @@ mod tests {
         std::fs::write(&doc, &bytes).unwrap();
         let before = read_all(&doc).unwrap();
 
-        let err = save_atomic(&doc, &board_named("mine", 1)).unwrap_err();
+        let err = save_atomic(&doc, &board_named("mine", 1), plain_rename).unwrap_err();
         assert!(
             matches!(err, SaveError::Refused(dto::OpenError::NewerVersion { .. })),
             "ต้องถูกปฏิเสธเพราะเวอร์ชัน ไม่ใช่เหตุอื่น: {err}"
@@ -361,8 +363,8 @@ mod tests {
     fn a_file_this_build_understands_is_replaced_normally() {
         let dir = temp_dir("replace");
         let doc = dir.join("work.refx");
-        save_atomic(&doc, &board_named("old", 1)).unwrap();
-        save_atomic(&doc, &board_named("new", 2)).unwrap();
+        save_atomic(&doc, &board_named("old", 1), plain_rename).unwrap();
+        save_atomic(&doc, &board_named("new", 2), plain_rename).unwrap();
         let back = dto::decode(&read_all(&doc).unwrap(), board_id()).unwrap();
         assert_eq!(back.name(), "new");
     }
@@ -377,7 +379,7 @@ mod tests {
         let doc = dir.join("work.refx");
         std::fs::write(&doc, b"this was never a refx file").unwrap();
 
-        save_atomic(&doc, &board_named("mine", 1)).unwrap();
+        save_atomic(&doc, &board_named("mine", 1), plain_rename).unwrap();
 
         assert!(dto::decode(&read_all(&doc).unwrap(), board_id()).is_ok());
         assert_eq!(
@@ -421,8 +423,8 @@ mod tests {
         loop {
             // ล้มก็ช่างมัน — หน้าที่ของมันคือ "เขียนไปเรื่อย ๆ จนโดนฆ่า"
             // สิ่งที่ถูกตรวจคือ *ไฟล์บนดิสก์* ไม่ใช่ค่าที่ฟังก์ชันนี้คืน
-            let _ = save_atomic(&doc, &new);
-            let _ = save_atomic(&doc, &old);
+            let _ = save_atomic(&doc, &new, plain_rename);
+            let _ = save_atomic(&doc, &old, plain_rename);
         }
     }
 
@@ -494,7 +496,7 @@ mod tests {
         // ไฟล์ตั้งต้น = "งานเมื่อวาน" ที่ห้ามเสียไม่ว่าอะไรจะเกิดขึ้น
         let old = board_named("old", VICTIM_ITEMS);
         let new = board_named("new", VICTIM_ITEMS);
-        save_atomic(&doc, &old).unwrap();
+        save_atomic(&doc, &old, plain_rename).unwrap();
 
         let exe = std::env::current_exe().expect("หา test binary ของตัวเองไม่เจอ");
         let marker = ready_marker(&doc);

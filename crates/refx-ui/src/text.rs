@@ -213,6 +213,26 @@ pub enum Key {
     /// กดส่งเข้า canvas แล้วไม่มีอะไรขยับ
     NothingToApply,
 
+    // ---- P4-2: บันทึกไฟล์ ----
+    /// กำลังให้ผู้ใช้เลือกที่เก็บ
+    SaveChoosing,
+    /// กำลังเขียนไฟล์
+    SaveInProgress,
+    /// ผู้ใช้กดยกเลิกตอนเลือกที่เก็บ
+    SaveCancelled,
+    /// บันทึกไม่สำเร็จ
+    SaveFailed,
+    /// หัวข้อของแถบยืนยันตอนปิดทั้งที่ยังไม่ได้บันทึก
+    CloseUnsavedTitle,
+    /// ปุ่ม "บันทึกแล้วปิด"
+    CloseSaveFirst,
+    /// ปุ่ม "ไม่ปิดแล้ว"
+    CloseCancel,
+    /// ปุ่ม "ปิดโดยไม่บันทึก"
+    CloseDiscard,
+    /// คำเตือนของปุ่มปิดโดยไม่บันทึก
+    CloseDiscardHint,
+
     // ---- P3-7: group / ungroup ----
     /// หัวข้อกลุ่มในแผง Arrange
     GroupTitle,
@@ -308,6 +328,15 @@ fn en(key: Key) -> &'static str {
         Key::SendToCanvasHint => {
             "Move these images on the canvas to match this arrangement (one undo puts them back)"
         }
+        Key::SaveChoosing => "Choose where to save",
+        Key::SaveInProgress => "Saving",
+        Key::SaveCancelled => "Save cancelled",
+        Key::SaveFailed => "Could not save - your work is still open, try another location",
+        Key::CloseUnsavedTitle => "This board has unsaved changes",
+        Key::CloseSaveFirst => "Save and close",
+        Key::CloseCancel => "Keep working",
+        Key::CloseDiscard => "Close without saving",
+        Key::CloseDiscardHint => "Everything since the last save will be lost",
         Key::GroupTitle => "Group",
         Key::GroupNone => "Not in a group",
         Key::GroupDefaultName => "Group",
@@ -394,6 +423,15 @@ fn th(key: Key) -> Option<&'static str> {
         Key::FilterMinRating => "ดาว",
         Key::FilterPinnedOnly => "เฉพาะที่ปักหมุด",
         Key::SendToCanvasHint => "ย้ายภาพบน canvas ให้เรียงแบบนี้ (กด Ctrl+Z ครั้งเดียวคืนสภาพเดิม)",
+        Key::SaveChoosing => "เลือกที่เก็บไฟล์",
+        Key::SaveInProgress => "กำลังบันทึก",
+        Key::SaveCancelled => "ยกเลิกการบันทึกแล้ว",
+        Key::SaveFailed => "บันทึกไม่สำเร็จ — งานของคุณยังเปิดอยู่ ลองเลือกที่เก็บอื่น",
+        Key::CloseUnsavedTitle => "กระดานนี้มีการแก้ที่ยังไม่ได้บันทึก",
+        Key::CloseSaveFirst => "บันทึกแล้วปิด",
+        Key::CloseCancel => "ทำงานต่อ",
+        Key::CloseDiscard => "ปิดโดยไม่บันทึก",
+        Key::CloseDiscardHint => "ทุกอย่างตั้งแต่บันทึกครั้งล่าสุดจะหายไป",
         Key::GroupTitle => "กลุ่ม",
         Key::GroupNone => "ไม่ได้อยู่ในกลุ่มไหน",
         Key::GroupDefaultName => "กลุ่ม",
@@ -431,6 +469,8 @@ pub enum Template {
     ItemCount,
     /// `{n}` — จำนวนสมาชิกของกลุ่มที่เลือกอยู่ (P3-7)
     GroupMembers,
+    /// `{name}` — บันทึกลงไฟล์นี้สำเร็จแล้ว (P4-2)
+    Saved,
     /// `{pct}` — ระดับซูมเป็นเปอร์เซ็นต์
     Zoom,
     /// `{n}` — จำนวนเฟรมที่วาดไปแล้ว (ตัวชี้วัด I-1 ที่เห็นด้วยตา)
@@ -516,6 +556,7 @@ fn template_en(template: Template) -> &'static str {
     match template {
         Template::ItemCount => "{n} items",
         Template::GroupMembers => "{n} in this group",
+        Template::Saved => "Saved to {name}",
         Template::Zoom => "Zoom {pct}%",
         Template::FramesDrawn => "Frames {n}",
         Template::Ram => "RAM {used} / {limit}",
@@ -611,6 +652,7 @@ fn template_th(template: Template) -> Option<&'static str> {
     Some(match template {
         Template::ItemCount => "{n} รายการ",
         Template::GroupMembers => "{n} ใบในกลุ่มนี้",
+        Template::Saved => "บันทึกลง {name} แล้ว",
         Template::Zoom => "ซูม {pct}%",
         Template::FramesDrawn => "เฟรมที่วาด {n}",
         Template::Ram => "RAM {used} / {limit}",
@@ -915,6 +957,15 @@ mod tests {
         Key::FilterPinnedOnly,
         Key::SendToCanvasHint,
         Key::NothingToApply,
+        Key::SaveChoosing,
+        Key::SaveInProgress,
+        Key::SaveCancelled,
+        Key::SaveFailed,
+        Key::CloseUnsavedTitle,
+        Key::CloseSaveFirst,
+        Key::CloseCancel,
+        Key::CloseDiscard,
+        Key::CloseDiscardHint,
         Key::GroupTitle,
         Key::GroupNone,
         Key::GroupDefaultName,
@@ -927,6 +978,7 @@ mod tests {
     const ALL_TEMPLATES: &[Template] = &[
         Template::ItemCount,
         Template::GroupMembers,
+        Template::Saved,
         Template::Zoom,
         Template::FramesDrawn,
         Template::Ram,

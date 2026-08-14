@@ -500,6 +500,41 @@ fn selection_after_history(
     Some(affected.iter().copied().filter(|id| alive(*id)).collect())
 }
 
+/// `Ctrl+S` = บันทึก · `Ctrl+Shift+S` = บันทึกเป็น (docs/03 §5, P4-2)
+fn save_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> Option<SaveRequest> {
+    if !modifiers.control_key() || modifiers.alt_key() {
+        return None;
+    }
+    match pressed? {
+        // บางระบบส่ง Ctrl+S มาเป็นอักขระ control (DC3) ไม่ใช่ 's'
+        's' | '\u{13}' => Some(if modifiers.shift_key() {
+            SaveRequest::SaveAs
+        } else {
+            SaveRequest::Save
+        }),
+        _ => None,
+    }
+}
+
+/// ผู้ใช้ขออะไรกับการบันทึก (P4-2)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveRequest {
+    /// `Ctrl+S` — บันทึกลงที่เดิม (ยังไม่เคยบันทึก = ถามที่เก็บก่อน)
+    Save,
+    /// `Ctrl+Shift+S` — ถามที่เก็บใหม่เสมอ
+    SaveAs,
+}
+
+/// สิ่งที่ต้องทำต่อหลังบันทึกเสร็จ (P4-2)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum AfterSave {
+    /// อยู่ต่อตามปกติ
+    #[default]
+    Stay,
+    /// ปิดโปรแกรม — ผู้ใช้เลือก "บันทึกแล้วปิด" ตอนถูกถาม
+    Close,
+}
+
 /// ผู้ใช้ขออะไรกับกลุ่ม (P3-7)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GroupRequest {
@@ -1336,6 +1371,20 @@ pub struct RefxApp {
     pending_appearance: Option<AppearanceKey>,
     /// ผู้ใช้กด `Ctrl+G` / `Ctrl+Shift+G` ในรอบ event ที่ผ่านมา (P3-7)
     pending_group: Option<GroupRequest>,
+    /// ผู้ใช้กด `Ctrl+S` / `Ctrl+Shift+S` ในรอบ event ที่ผ่านมา (P4-2)
+    pending_save: Option<SaveRequest>,
+    /// ★ ที่อยู่ของเอกสารปัจจุบัน — `None` = ยังไม่เคยบันทึก
+    doc_path: Option<std::path::PathBuf>,
+    /// dialog เลือกที่บันทึกที่กำลังเปิดอยู่ (รอผู้ใช้ตอบ — ไม่บล็อก I-2)
+    save_dialog: Option<crossbeam_channel::Receiver<Option<std::path::PathBuf>>>,
+    /// งานบันทึกที่ส่งไปเธรดแล้ว รอผลกลับ (ไม่บล็อก I-2)
+    save_job: Option<crossbeam_channel::Receiver<Result<std::path::PathBuf, String>>>,
+    /// ★ ทำอะไรต่อหลังบันทึกเสร็จ — ใช้ตอนผู้ใช้เลือก "บันทึกแล้วปิด"
+    after_save: AfterSave,
+    /// ผู้ใช้กดปิดหน้าต่างทั้งที่ยังมีงานไม่ได้บันทึก → รอเขาตอบ
+    close_confirm: bool,
+    /// ตัดสินใจแล้วว่าจะปิดจริง — `on_close_requested` รอบถัดไปปล่อยผ่าน
+    closing: bool,
     /// ★ กันการกด `Ctrl+V` รัว ๆ ให้เหลือทีละครั้ง — ภาพจาก clipboard ใหญ่ได้
     /// ระดับ 6000×4000 (96 MB) และ `arboard` จอง RAM ก้อนนั้นก่อนที่เพดานของเรา
     /// จะได้ตรวจ ถ้าปล่อยให้ซ้อนกันสิบใบคือแย่ง RAM กับ Photoshop ตรง ๆ
@@ -1413,6 +1462,13 @@ impl RefxApp {
             pending_delete: false,
             pending_appearance: None,
             pending_group: None,
+            pending_save: None,
+            doc_path: None,
+            save_dialog: None,
+            save_job: None,
+            after_save: AfterSave::Stay,
+            close_confirm: false,
+            closing: false,
             paste_in_flight: None,
             paste_count: 0,
             batch_from_clipboard: false,
@@ -2629,6 +2685,171 @@ impl RefxApp {
         gfx.window.request_redraw();
     }
 
+    /// ผู้ใช้ตอบแถบยืนยันตอนปิดแล้ว (P4-2)
+    fn apply_close_choice(&mut self, choice: crate::shell::CloseChoice) {
+        use crate::shell::CloseChoice;
+
+        self.close_confirm = false;
+        self.shell.close_prompt = false;
+        match choice {
+            CloseChoice::SaveThenClose => {
+                // ★ ปิดจริงตอน **บันทึกสำเร็จ** เท่านั้น (ดู `poll_save`)
+                self.after_save = AfterSave::Close;
+                self.apply_save_request(SaveRequest::Save);
+            }
+            CloseChoice::DiscardAndClose => {
+                self.closing = true;
+            }
+            CloseChoice::Cancel => {
+                self.after_save = AfterSave::Stay;
+            }
+        }
+        if let Some(gfx) = self.gfx.as_ref() {
+            gfx.window.request_redraw();
+        }
+    }
+
+    /// ★★★ บันทึกเอกสาร — **ทุกขั้นไม่บล็อก UI thread** (P4-2, I-2)
+    ///
+    /// สามขั้นที่แยกกันคนละเฟรม เพราะแต่ละขั้นรอคนละอย่าง:
+    ///
+    /// | ขั้น | รออะไร | ไม่บล็อกยังไง |
+    /// |---|---|---|
+    /// | เลือกที่เก็บ | ผู้ใช้ (เป็น**นาที**ได้) | dialog อยู่เธรดของตัวเอง คืน `Receiver` |
+    /// | เขียนไฟล์ | ดิสก์ (fsync จริง) | ส่งไปเธรด คืน `Receiver` |
+    /// | รายงานผล | — | `try_recv()` ต้นเฟรม |
+    ///
+    /// ★ `Board` ถูก **โคลนเข้าไปในเธรด** ไม่ใช่ส่ง reference — ผู้ใช้ต้องแก้งาน
+    /// ต่อได้ทันทีระหว่างที่ไฟล์กำลังเขียน และสิ่งที่ลงไฟล์ต้องเป็นสภาพ
+    /// ณ ตอนกด `Ctrl+S` ไม่ใช่สภาพหลังจากนั้น (ซึ่งจะเป็นการบันทึกที่ผู้ใช้ไม่ได้สั่ง)
+    fn apply_save_request(&mut self, request: SaveRequest) {
+        // มีงานบันทึกค้างอยู่แล้ว = อย่าซ้อน (ไฟล์เดียวเขียนสองที่พร้อมกันคือหายนะ)
+        if self.save_job.is_some() || self.save_dialog.is_some() {
+            return;
+        }
+        let known_path = match request {
+            SaveRequest::Save => self.doc_path.clone(),
+            // บันทึกเป็น = ถามที่ใหม่เสมอ ต่อให้เคยบันทึกแล้ว
+            SaveRequest::SaveAs => None,
+        };
+        match known_path {
+            Some(path) => self.start_save(&path),
+            None => {
+                let name = self
+                    .doc_path
+                    .as_ref()
+                    .and_then(|path| path.file_name())
+                    .map_or_else(
+                        || "board.refx".to_owned(),
+                        |name| name.to_string_lossy().into_owned(),
+                    );
+                self.save_dialog = Some(refx_platform::dialog::pick_save_location(&name));
+                self.shell.status = text::t(self.shell.lang, Key::SaveChoosing).to_owned();
+            }
+        }
+    }
+
+    /// ส่งงานเขียนไฟล์ไปเธรด — ไม่รอผล
+    fn start_save(&mut self, path: &std::path::Path) {
+        let Some(gfx) = self.gfx.as_ref() else {
+            return;
+        };
+        // ★ โคลน ณ จังหวะที่ผู้ใช้สั่ง (ดูเหตุผลใน `apply_save_request`)
+        let board = gfx.board.clone();
+        let path = path.to_path_buf();
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let spawned = std::thread::Builder::new()
+            .name("refx-save".to_owned())
+            .spawn(move || {
+                // ★★ ส่ง `rename_durable` ของชั้น platform เข้าไป — ตัวที่ทำให้
+                //    การสลับไฟล์เองทนไฟดับ (`MOVEFILE_WRITE_THROUGH` / fsync dir)
+                //    `refx-io` เรียกเองไม่ได้เพราะพึ่ง `refx-platform` ไม่ได้
+                let result =
+                    refx_io::save::save_atomic(&path, &board, refx_platform::fsops::rename_durable)
+                        .map(|()| path)
+                        .map_err(|err| err.to_string());
+                let _ = tx.send(result);
+            });
+        if spawned.is_err() {
+            self.shell.status = text::t(self.shell.lang, Key::SaveFailed).to_owned();
+            self.shell.status_warn = true;
+            return;
+        }
+        self.save_job = Some(rx);
+        self.shell.status = text::t(self.shell.lang, Key::SaveInProgress).to_owned();
+        self.shell.status_warn = false;
+    }
+
+    /// เก็บผลของ dialog และของงานเขียนไฟล์ — เรียกต้นเฟรม **ไม่บล็อก**
+    fn poll_save(&mut self) {
+        let lang = self.shell.lang;
+
+        // ---- ผู้ใช้เลือกที่เก็บแล้วหรือยัง ----
+        if let Some(rx) = self.save_dialog.as_ref() {
+            match rx.try_recv() {
+                Ok(Some(path)) => {
+                    self.save_dialog = None;
+                    self.start_save(&path);
+                }
+                Ok(None) => {
+                    // กดยกเลิก — ไม่ใช่ error และ **ต้องยกเลิกการปิดด้วย**
+                    self.save_dialog = None;
+                    self.after_save = AfterSave::Stay;
+                    self.shell.status = text::t(lang, Key::SaveCancelled).to_owned();
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => {}
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    self.save_dialog = None;
+                    self.after_save = AfterSave::Stay;
+                    self.shell.status = text::t(lang, Key::SaveFailed).to_owned();
+                    self.shell.status_warn = true;
+                }
+            }
+        }
+
+        // ---- เขียนไฟล์เสร็จหรือยัง ----
+        let Some(rx) = self.save_job.as_ref() else {
+            return;
+        };
+        let done = match rx.try_recv() {
+            Ok(result) => result,
+            Err(crossbeam_channel::TryRecvError::Empty) => return,
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                Err("save thread died".to_owned())
+            }
+        };
+        self.save_job = None;
+        match done {
+            Ok(path) => {
+                // ★★ `mark_saved` คือสิ่งที่ทำให้ `dirty` กลับเป็น false — และมันต้อง
+                //    เกิด **หลังเขียนสำเร็จเท่านั้น** ไม่ใช่ตอนสั่ง ไม่งั้นผู้ใช้จะ
+                //    ปิดโปรแกรมโดยคิดว่างานถูกบันทึกแล้วทั้งที่ดิสก์เต็ม
+                if let Some(gfx) = self.gfx.as_mut() {
+                    gfx.history.mark_saved(&mut gfx.board);
+                }
+                let name = path
+                    .file_name()
+                    .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+                self.doc_path = Some(path);
+                self.shell.status = text::fill(lang, text::Template::Saved, &[("name", &name)]);
+                self.shell.status_warn = false;
+                if self.after_save == AfterSave::Close {
+                    self.closing = true;
+                    if let Some(gfx) = self.gfx.as_ref() {
+                        gfx.window.request_redraw();
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::error!(%err, "cannot save the document");
+                // ★ บันทึกไม่สำเร็จ = **ห้ามปิด** ไม่ว่าผู้ใช้เลือกอะไรไว้
+                self.after_save = AfterSave::Stay;
+                self.shell.status = text::t(lang, Key::SaveFailed).to_owned();
+                self.shell.status_warn = true;
+            }
+        }
+    }
+
     /// `Ctrl+G` / `Ctrl+Shift+G` — จัดกลุ่ม / แยกกลุ่มสิ่งที่เลือก (P3-7)
     ///
     /// ★ คำสั่งที่ **ไม่มีอะไรเปลี่ยน** คืน `CmdError::Empty` มา แล้วเราไม่ขอเฟรม
@@ -3444,6 +3665,15 @@ impl AppDelegate for RefxApp {
         if let Some(request) = self.pending_group.take() {
             self.apply_group_request(request);
         }
+        // ★ การบันทึก (P4-2) — เก็บผลก่อน แล้วค่อยรับคำสั่งใหม่
+        self.poll_save();
+        if let Some(request) = self.pending_save.take() {
+            self.apply_save_request(request);
+        }
+        // ปุ่มในแถบยืนยันตอนปิด (ถ้ามี)
+        if let Some(choice) = self.shell.close_choice.take() {
+            self.apply_close_choice(choice);
+        }
         // ค่าที่ผู้ใช้ปรับใน inspector เมื่อเฟรมที่แล้ว
         self.apply_inspector_edit();
         // ข้อความที่ผู้ใช้พิมพ์ลงโน้ตเมื่อเฟรมที่แล้ว (P2-11)
@@ -4062,6 +4292,16 @@ impl AppDelegate for RefxApp {
                     self.pending_appearance = Some(what);
                     needs_redraw = true;
                 }
+                // ★ บันทึก (P4-2) — **ห้ามซ้ำตอนกดค้าง**: กดค้างหนึ่งวินาที
+                //   = เขียนไฟล์หลายสิบรอบ ซึ่งนอกจากเปลืองแล้วยังเปิด dialog
+                //   ซ้อนกันเป็นสิบบานถ้ายังไม่เคยบันทึก
+                if event.state.is_pressed()
+                    && !event.repeat
+                    && let Some(request) = save_shortcut(pressed, gfx.modifiers)
+                {
+                    self.pending_save = Some(request);
+                    needs_redraw = true;
+                }
                 // ★ จัดกลุ่ม / แยกกลุ่ม (P3-7) — **ห้ามซ้ำตอนกดค้าง** เหมือน Delete
                 //   กดค้างหนึ่งวินาที = สร้างกลุ่มใหม่ทับกันหลายสิบชั้นใน undo stack
                 //   ทั้งที่ผู้ใช้ตั้งใจกดครั้งเดียว
@@ -4090,6 +4330,36 @@ impl AppDelegate for RefxApp {
         }
 
         needs_redraw
+    }
+
+    /// ★★★ กดปิดหน้าต่างทั้งที่ยังมีงานไม่ได้บันทึก — **ถามก่อน** (P4-2)
+    ///
+    /// `CLAUDE.md` เขียนไว้ว่า "งาน mood board ที่จัดมา 3 ชั่วโมงหายไป = เลิกใช้
+    /// ทันที ไม่มีโอกาสที่สอง" · การปิดโดยไม่ถามคือทางที่งานหายง่ายที่สุด
+    /// และเป็นทางที่ผู้ใช้ทำพลาดได้ด้วยการกดผิดปุ่มเดียว
+    ///
+    /// ★ ถามด้วย **แถบใน egui ไม่ใช่ native dialog** — `rfd::MessageDialog`
+    /// บล็อกเธรดที่เรียก ซึ่งตรงนี้คือ UI thread (I-2) · แถบในแอปยังทำให้
+    /// ผู้ใช้เห็นงานของตัวเองอยู่ข้างหลังตอนตัดสินใจ ซึ่งช่วยเขาเลือกได้ถูกกว่า
+    fn on_close_requested(&mut self) -> bool {
+        if self.closing {
+            return true;
+        }
+        let dirty = self.gfx.as_ref().is_some_and(|gfx| gfx.board.is_dirty());
+        if !dirty {
+            return true;
+        }
+        self.close_confirm = true;
+        self.shell.close_prompt = true;
+        if let Some(gfx) = self.gfx.as_ref() {
+            gfx.window.request_redraw();
+        }
+        false
+    }
+
+    /// ★ ปิดโปรแกรมหลังบันทึกเสร็จ — ดู [`AppDelegate::wants_exit`] ว่าทำไมต้องมี
+    fn wants_exit(&self) -> bool {
+        self.closing
     }
 
     fn on_resize(&mut self, width: u32, height: u32) {

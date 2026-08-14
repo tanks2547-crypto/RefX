@@ -56,6 +56,17 @@ pub struct MetaView {
     pub tags: Vec<String>,
 }
 
+/// ผู้ใช้ตอบอะไรกับคำถาม "ปิดทั้งที่ยังไม่ได้บันทึก" (P4-2)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseChoice {
+    /// บันทึกก่อนแล้วค่อยปิด — ★ ปิดจริงเมื่อบันทึก **สำเร็จ** เท่านั้น
+    SaveThenClose,
+    /// ปิดโดยไม่บันทึก (ผู้ใช้ยืนยันว่าทิ้งงานได้)
+    DiscardAndClose,
+    /// ไม่ปิดแล้ว กลับไปทำงานต่อ
+    Cancel,
+}
+
 /// กลุ่มของสิ่งที่เลือกอยู่ — **ค่าสำหรับแสดงเท่านั้น** (P3-7)
 ///
 /// ★ `None` ทั้งก้อน = ไม่ได้เลือกอะไร · `Mixed` = เลือกข้ามหลายกลุ่ม
@@ -264,6 +275,10 @@ pub struct ShellState {
     pub tag_input: String,
     /// ★ กลุ่มของสิ่งที่เลือกอยู่ (P3-7) — `None` = ไม่ได้เลือกอะไร
     pub group: Option<GroupView>,
+    /// ★ กำลังถามว่าจะปิดยังไงทั้งที่ยังไม่ได้บันทึก (P4-2)
+    pub close_prompt: bool,
+    /// ผู้ใช้ตอบแล้วในเฟรมนี้ — `None` = ยังไม่ตอบ
+    pub close_choice: Option<CloseChoice>,
     /// ★★ สิ่งที่ผู้ใช้ขอทำกับกลุ่มในเฟรมนี้ — `None` = ไม่ได้แตะ
     pub group_request: Option<GroupRequest>,
     /// ผู้ใช้ออกจากช่องชื่อกลุ่มแล้ว → ปิดหน้าต่าง merge
@@ -375,6 +390,8 @@ impl Default for ShellState {
             meta_sealed: false,
             tag_input: String::new(),
             group: None,
+            close_prompt: false,
+            close_choice: None,
             group_request: None,
             group_sealed: false,
             picked: None,
@@ -425,6 +442,39 @@ pub fn draw_in_ui(
             }
         });
     });
+
+    // ---- ★ แถบยืนยันตอนปิดทั้งที่ยังไม่ได้บันทึก (P4-2) ----
+    //
+    //   วางไว้ **บนสุดใต้แท็บ** เพื่อให้เห็นแน่ ๆ แต่ยังเห็นงานข้างหลังอยู่
+    //   — ต่างจาก native dialog ที่บังทุกอย่างและบล็อก UI thread (I-2)
+    if state.close_prompt {
+        egui::Panel::top("refx-close-confirm").show_inside(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    egui::RichText::new(text::t(lang, Key::CloseUnsavedTitle))
+                        .strong()
+                        .color(WARN_COLOR),
+                );
+                ui.separator();
+                // ★ ปุ่มที่ **ปลอดภัยที่สุดมาก่อน** — ผู้ใช้ที่กดเร็วโดยไม่อ่าน
+                //   ต้องเจอทางที่ไม่ทำงานหายก่อนเสมอ
+                if ui.button(text::t(lang, Key::CloseSaveFirst)).clicked() {
+                    state.close_choice = Some(CloseChoice::SaveThenClose);
+                }
+                if ui.button(text::t(lang, Key::CloseCancel)).clicked() {
+                    state.close_choice = Some(CloseChoice::Cancel);
+                }
+                ui.separator();
+                if ui
+                    .button(text::t(lang, Key::CloseDiscard))
+                    .on_hover_text(text::t(lang, Key::CloseDiscardHint))
+                    .clicked()
+                {
+                    state.close_choice = Some(CloseChoice::DiscardAndClose);
+                }
+            });
+        });
+    }
 
     // ---- แถวสอง: mode switch + tools ----
     egui::Panel::top("refx-toolbar").show_inside(ui, |ui| {
@@ -1533,9 +1583,13 @@ mod tests {
             meta_sealed: _,
             group_request,
             group_sealed: _,
+            // ★ ปุ่มในแถบยืนยันตอนปิด (P4-2) — นำไปสู่ `mark_saved` ซึ่งแตะธง
+            //   `dirty` ของ `Board` จึงนับเป็นช่องทางที่แก้เอกสารได้
+            close_choice,
 
             // ---- สถานะของ *มุมมอง* — เปลี่ยนได้ตามใจ ไม่แตะเอกสาร ----
             mode: _,
+            close_prompt: _,    // บอกแค่ว่าแถบยืนยันโผล่อยู่ไหม ไม่ใช่คำขอแก้อะไร
             appearance: _,      // ค่าสำหรับแสดงของ inspector
             board_grayscale: _, // สวิตช์การมองเห็นทั้ง board (P2-8) ไม่ลงไฟล์
             tool: _,
@@ -1578,6 +1632,7 @@ mod tests {
             || note_edit.is_some()
             || meta_request.is_some()
             || group_request.is_some()
+            || close_choice.is_some()
             || *arrange_apply
     }
 

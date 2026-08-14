@@ -35,5 +35,6 @@ winit.workspace   = true
 rfd.workspace     = true
 arboard.workspace = true
 directories.workspace = true
+crossbeam-channel.workspace = true
 thiserror.workspace   = true
 tracing.workspace     = true
