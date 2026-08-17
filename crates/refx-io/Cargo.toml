@@ -21,5 +21,14 @@ thiserror.workspace = true
 tracing.workspace   = true
 
 [dev-dependencies]
+# ★★ **dev-dependency โดยตั้งใจ ไม่ใช่ dependency ปกติ**
+#
+#   เทสต์ฆ่าโปรเซสต้องยิง `rename_durable` ตัวที่ production ใช้จริง ไม่ใช่ตัวจำลอง
+#   (docs/08 §3.9 ข้อ 9 — เทสต์ที่เรียกฟังก์ชันจำลองพิสูจน์ได้แค่ว่าตัวจำลองทำงาน)
+#
+#   ★ dev-dep **ไม่ตามไปหาผู้ที่พึ่ง crate นี้** — `fuzz/` พึ่ง refx-io แบบปกติ
+#     จึงไม่ต้องคอมไพล์ rfd/arboard/winit ตามมา = ไม่ซ้ำรอย §4 ข้อ 18
+#     (ยืนยันด้วยการนับ GUI dep ใน fuzz/Cargo.lock ก่อน/หลัง — ต้องเป็น 0 เท่าเดิม)
+refx-platform.workspace = true
 proptest.workspace = true
 smallvec.workspace = true

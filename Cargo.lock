@@ -2858,6 +2858,7 @@ dependencies = [
  "postcard",
  "proptest",
  "refx-core",
+ "refx-platform",
  "serde",
  "smallvec",
  "thiserror 2.0.19",

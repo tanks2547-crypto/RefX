@@ -63,17 +63,6 @@ const BAK_TMP_SUFFIX: &str = "refx.bak.tmp";
 /// ข้อ 8 บันทึกไว้ · บังคับให้ทุกจุดเรียกตัดสินใจเอง
 pub type RenameFn = fn(&Path, &Path) -> std::io::Result<()>;
 
-/// สลับไฟล์ด้วย `std::fs::rename` เฉย ๆ — **ไม่มีหลักประกันความทนทานของตัว rename**
-///
-/// ★ ใช้ในเทสต์และในเส้นทางที่ไม่มีชั้น platform · โค้ดที่ผู้ใช้จริงใช้ต้องส่ง
-/// `refx_platform::fsops::rename_durable` เข้ามาแทน
-///
-/// # Errors
-/// คืน error ของระบบไฟล์ตามเดิม
-pub fn plain_rename(from: &Path, to: &Path) -> std::io::Result<()> {
-    std::fs::rename(from, to)
-}
-
 /// บันทึกไม่สำเร็จ
 ///
 /// ★ ทุก variant บอก **สิ่งที่เกิดขึ้น + ขั้นที่มันเกิด** เพราะข้อความที่ผู้ใช้เห็น
@@ -226,8 +215,18 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+    // ★★ **ยิงตัวที่ production ใช้จริง ไม่ใช่ `std::fs::rename` ที่จำลองขึ้นมา**
+    //
+    //    รุ่นแรกของเทสต์ชุดนี้ใช้ตัวจำลอง แปลว่าเส้นทางจริง (`rename_durable`
+    //    ที่ใส่ `MOVEFILE_WRITE_THROUGH` บน Windows) **ไม่เคยผ่านเทสต์ฆ่าโปรเซสเลย**
+    //    — สิ่งที่พิสูจน์ได้จึงเป็น "ตัวจำลองทำงาน" ไม่ใช่ "ของจริงทำงาน"
+    //    (docs/08 §3.9 ข้อ 9)
+    //
+    //    ★ `refx-platform` เป็น **dev-dependency** จึงไม่ตามไปที่ `fuzz/`
+    //      (ยืนยันแล้ว: GUI dep ใน `fuzz/Cargo.lock` เป็น 0 ทั้งก่อนและหลัง)
     use refx_core::arena::{ArenaKey as _, BoardId};
     use refx_core::board::{BoardParts, Group, Item, ItemKind, ItemParts, TextNote};
+    use refx_platform::fsops::rename_durable;
 
     fn board_id() -> BoardId {
         BoardId::from_parts(0, 0)
@@ -285,7 +284,7 @@ mod tests {
         let doc = dir.join("work.refx");
         let board = board_named("first", 3);
 
-        save_atomic(&doc, &board, plain_rename).unwrap();
+        save_atomic(&doc, &board, rename_durable).unwrap();
 
         let back = dto::decode(&read_all(&doc).unwrap(), board_id()).unwrap();
         assert_eq!(back, board);
@@ -308,8 +307,8 @@ mod tests {
 
         let old = board_named("old", 2);
         let new = board_named("new", 5);
-        save_atomic(&doc, &old, plain_rename).unwrap();
-        save_atomic(&doc, &new, plain_rename).unwrap();
+        save_atomic(&doc, &old, rename_durable).unwrap();
+        save_atomic(&doc, &new, rename_durable).unwrap();
 
         let current = dto::decode(&read_all(&doc).unwrap(), board_id()).unwrap();
         let backup = dto::decode(&read_all(backup_path(&doc)).unwrap(), board_id()).unwrap();
@@ -338,7 +337,7 @@ mod tests {
         std::fs::write(&doc, &bytes).unwrap();
         let before = read_all(&doc).unwrap();
 
-        let err = save_atomic(&doc, &board_named("mine", 1), plain_rename).unwrap_err();
+        let err = save_atomic(&doc, &board_named("mine", 1), rename_durable).unwrap_err();
         assert!(
             matches!(err, SaveError::Refused(dto::OpenError::NewerVersion { .. })),
             "ต้องถูกปฏิเสธเพราะเวอร์ชัน ไม่ใช่เหตุอื่น: {err}"
@@ -363,8 +362,8 @@ mod tests {
     fn a_file_this_build_understands_is_replaced_normally() {
         let dir = temp_dir("replace");
         let doc = dir.join("work.refx");
-        save_atomic(&doc, &board_named("old", 1), plain_rename).unwrap();
-        save_atomic(&doc, &board_named("new", 2), plain_rename).unwrap();
+        save_atomic(&doc, &board_named("old", 1), rename_durable).unwrap();
+        save_atomic(&doc, &board_named("new", 2), rename_durable).unwrap();
         let back = dto::decode(&read_all(&doc).unwrap(), board_id()).unwrap();
         assert_eq!(back.name(), "new");
     }
@@ -379,7 +378,7 @@ mod tests {
         let doc = dir.join("work.refx");
         std::fs::write(&doc, b"this was never a refx file").unwrap();
 
-        save_atomic(&doc, &board_named("mine", 1), plain_rename).unwrap();
+        save_atomic(&doc, &board_named("mine", 1), rename_durable).unwrap();
 
         assert!(dto::decode(&read_all(&doc).unwrap(), board_id()).is_ok());
         assert_eq!(
@@ -423,8 +422,8 @@ mod tests {
         loop {
             // ล้มก็ช่างมัน — หน้าที่ของมันคือ "เขียนไปเรื่อย ๆ จนโดนฆ่า"
             // สิ่งที่ถูกตรวจคือ *ไฟล์บนดิสก์* ไม่ใช่ค่าที่ฟังก์ชันนี้คืน
-            let _ = save_atomic(&doc, &new, plain_rename);
-            let _ = save_atomic(&doc, &old, plain_rename);
+            let _ = save_atomic(&doc, &new, rename_durable);
+            let _ = save_atomic(&doc, &old, rename_durable);
         }
     }
 
@@ -496,7 +495,7 @@ mod tests {
         // ไฟล์ตั้งต้น = "งานเมื่อวาน" ที่ห้ามเสียไม่ว่าอะไรจะเกิดขึ้น
         let old = board_named("old", VICTIM_ITEMS);
         let new = board_named("new", VICTIM_ITEMS);
-        save_atomic(&doc, &old, plain_rename).unwrap();
+        save_atomic(&doc, &old, rename_durable).unwrap();
 
         let exe = std::env::current_exe().expect("หา test binary ของตัวเองไม่เจอ");
         let marker = ready_marker(&doc);
