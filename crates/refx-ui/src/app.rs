@@ -1373,6 +1373,10 @@ pub struct RefxApp {
     pending_group: Option<GroupRequest>,
     /// ผู้ใช้กด `Ctrl+S` / `Ctrl+Shift+S` ในรอบ event ที่ผ่านมา (P4-2)
     pending_save: Option<SaveRequest>,
+    /// ★ นโยบาย autosave — `dirty` เท่านั้น + เว้นระยะ (P4-3)
+    autosaver: refx_io::autosave::Autosaver,
+    /// งาน autosave ที่ส่งไปเธรดแล้ว — กันไม่ให้ซ้อนกันสองงาน
+    autosave_job: Option<crossbeam_channel::Receiver<Result<(), String>>>,
     /// ★ ที่อยู่ของเอกสารปัจจุบัน — `None` = ยังไม่เคยบันทึก
     doc_path: Option<std::path::PathBuf>,
     /// dialog เลือกที่บันทึกที่กำลังเปิดอยู่ (รอผู้ใช้ตอบ — ไม่บล็อก I-2)
@@ -1463,6 +1467,8 @@ impl RefxApp {
             pending_appearance: None,
             pending_group: None,
             pending_save: None,
+            autosaver: refx_io::autosave::Autosaver::default(),
+            autosave_job: None,
             doc_path: None,
             save_dialog: None,
             save_job: None,
@@ -2685,6 +2691,60 @@ impl RefxApp {
         gfx.window.request_redraw();
     }
 
+    /// ★★★ autosave หนึ่งจังหวะ — เรียกทุกเฟรม **ไม่บล็อก** (P4-3, I-2)
+    ///
+    /// สองด่านที่ต้องผ่านทั้งคู่อยู่ใน `Autosaver::should_write` (ฟังก์ชันบริสุทธิ์
+    /// ที่เทสต์ได้โดยไม่ต้องแตะดิสก์) · ที่นี่มีแค่การต่อสาย
+    ///
+    /// ★ **เขียนได้เฉพาะเอกสารที่มี path แล้ว** — งานที่ยังไม่เคยบันทึกไม่มีที่
+    /// ให้วาง `.refx.autosave` · เป็นช่องที่รู้ตัว ดูรายงาน P4-3
+    fn tick_autosave(&mut self) {
+        // เก็บผลของรอบก่อน (ถ้ามี) — autosave ที่ล้มไม่ใช่เรื่องที่ผู้ใช้ต้องเห็น
+        if let Some(rx) = self.autosave_job.as_ref() {
+            match rx.try_recv() {
+                Ok(Ok(())) => self.autosave_job = None,
+                Ok(Err(err)) => {
+                    tracing::warn!(%err, "autosave snapshot failed");
+                    self.autosave_job = None;
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => return,
+                Err(crossbeam_channel::TryRecvError::Disconnected) => self.autosave_job = None,
+            }
+        }
+        let Some(doc) = self.doc_path.clone() else {
+            return;
+        };
+        let Some(gfx) = self.gfx.as_ref() else {
+            return;
+        };
+        let dirty = gfx.board.is_dirty();
+        let now = std::time::Instant::now();
+        if !self.autosaver.should_write(dirty, now) {
+            return;
+        }
+
+        // ★ โคลน ณ จังหวะที่ตัดสิน ด้วยเหตุผลเดียวกับการบันทึกจริง —
+        //   ผู้ใช้ต้องแก้งานต่อได้ระหว่างที่ snapshot กำลังเขียน
+        let board = gfx.board.clone();
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let spawned = std::thread::Builder::new()
+            .name("refx-autosave".to_owned())
+            .spawn(move || {
+                let result = refx_io::autosave::write_snapshot(
+                    &doc,
+                    &board,
+                    refx_platform::fsops::rename_durable,
+                )
+                .map_err(|err| err.to_string());
+                let _ = tx.send(result);
+            });
+        if spawned.is_err() {
+            return;
+        }
+        self.autosave_job = Some(rx);
+        self.autosaver.record_write(now);
+    }
+
     /// ผู้ใช้ตอบแถบยืนยันตอนปิดแล้ว (P4-2)
     fn apply_close_choice(&mut self, choice: crate::shell::CloseChoice) {
         use crate::shell::CloseChoice;
@@ -2830,6 +2890,10 @@ impl RefxApp {
                 let name = path
                     .file_name()
                     .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+                // ★★ ทิ้ง snapshot **เมื่อบันทึกสำเร็จเท่านั้น** (docs/07 §4)
+                //    และรีเซ็ตนาฬิกาเพื่อให้การแก้ครั้งถัดไปถูกเก็บทันที
+                refx_io::autosave::discard(&path);
+                self.autosaver.reset();
                 self.doc_path = Some(path);
                 self.shell.status = text::fill(lang, text::Template::Saved, &[("name", &name)]);
                 self.shell.status_warn = false;
@@ -3667,6 +3731,9 @@ impl AppDelegate for RefxApp {
         }
         // ★ การบันทึก (P4-2) — เก็บผลก่อน แล้วค่อยรับคำสั่งใหม่
         self.poll_save();
+        // ★ autosave (P4-3) — ตัดสินหลัง `poll_save` เพราะการบันทึกสำเร็จ
+        //   เพิ่งล้าง `dirty` ไป การถามก่อนจะได้คำตอบจากสถานะเก่าหนึ่งเฟรม
+        self.tick_autosave();
         if let Some(request) = self.pending_save.take() {
             self.apply_save_request(request);
         }
@@ -4170,12 +4237,17 @@ impl AppDelegate for RefxApp {
 
     fn wake_deadline(&self) -> Option<std::time::Instant> {
         let gfx = self.gfx.as_ref()?;
-        // เอาเวลาที่ใกล้ที่สุดของทั้งสองแหล่ง (egui กับตัวจำลอง device lost)
-        match (gfx.egui_wake, gfx.render.forced_lost_deadline()) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (Some(a), None) => Some(a),
-            (None, b) => b,
-        }
+        // ★ เอาเวลาที่ใกล้ที่สุดของทุกแหล่ง — egui · ตัวจำลอง device lost ·
+        //   และ autosave (P4-3 · ขาดตัวหลัง board ที่ dirty แล้วถูกปล่อยไว้
+        //   จะไม่ถูก snapshot เลยจนกว่าผู้ใช้จะกลับมาขยับเมาส์)
+        let autosave = self
+            .doc_path
+            .as_ref()
+            .and_then(|_| self.autosaver.next_deadline(gfx.board.is_dirty()));
+        [gfx.egui_wake, gfx.render.forced_lost_deadline(), autosave]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     fn on_wake(&mut self) -> Option<RedrawReason> {
