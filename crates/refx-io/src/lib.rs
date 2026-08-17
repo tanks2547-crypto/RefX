@@ -4,6 +4,11 @@
 //! หน้าที่หลักคือ invariant I-3: ข้อมูลผู้ใช้ห้ามหาย
 // lint ทั้งหมดสืบทอดจาก [workspace.lints] ใน Cargo.toml ราก
 
+// ★ เฉพาะตอนเทสต์: นาฬิกาของ "ผู้ใช้จำลอง" ที่เทสต์ฆ่าโปรเซสใช้วัดงานที่หายไป
+//   — แยกออกมาเพราะบทเรียนของมันต้องไม่ drift ระหว่างเทสต์สองตัวที่ใช้ร่วมกัน
+#[cfg(test)]
+mod killclock;
+
 pub mod autosave; // snapshot ทั้ง board กันงานหายตอน crash (P4-3)
 pub mod dto; // DTO มีเวอร์ชัน — แยกจาก type ใน refx-core เสมอ
 pub mod journal; // append-only command journal + CRC ต่อ record

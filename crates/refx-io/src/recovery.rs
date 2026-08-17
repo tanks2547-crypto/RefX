@@ -726,12 +726,18 @@ mod tests {
         // ★ session ใหม่ทุกครั้งที่เปิดโปรแกรม — เหมือนของจริงเป๊ะ
         let session = SessionId::new_unique();
         let mut saver = crate::autosave::Autosaver::new(TEST_INTERVAL);
+        let mut progress = crate::killclock::Progress::new(&crate::killclock::progress_path(&dir))
+            .expect("เปิดไฟล์ประวัติไม่ได้");
         let mut items = 0usize;
 
         std::fs::write(ready_marker(&dir), session.as_str()).expect("เขียนไฟล์สัญญาณไม่ได้");
         loop {
             items += 1;
             let board = board_named("ยังไม่เคยบันทึก", items);
+            // ★★ จดความคืบหน้าของ "ผู้ใช้" ลงไฟล์ — พ่อจะได้ **วัด** ว่าเสียไปเท่าไร
+            //    ไม่ใช่หารจากนาฬิกา ซึ่งเป็นสิ่งที่ทำให้เทสต์คู่แฝดแดงบน CI
+            //    (เหตุผลเต็มใน `killclock`)
+            progress.record(items);
             let now = Instant::now();
             if saver.should_write(true, now) {
                 let _ = write_snapshot(&dir, &session, &board, rename_durable);
@@ -744,9 +750,9 @@ mod tests {
     /// ★★★ **เกณฑ์ผ่านของ `docs/07 §4`**: เปิดโปรแกรมใหม่ · ลากภาพ ·
     /// **ไม่กด `Ctrl+S` เลย** · ฆ่าโปรเซส → เปิดใหม่ต้องได้งานคืน
     ///
-    /// ★★ วัดจริงเหมือน P4-3 ไม่ใช่แค่ดูว่ามีไฟล์: จำนวน item ใน snapshot คือ
-    /// **นาฬิกาที่อ่านย้อนหลังได้** เทียบกับเวลาที่เหยื่อมีชีวิตอยู่จริง
-    /// → ตอบได้ว่า "กู้ได้กี่ %" ไม่ใช่ "กู้ได้/ไม่ได้"
+    /// ★★ วัดจริงเหมือน P4-3 ไม่ใช่แค่ดูว่ามีไฟล์: เทียบจำนวน item ใน snapshot
+    /// กับ **ประวัติที่เหยื่อจดไว้เองว่าใบที่ N เกิดตอนไหน** ([`crate::killclock`])
+    /// → ตอบได้ว่า "กู้ได้กี่ %" และ "เสียไปกี่วินาที" ที่เป็นของจริงบนทุกเครื่อง
     ///
     /// ★ ไม่มี path ของเอกสารเข้ามาเกี่ยวข้องเลยสักจังหวะ — ถ้ามี แปลว่า
     /// เทสต์นี้กำลังวัดเส้นทางของ P4-3 ซ้ำแทนที่จะวัดช่องที่มันเปิดค้างไว้
@@ -803,17 +809,23 @@ mod tests {
                 .unwrap_or_else(|| panic!("รอบ {round}: snapshot อ่านไม่ออก — งานหาย"));
 
             let saved_items = board.len();
-            let done_items = (lived.as_millis() / EDIT_PERIOD.as_millis()) as usize;
-            let lost_items = done_items.saturating_sub(saved_items);
-            let lost = EDIT_PERIOD * u32::try_from(lost_items).unwrap_or(u32::MAX);
+            // ★★★ ถามประวัติที่เหยื่อจดไว้เอง **ห้ามหารจาก `lived`** — ดู `killclock`
+            //     (การหารทำให้เทสต์คู่แฝดของ P4-3 แดงบน runner 2 core)
+            let timeline = crate::killclock::read(&crate::killclock::progress_path(&dir));
+            let (Some(done_items), Some(lost)) =
+                (timeline.done(), timeline.lost_after(saved_items))
+            else {
+                nothing_yet += 1;
+                continue;
+            };
             #[expect(clippy::cast_precision_loss, reason = "แค่พิมพ์ให้คนอ่าน")]
             let kept = (saved_items as f64 / done_items.max(1) as f64 * 100.0).min(100.0);
             worst_lost = worst_lost.max(lost);
             worst_kept = worst_kept.min(kept);
             measured += 1;
             println!(
-                "รอบ {round}: มีชีวิต {lived:?} · ทำไป ~{done_items} ใบ · \
-                 กู้ได้ {saved_items} ใบ ({kept:.0}%) · เสีย ~{lost:?}"
+                "รอบ {round}: มีชีวิต {lived:?} · ทำไป {done_items} ใบ · \
+                 กู้ได้ {saved_items} ใบ ({kept:.0}%) · เสีย {lost:?}"
             );
         }
 

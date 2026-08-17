@@ -586,13 +586,19 @@ mod tests {
             return;
         };
         let doc = PathBuf::from(target);
+        let dir = doc.parent().unwrap_or(Path::new(".")).to_path_buf();
         let mut saver = Autosaver::new(TEST_INTERVAL);
+        let mut progress = crate::killclock::Progress::new(&crate::killclock::progress_path(&dir))
+            .expect("เปิดไฟล์ประวัติไม่ได้");
         let mut items = 0usize;
 
         std::fs::write(ready_marker(&doc), b"ready").expect("เขียนไฟล์สัญญาณไม่ได้");
         loop {
             items += 1;
             let board = board_named("editing", items);
+            // ★★ จด **ก่อน** ตัดสินใจ snapshot — ประวัติจึงครอบงานที่ยังไม่ถูกเก็บ
+            //    เสมอ ไม่ใช่ตามหลังมัน (ดู `killclock`: เราต้องวัด ไม่ใช่หาร)
+            progress.record(items);
             // ★ เส้นทางเดียวกับของจริงทุกขั้น: นโยบายเดิม · `write_snapshot` เดิม
             //   · `rename_durable` เดิม — ไม่ใช่ตัวจำลอง (docs/08 §3.9 ข้อ 9)
             let now = Instant::now();
@@ -609,8 +615,14 @@ mod tests {
     /// ★★ **วัด ไม่ใช่อนุมานจากค่า N ที่ตั้งไว้** — จังหวะที่ snapshot ถูก flush
     /// เทียบกับจังหวะที่โปรเซสตาย เป็นสิ่งที่รู้ได้ทางเดียวคือลองฆ่าจริง
     ///
-    /// วิธีวัด: เหยื่อเพิ่ม item ทีละใบทุก [`EDIT_PERIOD`] → **จำนวน item ใน
-    /// snapshot คือนาฬิกา** · เทียบกับเวลาที่มันมีชีวิตอยู่จริงแล้วได้ "เสียไปกี่วินาที"
+    /// วิธีวัด: เหยื่อเพิ่ม item ทีละใบแล้ว **จดลงไฟล์ประวัติว่าใบที่ N เกิดตอนไหน**
+    /// → เทียบจำนวน item ใน snapshot กับประวัตินั้น ได้ "เสียไปกี่วินาที" ที่เป็น
+    /// ของจริง
+    ///
+    /// ★★★ **เคยหารเอาจาก `เวลาที่มีชีวิต ÷ EDIT_PERIOD` แล้วแดงบน CI**
+    /// (17 ส.ค. 2026) เพราะ runner 2 core ทำได้ช้ากว่า 20 ms ต่อรอบจริง
+    /// ตัวหารจึงบอกว่าเหยื่อทำไป 163 ใบทั้งที่ทำน้อยกว่านั้นมาก — เหตุผลเต็ม
+    /// และทางแก้อยู่ใน [`crate::killclock`] · **อย่าเอาการหารกลับมา**
     ///
     /// ★ ค่าที่ยอมรับได้คือ **ไม่เกินระยะเว้น + ค่าเผื่อ** — เกินกว่านั้นแปลว่า
     /// snapshot ไม่ได้ลงดิสก์ตามที่นโยบายบอก ซึ่งเป็นคนละเรื่องกับ "นโยบายหลวม"
@@ -630,6 +642,8 @@ mod tests {
         for round in 0..ROUNDS {
             let _ = std::fs::remove_file(&marker);
             let _ = std::fs::remove_file(autosave_path(&doc));
+            // ประวัติของรอบก่อนต้องไม่ปนมา ไม่งั้นจะวัดงานของคนละโปรเซส
+            let _ = std::fs::remove_file(crate::killclock::progress_path(&dir));
 
             let mut child = std::process::Command::new(&exe)
                 .args([EDITOR_TEST_PATH, "--exact", "--nocapture"])
@@ -662,15 +676,19 @@ mod tests {
                 continue;
             };
             let saved_items = pending.board.len();
-            let done_items = (lived.as_millis() / EDIT_PERIOD.as_millis()) as usize;
-            let lost_items = done_items.saturating_sub(saved_items);
-            let lost = EDIT_PERIOD * u32::try_from(lost_items).unwrap_or(u32::MAX);
+            // ★★★ ถามประวัติที่เหยื่อจดไว้เอง **ห้ามหารจาก `lived`** (ดู `killclock`)
+            let timeline = crate::killclock::read(&crate::killclock::progress_path(&dir));
+            let (Some(done_items), Some(lost)) =
+                (timeline.done(), timeline.lost_after(saved_items))
+            else {
+                nothing_yet += 1;
+                continue;
+            };
             worst = worst.max(lost);
             measured += 1;
             println!(
-                "รอบ {round}: มีชีวิต {:?} · ทำไป ~{done_items} ใบ · \
-                 snapshot มี {saved_items} ใบ · เสีย ~{:?}",
-                lived, lost
+                "รอบ {round}: มีชีวิต {lived:?} · ทำไป {done_items} ใบ · \
+                 snapshot มี {saved_items} ใบ · เสีย {lost:?}"
             );
         }
 
@@ -683,8 +701,10 @@ mod tests {
             measured > 0,
             "ไม่มีรอบไหนวัดได้เลย — ฆ่าเร็วเกินไปทุกครั้งจนไม่เคยมี snapshot"
         );
-        // ★ เผื่อ 1.5 เท่าของช่วงแก้หนึ่งจังหวะ: ระหว่างที่ snapshot กำลังเขียน
-        //   เหยื่อยังเพิ่ม item ต่อ และการวัด `lived` มีค่าเผื่อของ scheduler
+        // ★ เผื่อครึ่งหนึ่งของระยะเว้น: ระหว่างที่ snapshot กำลังเขียน เหยื่อยัง
+        //   เพิ่ม item ต่อ ใบพวกนั้นจึงไม่อยู่ในไฟล์ทั้งที่ประวัติจดไว้แล้ว
+        //   ★ ค่าเผื่อนี้ **ไม่ได้มีไว้กลบความช้าของเครื่อง** อีกต่อไป —
+        //     ตัวเลขที่วัดได้มาจากประวัติของเหยื่อเอง จึงเป็นของจริงบนทุกเครื่อง
         let allowed = TEST_INTERVAL + TEST_INTERVAL / 2;
         assert!(
             worst <= allowed,
