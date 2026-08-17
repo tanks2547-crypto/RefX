@@ -1374,11 +1374,31 @@ pub struct RefxApp {
     /// ผู้ใช้กด `Ctrl+S` / `Ctrl+Shift+S` ในรอบ event ที่ผ่านมา (P4-2)
     pending_save: Option<SaveRequest>,
     /// ★ นโยบาย autosave — `dirty` เท่านั้น + เว้นระยะ (P4-3)
+    ///
+    /// ★★ **ตัวเดียวคุมทั้งสองปลายทาง** (ข้างเอกสาร / โฟลเดอร์ recovery) —
+    /// ที่ต่างกันคือ *ที่อยู่* ไม่ใช่ *นโยบาย* ดู [`SnapshotTarget`]
     autosaver: refx_io::autosave::Autosaver,
     /// งาน autosave ที่ส่งไปเธรดแล้ว — กันไม่ให้ซ้อนกันสองงาน
     autosave_job: Option<crossbeam_channel::Receiver<Result<(), String>>>,
+    /// ★★★ `board.revision()` ของ snapshot ล่าสุดที่ส่งไปเขียน — `None` = ยังไม่เคยเขียน
+    ///
+    /// **`dirty` อย่างเดียวตอบคำถามผิด** เมื่อรวมกับการปลุกตามเวลา: `dirty`
+    /// เป็นจริงยาวจนกว่าจะ `Ctrl+S` จริง ๆ ดังนั้น board ที่ถูกปล่อยทิ้งไว้
+    /// จะถูกปลุกมาเขียน snapshot ที่ **เนื้อหาเหมือนเดิมเป๊ะ** ทุก 10 วินาที
+    /// ตลอดทั้งวัน — ผิดทั้ง I-1 และข้อ "ห้ามแย่ง CPU กับ Photoshop"
+    ///
+    /// `revision` คือคำถามที่ถูก: *เปลี่ยนไปจากที่บันทึกไว้ล่าสุดหรือยัง*
+    /// (ตัวเดียวกับที่ P3-4 ใช้เป็นคีย์ cache — มันไม่ขยับตอนกล้องเลื่อน)
+    snapshot_revision: Option<u64>,
     /// ★ ที่อยู่ของเอกสารปัจจุบัน — `None` = ยังไม่เคยบันทึก
     doc_path: Option<std::path::PathBuf>,
+    /// ★★★ รหัสของการเปิดโปรแกรมครั้งนี้ — ชื่อไฟล์ snapshot ของงานที่ยังไม่เคยบันทึก
+    session: refx_io::recovery::SessionId,
+    /// ★ โฟลเดอร์ `<data_dir>/recovery` — `None` = หาที่อยู่ไม่ได้ (ไม่มี home dir)
+    ///
+    /// **ห้ามตกมาที่ `cache_dir`** ถ้าหาไม่เจอ (`docs/07 §4`) — ยอมไม่มี autosave
+    /// ดีกว่าวางงานของผู้ใช้ไว้ในที่ที่มีคนตั้งใจจะลบเป็นระยะ
+    recovery_dir: Option<std::path::PathBuf>,
     /// dialog เลือกที่บันทึกที่กำลังเปิดอยู่ (รอผู้ใช้ตอบ — ไม่บล็อก I-2)
     save_dialog: Option<crossbeam_channel::Receiver<Option<std::path::PathBuf>>>,
     /// งานบันทึกที่ส่งไปเธรดแล้ว รอผลกลับ (ไม่บล็อก I-2)
@@ -1404,6 +1424,21 @@ pub struct RefxApp {
     /// working texture ต้อง decode ใหม่จากไฟล์จริง จึงต้องจำที่มาไว้จับคู่
     job_sources:
         std::collections::HashMap<refx_asset::hash::ContentHash, refx_asset::pool::JobSource>,
+}
+
+/// ★★ snapshot ของ autosave รอบนี้จะไปลงที่ไหน
+///
+/// สองปลายทางนี้ต่างกันแค่ **ที่อยู่** — นโยบายว่าเมื่อไหร่ควรเขียน
+/// (`dirty` + เว้นระยะ) เป็นตัวเดียวกันทั้งคู่ ดู `RefxApp::autosaver`
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SnapshotTarget {
+    /// เอกสารมี path แล้ว → `<doc>.refx.autosave` (P4-3)
+    BesideDocument(std::path::PathBuf),
+    /// ★★★ ยังไม่เคยบันทึกที่ไหนเลย → `<data_dir>/recovery/<session>.refx` (P4-4)
+    ///
+    /// เก็บ **โฟลเดอร์** ไม่ใช่ไฟล์ เพราะชื่อไฟล์มาจาก `session` ซึ่งเป็นของ
+    /// `RefxApp` — การเก็บ path เต็มไว้สองที่คือสองแหล่งความจริงที่จะ drift กัน
+    Recovery(std::path::PathBuf),
 }
 
 /// ส่วนที่จัดการภาพ — อยู่คนละโลกกับ GPU
@@ -1469,7 +1504,12 @@ impl RefxApp {
             pending_save: None,
             autosaver: refx_io::autosave::Autosaver::default(),
             autosave_job: None,
+            snapshot_revision: None,
             doc_path: None,
+            // ★ รหัสใหม่ทุกครั้งที่เปิดโปรแกรม — สองหน้าต่างจึงเขียนคนละไฟล์
+            session: refx_io::recovery::SessionId::new_unique(),
+            // ผู้เรียก (`run`) เสียบให้ — ที่นี่ไม่รู้จัก `AppPaths`
+            recovery_dir: None,
             save_dialog: None,
             save_job: None,
             after_save: AfterSave::Stay,
@@ -2691,13 +2731,29 @@ impl RefxApp {
         gfx.window.request_redraw();
     }
 
-    /// ★★★ autosave หนึ่งจังหวะ — เรียกทุกเฟรม **ไม่บล็อก** (P4-3, I-2)
+    /// ★★ ที่ที่ snapshot รอบนี้จะไปลง — `None` = ไม่มีที่ให้วางเลย
+    ///
+    /// ★★★ **งานที่ยังไม่เคยบันทึกต้องมี autosave ด้วย** (`docs/07 §4`, P4-4)
+    ///
+    /// P4-3 เขียนได้เฉพาะเอกสารที่มี path แล้ว ซึ่งแปลว่าคนที่จัด mood board
+    /// มาสามชั่วโมงโดยยังไม่เคยกด `Ctrl+S` — คนที่เสียมากที่สุดถ้าโปรแกรมตาย —
+    /// ไม่มีอะไรคุ้มครองเลย · ตอนนี้เขาตกมาที่ [`SnapshotTarget::Recovery`]
+    ///
+    /// ★ `None` เกิดได้ทางเดียว: ยังไม่เคยบันทึก **และ** หาโฟลเดอร์ data ไม่ได้
+    fn snapshot_target(&self) -> Option<SnapshotTarget> {
+        if let Some(doc) = self.doc_path.clone() {
+            return Some(SnapshotTarget::BesideDocument(doc));
+        }
+        self.recovery_dir.clone().map(SnapshotTarget::Recovery)
+    }
+
+    /// ★★★ autosave หนึ่งจังหวะ — เรียกทุกเฟรม **ไม่บล็อก** (P4-3/P4-4, I-2)
     ///
     /// สองด่านที่ต้องผ่านทั้งคู่อยู่ใน `Autosaver::should_write` (ฟังก์ชันบริสุทธิ์
     /// ที่เทสต์ได้โดยไม่ต้องแตะดิสก์) · ที่นี่มีแค่การต่อสาย
     ///
-    /// ★ **เขียนได้เฉพาะเอกสารที่มี path แล้ว** — งานที่ยังไม่เคยบันทึกไม่มีที่
-    /// ให้วาง `.refx.autosave` · เป็นช่องที่รู้ตัว ดูรายงาน P4-3
+    /// ★ นโยบายเดียวคุมทั้งสองปลายทาง — ผู้ใช้ที่ยังไม่เคยบันทึกได้การคุ้มครอง
+    /// **เท่ากันเป๊ะ** กับคนที่บันทึกแล้ว ไม่ใช่รุ่นด้อยกว่า
     fn tick_autosave(&mut self) {
         // เก็บผลของรอบก่อน (ถ้ามี) — autosave ที่ล้มไม่ใช่เรื่องที่ผู้ใช้ต้องเห็น
         if let Some(rx) = self.autosave_job.as_ref() {
@@ -2706,43 +2762,93 @@ impl RefxApp {
                 Ok(Err(err)) => {
                     tracing::warn!(%err, "autosave snapshot failed");
                     self.autosave_job = None;
+                    // ★ ล้มแล้วต้อง **ลองใหม่** ไม่ใช่ถือว่าเก็บไปแล้ว (I-3) ·
+                    //   ตัวเว้นระยะยังคุมอยู่ จึงลองรอบละครั้ง ไม่ใช่รัวทุกเฟรม
+                    self.snapshot_revision = None;
                 }
                 Err(crossbeam_channel::TryRecvError::Empty) => return,
                 Err(crossbeam_channel::TryRecvError::Disconnected) => self.autosave_job = None,
             }
         }
-        let Some(doc) = self.doc_path.clone() else {
+        let Some(target) = self.snapshot_target() else {
             return;
         };
+        let unsaved = self.has_unsnapshotted_work();
         let Some(gfx) = self.gfx.as_ref() else {
             return;
         };
-        let dirty = gfx.board.is_dirty();
         let now = std::time::Instant::now();
-        if !self.autosaver.should_write(dirty, now) {
+        if !self.autosaver.should_write(unsaved, now) {
             return;
         }
+        let revision = gfx.board.revision();
 
         // ★ โคลน ณ จังหวะที่ตัดสิน ด้วยเหตุผลเดียวกับการบันทึกจริง —
         //   ผู้ใช้ต้องแก้งานต่อได้ระหว่างที่ snapshot กำลังเขียน
         let board = gfx.board.clone();
+        let session = self.session.clone();
         let (tx, rx) = crossbeam_channel::bounded(1);
         let spawned = std::thread::Builder::new()
             .name("refx-autosave".to_owned())
             .spawn(move || {
-                let result = refx_io::autosave::write_snapshot(
-                    &doc,
-                    &board,
-                    refx_platform::fsops::rename_durable,
-                )
+                // ★ `rename_durable` ตัวเดียวกับการบันทึกจริงทั้งสองเส้นทาง
+                let rename = refx_platform::fsops::rename_durable;
+                let result = match target {
+                    SnapshotTarget::BesideDocument(doc) => {
+                        refx_io::autosave::write_snapshot(&doc, &board, rename)
+                    }
+                    SnapshotTarget::Recovery(dir) => {
+                        refx_io::recovery::write_snapshot(&dir, &session, &board, rename)
+                    }
+                }
                 .map_err(|err| err.to_string());
                 let _ = tx.send(result);
             });
         if spawned.is_err() {
+            // ★ สร้างเธรดไม่ได้ (RAM หมด/ถึงเพดานเธรดของ OS) — **ยังต้องเดินนาฬิกา**
+            //   ไม่งั้นนาฬิกาจะค้างอยู่ในอดีตแล้วถูกปลุกซ้ำทันทีไม่รู้จบ
+            //   · ไม่บันทึก `snapshot_revision` เพราะยังไม่มีอะไรลงดิสก์จริง
+            //   → รอบหน้าหลังเว้นระยะครบ จะลองใหม่เอง
+            self.autosaver.record_write(now);
             return;
         }
         self.autosave_job = Some(rx);
+        self.snapshot_revision = Some(revision);
         self.autosaver.record_write(now);
+    }
+
+    /// ★★★ เวลาที่ต้องถูกปลุกมาเขียน snapshot — `None` = ไม่มีอะไรค้าง
+    ///
+    /// ★★ ถามผ่าน `snapshot_target()` ตัวเดียวกับที่ `tick_autosave` ใช้ —
+    /// ถ้าที่นี่ถาม `doc_path` ตรง ๆ เหมือนเดิม งานที่ยังไม่เคยบันทึกจะ
+    /// **ไม่มีใครปลุกมาเขียนเลยตอนผู้ใช้ลุกจากโต๊ะ** ซึ่งเป็นช่องเดียวกับที่
+    /// P4-3 เกือบพลาด แค่ย้ายมาโผล่ที่ผู้ใช้อีกกลุ่มหนึ่ง
+    ///
+    /// ★ เงื่อนไขคือ [`Self::has_unsnapshotted_work`] ไม่ใช่ `dirty` —
+    /// ไม่งั้น board ที่เก็บครบแล้วแต่ยังไม่ได้ `Ctrl+S` จะขอให้ปลุกทุก 10 วินาที
+    /// **ตลอดทั้งวัน** ทั้งที่ไม่มีอะไรให้เขียน (I-1)
+    fn autosave_deadline(&self) -> Option<std::time::Instant> {
+        // ★★★ งานที่ส่งไปเธรดแล้วยังไม่กลับ = **อย่าเพิ่งตั้งนาฬิกา**
+        //
+        //   ไม่งั้นจะได้วงจรนี้: ตื่นตามเวลา → `tick_autosave` เห็นว่ามีงานค้าง
+        //   แล้วออกทันทีโดยไม่เขียน → นาฬิกายังชี้เวลาที่ผ่านมาแล้ว → ตื่นอีก
+        //   ทันที → วนแบบนี้จนกว่าเธรดจะเขียนเสร็จ ซึ่งก็คือ `ControlFlow::Poll`
+        //   ที่ I-1 ห้ามไว้ตรง ๆ แค่สะกดด้วยชื่ออื่น
+        if self.autosave_job.is_some() {
+            return None;
+        }
+        self.snapshot_target()?;
+        self.autosaver.next_deadline(self.has_unsnapshotted_work())
+    }
+
+    /// ★★★ board เปลี่ยนไปจาก snapshot ล่าสุดหรือยัง — **คำถามที่ถูกกว่า `dirty`**
+    ///
+    /// `dirty` ตอบว่า "ยังไม่ได้ `Ctrl+S`" ซึ่งเป็นจริงค้างยาว ส่วนที่ autosave
+    /// อยากรู้จริง ๆ คือ "มีอะไรที่ยังไม่ได้เก็บไหม" · ดู `snapshot_revision`
+    fn has_unsnapshotted_work(&self) -> bool {
+        self.gfx.as_ref().is_some_and(|gfx| {
+            gfx.board.is_dirty() && self.snapshot_revision != Some(gfx.board.revision())
+        })
     }
 
     /// ผู้ใช้ตอบแถบยืนยันตอนปิดแล้ว (P4-2)
@@ -2893,6 +2999,14 @@ impl RefxApp {
                 // ★★ ทิ้ง snapshot **เมื่อบันทึกสำเร็จเท่านั้น** (docs/07 §4)
                 //    และรีเซ็ตนาฬิกาเพื่อให้การแก้ครั้งถัดไปถูกเก็บทันที
                 refx_io::autosave::discard(&path);
+                // ★★★ **ย้ายเจ้าของ** (docs/07 §4): งานนี้เคยไม่มีที่อยู่จึงถูก
+                //    เก็บใน `recovery/` · ตอนนี้มันมีไฟล์จริงแล้วและ
+                //    `<doc>.refx.autosave` รับช่วงต่อ → snapshot กำพร้าต้องหายไป
+                //    ไม่งั้นเปิดโปรแกรมรอบหน้าผู้ใช้จะถูกถามว่าจะกู้งานที่เขา
+                //    บันทึกไปเรียบร้อยแล้วหรือไม่
+                if let Some(dir) = self.recovery_dir.as_ref() {
+                    refx_io::recovery::discard(dir, &self.session);
+                }
                 self.autosaver.reset();
                 self.doc_path = Some(path);
                 self.shell.status = text::fill(lang, text::Template::Saved, &[("name", &name)]);
@@ -4240,17 +4354,37 @@ impl AppDelegate for RefxApp {
         // ★ เอาเวลาที่ใกล้ที่สุดของทุกแหล่ง — egui · ตัวจำลอง device lost ·
         //   และ autosave (P4-3 · ขาดตัวหลัง board ที่ dirty แล้วถูกปล่อยไว้
         //   จะไม่ถูก snapshot เลยจนกว่าผู้ใช้จะกลับมาขยับเมาส์)
-        let autosave = self
-            .doc_path
-            .as_ref()
-            .and_then(|_| self.autosaver.next_deadline(gfx.board.is_dirty()));
-        [gfx.egui_wake, gfx.render.forced_lost_deadline(), autosave]
-            .into_iter()
-            .flatten()
-            .min()
+        [
+            gfx.egui_wake,
+            gfx.render.forced_lost_deadline(),
+            self.autosave_deadline(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     fn on_wake(&mut self) -> Option<RedrawReason> {
+        // ★★★ **นาฬิกา autosave ต้องมีคนรับสายตรงนี้ ไม่ใช่แค่ตั้งไว้**
+        //
+        //   P4-3 ต่อ `next_deadline()` เข้า `wake_deadline()` แล้ว เธรดจึงตื่น
+        //   ตรงเวลาจริง — **แต่ `on_wake` ไม่มีกิ่งไหนรับมัน** พอคืน `None`
+        //   `about_to_wait` ก็ตั้ง `ControlFlow::Wait` แล้วหลับยาวต่อ
+        //   → กลไกที่สร้างมาเพื่อเคสนี้ **ไม่เคยทำงานเลยสักครั้ง**
+        //
+        //   วัดได้ด้วยตา: ลากภาพเข้ามาแล้วปล่อยทิ้งไว้ 35 วินาที (ระยะเว้น 10 วิ)
+        //   ไฟล์ snapshot ถูกเขียน **ครั้งเดียว** ไม่ใช่สี่ครั้ง — คือครั้งที่
+        //   เกิดจากเฟรมสุดท้ายที่ผู้ใช้ขยับเมาส์ ไม่ใช่จากนาฬิกา
+        //
+        // ★ เขียนตรงนี้เลย **ไม่ขอเฟรม** — การวาดใหม่ไม่ได้ทำให้ snapshot ถูกขึ้น
+        //   และจะทำให้ตัวนับเฟรมของ I-1 ไต่ขึ้นทั้งที่ผู้ใช้ไม่ได้แตะอะไร
+        if self
+            .autosave_deadline()
+            .is_some_and(|at| std::time::Instant::now() >= at)
+        {
+            self.tick_autosave();
+        }
+
         let gfx = self.gfx.as_mut()?;
 
         // ตัวจำลอง device lost ตามเวลา — เคลียร์นาฬิกาในตัวแล้ว
@@ -4447,8 +4581,12 @@ impl AppDelegate for RefxApp {
 pub fn run(
     args: AppArgs,
     cache_db: &std::path::Path,
+    recovery_dir: &std::path::Path,
 ) -> Result<(), refx_platform::window::RunError<DeviceError>> {
     let mut app = RefxApp::new(args);
+    // ★ ที่อยู่ของงานที่ยังไม่เคยบันทึก — ถูกส่งเข้ามาเพราะ `AppPaths` เป็นของ
+    //   ชั้น platform · ★★ ต้องเป็น `<data_dir>/recovery` เท่านั้น ห้าม cache
+    app.recovery_dir = Some(recovery_dir.to_path_buf());
     app.start_assets(cache_db);
     refx_platform::window::run(
         app,
@@ -5976,6 +6114,89 @@ mod tests {
             rx.recv_timeout(std::time::Duration::from_secs(30)).is_ok(),
             "drop แล้วไม่จบภายใน 30 วินาที = ปิดโปรแกรมแล้วโปรเซสไม่ตาย"
         );
+    }
+
+    // ---------- ★★★ P4-4: งานที่ยังไม่เคยบันทึกต้องมีที่ให้ autosave ----------
+
+    /// ★★★ **ยังไม่เคยกด `Ctrl+S` = ต้องยังมี snapshot** — ช่องที่ P4-3 เปิดค้าง
+    ///
+    /// `CLAUDE.md` ยกเคสนี้มาตรง ๆ ("mood board ที่จัดมา 3 ชั่วโมง") · ก่อนหน้านี้
+    /// `tick_autosave` ออกจากฟังก์ชันทันทีเมื่อ `doc_path` เป็น `None` แปลว่า
+    /// **คนที่เสียมากที่สุดคือคนที่ไม่ได้รับการปกป้องเลย**
+    #[test]
+    fn work_that_was_never_saved_still_has_somewhere_to_autosave() {
+        let mut app = RefxApp::new(AppArgs::default());
+        app.recovery_dir = Some(std::path::PathBuf::from("/data/RefX/recovery"));
+        assert_eq!(app.doc_path, None, "เคสนี้คือ 'ยังไม่เคยบันทึก'");
+
+        match app.snapshot_target() {
+            Some(SnapshotTarget::Recovery(dir)) => {
+                assert_eq!(dir, std::path::PathBuf::from("/data/RefX/recovery"));
+            }
+            other => panic!("งานที่ยังไม่เคยบันทึกไม่มีที่ให้ autosave: {other:?}"),
+        }
+    }
+
+    /// ★ บันทึกแล้ว = snapshot ย้ายไปอยู่ข้างเอกสาร (`docs/07 §4` "ย้ายเจ้าของ")
+    #[test]
+    fn once_the_document_has_a_path_the_snapshot_moves_next_to_it() {
+        let mut app = RefxApp::new(AppArgs::default());
+        app.recovery_dir = Some(std::path::PathBuf::from("/data/RefX/recovery"));
+        app.doc_path = Some(std::path::PathBuf::from("/work/moodboard.refx"));
+
+        match app.snapshot_target() {
+            Some(SnapshotTarget::BesideDocument(doc)) => {
+                assert_eq!(doc, std::path::PathBuf::from("/work/moodboard.refx"));
+            }
+            other => panic!("บันทึกแล้วแต่ snapshot ไม่ได้อยู่ข้างเอกสาร: {other:?}"),
+        }
+    }
+
+    /// ★★★ **ที่อยู่ของ snapshot ต้องไม่เคยตกไปอยู่ใน `cache_dir`** (`docs/07 §4`)
+    ///
+    /// cache คือที่ของสิ่งที่สร้างใหม่ได้ ซึ่งทั้ง OS และตัวล้างดิสก์ของผู้ใช้
+    /// ถือว่าลบได้ตามใจ · ประตูจริงอยู่ที่ `AppPaths::recovery_dir()` (มีเทสต์
+    /// ของตัวเอง) — ที่นี่ตรวจ **ปลายทางฝั่งผู้ใช้ของมัน**: `run()` ต้องเป็น
+    /// คนเสียบค่า และเมื่อไม่มีที่อยู่ก็ต้อง **ไม่เขียนอะไรเลย** ไม่ใช่หาที่ลงเอง
+    #[test]
+    fn without_a_data_dir_unsaved_work_is_simply_not_written_anywhere() {
+        let app = RefxApp::new(AppArgs::default());
+        assert_eq!(app.recovery_dir, None, "ค่าเริ่มต้นต้องว่าง รอ `run` เสียบให้");
+        assert_eq!(
+            app.snapshot_target(),
+            None,
+            "ไม่มีที่อยู่แล้วยังเลือกที่ลงเอง — ที่ที่มันเลือกคือที่ที่ไม่มีใครตรวจ"
+        );
+    }
+
+    /// ★★★ **board ที่เก็บครบแล้วต้องไม่ขอให้ปลุกอีก** — I-1 ในสถานะ "dirty + idle"
+    ///
+    /// `dirty` เป็นจริงค้างยาวจนกว่าจะ `Ctrl+S` จริง ๆ · ถ้านาฬิกา autosave
+    /// ถามแค่ `dirty` ผู้ใช้ที่ลากภาพเข้ามาแล้วไปวาดรูปต่อใน Photoshop ทั้งวัน
+    /// จะถูกปลุกมาเขียนไฟล์ที่ **เนื้อหาเหมือนเดิมเป๊ะ** ทุก 10 วินาที
+    /// = 2,880 ครั้งต่อวัน (`docs/08 §3.9` ข้อ 11: I-1 ต้องตรวจทุกสถานะ)
+    #[test]
+    fn a_board_already_captured_stops_asking_to_be_woken() {
+        let mut app = RefxApp::new(AppArgs::default());
+        app.recovery_dir = Some(std::path::PathBuf::from("/data/RefX/recovery"));
+
+        // ไม่มี `gfx` = ไม่มี board ให้ถาม → ต้องไม่ตั้งนาฬิกา
+        assert_eq!(app.autosave_deadline(), None);
+        assert!(!app.has_unsnapshotted_work());
+
+        // ★ งานที่ส่งไปเธรดแล้วยังไม่กลับ ต้องไม่ตั้งนาฬิกาเช่นกัน —
+        //   ตื่นมาแล้วทำอะไรไม่ได้ = ตั้งเวลาในอดีตซ้ำ = `Poll` ที่ I-1 ห้าม
+        let (_tx, rx) = crossbeam_channel::bounded::<Result<(), String>>(1);
+        app.autosave_job = Some(rx);
+        assert_eq!(app.autosave_deadline(), None, "มีงานค้างแล้วยังตั้งนาฬิกา");
+    }
+
+    /// ★★ สองหน้าต่างต้องไม่เขียนทับ snapshot ของกันและกัน (`docs/07 §4`)
+    #[test]
+    fn two_instances_never_share_a_recovery_file() {
+        let a = RefxApp::new(AppArgs::default());
+        let b = RefxApp::new(AppArgs::default());
+        assert_ne!(a.session, b.session, "สองหน้าต่างได้รหัส session เดียวกัน");
     }
 
     /// ภาพที่วางมาจาก clipboard ไม่มีไฟล์ให้ decode ซ้ำ — ต้องไม่ไปขอ working texture

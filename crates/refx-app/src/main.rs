@@ -155,6 +155,13 @@ fn main() -> anyhow::Result<()> {
     };
 
     // ControlFlow::Wait ตั้งอยู่ใน refx-platform::window::run() ที่เดียว (I-1)
-    refx_ui::app::run(cli.args, &paths.cache_dir().join("cache.sqlite"))?;
+    //
+    // ★ `recovery_dir()` อยู่ใต้ **data_dir ไม่ใช่ cache_dir** — งานที่ยังไม่เคย
+    //   บันทึกคือสิ่งที่สร้างใหม่ไม่ได้ (docs/07 §4 · เทสต์คุมไว้ที่ AppPaths)
+    refx_ui::app::run(
+        cli.args,
+        &paths.cache_dir().join("cache.sqlite"),
+        &paths.recovery_dir(),
+    )?;
     Ok(())
 }
