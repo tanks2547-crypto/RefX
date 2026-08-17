@@ -135,7 +135,12 @@ cargo run --features force-device-lost -p refx-app -- --force-device-lost-after-
 |---|---|---|
 | P4-1 | `.refx` format v1 (linked) + DTO แยกจาก core | round-trip property test ผ่าน |
 | P4-2 | Atomic save (tmp → fsync → rename → fsync dir) | ฆ่าโปรเซสกลาง save 100 ครั้ง → ไฟล์เดิมไม่เสียสักครั้ง |
-| P4-3 | Command journal + fsync policy | |
+| P4-3 | **Autosave snapshot** + fsync policy (เดิมเขียนว่า command journal) | ฆ่าโปรเซสระหว่างแก้งาน → **วัดว่าเสียไปกี่วินาทีจริง** ไม่ใช่แค่มีไฟล์ |
+
+> **P4-3 เปลี่ยนดีไซน์ 12 ส.ค. 2026** — `Command` เป็น trait ที่ serialize ไม่ได้
+> การทำ journal ต้องสร้าง `CommandDto` 13 variant ซึ่งเป็นผิวรูปแบบไฟล์ใหม่ทั้งชุด
+> + ภาระถาวรต่อ command ใหม่ทุกตัว และถ้าพลาดหนึ่งจุด ผู้ใช้ได้ **board ที่ผิดแบบเงียบ ๆ**
+> → v1 ใช้ **snapshot ทั้ง board** ด้วย DTO เดียวกับ `.refx` · **เหตุผลเต็มใน `docs/07 §4`**
 | P4-4 | Crash recovery + dialog 3 ตัวเลือก | End Task ระหว่างแก้งาน → กู้ได้ครบ |
 | P4-5 | Packed mode + asset table | |
 | P4-6 | Relink flow 5 ขั้น | ย้ายโฟลเดอร์ภาพแล้วยังหาเจอ |
