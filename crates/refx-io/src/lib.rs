@@ -7,7 +7,7 @@
 pub mod autosave; // snapshot ทั้ง board กันงานหายตอน crash (P4-3)
 pub mod dto; // DTO มีเวอร์ชัน — แยกจาก type ใน refx-core เสมอ
 pub mod journal; // append-only command journal + CRC ต่อ record
-pub mod recovery; // replay journal ตอนเปิดโปรแกรม
+pub mod recovery; // งานที่ยังไม่เคยบันทึก: <data_dir>/recovery/<session>.refx (P4-4)
 pub mod relink; // หาไฟล์ที่หายด้วย hash (5 ขั้นตอน)
 pub mod save; // atomic save: tmp -> fsync -> rename -> fsync dir
 pub mod validate; // validate_path + bound ทุก field ตอน deserialize
