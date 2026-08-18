@@ -25,7 +25,10 @@
 # ---------------------------------------------------------------------------
 # Usage
 # ---------------------------------------------------------------------------
-#   scripts/ui-drive.ps1 -Steps @(
+#   ! call it IN-PROCESS with & - going through "powershell -File" strips the
+#     quoting and the child's parser eats every step containing a '|'
+#
+#   & .\scripts\ui-drive.ps1 -Steps @(
 #     "launch|target\release\refx.exe|--open-dir=C:\shots\imgs",
 #     "click|452|386",
 #     "shot|C:\shots\selected.png")
@@ -40,6 +43,9 @@
 #   pan|<x1>|<y1>|<x2>|<y2>          middle-button camera pan (P2-4 moved pan there)
 #   wheel|<x>|<y>|<notches>          zoom
 #   keydn|<vk> / keyup|<vk> / key|<vk>   virtual key codes (Ctrl = 17, Z = 90)
+#   paste|<text>                     put text on the clipboard then Ctrl+V it
+#                                    (the only reliable way to fill a NATIVE
+#                                     Save As / Open dialog - see the step body)
 #   shot|<file>                      PNG of the client area
 #   sleep|<ms>
 #   kill                             stop refx and WAIT for the single-instance
@@ -229,6 +235,21 @@ function Setup-Window($proc, $note) {
   Write-Output "pid $($proc.Id) origin $($script:ox),$($script:oy) focused $note"
 }
 
+# ---------------------------------------------------------------------------
+# WHY THE STEP LIST IS ECHOED  (cost part of a session on 18 Aug 2026)
+# ---------------------------------------------------------------------------
+# Calling this script through a CHILD powershell (powershell -File ui-drive.ps1
+# -Steps @(...)) passes the array elements UNQUOTED, so the child's parser sees
+# the '|' inside "sleep|500" as a pipeline separator and keeps only the first
+# element.  The run then did one step, skipped the rest, printed nothing about
+# it and EXITED 0 - a harness reporting success for work it never did, which is
+# the exact failure mode the header of this file warns about.
+#
+# Two things stop it now: this banner (the count is visibly wrong immediately)
+# and the unknown-step guard below.  Callers should invoke the script IN-PROCESS
+# (& .\scripts\ui-drive.ps1 -Steps @(...)) which passes the array intact.
+Write-Output "steps: $($Steps.Count)"
+
 foreach ($step in $Steps) {
   $parts = $step -split '\|'
   switch ($parts[0]) {
@@ -273,6 +294,18 @@ foreach ($step in $Steps) {
     'keydn'  { Key-Down ([int]$parts[1]) }
     'keyup'  { Key-Up ([int]$parts[1]) }
     'key'    { Key-Down ([int]$parts[1]); Key-Up ([int]$parts[1]) }
+    # Type text into whatever has keyboard focus, including a NATIVE dialog
+    # (Save As / Open), by way of the clipboard.  Sending one keybd_event per
+    # character would need VkKeyScan per char and still get the layout wrong on
+    # a non-US keyboard - the same class of bug as the Thai-layout shortcut one.
+    # The clipboard carries the exact string whatever the layout is.
+    'paste'  {
+      Set-Clipboard -Value $parts[1]
+      Start-Sleep -Milliseconds 250
+      Key-Down 17; Key-Down 86; Key-Up 86; Key-Up 17   # Ctrl+V
+      Start-Sleep -Milliseconds 250
+      Write-Output "paste '$($parts[1])'"
+    }
     'shot'   { Shot $parts[1] }
     'sleep'  { Start-Sleep -Milliseconds ([int]$parts[1]) }
     'kill'   {
