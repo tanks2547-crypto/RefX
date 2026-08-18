@@ -256,6 +256,10 @@ pub enum Key {
     OpenInProgress,
     /// กำลังรอผู้ใช้เลือกไฟล์ที่จะเปิด
     OpenChoosing,
+    /// ★ คำอธิบายจุดบนแท็บตอนงานยังไม่ถูกบันทึก (docs/03 §1 — ตัวบ่งชี้ถาวร)
+    UnsavedHint,
+    /// คำอธิบายแท็บตอนทุกอย่างลงไฟล์แล้ว
+    SavedHint,
 
     // ---- P3-7: group / ungroup ----
     /// หัวข้อกลุ่มในแผง Arrange
@@ -376,6 +380,8 @@ fn en(key: Key) -> &'static str {
         }
         Key::OpenInProgress => "Opening",
         Key::OpenChoosing => "Choose a board to open",
+        Key::UnsavedHint => "Not saved to a file yet - press Ctrl+S to keep this work",
+        Key::SavedHint => "Everything is saved to the file",
         Key::GroupTitle => "Group",
         Key::GroupNone => "Not in a group",
         Key::GroupDefaultName => "Group",
@@ -482,6 +488,8 @@ fn th(key: Key) -> Option<&'static str> {
         Key::OpenFailed => "เปิดกระดานไม่ได้ — ไฟล์อาจเสียหาย หรือถูกเขียนด้วย RefX รุ่นใหม่กว่า",
         Key::OpenInProgress => "กำลังเปิด",
         Key::OpenChoosing => "เลือกกระดานที่จะเปิด",
+        Key::UnsavedHint => "ยังไม่ได้บันทึกลงไฟล์ — กด Ctrl+S เพื่อเก็บงานนี้ไว้",
+        Key::SavedHint => "ทุกอย่างถูกบันทึกลงไฟล์แล้ว",
         Key::GroupTitle => "กลุ่ม",
         Key::GroupNone => "ไม่ได้อยู่ในกลุ่มไหน",
         Key::GroupDefaultName => "กลุ่ม",
@@ -1035,6 +1043,8 @@ mod tests {
         Key::OpenFailed,
         Key::OpenInProgress,
         Key::OpenChoosing,
+        Key::UnsavedHint,
+        Key::SavedHint,
         Key::GroupTitle,
         Key::GroupNone,
         Key::GroupDefaultName,

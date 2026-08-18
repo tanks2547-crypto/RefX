@@ -19,6 +19,19 @@ use crate::text::{self, Key, Lang, Template};
 /// สีของข้อความที่ผู้ใช้ต้องสังเกตเห็น — ตัวเดียวกับ RAM/VRAM ตอนใกล้เต็ม
 const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(230, 160, 60);
 
+/// ★★★ เครื่องหมาย "ยังไม่ถูกบันทึก" ที่นำหน้าชื่อเอกสารบนแท็บ (docs/03 §1)
+///
+/// ★★ **เคยเป็น `●` (U+25CF) แล้วออกมาเป็นสี่เหลี่ยม tofu บนจอจริง**
+/// — ฟอนต์ที่เราฝังไว้ (Ubuntu-Light + Noto Sans Thai) ไม่มี glyph ตัวนั้น
+/// และกล่อง tofu ข้างชื่อไฟล์อ่านได้อย่างเดียวว่า "โปรแกรมพัง" ซึ่งแย่กว่า
+/// ไม่มีตัวบ่งชี้เลย
+///
+/// ★ **เทสต์จับไม่ได้โดยธรรมชาติ**: `galley.text()` เก็บอักขระต้นฉบับไว้เสมอ
+/// ไม่ว่าจะวาดออกมาเป็น glyph จริงหรือ tofu · เห็นได้ทางเดียวคือถ่ายภาพจอจริง
+/// (`docs/08 §3.9` ข้อ 5) → ตอนนี้มีประตู `the_unsaved_mark_has_a_real_glyph`
+/// ที่ถาม `Fonts::has_glyph` ตรง ๆ ปิดช่องนั้นแล้ว
+const UNSAVED_MARK: char = '*';
+
 /// ค่าการแสดงผลที่ inspector ปรับได้ — สำเนาของช่องใน `ItemCanvas` ที่เกี่ยวข้อง
 ///
 /// ★ เป็น **สำเนา** ไม่ใช่ `&mut ItemCanvas` โดยตั้งใจ: ทุกการแก้ `Board`
@@ -306,6 +319,18 @@ pub struct ShellState {
     pub close_prompt: bool,
     /// ผู้ใช้ตอบแล้วในเฟรมนี้ — `None` = ยังไม่ตอบ
     pub close_choice: Option<CloseChoice>,
+    /// ★★★ **สภาวะ "ยังไม่ถูกบันทึก"** — ตัวบ่งชี้ถาวรบนแท็บ (docs/03 §1)
+    ///
+    /// `true` = มีอะไรที่ยังไม่ลงไฟล์จริง (ไม่เคยบันทึกเลย หรือแก้หลังบันทึกล่าสุด)
+    /// · **ค่าสำหรับแสดงเท่านั้น** ชั้น `app` เติมทุกเฟรมจาก `board.is_dirty()`
+    ///
+    /// ★ ทำไมต้องถาวร: ข้อความชั่วคราวถูกเขียนทับได้ภายในไม่กี่มิลลิวินาที
+    /// (เกิดจริงกับ "กู้คืนแล้ว — กด Ctrl+S") แล้วผู้ใช้ก็ปิดโปรแกรมทิ้งอีกรอบ
+    pub unsaved: bool,
+    /// ชื่อไฟล์ที่กำลังแก้อยู่ — `None` = ยังไม่เคยบันทึกลงที่ไหน
+    ///
+    /// **ค่าสำหรับแสดงเท่านั้น** · แหล่งความจริงคือ `RefxApp::doc_path`
+    pub doc_name: Option<String>,
     /// ★★★ เจองานที่ยังไม่ได้บันทึกจาก session ก่อน (P4-4) — `None` = ไม่มีอะไรค้าง
     pub recover_prompt: Option<RecoverView>,
     /// ผู้ใช้ตอบแล้วในเฟรมนี้ — `None` = ยังไม่ตอบ
@@ -423,6 +448,8 @@ impl Default for ShellState {
             group: None,
             close_prompt: false,
             close_choice: None,
+            unsaved: false,
+            doc_name: None,
             recover_prompt: None,
             recover_choice: None,
             group_request: None,
@@ -460,8 +487,37 @@ pub fn draw_in_ui(
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("RefX").strong());
             ui.separator();
+            // ★★★ **ตัวบ่งชี้ถาวรของสภาวะ "ยังไม่ถูกบันทึก"** (docs/03 §1, P4-4)
+            //
+            //   "งานนี้ยังไม่เคยถูกบันทึก" ไม่ใช่ *เหตุการณ์* ที่เกิดแล้วจบ —
+            //   เป็น **สภาวะ** ที่คงอยู่จนกว่าผู้ใช้จะกด Save · ข้อความชั่วคราว
+            //   บน status bar จึงเป็นเครื่องมือผิดชนิด และมันพิสูจน์ตัวเองแล้ว:
+            //   ข้อความ "กู้คืนแล้ว — กด Ctrl+S เพื่อเก็บไว้" ถูกรายงานความคืบหน้า
+            //   ของการโหลดภาพเขียนทับใน **~3 มิลลิวินาที** ผู้ใช้ที่เพิ่งได้งานคืน
+            //   จึงไม่มีทางรู้ว่างานนั้นยังไม่ถูกบันทึก แล้วปิดโปรแกรมทิ้งได้อีกรอบ
+            //   ซึ่งวนกลับไปที่เดิมพอดี
+            //
+            //   ★ จุดนี้ถูกเลือกเพราะมันคือ **ชื่อของเอกสาร** — ที่ที่คนมองหา
+            //     คำตอบว่า "ฉันกำลังแก้ไฟล์ไหนอยู่" อยู่แล้วโดยสัญชาตญาณ
+            //     และเป็นที่เดียวกับที่โปรแกรมแก้ไขทุกตัวใส่จุด/ดอกจันไว้
+            let title = state
+                .doc_name
+                .as_deref()
+                .unwrap_or_else(|| text::t(lang, Key::UntitledBoard));
+            let tab = if state.unsaved {
+                // ★ เครื่องหมายนำหน้า **ไม่ใช่สี** อย่างเดียว — คนตาบอดสีต้องอ่านออกด้วย
+                //   (สีถูกใช้เสริม ไม่ใช่ใช้แทน)
+                egui::RichText::new(format!("{UNSAVED_MARK} {title}")).color(WARN_COLOR)
+            } else {
+                egui::RichText::new(title.to_owned())
+            };
+            let hint = if state.unsaved {
+                text::t(lang, Key::UnsavedHint)
+            } else {
+                text::t(lang, Key::SavedHint)
+            };
             // P4-7: หลาย board พร้อมกัน
-            let _ = ui.selectable_label(true, text::t(lang, Key::UntitledBoard));
+            let _ = ui.selectable_label(true, tab).on_hover_text(hint);
             if ui
                 .button("+")
                 .on_hover_text(text::t(lang, Key::NewBoardHint))
@@ -1679,6 +1735,8 @@ mod tests {
             mode: _,
             close_prompt: _,    // บอกแค่ว่าแถบยืนยันโผล่อยู่ไหม ไม่ใช่คำขอแก้อะไร
             recover_prompt: _,  // เหมือนกัน — แค่ "มีอะไรค้างให้ถามไหม"
+            unsaved: _,         // ตัวบ่งชี้สภาวะ อ่านจาก board ไม่ได้เขียนกลับ
+            doc_name: _,        // ชื่อไฟล์สำหรับแสดงบนแท็บ
             appearance: _,      // ค่าสำหรับแสดงของ inspector
             board_grayscale: _, // สวิตช์การมองเห็นทั้ง board (P2-8) ไม่ลงไฟล์
             tool: _,
@@ -1724,6 +1782,134 @@ mod tests {
             || close_choice.is_some()
             || recover_choice.is_some()
             || *arrange_apply
+    }
+
+    /// ★★★ **ตัวบ่งชี้ "ยังไม่บันทึก" ต้องอยู่ตราบเท่าที่สภาวะยังอยู่** (docs/03 §1)
+    ///
+    /// นี่คือความต่างทั้งหมดระหว่าง *ข้อความชั่วคราว* กับ *ตัวบ่งชี้ถาวร* —
+    /// ข้อความ "กู้คืนแล้ว — กด Ctrl+S เพื่อเก็บไว้" ของรุ่นก่อนถูกรายงาน
+    /// ความคืบหน้าการโหลดภาพเขียนทับใน **~3 มิลลิวินาที** ผู้ใช้ที่เพิ่งได้งานคืน
+    /// จึงไม่มีทางรู้ว่างานนั้นยังไม่ถูกบันทึก แล้วปิดโปรแกรมทิ้งได้อีกรอบ
+    ///
+    /// ★ เทสต์จึงวาดหลายเฟรม **แล้วเขียนทับ `status` ระหว่างทาง** เลียนแบบสิ่งที่
+    /// ของจริงทำ — ตัวบ่งชี้ต้องรอด (`docs/08 §3.9` ข้อ 8: สัญญาที่ถูกเฉพาะตอน
+    /// เรียกถูกจังหวะคือกับดัก · ที่นี่คือ "ถูกเฉพาะเฟรมแรก")
+    #[test]
+    fn the_unsaved_marker_survives_every_status_message_that_lands_on_top() {
+        let ctx = egui::Context::default();
+        let mut state = ShellState {
+            unsaved: true,
+            doc_name: None,
+            ..ShellState::default()
+        };
+
+        for frame in 0..30 {
+            // ของจริงเขียน status ทับตลอดเวลา: โหลดเสร็จ · ก๊อปสี · สลับโหมด
+            state.status = format!("เหตุการณ์ที่ {frame}");
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                let _ = draw_in_ui(ui, &mut state, |_, _| {});
+            });
+            let shown = shell_text(&output);
+            assert!(
+                shown.contains(UNSAVED_MARK),
+                "เฟรมที่ {frame}: ตัวบ่งชี้ 'ยังไม่บันทึก' หายไปจากจอ"
+            );
+        }
+
+        // ★ negative control — บันทึกแล้วจุดต้องหายไป ไม่ใช่ค้างอยู่ตลอดกาล
+        //   (ตัวบ่งชี้ที่ไม่เคยดับก็ไร้ความหมายเท่ากับตัวที่ไม่เคยติด)
+        state.unsaved = false;
+        state.doc_name = Some("moodboard.refx".to_owned());
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| {
+            let _ = draw_in_ui(ui, &mut state, |_, _| {});
+        });
+        let shown = shell_text(&output);
+        assert!(!shown.contains(UNSAVED_MARK), "บันทึกแล้วแต่เครื่องหมายยังอยู่");
+        assert!(
+            shown.contains("moodboard.refx"),
+            "บันทึกแล้วต้องเห็นชื่อไฟล์ที่กำลังแก้อยู่ — ไม่งั้นผู้ใช้ไม่รู้ว่าแก้ไฟล์ไหน"
+        );
+    }
+
+    /// ★★★ **เครื่องหมายบนแท็บต้องมี glyph จริงในฟอนต์ที่เราฝังไว้**
+    ///
+    /// รุ่นแรกใช้ `●` (U+25CF) แล้ว **ออกมาเป็นสี่เหลี่ยม tofu บนจอจริง** —
+    /// กล่องเปล่าข้างชื่อไฟล์อ่านได้อย่างเดียวว่า "โปรแกรมพัง" ซึ่งแย่กว่า
+    /// ไม่มีตัวบ่งชี้เลย
+    ///
+    /// ★★ เทสต์ที่ดูข้อความ (`galley.text()`) จับข้อนี้ **ไม่ได้โดยธรรมชาติ**
+    /// เพราะ galley เก็บอักขระต้นฉบับไว้เสมอไม่ว่าจะวาดเป็น glyph หรือ tofu
+    /// — ตอนนั้นเทสต์เขียวและภาพหน้าจอเป็นสิ่งเดียวที่เห็น (`docs/08 §3.9` ข้อ 5)
+    ///
+    /// ★ ประตูนี้ถาม `Fonts::has_glyph` ตรง ๆ จึงเป็นสิ่งที่**เทสต์ทำแทนตาได้**
+    /// สำหรับข้อนี้โดยเฉพาะ · negative control: เปลี่ยนกลับเป็น `●` แล้วมันแดง
+    #[test]
+    fn the_unsaved_mark_has_a_real_glyph() {
+        let ctx = egui::Context::default();
+        // ต้องวาดหนึ่งเฟรมก่อน ฟอนต์ถึงถูกโหลดจริง
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let mut state = ShellState::default();
+        let _ = ctx.run_ui(input, |ui| {
+            let _ = draw_in_ui(ui, &mut state, |_, _| {});
+        });
+
+        let font = egui::FontId::proportional(14.0);
+        let has = ctx.fonts_mut(|fonts| fonts.has_glyph(&font, UNSAVED_MARK));
+        assert!(
+            has,
+            "เครื่องหมาย {UNSAVED_MARK:?} ไม่มี glyph ในฟอนต์ที่ฝังไว้ — \
+             ผู้ใช้จะเห็นสี่เหลี่ยม tofu ข้างชื่อไฟล์ ซึ่งอ่านว่า 'โปรแกรมพัง'"
+        );
+        // ★ และ `●` ที่เคยใช้ **ไม่มีจริง** — พิสูจน์ว่าประตูนี้แยกสองกรณีออกจากกัน
+        //   ไม่ใช่ประตูที่ตอบ true กับทุกอักขระ (ประตูที่ผ่านทุกอย่าง = ไม่มีประตู)
+        assert!(
+            !ctx.fonts_mut(|fonts| fonts.has_glyph(&font, '\u{25CF}')),
+            "ถ้า ● มี glyph แล้ว ประตูนี้ก็ไม่ได้พิสูจน์อะไร — ทบทวนว่ายังจำเป็นไหม"
+        );
+    }
+
+    /// ข้อความทั้งหมดที่ egui วาดออกมาในเฟรมนั้น
+    fn shell_text(output: &egui::FullOutput) -> String {
+        let mut found = String::new();
+        for shape in &output.shapes {
+            collect_text(&shape.shape, &mut found);
+        }
+        found
+    }
+
+    fn collect_text(shape: &egui::Shape, out: &mut String) {
+        match shape {
+            egui::Shape::Text(text) => {
+                out.push_str(text.galley.text());
+                out.push('\n');
+            }
+            egui::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect_text(shape, out);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// ★★★ **สลับ mode 100 ครั้งแล้วต้องไม่มีคำขอแก้เอกสารสักครั้งเดียว** (P3-8)

@@ -4418,6 +4418,7 @@ impl AppDelegate for RefxApp {
             loading,
             pick_in_flight,
             pick_count,
+            doc_path,
             ..
         } = self;
         let gfx = gfx.as_mut()?;
@@ -4436,6 +4437,13 @@ impl AppDelegate for RefxApp {
         let raw_input = gfx.egui_winit.take_egui_input(&gfx.window);
         shell.item_count = gfx.board.len();
         shell.zoom = gfx.camera.zoom();
+        // ★★★ สภาวะ "ยังไม่ถูกบันทึก" — เติมทุกเฟรมเหมือนค่าแสดงผลตัวอื่น
+        //   (docs/03 §1: สภาวะที่คงอยู่ต้องมีตัวบ่งชี้ที่คงอยู่ ไม่ใช่ข้อความชั่วคราว)
+        shell.unsaved = gfx.board.is_dirty();
+        shell.doc_name = doc_path.as_ref().and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        });
         // ★ ปุ่มบน toolbar เป็นภาพสะท้อนของ `gfx.tool` เท่านั้น — เจ้าของมีคนเดียว
         shell.tool = gfx.tool;
         // ★ inspector อ่านค่าจากภาพ **ตัวแรกในชุดที่เลือก** (anchor ของการเลือก)
