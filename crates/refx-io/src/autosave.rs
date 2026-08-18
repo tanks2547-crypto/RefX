@@ -445,7 +445,9 @@ mod tests {
         // ★ และมันเป็นไฟล์ `.refx` ที่ถูกต้องทุกประการ — ผิวรูปแบบใหม่เป็นศูนย์
         //   หัวไฟล์ต้องผ่าน `inspect` ตัวเดียวกับเอกสารจริง และเขียนทับได้
         let info = crate::dto::inspect(&read_bytes(&autosave_path(&doc))).unwrap();
-        assert_eq!(info.version, crate::dto::FORMAT_VERSION);
+        // ★ `LINKED_VERSION` **ไม่ใช่ `FORMAT_VERSION`** — ตัวหลังคือ *เพดานที่อ่านได้*
+        //   ซึ่งขยับเป็น 2 ตอน P4-5 · snapshot เขียนด้วยเส้นทาง linked จึงยังเป็น v1
+        assert_eq!(info.version, crate::dto::LINKED_VERSION);
         assert!(info.writable);
         assert!(!info.packed);
     }

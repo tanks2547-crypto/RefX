@@ -48,12 +48,22 @@ use serde::{Deserialize, Serialize};
 /// ลายเซ็นหัวไฟล์
 pub const MAGIC: [u8; 4] = *b"REFX";
 
-/// เวอร์ชันที่รุ่นนี้ **เขียน** และเป็นเพดานของสิ่งที่รุ่นนี้ **อ่าน** ได้
+/// **เพดานของสิ่งที่รุ่นนี้อ่านได้** — ไม่ใช่เลขที่มันเขียนเสมอไป
 ///
 /// ★ นี่คือ *major* version ตามความหมายของ `docs/02 §2.9` — การเพิ่ม/ถอดฟิลด์
 /// ใด ๆ ต้องบวกเลขนี้ เพราะ postcard **ไม่ self-describing**: ไฟล์ที่มีฟิลด์
 /// เกินมาหนึ่งตัวจะถูกอ่านเพี้ยนทั้งก้อนโดยไม่มีอะไรฟ้อง
-pub const FORMAT_VERSION: u16 = 1;
+///
+/// ★★★ **เลขที่เขียนขึ้นกับโหมด ไม่ใช่ค่าคงตัวเดียว** (P4-5)
+/// — linked เขียน [`LINKED_VERSION`] (1) · packed เขียน
+/// [`crate::packed::PACKED_VERSION`] (2) · เหตุผลอยู่ที่หัวโมดูล `packed`
+/// โดยย่อ: ไฟล์ packed ที่รุ่นเก่าเปิดได้ จะถูกรุ่นเก่า save ทับแล้ว
+/// **ภาพต้นฉบับที่ฝังไว้หายถาวร** ส่วนไฟล์ linked ไม่มีอะไรให้เสีย
+/// จึงไม่มีเหตุให้ตัดรุ่นเก่าออก
+pub const FORMAT_VERSION: u16 = 2;
+
+/// เวอร์ชันที่ไฟล์ **linked** ประกาศ — ยังเป็น 1 เพื่อให้รุ่นเก่าเปิดงานประจำวันได้
+pub const LINKED_VERSION: u16 = 1;
 
 /// bit0 ของ `flags` — เอกสารนี้ฝังไฟล์ภาพไว้ด้วย (packed mode · P4-5)
 pub const FLAG_PACKED: u16 = 1 << 0;
@@ -206,11 +216,16 @@ pub fn may_overwrite(existing: &[u8]) -> Result<(), OpenError> {
 // เข้ารหัส / ถอดรหัส
 // ---------------------------------------------------------------------------
 
-/// แปลง `Board` เป็นไบต์ของไฟล์ `.refx` (โหมด linked)
+/// ★★ เนื้อ document ที่บีบแล้ว — **ไม่มีหัวไฟล์** (ใช้ร่วมกับ packed mode)
+///
+/// แยกออกมาเพราะ [`crate::packed`] ต้องเขียนหัวไฟล์เอง (คนละเวอร์ชัน คนละ flag)
+/// แต่ **เนื้อ document ต้องเหมือนกันเป๊ะทั้งสองโหมด** — ถ้าปล่อยให้แต่ละที่
+/// ประกอบเอง สองเส้นทางจะ drift กันแล้วไฟล์ packed จะอ่านด้วย `decode` ไม่ได้
+/// โดยไม่มีใครรู้จนกว่าจะมีคนลองเปิด
 ///
 /// # Errors
 /// [`SaveError`] เมื่อเอกสารใหญ่เกินเพดานหรือบีบอัดไม่สำเร็จ
-pub fn encode(board: &Board) -> Result<Vec<u8>, SaveError> {
+pub fn encode_body(board: &Board) -> Result<Vec<u8>, SaveError> {
     let document = v1::DocumentDto::from_parts(&board.to_parts());
     let raw = postcard::to_stdvec(&document).map_err(|_| SaveError::Encode)?;
     if raw.len() > MAX_DOCUMENT_BYTES {
@@ -218,11 +233,21 @@ pub fn encode(board: &Board) -> Result<Vec<u8>, SaveError> {
             size: raw.len() as u64,
         });
     }
-    let packed = zstd::encode_all(raw.as_slice(), ZSTD_LEVEL).map_err(|_| SaveError::Encode)?;
+    zstd::encode_all(raw.as_slice(), ZSTD_LEVEL).map_err(|_| SaveError::Encode)
+}
+
+/// แปลง `Board` เป็นไบต์ของไฟล์ `.refx` (โหมด linked)
+///
+/// # Errors
+/// [`SaveError`] เมื่อเอกสารใหญ่เกินเพดานหรือบีบอัดไม่สำเร็จ
+pub fn encode(board: &Board) -> Result<Vec<u8>, SaveError> {
+    let packed = encode_body(board)?;
 
     let mut out = Vec::with_capacity(HEADER_LEN + packed.len());
     out.extend_from_slice(&MAGIC);
-    out.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+    // ★ **ไม่ใช่ `FORMAT_VERSION`** — ไฟล์ linked ยังประกาศ v1 เพื่อให้รุ่นเก่า
+    //   เปิดงานประจำวันได้ตามเดิม (ดูคอมเมนต์ที่ `FORMAT_VERSION`)
+    out.extend_from_slice(&LINKED_VERSION.to_le_bytes());
     out.extend_from_slice(&0u16.to_le_bytes()); // flags — linked mode
     out.extend_from_slice(&(packed.len() as u64).to_le_bytes());
     out.extend_from_slice(&crc32fast::hash(&packed).to_le_bytes());

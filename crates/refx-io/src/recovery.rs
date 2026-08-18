@@ -479,7 +479,9 @@ mod tests {
             .read_to_end(&mut bytes)
             .unwrap();
         let info = crate::dto::inspect(&bytes).unwrap();
-        assert_eq!(info.version, crate::dto::FORMAT_VERSION);
+        // ★ `LINKED_VERSION` **ไม่ใช่ `FORMAT_VERSION`** — ตัวหลังคือ *เพดานที่อ่านได้*
+        //   ซึ่งขยับเป็น 2 ตอน P4-5 · snapshot เขียนด้วยเส้นทาง linked จึงยังเป็น v1
+        assert_eq!(info.version, crate::dto::LINKED_VERSION);
         assert!(info.writable);
     }
 
