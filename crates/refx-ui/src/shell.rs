@@ -67,6 +67,33 @@ pub enum CloseChoice {
     Cancel,
 }
 
+/// ★★★ ผู้ใช้ตอบอะไรกับ "เจองานที่ยังไม่ได้บันทึกจาก session ก่อน" (P4-4)
+///
+/// `docs/07 §4` บังคับว่าต้องมี **สามทาง** และเขียนเหตุผลของตัวที่สามไว้ตรง ๆ:
+/// *"ผู้ใช้ที่ไม่แน่ใจต้องไม่ถูกบังคับให้ตัดสินใจแบบทำลายข้อมูล"*
+///
+/// ★★ สองตัวเลือกพอในทางเทคนิค แต่มันบังคับให้คนที่ยัง **จำไม่ได้ว่างานนั้นคืออะไร**
+/// ต้องเดา — และครึ่งหนึ่งของการเดาคือการกด "ทิ้ง" ทับงานที่ยังมีค่า
+/// · [`Self::Later`] แปลว่า "อย่าแตะไฟล์นั้น ถามฉันใหม่รอบหน้า"
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoverChoice {
+    /// เอางานนั้นกลับมาบนจอเดี๋ยวนี้
+    Restore,
+    /// ไม่เอาแล้ว ลบทิ้งได้
+    Discard,
+    /// ★ **เก็บไว้ก่อน ตัดสินใจทีหลัง** — ไฟล์ไม่ถูกแตะ และจะถูกถามใหม่รอบหน้า
+    Later,
+}
+
+/// งานค้างที่เจอตอนเปิดโปรแกรม — **ค่าสำหรับแสดงเท่านั้น** (P4-4)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoverView {
+    /// เขียนไว้เมื่อไหร่ (ข้อความพร้อมแสดงแล้ว) — `None` = ระบบไฟล์ไม่บอก
+    pub when: Option<String>,
+    /// มีกี่ชิ้นอยู่ในนั้น — ช่วยผู้ใช้จำว่าเป็นงานชิ้นไหน
+    pub items: usize,
+}
+
 /// กลุ่มของสิ่งที่เลือกอยู่ — **ค่าสำหรับแสดงเท่านั้น** (P3-7)
 ///
 /// ★ `None` ทั้งก้อน = ไม่ได้เลือกอะไร · `Mixed` = เลือกข้ามหลายกลุ่ม
@@ -279,6 +306,10 @@ pub struct ShellState {
     pub close_prompt: bool,
     /// ผู้ใช้ตอบแล้วในเฟรมนี้ — `None` = ยังไม่ตอบ
     pub close_choice: Option<CloseChoice>,
+    /// ★★★ เจองานที่ยังไม่ได้บันทึกจาก session ก่อน (P4-4) — `None` = ไม่มีอะไรค้าง
+    pub recover_prompt: Option<RecoverView>,
+    /// ผู้ใช้ตอบแล้วในเฟรมนี้ — `None` = ยังไม่ตอบ
+    pub recover_choice: Option<RecoverChoice>,
     /// ★★ สิ่งที่ผู้ใช้ขอทำกับกลุ่มในเฟรมนี้ — `None` = ไม่ได้แตะ
     pub group_request: Option<GroupRequest>,
     /// ผู้ใช้ออกจากช่องชื่อกลุ่มแล้ว → ปิดหน้าต่าง merge
@@ -392,6 +423,8 @@ impl Default for ShellState {
             group: None,
             close_prompt: false,
             close_choice: None,
+            recover_prompt: None,
+            recover_choice: None,
             group_request: None,
             group_sealed: false,
             picked: None,
@@ -471,6 +504,58 @@ pub fn draw_in_ui(
                     .clicked()
                 {
                     state.close_choice = Some(CloseChoice::DiscardAndClose);
+                }
+            });
+        });
+    }
+
+    // ---- ★★★ แถบกู้คืนงานที่ยังไม่ได้บันทึกจากรอบก่อน (P4-4) ----
+    //
+    //   วางไว้ที่เดียวกับแถบยืนยันตอนปิด ด้วยเหตุผลเดียวกัน (เห็นแน่ แต่ยัง
+    //   เห็นงานข้างหลัง · ไม่บล็อก UI thread แบบ native dialog — I-2)
+    if let Some(found) = state.recover_prompt.clone() {
+        egui::Panel::top("refx-recover").show_inside(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(
+                    egui::RichText::new(text::t(lang, Key::RecoverTitle))
+                        .strong()
+                        .color(WARN_COLOR),
+                );
+                ui.label(text::fill(
+                    lang,
+                    Template::RecoverFound,
+                    &[
+                        ("items", &found.items.to_string()),
+                        (
+                            "when",
+                            found
+                                .when
+                                .as_deref()
+                                .unwrap_or_else(|| text::t(lang, Key::RecoverWhenUnknown)),
+                        ),
+                    ],
+                ));
+                ui.separator();
+                // ★★ เรียงตาม **ความปลอดภัย** เหมือนแถบตอนปิด: ทางที่ไม่ทำงานหาย
+                //    ต้องมาก่อนเสมอสำหรับคนที่กดเร็วโดยไม่อ่าน
+                if ui.button(text::t(lang, Key::RecoverRestore)).clicked() {
+                    state.recover_choice = Some(RecoverChoice::Restore);
+                }
+                // ★★★ ตัวที่สาม — สำคัญที่สุดตาม docs/07 §4 · **ไม่แตะไฟล์เลย**
+                if ui
+                    .button(text::t(lang, Key::RecoverLater))
+                    .on_hover_text(text::t(lang, Key::RecoverLaterHint))
+                    .clicked()
+                {
+                    state.recover_choice = Some(RecoverChoice::Later);
+                }
+                ui.separator();
+                if ui
+                    .button(text::t(lang, Key::RecoverDiscard))
+                    .on_hover_text(text::t(lang, Key::RecoverDiscardHint))
+                    .clicked()
+                {
+                    state.recover_choice = Some(RecoverChoice::Discard);
                 }
             });
         });
@@ -1586,10 +1671,14 @@ mod tests {
             // ★ ปุ่มในแถบยืนยันตอนปิด (P4-2) — นำไปสู่ `mark_saved` ซึ่งแตะธง
             //   `dirty` ของ `Board` จึงนับเป็นช่องทางที่แก้เอกสารได้
             close_choice,
+            // ★★ ปุ่มในแถบกู้คืน (P4-4) — "กู้คืน" **เปลี่ยน board ทั้งก้อน**
+            //    ซึ่งแรงกว่าทุกช่องทางในรายการนี้ · ต้องนับเป็นการแก้เอกสารแน่นอน
+            recover_choice,
 
             // ---- สถานะของ *มุมมอง* — เปลี่ยนได้ตามใจ ไม่แตะเอกสาร ----
             mode: _,
             close_prompt: _,    // บอกแค่ว่าแถบยืนยันโผล่อยู่ไหม ไม่ใช่คำขอแก้อะไร
+            recover_prompt: _,  // เหมือนกัน — แค่ "มีอะไรค้างให้ถามไหม"
             appearance: _,      // ค่าสำหรับแสดงของ inspector
             board_grayscale: _, // สวิตช์การมองเห็นทั้ง board (P2-8) ไม่ลงไฟล์
             tool: _,
@@ -1633,6 +1722,7 @@ mod tests {
             || meta_request.is_some()
             || group_request.is_some()
             || close_choice.is_some()
+            || recover_choice.is_some()
             || *arrange_apply
     }
 

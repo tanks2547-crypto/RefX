@@ -66,6 +66,34 @@ pub fn pick_save_location(suggested_name: &str) -> crossbeam_channel::Receiver<O
     rx
 }
 
+/// ให้ผู้ใช้เลือกไฟล์ `.refx` ที่จะเปิด — **ไม่บล็อก UI thread** (P4-4)
+///
+/// เหตุผลของรูปร่าง API ทั้งหมดเหมือน [`pick_save_location`] เป๊ะ (ดูที่นั่น)
+/// — ต่างแค่มันเปิดไฟล์ที่มีอยู่แล้วแทนที่จะตั้งชื่อไฟล์ใหม่
+///
+/// `None` = ผู้ใช้กดยกเลิก ซึ่งไม่ใช่ error
+#[must_use]
+pub fn pick_document_to_open() -> crossbeam_channel::Receiver<Option<PathBuf>> {
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    std::thread::Builder::new()
+        .name("refx-open-dialog".to_owned())
+        .spawn(move || {
+            let picked = std::panic::catch_unwind(|| {
+                rfd::FileDialog::new()
+                    .set_title("เปิดกระดาน")
+                    .add_filter("RefX board", &["refx"])
+                    .pick_file()
+            })
+            .unwrap_or(None);
+            let _ = tx.send(picked);
+        })
+        .map_or_else(
+            |err| tracing::error!(%err, "cannot spawn the open dialog thread"),
+            drop,
+        );
+    rx
+}
+
 /// แจ้งผู้ใช้ว่าโปรแกรมพัง พร้อมบอกว่าไฟล์ log อยู่ไหน
 ///
 /// เรียกจาก panic hook เท่านั้น — **บล็อกได้** เพราะตอนนั้นโปรแกรมกำลังจะตายอยู่แล้ว

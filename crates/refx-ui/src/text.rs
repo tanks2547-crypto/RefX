@@ -233,6 +233,30 @@ pub enum Key {
     /// คำเตือนของปุ่มปิดโดยไม่บันทึก
     CloseDiscardHint,
 
+    // ---- P4-4: กู้คืนงานที่ยังไม่เคยบันทึก ----
+    /// หัวข้อของแถบกู้คืน
+    RecoverTitle,
+    /// ปุ่ม "กู้คืน"
+    RecoverRestore,
+    /// ★ ปุ่ม "เก็บไว้ก่อน" — ตัวที่ docs/07 §4 บอกว่าสำคัญที่สุด
+    RecoverLater,
+    /// คำอธิบายของปุ่ม "เก็บไว้ก่อน" — ต้องบอกให้ชัดว่า **ไม่มีอะไรถูกลบ**
+    RecoverLaterHint,
+    /// ปุ่ม "ทิ้งไป"
+    RecoverDiscard,
+    /// คำเตือนของปุ่มทิ้ง
+    RecoverDiscardHint,
+    /// เวลาที่เขียนไฟล์ที่ระบบไฟล์ไม่ยอมบอก
+    RecoverWhenUnknown,
+    /// กู้คืนแล้ว แต่ยังไม่ได้บันทึกลงไฟล์จริง
+    RecoveredNotSavedYet,
+    /// เปิดไฟล์ไม่สำเร็จ
+    OpenFailed,
+    /// กำลังเปิดไฟล์ที่ผู้ใช้เลือก
+    OpenInProgress,
+    /// กำลังรอผู้ใช้เลือกไฟล์ที่จะเปิด
+    OpenChoosing,
+
     // ---- P3-7: group / ungroup ----
     /// หัวข้อกลุ่มในแผง Arrange
     GroupTitle,
@@ -337,6 +361,21 @@ fn en(key: Key) -> &'static str {
         Key::CloseCancel => "Keep working",
         Key::CloseDiscard => "Close without saving",
         Key::CloseDiscardHint => "Everything since the last save will be lost",
+        Key::RecoverTitle => "Unsaved work from last time",
+        Key::RecoverRestore => "Bring it back",
+        Key::RecoverLater => "Keep it, decide later",
+        Key::RecoverLaterHint => "Nothing is deleted - you will be asked again next time",
+        Key::RecoverDiscard => "Throw it away",
+        Key::RecoverDiscardHint => "That work is deleted for good",
+        Key::RecoverWhenUnknown => "an earlier session",
+        Key::RecoveredNotSavedYet => {
+            "Restored - this board still has no file, press Ctrl+S to keep it"
+        }
+        Key::OpenFailed => {
+            "Could not open that board - the file may be damaged or from a newer RefX"
+        }
+        Key::OpenInProgress => "Opening",
+        Key::OpenChoosing => "Choose a board to open",
         Key::GroupTitle => "Group",
         Key::GroupNone => "Not in a group",
         Key::GroupDefaultName => "Group",
@@ -432,6 +471,17 @@ fn th(key: Key) -> Option<&'static str> {
         Key::CloseCancel => "ทำงานต่อ",
         Key::CloseDiscard => "ปิดโดยไม่บันทึก",
         Key::CloseDiscardHint => "ทุกอย่างตั้งแต่บันทึกครั้งล่าสุดจะหายไป",
+        Key::RecoverTitle => "เจองานที่ยังไม่ได้บันทึกจากรอบก่อน",
+        Key::RecoverRestore => "เอากลับมา",
+        Key::RecoverLater => "เก็บไว้ก่อน ตัดสินใจทีหลัง",
+        Key::RecoverLaterHint => "ไม่มีอะไรถูกลบ — จะถามใหม่ในรอบหน้า",
+        Key::RecoverDiscard => "ทิ้งไป",
+        Key::RecoverDiscardHint => "งานชุดนั้นจะถูกลบถาวร",
+        Key::RecoverWhenUnknown => "รอบก่อน",
+        Key::RecoveredNotSavedYet => "เอากลับมาแล้ว — กระดานนี้ยังไม่มีไฟล์ กด Ctrl+S เพื่อเก็บไว้",
+        Key::OpenFailed => "เปิดกระดานไม่ได้ — ไฟล์อาจเสียหาย หรือถูกเขียนด้วย RefX รุ่นใหม่กว่า",
+        Key::OpenInProgress => "กำลังเปิด",
+        Key::OpenChoosing => "เลือกกระดานที่จะเปิด",
         Key::GroupTitle => "กลุ่ม",
         Key::GroupNone => "ไม่ได้อยู่ในกลุ่มไหน",
         Key::GroupDefaultName => "กลุ่ม",
@@ -471,6 +521,10 @@ pub enum Template {
     GroupMembers,
     /// `{name}` — บันทึกลงไฟล์นี้สำเร็จแล้ว (P4-2)
     Saved,
+    /// `{items}` `{when}` — เจองานค้างจาก session ก่อนกี่ชิ้น เขียนไว้เมื่อไหร่ (P4-4)
+    RecoverFound,
+    /// `{name}` — เปิดไฟล์นี้สำเร็จแล้ว (P4-4)
+    Opened,
     /// `{pct}` — ระดับซูมเป็นเปอร์เซ็นต์
     Zoom,
     /// `{n}` — จำนวนเฟรมที่วาดไปแล้ว (ตัวชี้วัด I-1 ที่เห็นด้วยตา)
@@ -557,6 +611,8 @@ fn template_en(template: Template) -> &'static str {
         Template::ItemCount => "{n} items",
         Template::GroupMembers => "{n} in this group",
         Template::Saved => "Saved to {name}",
+        Template::RecoverFound => "{items} items from {when}",
+        Template::Opened => "Opened {name}",
         Template::Zoom => "Zoom {pct}%",
         Template::FramesDrawn => "Frames {n}",
         Template::Ram => "RAM {used} / {limit}",
@@ -653,6 +709,8 @@ fn template_th(template: Template) -> Option<&'static str> {
         Template::ItemCount => "{n} รายการ",
         Template::GroupMembers => "{n} ใบในกลุ่มนี้",
         Template::Saved => "บันทึกลง {name} แล้ว",
+        Template::RecoverFound => "{items} ชิ้น จาก{when}",
+        Template::Opened => "เปิด {name} แล้ว",
         Template::Zoom => "ซูม {pct}%",
         Template::FramesDrawn => "เฟรมที่วาด {n}",
         Template::Ram => "RAM {used} / {limit}",
@@ -966,6 +1024,17 @@ mod tests {
         Key::CloseCancel,
         Key::CloseDiscard,
         Key::CloseDiscardHint,
+        Key::RecoverTitle,
+        Key::RecoverRestore,
+        Key::RecoverLater,
+        Key::RecoverLaterHint,
+        Key::RecoverDiscard,
+        Key::RecoverDiscardHint,
+        Key::RecoverWhenUnknown,
+        Key::RecoveredNotSavedYet,
+        Key::OpenFailed,
+        Key::OpenInProgress,
+        Key::OpenChoosing,
         Key::GroupTitle,
         Key::GroupNone,
         Key::GroupDefaultName,
@@ -979,6 +1048,8 @@ mod tests {
         Template::ItemCount,
         Template::GroupMembers,
         Template::Saved,
+        Template::RecoverFound,
+        Template::Opened,
         Template::Zoom,
         Template::FramesDrawn,
         Template::Ram,

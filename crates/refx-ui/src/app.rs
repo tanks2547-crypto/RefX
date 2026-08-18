@@ -516,6 +516,18 @@ fn save_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> Option<Sav
     }
 }
 
+/// `Ctrl+O` = เปิดกระดาน (docs/03 §5, P4-4)
+///
+/// ★ ไม่รับ `Ctrl+Shift+O` เป็นอย่างอื่น — ปุ่มที่ยังไม่มีความหมายควรเงียบ
+/// ไม่ใช่ทำอะไรที่ผู้ใช้ไม่ได้ขอ
+fn open_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> bool {
+    if !modifiers.control_key() || modifiers.alt_key() || modifiers.shift_key() {
+        return false;
+    }
+    // บางระบบส่ง Ctrl+O มาเป็นอักขระ control (SI) ไม่ใช่ 'o' — เหมือน Ctrl+S
+    matches!(pressed, Some('o' | '\u{f}'))
+}
+
 /// ผู้ใช้ขออะไรกับการบันทึก (P4-2)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SaveRequest {
@@ -1392,6 +1404,46 @@ pub struct RefxApp {
     snapshot_revision: Option<u64>,
     /// ★ ที่อยู่ของเอกสารปัจจุบัน — `None` = ยังไม่เคยบันทึก
     doc_path: Option<std::path::PathBuf>,
+    /// ผู้ใช้กด `Ctrl+O` ในรอบ event ที่ผ่านมา (P4-4)
+    pending_open: bool,
+    /// dialog เลือกไฟล์ที่จะเปิดที่กำลังรอผู้ใช้ตอบ (ไม่บล็อก I-2)
+    open_dialog: Option<crossbeam_channel::Receiver<Option<std::path::PathBuf>>>,
+    /// งานอ่าน+decode ไฟล์ที่ส่งไปเธรดแล้ว (ไม่บล็อก I-2)
+    ///
+    /// ★ `Box<Board>` เพราะ `Board` ใหญ่ — clippy `large_enum_variant` ไม่ชอบ
+    /// ให้มันนั่งอยู่ใน `Result` ที่ถูกส่งข้ามช่อง
+    #[allow(clippy::type_complexity, reason = "ชนิดของช่องรับผลอ่านตรง ๆ ชัดกว่า alias")]
+    load_job: Option<crossbeam_channel::Receiver<Result<(std::path::PathBuf, Box<Board>), String>>>,
+    /// ★★★ งานค้างจาก session ก่อนที่กำลังถามผู้ใช้อยู่ — `None` = ไม่มี
+    pending_recovery: Option<PendingRecovery>,
+    /// งานสแกนโฟลเดอร์ recovery ตอนเปิดโปรแกรม (แตะดิสก์ → ต้องอยู่เธรดอื่น I-2)
+    recovery_scan: Option<crossbeam_channel::Receiver<Option<PendingRecovery>>>,
+    /// ★★ ถามเรื่องงานค้างไปแล้วในการรันครั้งนี้ — **ครั้งเดียวตลอดอายุโปรแกรม**
+    ///
+    /// `resumed()` ถูกเรียกซ้ำได้ตอนกู้ device (docs/04 §7) · ถ้าใช้ "ไม่มีงานค้าง
+    /// อยู่ตอนนี้" เป็นเงื่อนไข ผู้ใช้ที่ตอบ "เก็บไว้ก่อน" ไปแล้วจะถูกถามใหม่ทุกครั้ง
+    /// ที่ไดรเวอร์สะดุด — และคำถามที่โผล่ซ้ำ ๆ คือคำถามที่คนกดปิดโดยไม่อ่าน
+    recovery_checked: bool,
+    /// ★★★ snapshot เก่าที่เพิ่ง "เอากลับมา" — รอให้ session นี้เขียนของตัวเองก่อน
+    ///
+    /// **ลบทันทีที่กู้คืนไม่ได้**: ระหว่างจังหวะนั้นจนถึง autosave ครั้งแรกของเรา
+    /// งานชุดนั้นจะไม่มีสำเนาอยู่บนดิสก์เลยสักที่ — โปรแกรมตายตรงกลางคือหายจริง
+    /// (และนั่นคือสิ่งเดียวที่กลไกทั้งหมดนี้มีไว้กัน)
+    ///
+    /// **ไม่ลบเลยก็ไม่ได้**: มันจะถูกเสนอให้กู้ซ้ำทุกครั้งที่เปิดโปรแกรม ทั้งที่
+    /// ผู้ใช้เอากลับมาแล้ว — แล้วเขาจะได้งานซ้ำสองชุดโดยไม่รู้ว่าอันไหนใหม่กว่า
+    ///
+    /// → ลบ **หลัง snapshot ของ session นี้ลงดิสก์สำเร็จ** ซึ่งเป็นจังหวะแรกที่
+    /// มีสำเนาสองชุดพร้อมกัน (หลักการเดียวกับ tmp → rename ของ `save_atomic`)
+    adopted_recovery: Option<std::path::PathBuf>,
+    /// ★★★ คีย์งาน decode → `ItemId` ที่ผลลัพธ์ต้องไปเกาะ (P4-4)
+    ///
+    /// เส้นทาง "ลากไฟล์เข้ามา" **สร้าง item ใหม่** จากผลลัพธ์ ส่วนเส้นทาง
+    /// "เปิดไฟล์ `.refx`" มี item อยู่แล้วครบทุกใบพร้อมตำแหน่ง/หมุน/ครอป/แท็ก
+    /// สิ่งที่ขาดคือ *พิกเซล* เท่านั้น · ถ้าไม่มีตารางนี้ ผลลัพธ์จะถูกเติมเป็นใบใหม่
+    /// ต่อท้ายเป็นตาราง 16 คอลัมน์ แล้วผู้ใช้จะเห็น **ภาพซ้ำสองชุด** ชุดหนึ่ง
+    /// อยู่ผิดที่ทั้งหมด ซึ่งอ่านได้อย่างเดียวว่า "เปิดไฟล์แล้วงานเพี้ยน"
+    relink_targets: std::collections::HashMap<refx_asset::hash::ContentHash, ItemId>,
     /// ★★★ รหัสของการเปิดโปรแกรมครั้งนี้ — ชื่อไฟล์ snapshot ของงานที่ยังไม่เคยบันทึก
     session: refx_io::recovery::SessionId,
     /// ★ โฟลเดอร์ `<data_dir>/recovery` — `None` = หาที่อยู่ไม่ได้ (ไม่มี home dir)
@@ -1424,6 +1476,97 @@ pub struct RefxApp {
     /// working texture ต้อง decode ใหม่จากไฟล์จริง จึงต้องจำที่มาไว้จับคู่
     job_sources:
         std::collections::HashMap<refx_asset::hash::ContentHash, refx_asset::pool::JobSource>,
+}
+
+/// ★ id ของ board ที่แอปนี้ใช้ — ตัวเดียวกับ `Board::default()`
+///
+/// `.refx` **ไม่เก็บ id** โดยตั้งใจ (P4-1: มันเป็นคีย์ในหน่วยความจำ ไม่ใช่เนื้อหา
+/// ของเอกสาร) ผู้อ่านจึงต้องบอกว่าจะให้ board ที่โหลดมาใช้ id ไหน · การอ่าน
+/// ด้วย id คนละตัวกับที่แอปใช้ = `ItemId` ที่ชี้ไป board ผิดใบตั้งแต่วินาทีแรก
+fn default_board_id() -> refx_core::arena::BoardId {
+    use refx_core::arena::ArenaKey as _;
+    refx_core::arena::BoardId::from_parts(0, 0)
+}
+
+/// งานค้างจาก session ก่อนที่กำลังรอให้ผู้ใช้ตัดสิน (P4-4)
+#[derive(Debug, Clone)]
+struct PendingRecovery {
+    /// ไฟล์ snapshot ตัวจริงบนดิสก์
+    path: std::path::PathBuf,
+    /// เขียนไว้เมื่อไหร่ (ข้อความพร้อมแสดง) — `None` = ระบบไฟล์ไม่บอก
+    when: Option<String>,
+    /// มีกี่ชิ้นอยู่ในนั้น
+    items: usize,
+}
+
+/// ★★ หา snapshot ที่ค้างอยู่ที่ **ใหม่ที่สุด** — รันบนเธรดอื่นเสมอ (I-2)
+///
+/// ★ ถามทีละใบ ไม่ใช่ยัดทั้งโฟลเดอร์ให้ผู้ใช้ตัดสินรวดเดียว: คนที่เปิดโปรแกรม
+/// มาเจอรายการ 10 บรรทัดที่หน้าตาเหมือนกันหมดจะกด "ทิ้ง" ทุกอันเพื่อให้มันหายไป
+/// ซึ่งตรงข้ามกับสิ่งที่กลไกนี้มีไว้ทำ · ที่เหลือถูกถามในรอบถัด ๆ ไป
+/// และ [`refx_io::recovery::prune`] ไม่แตะตัวที่ยังไม่เคยถูกถาม
+fn scan_for_recovery(
+    dir: &std::path::Path,
+    session: &refx_io::recovery::SessionId,
+) -> Option<PendingRecovery> {
+    let orphan = refx_io::recovery::scan(dir, session).into_iter().next()?;
+    // ★ อ่านทั้งไฟล์เพื่อ **นับชิ้น** ตรงนี้เลย — ตัวเลขนั้นคือสิ่งเดียวที่ช่วย
+    //   ผู้ใช้จำได้ว่างานชุดไหน · ไฟล์ที่อ่านไม่ออกถือว่าไม่มีอะไรให้กู้
+    let board = refx_io::recovery::load(&orphan.path, default_board_id())?;
+    Some(PendingRecovery {
+        path: orphan.path,
+        when: orphan.written_at.map(format_when),
+        items: board.len(),
+    })
+}
+
+/// เวลาที่ไฟล์ถูกเขียน → ข้อความสั้น ๆ ที่ผู้ใช้อ่านรู้เรื่อง
+///
+/// ★ ไม่มี dependency สำหรับจัดรูปแบบวันที่ใน `docs/09` (และการเพิ่มต้องขอก่อน)
+/// → บอกเป็น **ระยะเวลาที่ผ่านมา** แทนวันที่ ซึ่งตอบคำถามที่ผู้ใช้ถามจริง ๆ
+/// ได้ตรงกว่าอยู่แล้ว: *"เมื่อกี้นี้เอง หรือเมื่ออาทิตย์ที่แล้ว"*
+fn format_when(at: std::time::SystemTime) -> String {
+    let Ok(ago) = std::time::SystemTime::now().duration_since(at) else {
+        return "just now".to_owned(); // นาฬิกาเครื่องถอยหลัง — ไม่ใช่เรื่องต้องล้ม
+    };
+    let mins = ago.as_secs() / 60;
+    match mins {
+        0 => "just now".to_owned(),
+        1..60 => format!("{mins} min ago"),
+        60..1440 => format!("{} h ago", mins / 60),
+        _ => format!("{} d ago", mins / 1440),
+    }
+}
+
+/// อ่านไฟล์ `.refx` ทั้งไฟล์แล้วแปลงเป็น `Board` — **รันบนเธรดอื่นเท่านั้น** (I-2)
+///
+/// ★ `std::fs::read` ถูกแบนใน `clippy.toml` เพราะเส้นทางจริงต้องมีเพดานขนาด —
+/// ที่นี่ใช้ `File::take` ด้วยเพดานเดียวกับตัวอ่านเอกสารตัวอื่นทุกตัว
+fn read_document(path: &std::path::Path) -> Result<Board, String> {
+    use std::io::Read as _;
+
+    let mut bytes = Vec::new();
+    let mut file = std::fs::File::open(path).map_err(|err| err.to_string())?;
+    file.by_ref()
+        .take(refx_io::dto::MAX_COMPRESSED_BYTES + refx_io::dto::HEADER_LEN as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|err| err.to_string())?;
+    refx_io::dto::decode(&bytes, default_board_id()).map_err(|err| err.to_string())
+}
+
+/// ลบ snapshot ที่ผู้ใช้สั่งทิ้ง พร้อมไฟล์บริวารของมัน
+fn remove_recovery_file(snapshot: &std::path::Path) {
+    for path in [
+        snapshot.to_path_buf(),
+        snapshot.with_extension(refx_io::save::BAK_SUFFIX),
+        refx_io::recovery::asked_marker(snapshot),
+    ] {
+        if let Err(err) = std::fs::remove_file(&path)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(%err, path = %path.display(), "cannot remove the recovery file");
+        }
+    }
 }
 
 /// ★★ snapshot ของ autosave รอบนี้จะไปลงที่ไหน
@@ -1506,6 +1649,14 @@ impl RefxApp {
             autosave_job: None,
             snapshot_revision: None,
             doc_path: None,
+            pending_open: false,
+            open_dialog: None,
+            load_job: None,
+            pending_recovery: None,
+            recovery_scan: None,
+            recovery_checked: false,
+            adopted_recovery: None,
+            relink_targets: std::collections::HashMap::new(),
             // ★ รหัสใหม่ทุกครั้งที่เปิดโปรแกรม — สองหน้าต่างจึงเขียนคนละไฟล์
             session: refx_io::recovery::SessionId::new_unique(),
             // ผู้เรียก (`run`) เสียบให้ — ที่นี่ไม่รู้จัก `AppPaths`
@@ -1844,6 +1995,30 @@ impl RefxApp {
             for (hash, source, thumb, meta) in done {
                 match Self::upload_thumb(gfx, &thumb.pixels) {
                     Ok(slot) => {
+                        // ★★★ ภาพของ board ที่ **เปิดมาจากไฟล์** — item มีอยู่แล้ว
+                        //
+                        //   ที่ขาดคือพิกเซลอย่างเดียว ตำแหน่ง/ขนาด/หมุน/ครอป/ฟิลเตอร์
+                        //   /แท็ก/ดาว/กลุ่ม/โน้ต มาจากไฟล์ครบแล้ว · สร้างใบใหม่ตรงนี้
+                        //   = ผู้ใช้เห็นภาพซ้ำสองชุด ชุดหนึ่งอยู่ผิดที่ทั้งหมด
+                        if let Some(id) = self.relink_targets.remove(&hash) {
+                            if gfx.board.item(id).is_some() {
+                                gfx.render_state.insert(
+                                    id,
+                                    ItemRender {
+                                        source,
+                                        hash,
+                                        tint: dominant_rgba(thumb.dominant),
+                                        thumb: *thumb,
+                                        slot: Some(slot),
+                                    },
+                                );
+                                self.drop.added += 1;
+                            } else {
+                                // item ถูกลบไประหว่างที่งานเดินอยู่ (undo/เปิดไฟล์อื่นทับ)
+                                self.drop.cancelled += 1;
+                            }
+                            continue;
+                        }
                         // จัดเป็นตารางง่าย ๆ ไปก่อน — layout จริงมาใน P2/P3
                         // ★ ตำแหน่งไปอยู่ใน `ItemCanvas` แล้ว ไม่ได้คำนวณลง quad ตรง ๆ
                         let n = u32::try_from(gfx.board.len()).unwrap_or(u32::MAX);
@@ -2758,7 +2933,14 @@ impl RefxApp {
         // เก็บผลของรอบก่อน (ถ้ามี) — autosave ที่ล้มไม่ใช่เรื่องที่ผู้ใช้ต้องเห็น
         if let Some(rx) = self.autosave_job.as_ref() {
             match rx.try_recv() {
-                Ok(Ok(())) => self.autosave_job = None,
+                Ok(Ok(())) => {
+                    self.autosave_job = None;
+                    // ★★ ตอนนี้งานชุดที่กู้มามีสำเนาใหม่ของ session นี้บนดิสก์แล้ว
+                    //    ตัวเก่าจึงหมดหน้าที่ · ลบก่อนหน้านี้ = มีช่วงที่ไม่มีสำเนาเลย
+                    if let Some(old) = self.adopted_recovery.take() {
+                        remove_recovery_file(&old);
+                    }
+                }
                 Ok(Err(err)) => {
                     tracing::warn!(%err, "autosave snapshot failed");
                     self.autosave_job = None;
@@ -2849,6 +3031,310 @@ impl RefxApp {
         self.gfx.as_ref().is_some_and(|gfx| {
             gfx.board.is_dirty() && self.snapshot_revision != Some(gfx.board.revision())
         })
+    }
+
+    // ---------- ★★★ P4-4: กู้คืนงานที่ยังไม่เคยบันทึก + เปิดไฟล์ ----------
+
+    /// ★★ ไล่ดูโฟลเดอร์ recovery ตอนเปิดโปรแกรม — **บนเธรดอื่นเสมอ** (I-2)
+    ///
+    /// การสแกนอ่าน metadata ของทุกไฟล์ในโฟลเดอร์แล้ว decode ตัวที่ใหม่สุด
+    /// ซึ่งเป็นงานดิสก์ล้วน ๆ · ทำบน UI thread = หน้าต่างขาวตอนเปิดโปรแกรม
+    /// ซึ่งเป็นวินาทีที่ผู้ใช้ตัดสินว่าโปรแกรมนี้ "หนัก" หรือเปล่า
+    fn start_recovery_scan(&mut self) {
+        let Some(dir) = self.recovery_dir.clone() else {
+            return;
+        };
+        let session = self.session.clone();
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let spawned = std::thread::Builder::new()
+            .name("refx-recovery-scan".to_owned())
+            .spawn(move || {
+                let _ = tx.send(scan_for_recovery(&dir, &session));
+            });
+        if spawned.is_ok() {
+            self.recovery_scan = Some(rx);
+        }
+    }
+
+    /// เก็บผลการสแกน — เรียกต้นเฟรม **ไม่บล็อก**
+    fn poll_recovery_scan(&mut self) {
+        let Some(rx) = self.recovery_scan.as_ref() else {
+            return;
+        };
+        let found = match rx.try_recv() {
+            Ok(found) => found,
+            Err(crossbeam_channel::TryRecvError::Empty) => return,
+            Err(crossbeam_channel::TryRecvError::Disconnected) => None,
+        };
+        self.recovery_scan = None;
+        let Some(found) = found else {
+            return;
+        };
+
+        // ★★★ ประทับว่า "ถามแล้ว" **ตอนที่แถบโผล่ขึ้นจอ** ไม่ใช่ตอนผู้ใช้ตอบ
+        //
+        //   ถ้าประทับตอนตอบ ผู้ใช้ที่ปิดโปรแกรมทิ้งโดยไม่แตะแถบเลย จะทำให้ไฟล์นั้น
+        //   ไม่มีวันเข้าเกณฑ์เก็บกวาด แล้วโฟลเดอร์โตไม่รู้จบ · ส่วนการประทับตอนนี้
+        //   ให้ความหมายตรงกับที่ `docs/07 §4` เขียนพอดี: **"ผู้ใช้ได้เห็นแล้ว"**
+        refx_io::recovery::mark_asked(&found.path);
+        self.shell.recover_prompt = Some(crate::shell::RecoverView {
+            when: found.when.clone(),
+            items: found.items,
+        });
+        self.pending_recovery = Some(found);
+        if let Some(gfx) = self.gfx.as_ref() {
+            gfx.window.request_redraw();
+        }
+    }
+
+    /// ★★★ ผู้ใช้ตอบแถบกู้คืนแล้ว — **สามทาง และมีทางเดียวที่ลบไฟล์**
+    fn apply_recover_choice(&mut self, choice: crate::shell::RecoverChoice) {
+        use crate::shell::RecoverChoice;
+
+        self.shell.recover_prompt = None;
+        let Some(found) = self.pending_recovery.take() else {
+            return;
+        };
+        match choice {
+            RecoverChoice::Restore => {
+                // ★ id เดียวกับ `Board::default()` ที่แอปใช้ — `.refx` ไม่เก็บ id
+                //   (P4-1 ตัดออกโดยตั้งใจ: มันเป็นคีย์ในหน่วยความจำ ไม่ใช่เนื้อหา)
+                let Some(board) = refx_io::recovery::load(&found.path, default_board_id()) else {
+                    self.shell.status = text::t(self.shell.lang, Key::OpenFailed).to_owned();
+                    self.shell.status_warn = true;
+                    return;
+                };
+                // ★ กู้คืนแล้ว **ยังไม่มี path** — งานชุดนี้ไม่เคยถูกบันทึกมาก่อน
+                //   จึงต้อง dirty ต่อไปและถูก autosave ต่อไปตามปกติ
+                self.adopt_board(board, None);
+                // ★ ยังไม่ลบไฟล์เก่า — รอให้ snapshot ของ session นี้ลงดิสก์ก่อน
+                //   (ดู `adopted_recovery`) · ระหว่างนี้มีสำเนาอยู่หนึ่งชุดเสมอ
+                self.adopted_recovery = Some(found.path.clone());
+                self.shell.status = text::t(self.shell.lang, Key::RecoveredNotSavedYet).to_owned();
+                self.shell.status_warn = true;
+            }
+            RecoverChoice::Discard => {
+                // ผู้ใช้ยืนยันเองว่าไม่เอา — นี่คือทางเดียวที่ไฟล์ถูกลบตามคำสั่งคน
+                remove_recovery_file(&found.path);
+                self.shell.status = text::t(self.shell.lang, Key::Ready).to_owned();
+            }
+            // ★★★ **ไม่แตะไฟล์เลยแม้แต่นิดเดียว** — นี่คือทั้งหมดของตัวเลือกที่สาม
+            //     ไฟล์ยังอยู่ ถูกถามใหม่รอบหน้า และเข้าเกณฑ์เก็บกวาดได้แล้ว
+            //     เพราะถูกประทับ `.asked` ไปตอนแถบโผล่
+            RecoverChoice::Later => {}
+        }
+        // ★ เก็บกวาดตามเพดาน **หลังผู้ใช้ตอบเสมอ** — ตอนนี้ไฟล์ที่เพิ่งถูกถาม
+        //   มีไฟล์ประทับแล้ว เพดาน 10 ไฟล์ / 30 วันจึงมีของให้ทำงานด้วยจริง
+        self.sweep_recovery_folder();
+        if let Some(gfx) = self.gfx.as_ref() {
+            gfx.window.request_redraw();
+        }
+    }
+
+    /// ★ เก็บกวาดโฟลเดอร์ recovery ตามเพดาน — บนเธรดอื่น (I-2)
+    ///
+    /// `prune` ลบได้เฉพาะไฟล์ที่ผู้ใช้เคยเห็นแล้ว (`docs/07 §4`) การเรียกก่อนมี
+    /// แถบกู้คืนจึงเป็นโค้ดที่ทำงานเป็นศูนย์ — ที่นี่คือจุดแรกที่มันมีความหมาย
+    fn sweep_recovery_folder(&self) {
+        let Some(dir) = self.recovery_dir.clone() else {
+            return;
+        };
+        let session = self.session.clone();
+        let spawned = std::thread::Builder::new()
+            .name("refx-recovery-sweep".to_owned())
+            .spawn(move || {
+                refx_io::recovery::prune(
+                    &dir,
+                    &session,
+                    refx_io::recovery::MAX_KEPT,
+                    refx_io::recovery::MAX_AGE,
+                    std::time::SystemTime::now(),
+                );
+            });
+        if let Err(err) = spawned {
+            tracing::warn!(%err, "cannot spawn the recovery sweep thread");
+        }
+    }
+
+    /// `Ctrl+O` — ถามว่าจะเปิดไฟล์ไหน (P4-4)
+    fn apply_open_request(&mut self) {
+        // ★ ซ้อนกันไม่ได้: สอง dialog พร้อมกันแปลว่าผลของอันที่ตอบก่อนถูกทิ้ง
+        if self.open_dialog.is_some() || self.load_job.is_some() {
+            return;
+        }
+        self.open_dialog = Some(refx_platform::dialog::pick_document_to_open());
+        // ★ บอกด้วยว่ากำลังรออะไรอยู่ — native dialog เปิดหลังหน้าต่างหลักได้
+        //   (เกิดจริงตอนขับด้วยสคริปต์) ถ้าไม่มีข้อความนี้ ผู้ใช้ที่ไม่เห็น dialog
+        //   จะสรุปว่า `Ctrl+O` ไม่ทำงาน แล้วกดซ้ำอีกสิบครั้ง
+        self.shell.status = text::t(self.shell.lang, Key::OpenChoosing).to_owned();
+        self.shell.status_warn = false;
+    }
+
+    /// ส่งงานอ่านไฟล์ไปเธรด — ไม่รอผล (I-2)
+    ///
+    /// ★ อ่าน+แตกบีบ+ตรวจ CRC ของไฟล์ระดับ MB เป็นงานที่กินเวลาจริง และ `.refx`
+    /// แบบ packed (P4-5) จะใหญ่กว่านี้อีกมาก — เส้นทางนี้ห้ามแตะ UI thread
+    /// ตั้งแต่วันแรก ไม่ใช่ "ค่อยย้ายทีหลังตอนมันช้า"
+    fn start_load(&mut self, path: &std::path::Path) {
+        let path = path.to_path_buf();
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let spawned = std::thread::Builder::new()
+            .name("refx-open".to_owned())
+            .spawn(move || {
+                let result = read_document(&path).map(|board| (path, Box::new(board)));
+                let _ = tx.send(result);
+            });
+        if spawned.is_err() {
+            self.shell.status = text::t(self.shell.lang, Key::OpenFailed).to_owned();
+            self.shell.status_warn = true;
+            return;
+        }
+        self.load_job = Some(rx);
+        self.shell.status = text::t(self.shell.lang, Key::OpenInProgress).to_owned();
+        self.shell.status_warn = false;
+    }
+
+    /// เก็บผลของ dialog เปิดไฟล์และของงานอ่าน — เรียกต้นเฟรม **ไม่บล็อก**
+    fn poll_open(&mut self) {
+        let lang = self.shell.lang;
+
+        if let Some(rx) = self.open_dialog.as_ref() {
+            match rx.try_recv() {
+                Ok(Some(path)) => {
+                    self.open_dialog = None;
+                    self.start_load(&path);
+                }
+                Ok(None) => {
+                    self.open_dialog = None; // กดยกเลิก — ไม่ใช่ error
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => {}
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    self.open_dialog = None;
+                    self.shell.status = text::t(lang, Key::OpenFailed).to_owned();
+                    self.shell.status_warn = true;
+                }
+            }
+        }
+
+        let Some(rx) = self.load_job.as_ref() else {
+            return;
+        };
+        let done = match rx.try_recv() {
+            Ok(result) => result,
+            Err(crossbeam_channel::TryRecvError::Empty) => return,
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                Err("open thread died".to_owned())
+            }
+        };
+        self.load_job = None;
+        match done {
+            Ok((path, board)) => {
+                let name = path
+                    .file_name()
+                    .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+                self.adopt_board(*board, Some(path));
+                self.shell.status = text::fill(lang, text::Template::Opened, &[("name", &name)]);
+                self.shell.status_warn = false;
+            }
+            Err(err) => {
+                tracing::error!(%err, "cannot open the document");
+                self.shell.status = text::t(lang, Key::OpenFailed).to_owned();
+                self.shell.status_warn = true;
+            }
+        }
+    }
+
+    /// ★★★ เอา `Board` ที่โหลดมาขึ้นจอ — **แทนที่ทั้งก้อน ไม่ใช่ผสมกับของเดิม**
+    ///
+    /// ทุกอย่างที่ผูกกับ board เก่าต้องถูกล้างพร้อมกัน ไม่งั้นจะเหลือของค้างที่
+    /// ชี้ไป `ItemId` ของเอกสารคนละฉบับ:
+    ///
+    /// | ล้าง | ถ้าไม่ล้างจะเกิดอะไร |
+    /// |---|---|
+    /// | `history` | `Ctrl+Z` ครั้งแรกหลังเปิดไฟล์ ย้อนไปเป็น board ของเอกสารก่อนหน้า |
+    /// | `selection` | inspector แสดงค่าของ item ที่ไม่มีอยู่แล้ว |
+    /// | `render_state` | thumbnail ของภาพเก่าไปโผล่บนภาพใหม่ที่ได้ `ItemId` ซ้ำ |
+    /// | `index` | hit-test ชี้ไปที่ว่าง — คลิกแล้วไม่โดนอะไร |
+    ///
+    /// ★ `doc_path = None` ตอนกู้คืน (งานชุดนั้นไม่เคยมีไฟล์) · `Some` ตอนเปิดไฟล์
+    fn adopt_board(&mut self, board: Board, path: Option<std::path::PathBuf>) {
+        let Some(gfx) = self.gfx.as_mut() else {
+            return;
+        };
+        gfx.board = board;
+        gfx.history = History::default();
+        gfx.selection = Selection::new();
+        gfx.select_tool.cancel();
+        gfx.render_state.clear();
+        gfx.index = SpatialIndex::new(refx_core::spatial::DEFAULT_CELL_SIZE);
+        for (id, item) in gfx.board.items_in_z_order() {
+            gfx.index.insert(id, &item.canvas);
+        }
+        gfx.rubber_band = None;
+        gfx.guides.clear();
+        gfx.arrange.invalidate();
+        Self::rebuild_quads(gfx);
+
+        // ★★ `doc_path`/นาฬิกา autosave ต้องเปลี่ยนพร้อมกันกับ board เสมอ —
+        //    ถ้าตั้ง path ใหม่แต่ลืมรีเซ็ตนาฬิกา snapshot แรกของเอกสารใหม่จะ
+        //    ถูกเลื่อนไปจนครบรอบของเอกสารเก่า
+        self.doc_path = path;
+        self.snapshot_revision = None;
+        self.autosaver.reset();
+        self.request_thumbnails_for_board();
+        if let Some(gfx) = self.gfx.as_ref() {
+            gfx.window.request_redraw();
+        }
+    }
+
+    /// ★★ ขอ thumbnail ของทุกภาพบน board ที่เพิ่งโหลดมา
+    ///
+    /// ไฟล์ `.refx` เก็บแค่ **การอ้างถึง** ภาพ (`AssetRef`: hash/path/ขนาด) ไม่ได้
+    /// เก็บพิกเซล (docs/07 §2 โหมด linked) — เปิดไฟล์มาจึงต้อง decode ใหม่ทุกใบ
+    ///
+    /// ★ ผลที่กลับมาต้องไปเกาะ **item ที่มีอยู่แล้ว** ไม่ใช่สร้างใบใหม่ต่อท้าย
+    /// (ซึ่งเป็นสิ่งที่เส้นทางลากไฟล์เข้ามาทำ) — คีย์ที่จับคู่คือ `relink_targets`
+    fn request_thumbnails_for_board(&mut self) {
+        let Some(gfx) = self.gfx.as_ref() else {
+            return;
+        };
+        if self.assets.is_none() {
+            return;
+        }
+        let mut jobs = Vec::new();
+        self.relink_targets.clear();
+        for (index, (id, item)) in gfx.board.items_in_z_order().enumerate() {
+            let ItemKind::Image(asset) = &item.kind else {
+                continue; // โน้ตข้อความไม่มีอะไรให้ decode
+            };
+            if asset.path.as_os_str().is_empty() {
+                continue; // ภาพที่วางมาจาก clipboard — ไม่มีไฟล์ให้กลับไปอ่าน
+            }
+            // คีย์ชั่วคราวสำหรับจับคู่ผลลัพธ์ (เหมือน `submit_dropped` เป๊ะ)
+            let key = refx_asset::hash::hash_bytes(asset.path.to_string_lossy().as_bytes());
+            let source = refx_asset::pool::JobSource::File(asset.path.clone());
+            self.relink_targets.insert(key, id);
+            self.job_sources.insert(key, source.clone());
+            jobs.push(refx_asset::pool::Job {
+                hash: key,
+                source,
+                // เรียงตาม z-order — ใบล่างสุดขึ้นก่อน เหมือนลำดับที่ผู้ใช้เห็น
+                priority: index as f32,
+                cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                target: refx_asset::pool::JobTarget::Thumbnail,
+            });
+        }
+        if jobs.is_empty() {
+            return;
+        }
+        self.drop_started = Some(std::time::Instant::now());
+        self.drop.start(jobs.len());
+        self.batch_from_clipboard = false;
+        if let Some(assets) = self.assets.as_ref() {
+            for job in jobs {
+                assets.pool.submit(job);
+            }
+        }
     }
 
     /// ผู้ใช้ตอบแถบยืนยันตอนปิดแล้ว (P4-2)
@@ -3796,6 +4282,16 @@ impl AppDelegate for RefxApp {
             modifiers: ModifiersState::empty(),
         });
         self.queue_initial_files();
+        // ★★ ถามโฟลเดอร์ recovery ว่ามีงานค้างจากรอบก่อนไหม (P4-4)
+        //
+        //   ★ เริ่มที่นี่เพราะต้องมีหน้าต่างก่อนถึงจะมีที่ให้แถบโผล่ · การสแกน
+        //     อยู่เธรดอื่นทั้งหมด หน้าต่างจึงขึ้นทันทีไม่ต้องรอดิสก์ (I-2)
+        //   ★ เรียกครั้งเดียวตลอดอายุโปรแกรม — `resumed()` ถูกเรียกซ้ำได้ตอนกู้
+        //     device แต่ตอนนั้นผู้ใช้ตอบคำถามไปแล้ว การถามซ้ำจะน่ารำคาญมาก
+        if !self.recovery_checked {
+            self.recovery_checked = true;
+            self.start_recovery_scan();
+        }
         Ok(())
     }
 
@@ -3845,6 +4341,15 @@ impl AppDelegate for RefxApp {
         }
         // ★ การบันทึก (P4-2) — เก็บผลก่อน แล้วค่อยรับคำสั่งใหม่
         self.poll_save();
+        // ★ การเปิดไฟล์ + งานค้างจาก session ก่อน (P4-4) — ลำดับเดียวกับข้างบน
+        self.poll_open();
+        self.poll_recovery_scan();
+        if std::mem::take(&mut self.pending_open) {
+            self.apply_open_request();
+        }
+        if let Some(choice) = self.shell.recover_choice.take() {
+            self.apply_recover_choice(choice);
+        }
         // ★ autosave (P4-3) — ตัดสินหลัง `poll_save` เพราะการบันทึกสำเร็จ
         //   เพิ่งล้าง `dirty` ไป การถามก่อนจะได้คำตอบจากสถานะเก่าหนึ่งเฟรม
         self.tick_autosave();
@@ -4506,6 +5011,15 @@ impl AppDelegate for RefxApp {
                     && let Some(request) = save_shortcut(pressed, gfx.modifiers)
                 {
                     self.pending_save = Some(request);
+                    needs_redraw = true;
+                }
+                // ★ เปิดกระดาน (P4-4) — ห้ามซ้ำตอนกดค้างด้วยเหตุผลเดียวกับ Ctrl+S
+                //   (กดค้าง = dialog เปิดซ้อนกันเป็นสิบบาน)
+                if event.state.is_pressed()
+                    && !event.repeat
+                    && open_shortcut(pressed, gfx.modifiers)
+                {
+                    self.pending_open = true;
                     needs_redraw = true;
                 }
                 // ★ จัดกลุ่ม / แยกกลุ่ม (P3-7) — **ห้ามซ้ำตอนกดค้าง** เหมือน Delete
@@ -6189,6 +6703,302 @@ mod tests {
         let (_tx, rx) = crossbeam_channel::bounded::<Result<(), String>>(1);
         app.autosave_job = Some(rx);
         assert_eq!(app.autosave_deadline(), None, "มีงานค้างแล้วยังตั้งนาฬิกา");
+    }
+
+    // ---------- ★★★ P4-4 ครึ่งหลัง: dialog 3 ตัวเลือก + เปิดไฟล์ ----------
+
+    /// ★★★ **"เก็บไว้ก่อน" ต้องไม่แตะไฟล์แม้แต่ไบต์เดียว** (`docs/07 §4`)
+    ///
+    /// นี่คือตัวเลือกที่ spec บอกว่าสำคัญที่สุด และคุณค่าทั้งหมดของมันอยู่ที่
+    /// **ไฟล์ยังอยู่ครบหลังกดแล้ว** · ถ้ามันลบ (หรือ "ย้ายไปที่ปลอดภัย" อะไรก็ตาม)
+    /// มันก็เป็นแค่ "ทิ้ง" ที่ใส่เสื้อคลุมสุภาพ ซึ่งแย่กว่าไม่มีตัวเลือกนี้เลย
+    /// เพราะผู้ใช้ที่ไม่แน่ใจจะเลือกมันด้วยความเข้าใจว่างานยังอยู่
+    #[test]
+    fn keeping_it_for_later_leaves_the_file_completely_untouched() {
+        use refx_platform::fsops::rename_durable;
+        let dir = std::env::temp_dir().join(format!("refx-later-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let session = refx_io::recovery::SessionId::new_unique();
+        let board = refx_core::board::Board::default();
+        refx_io::recovery::write_snapshot(&dir, &session, &board, rename_durable).unwrap();
+        let path = refx_io::recovery::snapshot_path(&dir, &session);
+        let before = std::fs::metadata(&path).unwrap().len();
+
+        let mut app = RefxApp::new(AppArgs::default());
+        app.recovery_dir = Some(dir.clone());
+        app.pending_recovery = Some(PendingRecovery {
+            path: path.clone(),
+            when: None,
+            items: 0,
+        });
+        app.shell.recover_prompt = Some(crate::shell::RecoverView {
+            when: None,
+            items: 0,
+        });
+
+        app.apply_recover_choice(crate::shell::RecoverChoice::Later);
+
+        assert!(path.exists(), "ตัวเลือก 'เก็บไว้ก่อน' ลบไฟล์ของผู้ใช้ทิ้ง");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            before,
+            "ไฟล์ถูกเขียนทับ"
+        );
+        assert!(app.shell.recover_prompt.is_none(), "แถบต้องหายไปหลังตอบ");
+        // ★ และต้องถูกถามใหม่ได้รอบหน้า — ไฟล์ยังอยู่ให้ `scan` เจอ
+        let next = refx_io::recovery::SessionId::new_unique();
+        assert_eq!(refx_io::recovery::scan(&dir, &next).len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ★ negative control ของข้อบน — "ทิ้งไป" ต้องลบจริง
+    ///
+    /// ถ้าไม่มีข้อนี้ การ **ไม่ทำอะไรเลยทั้งสามปุ่ม** จะดูเหมือนถูกต้องสมบูรณ์
+    /// (`docs/08 §3.9` ข้อ 1)
+    #[test]
+    fn throwing_it_away_actually_removes_it() {
+        use refx_platform::fsops::rename_durable;
+        let dir = std::env::temp_dir().join(format!("refx-discard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let session = refx_io::recovery::SessionId::new_unique();
+        refx_io::recovery::write_snapshot(
+            &dir,
+            &session,
+            &refx_core::board::Board::default(),
+            rename_durable,
+        )
+        .unwrap();
+        let path = refx_io::recovery::snapshot_path(&dir, &session);
+        refx_io::recovery::mark_asked(&path);
+
+        let mut app = RefxApp::new(AppArgs::default());
+        app.recovery_dir = Some(dir.clone());
+        app.pending_recovery = Some(PendingRecovery {
+            path: path.clone(),
+            when: None,
+            items: 0,
+        });
+
+        app.apply_recover_choice(crate::shell::RecoverChoice::Discard);
+
+        assert!(!path.exists(), "กด 'ทิ้งไป' แล้วไฟล์ยังอยู่");
+        assert!(
+            !refx_io::recovery::asked_marker(&path).exists(),
+            "ไฟล์ประทับกลายเป็นขยะกำพร้า"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ★★★ กู้คืนแล้ว **ห้ามลบตัวเก่าทันที** — ต้องรอ snapshot ของเราลงดิสก์ก่อน
+    ///
+    /// ระหว่างจังหวะ "เอากลับมาแล้ว" กับ "autosave ครั้งแรกของ session นี้"
+    /// งานชุดนั้นอยู่ใน RAM ที่เดียว · ลบตัวเก่าตรงนั้นแล้วโปรแกรมตาย = หายจริง
+    /// ซึ่งคือสิ่งเดียวที่กลไกทั้งหมดนี้มีไว้กัน
+    ///
+    /// ★ แต่ก็ต้องไม่ค้างตลอดกาล ไม่งั้นผู้ใช้ถูกเสนอให้กู้งานเดิมซ้ำทุกครั้ง
+    /// ที่เปิดโปรแกรม แล้วจะได้งานสองชุดโดยไม่รู้ว่าอันไหนใหม่กว่า
+    #[test]
+    fn a_restored_snapshot_is_only_dropped_once_ours_is_on_disk() {
+        use refx_platform::fsops::rename_durable;
+        let dir = std::env::temp_dir().join(format!("refx-adopt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let old_session = refx_io::recovery::SessionId::new_unique();
+        refx_io::recovery::write_snapshot(
+            &dir,
+            &old_session,
+            &refx_core::board::Board::default(),
+            rename_durable,
+        )
+        .unwrap();
+        let old = refx_io::recovery::snapshot_path(&dir, &old_session);
+
+        let mut app = RefxApp::new(AppArgs::default());
+        app.recovery_dir = Some(dir.clone());
+        // จำลองสภาพหลังกด "เอากลับมา": ตัวเก่าถูกจอง ยังไม่ถูกลบ
+        app.adopted_recovery = Some(old.clone());
+        assert!(old.exists(), "ห้ามลบก่อนที่ของเราจะลงดิสก์");
+
+        // ★ จำลอง "งาน autosave ของเราสำเร็จ" ผ่านช่องเดิมที่ production ใช้จริง
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        tx.send(Ok(())).unwrap();
+        app.autosave_job = Some(rx);
+        app.tick_autosave();
+
+        assert!(
+            !old.exists(),
+            "snapshot เก่ายังอยู่ — ผู้ใช้จะถูกถามให้กู้งานเดิมซ้ำทุกครั้งที่เปิดโปรแกรม"
+        );
+        assert_eq!(app.adopted_recovery, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ★★ ตอบไปแล้วต้องไม่ถูกถามซ้ำในการรันเดียวกัน
+    ///
+    /// `resumed()` ถูกเรียกใหม่ทุกครั้งที่กู้ device (docs/04 §7) — คำถามที่โผล่
+    /// ซ้ำ ๆ คือคำถามที่คนกดปิดโดยไม่อ่าน ซึ่งทำให้ตัวเลือกที่สามไร้ความหมาย
+    #[test]
+    fn answering_once_is_enough_for_the_whole_run() {
+        let mut app = RefxApp::new(AppArgs::default());
+        assert!(!app.recovery_checked, "ยังไม่ได้ถามตอนเพิ่งสร้าง");
+        app.recovery_checked = true;
+        app.apply_recover_choice(crate::shell::RecoverChoice::Later);
+        assert!(
+            app.recovery_checked,
+            "ตอบแล้วต้องยังนับว่าถามไปแล้ว ไม่งั้นกู้ device ทีนึงถามใหม่ทีนึง"
+        );
+    }
+
+    /// ★ `Ctrl+O` ต้องติด และ `Ctrl+Shift+O` ต้องเงียบ (ยังไม่มีความหมาย)
+    #[test]
+    fn ctrl_o_opens_a_board_and_nothing_else_does() {
+        let ctrl = ModifiersState::CONTROL;
+        assert!(open_shortcut(Some('o'), ctrl));
+        // บางระบบส่ง Ctrl+O มาเป็นอักขระ control
+        assert!(open_shortcut(Some('\u{f}'), ctrl));
+        assert!(
+            !open_shortcut(Some('o'), ModifiersState::empty()),
+            "ไม่กด Ctrl"
+        );
+        assert!(!open_shortcut(Some('s'), ctrl), "ปุ่มอื่น");
+        assert!(!open_shortcut(None, ctrl));
+        assert!(
+            !open_shortcut(Some('o'), ctrl | ModifiersState::SHIFT),
+            "Ctrl+Shift+O ยังไม่มีความหมาย ต้องเงียบ ไม่ใช่ทำอะไรที่ผู้ใช้ไม่ได้ขอ"
+        );
+        assert!(!open_shortcut(Some('o'), ctrl | ModifiersState::ALT));
+    }
+
+    /// ★★★ **เปิดไฟล์แล้วต้องได้ทุกอย่างกลับมาครบ** — round-trip ระดับเอกสาร
+    ///
+    /// ทดสอบ `read_document` ซึ่งเป็น**ฟังก์ชันเดียวกับที่ `Ctrl+O` ใช้จริง**
+    /// (`docs/08 §3.9` ข้อ 9: เทสต์ที่เรียกตัวจำลองพิสูจน์ได้แค่ว่าตัวจำลองทำงาน)
+    ///
+    /// ★ เดินครบทุกฟิลด์ที่ ROADMAP P4-4 ระบุ: pos/size/rotation/crop/filter/
+    /// tag/rating/group/note — ฟิลด์ที่ไม่มีใครเทียบคือฟิลด์ที่หายเงียบได้
+    #[test]
+    fn opening_a_saved_board_brings_back_every_field() {
+        use refx_core::board::{
+            AssetRef, BoardParts, ColorLabel, CropRect, Flip, Group, ImageFormat, Item, ItemCanvas,
+            ItemFilter, ItemKind, ItemMeta, ItemParts, TagId, TextNote,
+        };
+        use refx_core::hash::ContentHash;
+
+        let dir = std::env::temp_dir().join(format!("refx-roundtrip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let doc = dir.join("work.refx");
+
+        let image = Item {
+            canvas: ItemCanvas {
+                pos: Vec2::new(123.5, -456.25),
+                size: Vec2::new(640.0, 480.0),
+                rotation: 0.75,
+                crop: CropRect {
+                    min: Vec2::new(0.1, 0.2),
+                    max: Vec2::new(0.9, 0.8),
+                },
+                opacity: 0.5,
+                filter: ItemFilter {
+                    grayscale: true,
+                    invert: true,
+                    brightness: -0.25,
+                    contrast: 0.75,
+                },
+                flip: Flip::Horizontal,
+                ..ItemCanvas::default()
+            },
+            meta: ItemMeta {
+                rating: 4,
+                color_label: Some(ColorLabel::Blue),
+                pinned: true,
+                note: "จดไว้ว่าใช้เป็นอ้างอิงแสง".to_owned(),
+                tags: [TagId(1), TagId(2)].into_iter().collect(),
+                added_at: 1_700_000_000_000,
+                ..ItemMeta::default()
+            },
+            ..Item::new(ItemKind::Image(AssetRef {
+                hash: ContentHash::from_bytes([7u8; 32]),
+                path: std::path::PathBuf::from("C:/refs/plate.jpg"),
+                px_size: glam::UVec2::new(4000, 3000),
+                format: ImageFormat::Unknown,
+                embedded: false,
+                mtime: 1_760_000_000_000,
+                file_size: 2_400_000,
+            }))
+        };
+        let saved = refx_core::board::Board::load(
+            default_board_id(),
+            BoardParts {
+                name: "moodboard".to_owned(),
+                groups: vec![Group {
+                    name: "แสงเช้า".to_owned(),
+                    collapsed: true,
+                }],
+                tags: vec![
+                    (TagId(1), "portrait".to_owned()),
+                    (TagId(2), "light".to_owned()),
+                ],
+                items: vec![
+                    ItemParts {
+                        item: image,
+                        group: Some(0),
+                    },
+                    ItemParts {
+                        item: Item::new(ItemKind::Text(TextNote {
+                            text: "โน้ตบน canvas".to_owned(),
+                        })),
+                        group: None,
+                    },
+                ],
+                ..BoardParts::default()
+            },
+        );
+
+        refx_io::save::save_atomic(&doc, &saved, refx_platform::fsops::rename_durable).unwrap();
+        let back = read_document(&doc).expect("เปิดไฟล์ที่เพิ่งบันทึกไม่ได้");
+
+        // ★ เทียบทั้งก้อนก่อน — จับฟิลด์ที่ยังไม่มีใครนึกถึงได้ด้วย
+        assert_eq!(back, saved, "เปิดกลับมาแล้วไม่เท่าเดิม");
+
+        // แล้วเทียบทีละฟิลด์ตามที่ ROADMAP สั่ง เพื่อให้ข้อความตอนแดงชี้จุดได้
+        let (id, item) = back.items_in_z_order().next().expect("ไม่มี item เลย");
+        let ItemKind::Image(asset) = &item.kind else {
+            panic!("ใบแรกควรเป็นภาพ");
+        };
+        assert_eq!(item.canvas.pos, Vec2::new(123.5, -456.25), "pos");
+        assert_eq!(item.canvas.size, Vec2::new(640.0, 480.0), "size");
+        assert_eq!(item.canvas.rotation, 0.75, "rotation");
+        assert_eq!(item.canvas.crop.min, Vec2::new(0.1, 0.2), "crop");
+        assert_eq!(item.canvas.opacity, 0.5, "opacity");
+        assert!(item.canvas.filter.grayscale, "filter.grayscale");
+        assert_eq!(item.canvas.filter.contrast, 0.75, "filter.contrast");
+        assert_eq!(item.canvas.flip, Flip::Horizontal, "flip");
+        assert_eq!(item.meta.rating, 4, "rating");
+        assert_eq!(item.meta.color_label, Some(ColorLabel::Blue), "color label");
+        assert!(item.meta.pinned, "pinned");
+        assert_eq!(item.meta.note, "จดไว้ว่าใช้เป็นอ้างอิงแสง", "note");
+        assert_eq!(item.meta.tags.as_slice(), [TagId(1), TagId(2)], "tags");
+        assert_eq!(
+            asset.path,
+            std::path::PathBuf::from("C:/refs/plate.jpg"),
+            "path"
+        );
+        let group = item.meta.group.expect("item ต้องยังอยู่ในกลุ่มเดิม");
+        assert_eq!(
+            back.group(group).map(|g| g.name.as_str()),
+            Some("แสงเช้า"),
+            "group"
+        );
+        assert_eq!(back.tags().name(TagId(2)), Some("light"), "ชื่อแท็ก");
+        let _ = id;
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// ★★ สองหน้าต่างต้องไม่เขียนทับ snapshot ของกันและกัน (`docs/07 §4`)
