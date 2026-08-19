@@ -31,7 +31,7 @@
 //! กติกา (`docs/07 §2`):
 //! 1. ห้ามลบไฟล์ที่ **board ที่เปิดอยู่** อ้างถึง
 //! 2. ★ ห้ามลบไฟล์ที่ **recovery snapshot** อ้างถึง ← ข้อที่มองข้ามง่ายที่สุด
-//! 3. ที่เหลือใช้เพดานแบบเดียวกับ `recovery/`
+//! 3. ที่เหลือใช้เพดาน — **เป็นไบต์ ไม่ใช่จำนวนไฟล์** ([`MAX_BYTES`])
 //!
 //! ★★ ข้อ 2 ที่นี่ **กว้างกว่าตัวหนังสือใน spec**: spec เขียนว่า "snapshot ที่ยัง
 //! ไม่ถูกตอบ" ส่วนที่นี่คุ้มครอง **snapshot ทุกไฟล์ที่ยังอยู่ในโฟลเดอร์**
@@ -53,8 +53,16 @@ use crate::save::{RenameFn, SaveError};
 /// นามสกุลของไฟล์ใน spool — PNG เพราะไม่มีการสูญเสีย (ภาพที่วางจะถูกฝังต่อ)
 pub const SPOOL_EXT: &str = "png";
 
-/// เก็บไฟล์ที่ไม่มีใครอ้างถึงได้กี่ไฟล์ (เพดานแบบเดียวกับ `recovery/` — I-6)
-pub const MAX_KEPT: usize = 64;
+/// ★★★ เพดานของไฟล์ที่ **กวาดได้** — เป็น **ไบต์ ไม่ใช่จำนวนไฟล์** (I-6)
+///
+/// เดิมเขียนเป็น `MAX_KEPT = 64` ไฟล์ ซึ่งตั้งไว้ **ก่อน** จะรู้ว่า PNG ของภาพ
+/// 6000×4000 มีขนาด **78 MB** (วัดแล้วใน `refx_asset::encode`) — เพดานจริงจึง
+/// กลายเป็น **~5 GB** โดยไม่มีใครตั้งใจ แล้วมันจะเต็มดิสก์ผู้ใช้เงียบ ๆ
+///
+/// ★ ไฟล์ที่กติกาข้อ 1/2 คุ้มครอง **ไม่นับเข้าเพดานนี้และไม่ถูกลบ ไม่ว่าใหญ่แค่ไหน**
+/// — เพดานที่ไล่ของที่กู้ไม่ได้แล้วออกไป คือเพดานที่กลายเป็นตัวทำงานหายเสียเอง
+/// ดู [`Swept::protected_over_cap`] สำหรับสภาพที่ต้อง **บอกผู้ใช้ ไม่ใช่ลบ**
+pub const MAX_BYTES: u64 = 512 << 20;
 
 /// เก็บไฟล์ที่ไม่มีใครอ้างถึงได้นานแค่ไหน
 pub const MAX_AGE: Duration = crate::recovery::MAX_AGE;
@@ -117,6 +125,27 @@ pub struct Swept {
     /// แยกจาก `removed` เพื่อให้อ่านออกว่า "ไม่มีอะไรให้ลบ" ต่างจาก
     /// "มีของแต่ห้ามแตะ" — สองสภาพนี้บอกคนละเรื่องตอนตามปัญหา
     pub kept_because_referenced: usize,
+    /// ★★ ไบต์รวมของไฟล์ที่ถูกคุ้มครอง — **ไม่ถูกนับเข้าเพดาน**
+    ///
+    /// มีไว้ตอบคำถามเดียว: *เพดานไม่ได้ทำงานเพราะไม่มีอะไรให้ทำ หรือเพราะ
+    /// ทุกอย่างห้ามแตะ?* ([`Self::protected_over_cap`])
+    pub protected_bytes: u64,
+    /// ไบต์รวมของไฟล์ที่กวาดได้แต่เก็บไว้ (ยังไม่ชนเพดาน)
+    pub kept_bytes: u64,
+    /// ไบต์รวมที่ลบออกไปจริง
+    pub removed_bytes: u64,
+}
+
+impl Swept {
+    /// ★★★ ไฟล์ที่ **ห้ามลบ** อย่างเดียวก็เกินเพดานแล้ว → ต้อง **บอกผู้ใช้**
+    ///
+    /// `docs/07 §2`: *"ถ้าไฟล์ที่ถูกคุ้มครองอย่างเดียวก็เกิน 512 MB แล้ว →
+    /// บอกผู้ใช้ ห้ามลบ"* รูปแบบเดียวกับ "board เต็ม" ใน `ROADMAP P3-3` —
+    /// เงียบไว้แล้วลบทิ้งคือการทำงานของผู้ใช้หายโดยที่เขาไม่มีทางรู้ว่าเกิดอะไร
+    #[must_use]
+    pub fn protected_over_cap(&self, cap: u64) -> bool {
+        self.protected_bytes > cap
+    }
 }
 
 /// ★★★ เก็บกวาด spool — **ลบได้เฉพาะไฟล์ที่ไม่มีใครอ้างถึงเลย**
@@ -126,10 +155,13 @@ pub struct Swept {
 ///
 /// ★ `now` ถูกส่งเข้ามา เทสต์จึงเดินเวลาไป 40 วันได้โดยไม่ต้องรอ
 /// (`docs/08 §3.9` ข้อ 5b)
+///
+/// ★★ `max_bytes` เป็น **ไบต์รวมของไฟล์ที่กวาดได้** (ดู [`MAX_BYTES`]) —
+/// ไฟล์ที่ [`referenced`](sweep) คุ้มครองไม่ถูกนับและไม่ถูกลบไม่ว่าจะใหญ่แค่ไหน
 pub fn sweep(
     dir: &Path,
     referenced: &BTreeSet<ContentHash>,
-    keep: usize,
+    max_bytes: u64,
     max_age: Duration,
     now: SystemTime,
 ) -> Swept {
@@ -137,7 +169,7 @@ pub fn sweep(
         return Swept::default(); // ยังไม่มีโฟลเดอร์ = ไม่มีอะไรให้กวาด
     };
 
-    let mut found: Vec<(PathBuf, Option<SystemTime>, bool)> = entries
+    let mut found: Vec<(PathBuf, Option<SystemTime>, u64, bool)> = entries
         .filter_map(Result::ok)
         .map(|entry| entry.path())
         .filter(|path| path.extension().is_some_and(|ext| ext == SPOOL_EXT))
@@ -147,29 +179,35 @@ pub fn sweep(
                 return None;
             }
             let in_use = hash_of_file_name(&path).is_some_and(|hash| referenced.contains(&hash));
-            Some((path, meta.modified().ok(), in_use))
+            Some((path, meta.modified().ok(), meta.len(), in_use))
         })
         .collect();
     // ใหม่สุดก่อน · ตัดสินด้วยชื่อไฟล์เมื่อเวลาเท่ากัน (ลำดับต้อง deterministic)
     found.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
     let mut result = Swept::default();
-    let mut kept = 0usize;
-    for (path, written_at, in_use) in found {
+    for (path, written_at, size, in_use) in found {
         // ★★★ ด่านแรกและด่านเดียวที่สำคัญ: มีคนอ้างถึงอยู่ = ห้ามแตะ
-        //     ไม่ว่าจะเก่าแค่ไหนหรือเกินเพดานแค่ไหน
+        //     ไม่ว่าจะเก่าแค่ไหนหรือใหญ่แค่ไหน — และ **ไม่นับเข้าเพดาน**
+        //     ถ้ามันนับ ไฟล์ที่กู้ไม่ได้แล้วจะไล่ไฟล์ที่ยังกู้ได้ออกไปแทน
         if in_use {
             result.kept_because_referenced += 1;
+            result.protected_bytes = result.protected_bytes.saturating_add(size);
             continue;
         }
         let too_old =
             written_at.is_some_and(|at| now.duration_since(at).is_ok_and(|age| age > max_age));
-        if kept < keep && !too_old {
-            kept += 1;
+        // ★ เพดานนับ **ไบต์** — ไฟล์เดียวขนาด 78 MB กินเพดานเท่ากับไฟล์เล็ก 78,000 ใบ
+        let fits = result.kept_bytes.saturating_add(size) <= max_bytes;
+        if fits && !too_old {
+            result.kept_bytes = result.kept_bytes.saturating_add(size);
             continue;
         }
         match std::fs::remove_file(&path) {
-            Ok(()) => result.removed += 1,
+            Ok(()) => {
+                result.removed += 1;
+                result.removed_bytes = result.removed_bytes.saturating_add(size);
+            }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
             Err(err) => {
                 tracing::warn!(%err, path = %path.display(), "cannot sweep a spooled image")
@@ -179,8 +217,18 @@ pub fn sweep(
     if result.removed > 0 {
         tracing::info!(
             removed = result.removed,
+            removed_bytes = result.removed_bytes,
             kept = result.kept_because_referenced,
+            protected_bytes = result.protected_bytes,
             "swept the paste spool"
+        );
+    }
+    // ★ ไม่ลบอะไรเลยเพราะทุกอย่างห้ามแตะ = สภาพที่ผู้ใช้ต้องรู้ ไม่ใช่ความเงียบ
+    if result.protected_over_cap(max_bytes) {
+        tracing::warn!(
+            protected_bytes = result.protected_bytes,
+            cap = max_bytes,
+            "the paste spool is over its cap but every file in it is still referenced"
         );
     }
     result
@@ -285,8 +333,24 @@ mod tests {
         )
     }
 
+    /// ไฟล์ขนาด 128 ไบต์ — ขนาดคือสิ่งที่เพดานนับ จึงเขียนไว้ตรงนี้ที่เดียว
+    const SPOOLED_BYTES: u64 = 128;
+
     fn spool(dir: &Path, n: u8) -> PathBuf {
-        store(dir, hash_of(n), &[n; 128], rename_durable).unwrap()
+        let path = store(
+            dir,
+            hash_of(n),
+            &[n; SPOOLED_BYTES as usize],
+            rename_durable,
+        )
+        .unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), SPOOLED_BYTES);
+        path
+    }
+
+    /// เพดานที่กว้างพอสำหรับ `n` ไฟล์ของ [`spool`] พอดี ๆ
+    fn cap_for(n: u64) -> u64 {
+        SPOOLED_BYTES * n
     }
 
     // ---------- ชื่อไฟล์ ----------
@@ -335,6 +399,10 @@ mod tests {
         assert!(!stale.exists(), "ไฟล์ที่ไม่มีใครอ้างถึงต้องถูกกวาด");
         assert_eq!(swept.removed, 1);
         assert_eq!(swept.kept_because_referenced, 1);
+        // ★ ไฟล์ที่ถูกคุ้มครองอยู่นอกเพดาน — ทั้งที่เพดานคือ 0 มันก็ยังอยู่
+        assert_eq!(swept.protected_bytes, SPOOLED_BYTES);
+        assert_eq!(swept.kept_bytes, 0);
+        assert_eq!(swept.removed_bytes, SPOOLED_BYTES);
     }
 
     /// ★★★ **ห้ามลบไฟล์ที่ recovery snapshot อ้างถึง** (กติกาข้อ 2)
@@ -447,7 +515,7 @@ mod tests {
         assert!(pasted.exists(), "ตอบ 'เก็บไว้ก่อน' แล้วภาพของมันถูกลบ");
     }
 
-    /// เพดานจำนวน/อายุใช้ได้กับไฟล์ที่ไม่มีใครอ้างถึงเท่านั้น
+    /// เพดานไบต์/อายุใช้ได้กับไฟล์ที่ไม่มีใครอ้างถึงเท่านั้น
     #[test]
     fn the_cap_only_ever_applies_to_unreferenced_files() {
         let dir = temp_dir("cap");
@@ -459,12 +527,97 @@ mod tests {
         // อ้างถึงตัวที่เก่าที่สุดสองใบ — มันต้องรอดทั้งที่อยู่ท้ายรายการ
         let referenced = hashes_of(&board_of(&[10, 11]));
 
-        let swept = sweep(&dir, &referenced, 2, MAX_AGE, SystemTime::now());
+        let swept = sweep(&dir, &referenced, cap_for(2), MAX_AGE, SystemTime::now());
 
         assert!(planted[0].exists() && planted[1].exists(), "ตัวที่ถูกอ้างถึงหาย");
         assert!(planted[5].exists() && planted[4].exists(), "ตัวใหม่สุดหาย");
         assert_eq!(swept.removed, 2, "ต้องลบสองใบกลาง ๆ ที่ไม่มีใครอ้างถึง");
         assert_eq!(swept.kept_because_referenced, 2);
+        // ★ ที่คุ้มครองสองใบ **ไม่ถูกนับ** — ไม่งั้นเพดาน 2 ใบจะเต็มไปแล้วตั้งแต่
+        //   ยังไม่ถึงไฟล์ที่กวาดได้สักใบ แล้วมันจะลบตัวใหม่สุดทิ้งหมด
+        assert_eq!(swept.protected_bytes, cap_for(2));
+        assert_eq!(swept.kept_bytes, cap_for(2));
+    }
+
+    /// ★★★ **เพดานนับไบต์ ไม่ใช่จำนวนไฟล์** (แก้ 19 ส.ค. 2026)
+    ///
+    /// เทสต์นี้ล้มเป็นกับโค้ดรุ่นก่อน: `MAX_KEPT = 64` **ไฟล์** ปล่อยให้ทั้งสอง
+    /// ใบอยู่ต่อ เพราะ 2 < 64 · ของจริงที่ตัวเลขนั้นแปลว่าอะไรคือ 64 × 78 MB
+    /// = **~5 GB** ซึ่งเต็มดิสก์ผู้ใช้โดยไม่มีใครตั้งใจ (`docs/07 §2`)
+    #[test]
+    fn the_cap_counts_bytes_not_files() {
+        let dir = temp_dir("bytes");
+        let older = spool(&dir, 40);
+        std::thread::sleep(Duration::from_millis(12));
+        let newer = spool(&dir, 41);
+
+        // เพดานกว้างพอสำหรับ **ไฟล์เดียว** ทั้งที่มีสองไฟล์
+        let swept = sweep(
+            &dir,
+            &BTreeSet::new(),
+            cap_for(1),
+            MAX_AGE,
+            SystemTime::now(),
+        );
+
+        assert!(newer.exists(), "ตัวใหม่สุดต้องอยู่ก่อนเสมอ");
+        assert!(!older.exists(), "เพดานนับไฟล์อยู่ — สองไฟล์เล็ก ๆ ผ่านไปได้ทั้งคู่");
+        assert_eq!(swept.removed, 1);
+        assert_eq!(swept.kept_bytes, cap_for(1));
+        assert_eq!(swept.removed_bytes, SPOOLED_BYTES);
+    }
+
+    /// ★★★ ทุกไฟล์ถูกคุ้มครอง + เกินเพดาน → **บอกผู้ใช้ ห้ามลบ**
+    ///
+    /// `docs/07 §2`: *"ถ้าไฟล์ที่ถูกคุ้มครองอย่างเดียวก็เกิน 512 MB แล้ว →
+    /// บอกผู้ใช้ ห้ามลบ"* — เพดานต้องไม่กลายเป็นตัวทำงานหาย (`ROADMAP P3-3`)
+    #[test]
+    fn a_spool_full_of_protected_files_is_reported_never_deleted() {
+        let dir = temp_dir("protected-over-cap");
+        let planted: Vec<PathBuf> = (50..53u8).map(|n| spool(&dir, n)).collect();
+        let referenced = hashes_of(&board_of(&[50, 51, 52]));
+
+        // เพดานแคบกว่าของที่มีอยู่ทั้งหมด
+        let cap = cap_for(1);
+        let swept = sweep(&dir, &referenced, cap, Duration::ZERO, SystemTime::now());
+
+        assert!(planted.iter().all(|p| p.exists()), "ลบไฟล์ที่ห้ามลบเพราะเพดาน");
+        assert_eq!(swept.removed, 0);
+        assert_eq!(swept.protected_bytes, cap_for(3));
+        assert!(
+            swept.protected_over_cap(cap),
+            "ไม่มีอะไรบอกผู้ใช้ว่า spool เกินเพดานแล้วแต่แตะอะไรไม่ได้"
+        );
+    }
+
+    /// ★ negative control ของข้อบน — ไม่มีของที่ถูกคุ้มครอง = ไม่ต้องไปกวนผู้ใช้
+    #[test]
+    fn a_spool_the_sweep_can_actually_trim_never_bothers_the_user() {
+        let dir = temp_dir("under-cap");
+        for n in 60..63u8 {
+            spool(&dir, n);
+        }
+
+        let cap = cap_for(1);
+        let swept = sweep(&dir, &BTreeSet::new(), cap, MAX_AGE, SystemTime::now());
+
+        assert_eq!(swept.removed, 2, "เพดานไม่ได้ทำงาน");
+        assert!(
+            !swept.protected_over_cap(cap),
+            "ไม่มีไฟล์ที่ถูกคุ้มครองสักใบ แต่ยังเตือนผู้ใช้"
+        );
+    }
+
+    /// เพดานที่ประกาศไว้ต้องเป็น **ไบต์** และใหญ่พอสำหรับ PNG จริงหลายใบ
+    ///
+    /// ★ อ้างค่าคงของสัญญาโดยตรง ไม่ hard-code เลขซ้ำ (`HANDOFF §4` ข้อ 21)
+    #[test]
+    fn the_declared_cap_is_the_one_the_spec_decided() {
+        assert_eq!(MAX_BYTES, 512 << 20, "docs/07 §2 ตัดสินไว้ที่ 512 MB");
+        // PNG ของภาพ 6000×4000 = 78 MB (วัดไว้ใน refx_asset::encode)
+        const {
+            assert!(MAX_BYTES > 78 << 20, "เพดานเล็กกว่าภาพที่วางได้หนึ่งใบ")
+        }
     }
 
     /// เก่ากว่าเพดานอายุก็ถูกกวาด ถึงจะยังไม่เกินจำนวน — แต่ยังต้องผ่านด่านข้อ 1/2
@@ -475,7 +628,7 @@ mod tests {
         let referenced = BTreeSet::new();
         let in_40_days = SystemTime::now() + Duration::from_secs(40 * 24 * 60 * 60);
 
-        let swept = sweep(&dir, &referenced, MAX_KEPT, MAX_AGE, in_40_days);
+        let swept = sweep(&dir, &referenced, MAX_BYTES, MAX_AGE, in_40_days);
 
         assert!(!old.exists());
         assert_eq!(swept.removed, 1);
