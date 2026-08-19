@@ -68,6 +68,16 @@ type WakeFn = Arc<dyn Fn() + Send + Sync>;
 /// งาน clipboard ที่วิ่งมาก่อนใครจะต่อสายให้ ต้องไม่กลายเป็น "เงียบหาย"
 type ClipboardHandle = Arc<dyn ClipboardReader>;
 
+/// ★★ ที่พักของภาพที่วาง ที่ชั้นบนเสียบเข้ามาตอนสร้าง pool
+///
+/// หลักการเดียวกับ [`ClipboardHandle`] เป๊ะ: คนที่ *มีไบต์* คือ worker ตัวนี้
+/// ส่วนคนที่ *รู้ว่าไฟล์ต้องไปไหนและเขียนยังไงให้ atomic* คือ `refx-io::spool`
+/// ซึ่ง `refx-asset` พึ่งไม่ได้ (ARCHITECTURE §2) → กลับทิศด้วย trait ใน `refx-core`
+///
+/// `None` = pool นี้ไม่มีที่พัก (เทสต์/fuzz) ภาพที่วางจะขึ้นจอได้ตามปกติ
+/// แต่คมได้แค่ระดับ thumbnail และหายไปตอนปิดโปรแกรม
+type SpoolHandle = Arc<dyn refx_core::spool::PastedImageStore>;
+
 /// ของที่ worker ทุกตัวใช้ร่วมกันตลอดอายุ pool
 ///
 /// รวมเป็น struct เดียวเพราะส่งทีละตัวทำให้ลายเซ็นของ [`worker_loop`] ยาวจนอ่านไม่ออก
@@ -81,6 +91,8 @@ struct WorkerContext {
     /// `None` = pool นี้อ่าน clipboard ไม่ได้ (เทสต์/fuzz ที่ไม่ต้องการ)
     /// งาน `JobSource::Clipboard` จะได้ `Failed` พร้อมเหตุผลที่ชัด **ไม่ใช่เงียบหาย**
     clipboard: Option<ClipboardHandle>,
+    /// ที่พักของภาพที่วาง — ดู [`SpoolHandle`]
+    spool: Option<SpoolHandle>,
 }
 
 /// ตัวปลุก UI ที่ worker เรียกเมื่อมีผลใหม่
@@ -286,6 +298,21 @@ pub enum JobResult {
         meta: SourceMeta,
         /// เวลาที่ใช้ตั้งแต่หยิบงานจนเสร็จ
         elapsed: Duration,
+        /// ★★★ hash ของ **เนื้อภาพ** สำหรับภาพที่ไม่มีไฟล์ต้นทาง (clipboard)
+        ///
+        /// `Some` = ภาพใบนี้กำลังจะถูกพักลง spool ที่ `<spool_dir>/<hash>.png`
+        /// ผู้เรียกต้องใช้ค่านี้เป็น `AssetRef::hash` **ไม่ใช่คีย์ของงาน** เพราะ:
+        ///
+        /// | ใคร | ต้องการอะไร |
+        /// |---|---|
+        /// | `spool::sweep` | `AssetRef::hash` ต้องตรงกับ **ชื่อไฟล์ใน spool** ไม่งั้นมันจะถูกลบทิ้งทั้งที่ board อ้างถึงอยู่ |
+        /// | วางภาพเดิมซ้ำ | คีย์เดียวกัน → ไฟล์เดียว (คีย์ของงานเป็น `clipboard:N` ซึ่งต่างกันทุกครั้ง) |
+        ///
+        /// ★★ เป็น **hash ไม่ใช่ path** โดยตั้งใจ: ตอนที่ข้อความนี้ถูกส่ง ไฟล์ยัง
+        /// เขียนไม่เสร็จ · การ encode PNG ของภาพ 6000×4000 กินเวลา **1.07 วินาที**
+        /// ซึ่ง `docs/07 §2` ห้ามไม่ให้มาขวางการที่ภาพขึ้นจอ → ส่ง `Done` ออกไปก่อน
+        /// แล้วยืนยันด้วย [`JobResult::Spooled`] เมื่อไฟล์ลงดิสก์จริง
+        spooled: Option<ContentHash>,
     },
     /// working texture พร้อมใช้ (docs/04 §4 ชั้น B)
     Working {
@@ -330,6 +357,20 @@ pub enum JobResult {
         /// ไฟล์ที่อยู่ใน clipboard
         paths: Vec<PathBuf>,
     },
+    /// ★★★ ภาพที่วาง **ลงดิสก์เรียบร้อยแล้ว** — ตามหลัง [`JobResult::Done`] ของงานเดียวกัน
+    ///
+    /// ★ นี่ไม่ใช่ "งาน" ใหม่ — เป็นผลตามหลังของงานที่ถูกนับไปแล้ว จึงไม่เข้า
+    /// สถิติและไม่เข้างวดที่ผู้ใช้กำลังรออยู่ (ไม่งั้นงวดจะจบเร็วเกินจริง)
+    ///
+    /// ★★ **ส่งเมื่อไฟล์มีอยู่จริงเท่านั้น** เพราะนี่คือสัญญาณที่ปลดล็อกการขอ
+    /// working texture ของภาพใบนั้น — ปลดก่อนไฟล์พร้อม = ผู้ใช้ได้ error
+    /// "เปิดภาพไม่ได้" ที่เขาทำอะไรกับมันไม่ได้ ทุกครั้งที่ซูมเข้าในช่วงนั้น
+    Spooled {
+        /// hash ของเนื้อภาพ — ตรงกับ `spooled` ใน [`JobResult::Done`] และกับ `AssetRef::hash`
+        hash: ContentHash,
+        /// ไฟล์ที่พักไว้ (`<spool_dir>/<hash>.png`)
+        path: PathBuf,
+    },
     /// ล้มเหลว — item จะขึ้นสถานะ "โหลดไม่ได้" ไม่ใช่ crash (I-7)
     Failed {
         /// คีย์ของภาพ
@@ -351,6 +392,7 @@ impl JobResult {
             | Self::Sampled { hash, .. }
             | Self::Cancelled { hash, .. }
             | Self::ClipboardFiles { hash, .. }
+            | Self::Spooled { hash, .. }
             | Self::Failed { hash, .. } => *hash,
         }
     }
@@ -545,6 +587,7 @@ impl DecodePool {
         limits: Limits,
         io: Option<crossbeam_channel::Sender<IoRequest>>,
         clipboard: Option<ClipboardHandle>,
+        spool: Option<SpoolHandle>,
     ) -> Self {
         let workers = workers.max(1);
         let queue = Arc::new(Queue::new());
@@ -562,6 +605,7 @@ impl DecodePool {
                 wake: wake.clone(),
                 io: io.clone(),
                 clipboard: clipboard.clone(),
+                spool: spool.clone(),
             };
             let tx = tx.clone();
 
@@ -603,14 +647,15 @@ impl DecodePool {
     /// เพดานขนาดภาพคำนวณจาก RAM ที่ติดตั้ง (docs/05 §3) ไม่ใช่ค่าคงที่
     /// — ภาพที่ผ่านเกราะมาได้จึงไม่มีทางเกิน 1/8 ของ RAM เครื่อง
     ///
-    /// `total_ram` กับ `clipboard` **รับเข้ามา ไม่ได้ไปถามเอง** เพราะทั้งสองอย่าง
-    /// ต้องถาม OS ซึ่งเป็นงานของ `refx-platform` — ชั้น asset ไม่รู้จักมัน
-    /// (ARCHITECTURE §2, HANDOFF §2.0) ผู้เรียกจริงคือ `refx-ui`
+    /// `total_ram` · `clipboard` · `spool` **รับเข้ามา ไม่ได้ไปถามเอง** เพราะทั้งสาม
+    /// อย่างต้องถาม OS หรือแตะดิสก์ ซึ่งเป็นงานของ `refx-platform`/`refx-io` —
+    /// ชั้น asset ไม่รู้จักมัน (ARCHITECTURE §2, HANDOFF §2.0) ผู้เรียกจริงคือ `refx-ui`
     #[must_use]
     pub fn with_defaults(
         total_ram: u64,
         clipboard: ClipboardHandle,
         io: Option<crossbeam_channel::Sender<IoRequest>>,
+        spool: Option<SpoolHandle>,
     ) -> Self {
         Self::new(
             default_worker_count(),
@@ -618,6 +663,7 @@ impl DecodePool {
             Limits::for_system(total_ram),
             io,
             Some(clipboard),
+            spool,
         )
     }
 
@@ -678,7 +724,7 @@ impl Drop for DecodePool {
 fn worker_loop(queue: &Queue, ctx: &WorkerContext, tx: &crossbeam_channel::Sender<JobResult>) {
     let stats = &ctx.stats;
     while let Some(job) = queue.pop() {
-        let result = run_job(&job, ctx);
+        let (result, deferred) = run_job(&job, ctx);
 
         match &result {
             JobResult::Done { .. }
@@ -693,6 +739,9 @@ fn worker_loop(queue: &Queue, ctx: &WorkerContext, tx: &crossbeam_channel::Sende
             JobResult::Failed { .. } => {
                 stats.failed.fetch_add(1, AtomicOrdering::Relaxed);
             }
+            // ★ ไม่มีทางมาถึงตรงนี้: `Spooled` ถูกส่งจากกิ่งด้านล่างเท่านั้น
+            //   ไม่ใช่ผลของ `run_job` — และมันไม่ใช่งานจึงไม่เข้าสถิติ
+            JobResult::Spooled { .. } => {}
         }
 
         // main thread อาจปิดไปแล้ว — ไม่ใช่ error
@@ -704,20 +753,84 @@ fn worker_loop(queue: &Queue, ctx: &WorkerContext, tx: &crossbeam_channel::Sende
         //   แล้วภาพจะไม่ขึ้นจนกว่าผู้ใช้จะขยับเมาส์
         //   winit รวบ request_redraw หลายครั้งเป็นเฟรมเดียวอยู่แล้ว จึงไม่เปลือง
         ctx.wake.wake();
+
+        // ★★★ **หลังจากภาพขึ้นจอแล้วเท่านั้น** ค่อย encode PNG ลง spool
+        //
+        //   `docs/07 §2` บังคับข้อนี้ไว้ตรง ๆ และตัวเลขก็บอกเอง: 6000×4000
+        //   ใช้เวลา encode **1.07 วินาที** ถ้าทำก่อนส่ง `Done` ผู้ใช้จะเห็น
+        //   โปรแกรมค้างทุกครั้งที่กด Ctrl+V กับภาพใหญ่
+        //
+        //   ★ ลำดับนี้ถูกบังคับด้วย **โครงสร้าง** ไม่ใช่ด้วยความจำ: `run_job`
+        //   ส่งงานที่เลื่อนออกไปกลับมาเป็นค่าคืน มันจึงเขียนให้ทำก่อนส่งผลไม่ได้
+        if let Some(task) = deferred {
+            let hash = task.hash;
+            let stored = spool_pasted_image(&task, ctx);
+            drop(task); // คืนโควตา RAM ของภาพเต็มทันที ไม่รอรอบถัดไปของลูป
+            if let Some(path) = stored {
+                if tx.send(JobResult::Spooled { hash, path }).is_err() {
+                    break;
+                }
+                ctx.wake.wake();
+            }
+        }
     }
 }
 
+/// ★★ งานที่ต้องทำ **หลังส่งผลออกไปแล้ว** — พัก PNG ของภาพที่วางลงดิสก์
+///
+/// มีอยู่เพื่อบังคับลำดับด้วยชนิดข้อมูล: ตราบใดที่มันเป็น *ค่าคืน* ของ
+/// [`run_job`] การ encode จะเกิดก่อน `Done` ถูกส่งไม่ได้เลย (`docs/07 §2`)
+struct SpoolTask {
+    /// hash ของเนื้อภาพ — ชื่อไฟล์ใน spool
+    hash: ContentHash,
+    /// พิกเซลที่จะถูก encode (ยังถืออยู่เพราะยังไม่ได้เขียน)
+    image: RgbaImage,
+    /// ★ ใบจองโควตา RAM ของภาพเต็ม — ต้องถือต่อจนกว่าจะ encode เสร็จ
+    /// ไม่งั้นถังกลางจะคิดว่าว่างแล้วปล่อยงานอื่นเข้ามาซ้อน (I-6)
+    _reservation: crate::budget::RamReservation,
+}
+
+/// เขียน PNG ของภาพที่วางลง spool — **เรียกหลังส่งผลออกไปแล้วเท่านั้น**
+///
+/// คืน `None` เมื่อทำไม่สำเร็จ ซึ่ง **ไม่ใช่ error ที่ต้องหยุดงาน**: ภาพขึ้นจอ
+/// ไปแล้วเรียบร้อย สิ่งที่เสียไปคือความคมตอนซูมกับความสามารถในการกู้คืน
+fn spool_pasted_image(task: &SpoolTask, ctx: &WorkerContext) -> Option<PathBuf> {
+    let spool = ctx.spool.as_ref()?;
+    let started = Instant::now();
+    let png = match crate::encode::to_png(&task.image) {
+        Ok(png) => png,
+        Err(err) => {
+            tracing::warn!(%err, hash = %task.hash.short(), "cannot encode the pasted image");
+            return None;
+        }
+    };
+    let bytes = png.len();
+    let path = spool.store(task.hash, &png)?;
+    tracing::info!(
+        hash = %task.hash.short(),
+        bytes,
+        elapsed = ?started.elapsed(),
+        "spooled a pasted image"
+    );
+    Some(path)
+}
+
 /// ทำงานหนึ่งชิ้นจนจบ
-fn run_job(job: &Job, ctx: &WorkerContext) -> JobResult {
+///
+/// ★ ค่าคืนที่สองคืองานที่ต้องทำ **หลังส่งผลแล้ว** ([`SpoolTask`])
+fn run_job(job: &Job, ctx: &WorkerContext) -> (JobResult, Option<SpoolTask>) {
     let started = Instant::now();
     let io = ctx.io.as_ref();
 
     // ★ เช็คธงยกเลิก **ก่อนเริ่ม** — ผู้ใช้ pan ผ่านไปแล้วก็ไม่ต้องเสียแรงเลย
     if job.cancel.load(AtomicOrdering::Relaxed) {
-        return JobResult::Cancelled {
-            hash: job.hash,
-            target: job.target,
-        };
+        return (
+            JobResult::Cancelled {
+                hash: job.hash,
+                target: job.target,
+            },
+            None,
+        );
     }
 
     let file = job.source.label();
@@ -737,35 +850,49 @@ fn run_job(job: &Job, ctx: &WorkerContext) -> JobResult {
         _ => CacheLookup::Unavailable,
     };
     if let CacheLookup::Hit(thumb) = lookup {
-        return JobResult::Done {
-            hash: job.hash,
-            thumb,
-            meta,
-            elapsed: started.elapsed(),
-        };
+        return (
+            JobResult::Done {
+                hash: job.hash,
+                thumb,
+                meta,
+                elapsed: started.elapsed(),
+                // cache hit เกิดกับไฟล์บนดิสก์เท่านั้น — clipboard ไม่เข้า cache
+                spooled: None,
+            },
+            None,
+        );
     }
 
     // ★ หยิบ pixel เข้ามา — จุดเดียวที่สองแหล่งต่างกัน หลังจากนี้เหมือนกันหมด
-    let (image, _reservation) = match acquire_pixels(job, ctx) {
+    let (image, reservation) = match acquire_pixels(job, ctx) {
         Acquired::Ready { image, reservation } => (image, reservation),
         Acquired::Files(paths) => {
-            return JobResult::ClipboardFiles {
-                hash: job.hash,
-                paths,
-            };
+            return (
+                JobResult::ClipboardFiles {
+                    hash: job.hash,
+                    paths,
+                },
+                None,
+            );
         }
         Acquired::Cancelled => {
-            return JobResult::Cancelled {
-                hash: job.hash,
-                target: job.target,
-            };
+            return (
+                JobResult::Cancelled {
+                    hash: job.hash,
+                    target: job.target,
+                },
+                None,
+            );
         }
         Acquired::Failed(reason) => {
-            return JobResult::Failed {
-                hash: job.hash,
-                reason,
-                target: job.target,
-            };
+            return (
+                JobResult::Failed {
+                    hash: job.hash,
+                    reason,
+                    target: job.target,
+                },
+                None,
+            );
         }
     };
 
@@ -777,23 +904,32 @@ fn run_job(job: &Job, ctx: &WorkerContext) -> JobResult {
 
         // ยกเลิกกลางทางได้ — ผู้ใช้ซูมออกไปแล้วก็ไม่ต้องส่งของหนักกลับไป
         if job.cancel.load(AtomicOrdering::Relaxed) {
-            return JobResult::Cancelled {
-                hash: job.hash,
-                target: job.target,
-            };
-        }
-        return match built {
-            Some(image) => JobResult::Working {
-                hash: job.hash,
-                image: Box::new(image),
-                elapsed,
-            },
-            None => {
-                tracing::warn!(file, size, "could not build the working texture");
+            return (
                 JobResult::Cancelled {
                     hash: job.hash,
                     target: job.target,
-                }
+                },
+                None,
+            );
+        }
+        return match built {
+            Some(image) => (
+                JobResult::Working {
+                    hash: job.hash,
+                    image: Box::new(image),
+                    elapsed,
+                },
+                None,
+            ),
+            None => {
+                tracing::warn!(file, size, "could not build the working texture");
+                (
+                    JobResult::Cancelled {
+                        hash: job.hash,
+                        target: job.target,
+                    },
+                    None,
+                )
             }
         };
     }
@@ -804,22 +940,46 @@ fn run_job(job: &Job, ctx: &WorkerContext) -> JobResult {
         let (source_px, rgba) = sample_pixel(&image, u, v);
         drop(image);
         if job.cancel.load(AtomicOrdering::Relaxed) {
-            return JobResult::Cancelled {
-                hash: job.hash,
-                target: job.target,
-            };
+            return (
+                JobResult::Cancelled {
+                    hash: job.hash,
+                    target: job.target,
+                },
+                None,
+            );
         }
-        return JobResult::Sampled {
-            hash: job.hash,
-            rgba,
-            source_px,
-        };
+        return (
+            JobResult::Sampled {
+                hash: job.hash,
+                rgba,
+                source_px,
+            },
+            None,
+        );
     }
 
     // ขั้น 6: ย่อเป็น thumbnail (Lanczos3) — ทำบน worker ไม่ใช่ UI thread
     // ขั้น 7 (BC7) ถูกตัดออกจาก P1 แล้ว — docs/04 §4
     let thumb = make_thumbnail(&image);
-    drop(image); // คืน RAM ของภาพเต็มทันที ไม่ต้องรอจบฟังก์ชัน
+
+    // ★★★ ภาพที่ **ไม่มีไฟล์ต้นทาง** ต้องได้คีย์จากพิกเซลของมันเอง
+    //
+    //   คีย์ของงานเป็น `clipboard:N` ซึ่งต่างกันทุกครั้งที่วาง · ถ้าเอาไปใช้เป็น
+    //   `AssetRef::hash` จะพังสองทางพร้อมกัน: วางภาพเดิมซ้ำได้ไฟล์ละใบใน spool
+    //   และ `spool::sweep` จะหาชื่อไฟล์ที่ board อ้างถึงไม่เจอ **แล้วลบทิ้ง**
+    //
+    //   ★ ทำ **ก่อน** ส่ง `Done` เพราะ item ต้องมีคีย์ที่ถูกตั้งแต่ถูกสร้าง
+    //   (ราคาคือการ hash ครั้งเดียว ไม่ใช่การ encode ที่กินเป็นวินาที)
+    let spooled = (ctx.spool.is_some() && job.source.file().is_none())
+        .then(|| crate::hash::hash_pasted(image.width(), image.height(), image.as_raw()));
+
+    let deferred = spooled.map(|hash| SpoolTask {
+        hash,
+        image,
+        _reservation: reservation,
+    });
+    // ★ ภาพเต็มถูกส่งต่อให้ `SpoolTask` แล้วในกรณี clipboard — กรณีอื่นคืน RAM ทันที
+    //   (ไม่ต้องรอจบฟังก์ชัน) เหมือนเดิมทุกประการ
 
     let elapsed = started.elapsed();
 
@@ -828,22 +988,32 @@ fn run_job(job: &Job, ctx: &WorkerContext) -> JobResult {
     if elapsed > DECODE_TIMEOUT {
         ctx.stats.timed_out.fetch_add(1, AtomicOrdering::Relaxed);
         tracing::warn!(file, ?elapsed, "decode took longer than the timeout");
-        return JobResult::Failed {
-            hash: job.hash,
-            reason: JobFailure::Timeout {
-                file,
-                seconds: DECODE_TIMEOUT.as_secs(),
+        return (
+            JobResult::Failed {
+                hash: job.hash,
+                reason: JobFailure::Timeout {
+                    file,
+                    seconds: DECODE_TIMEOUT.as_secs(),
+                },
+                target: job.target,
             },
-            target: job.target,
-        };
+            None,
+        );
     }
 
     // เช็คธงครั้งสุดท้าย — ถ้าผู้ใช้ pan ผ่านไปแล้วก็ไม่ต้องส่งภาพกลับให้เปลือง
+    //
+    // ★ ยกเลิกแล้ว = ไม่มี item บน board = ไม่มีใครอ้างถึงไฟล์ใน spool
+    //   จึงทิ้ง `deferred` ไปด้วย ไม่งั้นเราจะเขียนไฟล์ 78 MB ที่รอบเก็บกวาด
+    //   รอบถัดไปจะลบทิ้งอยู่ดี
     if job.cancel.load(AtomicOrdering::Relaxed) {
-        return JobResult::Cancelled {
-            hash: job.hash,
-            target: job.target,
-        };
+        return (
+            JobResult::Cancelled {
+                hash: job.hash,
+                target: job.target,
+            },
+            None,
+        );
     }
 
     // เก็บลง cache เพื่อให้ครั้งหน้าไม่ต้อง decode อีก
@@ -861,12 +1031,16 @@ fn run_job(job: &Job, ctx: &WorkerContext) -> JobResult {
         });
     }
 
-    JobResult::Done {
-        hash: job.hash,
-        thumb: Box::new(thumb),
-        meta,
-        elapsed,
-    }
+    (
+        JobResult::Done {
+            hash: job.hash,
+            thumb: Box::new(thumb),
+            meta,
+            elapsed,
+            spooled,
+        },
+        deferred,
+    )
 }
 
 /// อ่านสีของ pixel เดียวจากภาพที่ decode มาแล้ว
@@ -1155,6 +1329,7 @@ mod tests {
             Limits::default(),
             None, // ไม่มี cache ในเทสต์ — วัดเส้นทาง decode ล้วน
             None, // ไม่มี clipboard — เทสต์ที่ต้องการจะเสียบ FakeClipboard เอง
+            None, // ไม่มี spool — เทสต์ที่ต้องการจะเสียบ FakeSpool เอง
         )
     }
 
@@ -1175,13 +1350,34 @@ mod tests {
         }
 
         fn with_image(w: u32, h: u32) -> ClipboardHandle {
-            Self::answering(Ok(ClipboardContent::Image(
-                refx_core::clipboard::ClipboardImage {
-                    width: w,
-                    height: h,
-                    rgba: vec![200; (w as usize) * (h as usize) * 4],
-                },
-            )))
+            Self::answering(Ok(ClipboardContent::Image(image_of(w, h))))
+        }
+    }
+
+    /// ภาพดิบใน clipboard — ลายที่ต่างกันตามขนาด (คนละภาพต้องได้คนละคีย์)
+    fn image_of(w: u32, h: u32) -> refx_core::clipboard::ClipboardImage {
+        refx_core::clipboard::ClipboardImage {
+            width: w,
+            height: h,
+            rgba: (0..(w as usize) * (h as usize) * 4)
+                .map(|i| (i as u32).wrapping_mul(2_654_435_761).to_le_bytes()[0])
+                .collect(),
+        }
+    }
+
+    /// clipboard ที่ตอบ **ภาพเดิมได้ไม่จำกัดครั้ง** — สำหรับเทสต์ที่วางซ้ำ
+    #[derive(Debug)]
+    struct RepeatingClipboard(refx_core::clipboard::ClipboardImage);
+
+    impl RepeatingClipboard {
+        fn with_image(w: u32, h: u32) -> ClipboardHandle {
+            Arc::new(Self(image_of(w, h)))
+        }
+    }
+
+    impl ClipboardReader for RepeatingClipboard {
+        fn read(&self) -> Result<ClipboardContent, ClipboardError> {
+            Ok(ClipboardContent::Image(self.0.clone()))
         }
     }
 
@@ -1203,6 +1399,7 @@ mod tests {
             Limits::default(),
             None,
             Some(reader),
+            None,
         )
     }
 
@@ -1260,7 +1457,8 @@ mod tests {
                 JobResult::Working { .. }
                 | JobResult::Sampled { .. }
                 | JobResult::Cancelled { .. }
-                | JobResult::ClipboardFiles { .. } => {}
+                | JobResult::ClipboardFiles { .. }
+                | JobResult::Spooled { .. } => {}
             }
         }
         assert_eq!((failed, done), (1, 1), "ไฟล์เสียต้องไม่ลากไฟล์ดีลงไปด้วย");
@@ -1621,7 +1819,7 @@ mod tests {
     fn ram_stays_under_shared_limit() {
         let path = write_png("ram", "r.png", 512, 512); // ~2 MB หลัง decode (×2 = 4 MB)
         let budget = Arc::new(RamBudget::new(8 << 20)); // 8 MB — พอแค่ ~2 งานพร้อมกัน
-        let pool = DecodePool::new(6, Arc::clone(&budget), Limits::default(), None, None);
+        let pool = DecodePool::new(6, Arc::clone(&budget), Limits::default(), None, None, None);
 
         for i in 0..40u32 {
             pool.submit(Job {
@@ -1831,6 +2029,7 @@ mod tests {
             Limits::default(),
             Some(io_tx),
             Some(FakeClipboard::with_image(8, 8)),
+            None,
         );
 
         pool.submit(clipboard_job(b"no-cache"));
@@ -1876,6 +2075,260 @@ mod tests {
             asked.load(AtomicOrdering::Relaxed) > 0,
             "งานของไฟล์ต้องคุยกับ cache — ถ้าไม่คุยเลย เทสต์ข้างบนก็ไม่ได้พิสูจน์อะไร"
         );
+    }
+
+    // ---------- ★★★ spool ของภาพที่วาง (P4-5) ----------
+
+    /// ที่พักปลอม — จำทุกอย่างที่ถูกเก็บ และ **หน่วงได้ตามสั่ง**
+    ///
+    /// ★ การหน่วงคือหัวใจ: มันทำให้เทสต์ถามได้ว่า *"ภาพขึ้นจอก่อนไฟล์ลงดิสก์
+    /// จริงไหม"* ซึ่งเป็นข้อบังคับของ `docs/07 §2` ที่ไม่มีเทสต์แบบอื่นถามได้
+    #[derive(Debug)]
+    struct FakeSpool {
+        dir: PathBuf,
+        stored: std::sync::Mutex<Vec<(ContentHash, usize)>>,
+        /// เปิดประตูให้ `store` เดินต่อ — `None` = ไม่หน่วง
+        gate: Option<crossbeam_channel::Receiver<()>>,
+    }
+
+    impl FakeSpool {
+        fn new(tag: &str) -> Arc<Self> {
+            Arc::new(Self {
+                dir: temp_dir(tag),
+                stored: std::sync::Mutex::new(Vec::new()),
+                gate: None,
+            })
+        }
+
+        fn gated(tag: &str) -> (Arc<Self>, crossbeam_channel::Sender<()>) {
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            (
+                Arc::new(Self {
+                    dir: temp_dir(tag),
+                    stored: std::sync::Mutex::new(Vec::new()),
+                    gate: Some(rx),
+                }),
+                tx,
+            )
+        }
+
+        fn stored(&self) -> Vec<(ContentHash, usize)> {
+            self.stored.lock().map(|s| s.clone()).unwrap_or_default()
+        }
+    }
+
+    impl refx_core::spool::PastedImageStore for FakeSpool {
+        fn store(&self, hash: ContentHash, png: &[u8]) -> Option<PathBuf> {
+            if let Some(gate) = self.gate.as_ref() {
+                gate.recv_timeout(Duration::from_secs(30)).ok()?;
+            }
+            self.stored.lock().ok()?.push((hash, png.len()));
+            let path = self.dir.join(format!("{hash}.png"));
+            std::fs::write(&path, png).ok()?;
+            Some(path)
+        }
+    }
+
+    fn spool_pool(reader: ClipboardHandle, spool: Arc<FakeSpool>) -> DecodePool {
+        DecodePool::new(
+            1, // worker ตัวเดียว — ลำดับของข้อความจึงเป็นลำดับของงานจริง ๆ
+            Arc::new(RamBudget::new(64 << 20)),
+            Limits::default(),
+            None,
+            Some(reader),
+            Some(spool),
+        )
+    }
+
+    /// ★★★ **ภาพขึ้นจอก่อน · ไฟล์ลงดิสก์ทีหลัง** — `docs/07 §2` บังคับข้อนี้ไว้
+    ///
+    /// วัดแล้วว่า PNG ของภาพ 6000×4000 ใช้เวลา encode **1.07 วินาที** ถ้ามันเกิด
+    /// ก่อน `Done` ถูกส่ง ผู้ใช้จะเห็นโปรแกรมค้างทุกครั้งที่กด `Ctrl+V` กับภาพใหญ่
+    ///
+    /// ★ เทสต์นี้ **ล้มเป็น** โดยนิยาม: ถ้าใครย้ายการ encode ไปไว้ก่อนส่ง `Done`
+    /// worker จะไปนอนรอประตูที่ยังไม่เปิด แล้ว `recv_timeout` ตรงนี้จะหมดเวลา
+    /// — ไม่ใช่เทสต์ที่ "ผ่านเพราะเร็วพอ" แต่เป็นการบังคับลำดับด้วยการบล็อกจริง
+    ///
+    /// ★★ ยืนยันแล้วด้วย negative control (19 ส.ค. 2026): ย้าย `spool_pasted_image`
+    /// ไปไว้ก่อน `tx.send(result)` ใน `worker_loop` → เทสต์นี้ **แดงพร้อมข้อความ
+    /// `Done ต้องมาก่อน โดยไม่ต้องรอ store: Timeout`** แล้วถอดออก
+    #[test]
+    fn the_image_reaches_the_screen_before_the_png_reaches_the_disk() {
+        let (spool, open_gate) = FakeSpool::gated("spool-order");
+        let pool = spool_pool(FakeClipboard::with_image(32, 24), Arc::clone(&spool));
+        pool.submit(clipboard_job(b"order"));
+
+        // ★ ประตูยัง **ไม่เปิด** — `store` ค้างอยู่ แต่ `Done` ต้องมาถึงแล้ว
+        let first = pool
+            .results()
+            .recv_timeout(Duration::from_secs(10))
+            .expect("Done ต้องมาก่อน โดยไม่ต้องรอ store");
+        let spooled = match first {
+            JobResult::Done { thumb, spooled, .. } => {
+                assert_eq!((thumb.source_width, thumb.source_height), (32, 24));
+                spooled.expect("ภาพที่วางต้องได้คีย์ของเนื้อภาพติดมาด้วย")
+            }
+            other => panic!("ข้อความแรกต้องเป็น Done แต่ได้ {other:?}"),
+        };
+        assert!(
+            spool.stored().is_empty(),
+            "ไฟล์ลงดิสก์ไปแล้วทั้งที่ประตูยังไม่เปิด — เทสต์นี้ไม่ได้วัดอะไร"
+        );
+
+        // เปิดประตู → การยืนยันต้องตามมา พร้อม path จริง
+        open_gate.send(()).unwrap();
+        match pool
+            .results()
+            .recv_timeout(Duration::from_secs(30))
+            .expect("ต้องมีการยืนยันตามมาหลังไฟล์ลงดิสก์")
+        {
+            JobResult::Spooled { hash, path } => {
+                assert_eq!(hash, spooled, "คีย์ในการยืนยันต้องตรงกับที่ Done บอกไว้");
+                assert!(path.exists(), "ยืนยันว่าเก็บแล้วแต่ไฟล์ไม่มีอยู่จริง");
+                assert_eq!(
+                    path.file_name().unwrap().to_string_lossy(),
+                    format!("{hash}.png"),
+                    "ชื่อไฟล์ต้องเป็น hash — ไม่งั้น sweep หาไม่เจอแล้วลบทิ้ง"
+                );
+            }
+            other => panic!("ต้องได้ Spooled แต่ได้ {other:?}"),
+        }
+        assert_eq!(spool.stored().len(), 1);
+    }
+
+    /// ★★★ วางภาพเดิมซ้ำสามครั้ง → **คีย์เดียว** (ที่ `spool::store` แปลงเป็นไฟล์เดียว)
+    ///
+    /// คีย์ของ *งาน* ต่างกันทุกครั้ง (`clipboard:N`) โดยตั้งใจ — ผู้ใช้ที่วางซ้ำ
+    /// ต้องการภาพสามใบบน board · แต่คีย์ของ *เนื้อ* ต้องเหมือนกัน ไม่งั้น
+    /// spool จะเก็บ PNG 78 MB ไว้สามชุด
+    #[test]
+    fn pasting_the_same_image_three_times_spools_one_file() {
+        let spool = FakeSpool::new("spool-dedup");
+        let pool = spool_pool(RepeatingClipboard::with_image(24, 16), Arc::clone(&spool));
+
+        let mut job_keys = Vec::new();
+        let mut content_keys = Vec::new();
+        for n in 0..3u8 {
+            let job = clipboard_job(&[b'p', n]);
+            job_keys.push(job.hash);
+            pool.submit(job);
+            // Done แล้ว Spooled สลับกันไป — worker ตัวเดียวจึงเป็นคู่ ๆ เสมอ
+            for _ in 0..2 {
+                if let JobResult::Done { hash, spooled, .. } = pool
+                    .results()
+                    .recv_timeout(Duration::from_secs(30))
+                    .expect("ต้องได้ผลกลับมา")
+                {
+                    assert_eq!(hash, job_keys[n as usize]);
+                    content_keys.push(spooled.expect("ต้องมีคีย์ของเนื้อภาพ"));
+                }
+            }
+        }
+
+        assert_eq!(job_keys.len(), 3);
+        assert!(
+            job_keys[0] != job_keys[1] && job_keys[1] != job_keys[2],
+            "คีย์ของงานต้องต่างกันทุกครั้ง ไม่งั้นวางซ้ำจะได้ภาพใบเดียว"
+        );
+        assert_eq!(content_keys.len(), 3);
+        assert!(
+            content_keys.windows(2).all(|w| w[0] == w[1]),
+            "ภาพเดิมได้คนละคีย์ → spool จะเก็บซ้ำสามชุด"
+        );
+        let files = std::fs::read_dir(&spool.dir).unwrap().count();
+        assert_eq!(files, 1, "ได้ {files} ไฟล์แทนที่จะเป็นไฟล์เดียว");
+    }
+
+    /// ไบต์ที่ส่งเข้า spool ต้องเป็น **PNG ของภาพนั้นจริง ๆ** ไม่ใช่ thumbnail
+    ///
+    /// ถ้าเผลอส่ง thumbnail ไป ภาพที่กู้กลับมาจะเป็นก้อน 128 px ตลอดไป —
+    /// ซึ่งเป็นหนี้ที่ทั้ง P4-5 มีไว้เพื่อปลด
+    #[test]
+    fn what_lands_in_the_spool_is_the_full_size_png() {
+        let spool = FakeSpool::new("spool-content");
+        let pool = spool_pool(FakeClipboard::with_image(200, 120), Arc::clone(&spool));
+        pool.submit(clipboard_job(b"content"));
+        for _ in 0..2 {
+            pool.results()
+                .recv_timeout(Duration::from_secs(30))
+                .expect("ต้องได้ผลกลับมา");
+        }
+
+        let stored = spool.stored();
+        assert_eq!(stored.len(), 1);
+        let path = spool.dir.join(format!("{}.png", stored[0].0));
+        let back = image::open(&path).unwrap().to_rgba8();
+        assert_eq!(
+            back.dimensions(),
+            (200, 120),
+            "ขนาดไม่ตรง — เก็บ thumbnail แทนภาพเต็มอยู่"
+        );
+    }
+
+    /// ★ ไม่มีที่พักเสียบไว้ = เหมือนเดิมทุกประการ (เทสต์/fuzz ต้องไม่เขียนดิสก์)
+    #[test]
+    fn without_a_spool_a_paste_behaves_exactly_as_before() {
+        let pool = clipboard_pool(FakeClipboard::with_image(16, 16));
+        pool.submit(clipboard_job(b"no-spool"));
+        match pool
+            .results()
+            .recv_timeout(Duration::from_secs(30))
+            .expect("ต้องได้ผลกลับมา")
+        {
+            JobResult::Done { spooled, .. } => assert!(
+                spooled.is_none(),
+                "ไม่มีที่พักแต่ยังบอกว่าภาพถูกพักไว้ — path ที่ชี้ไปที่ว่างคือ I-3"
+            ),
+            other => panic!("ต้องสำเร็จ แต่ได้ {other:?}"),
+        }
+        assert!(
+            pool.results()
+                .recv_timeout(Duration::from_millis(200))
+                .is_err(),
+            "ไม่ควรมีข้อความตามมาเมื่อไม่มีที่พัก"
+        );
+    }
+
+    /// ★★ ไฟล์บนดิสก์ **ไม่ต้องพักซ้ำ** — มันมีที่อยู่ถาวรของมันเองอยู่แล้ว
+    #[test]
+    fn a_file_on_disk_is_never_copied_into_the_spool() {
+        let spool = FakeSpool::new("spool-file");
+        let pool = spool_pool(FakeClipboard::with_image(8, 8), Arc::clone(&spool));
+        let path = write_png("spool-file-src", "s.png", 16, 16);
+        pool.submit(job(path, 0.0, b"on-disk"));
+
+        match pool
+            .results()
+            .recv_timeout(Duration::from_secs(30))
+            .expect("ต้องได้ผลกลับมา")
+        {
+            JobResult::Done { spooled, .. } => assert!(spooled.is_none()),
+            other => panic!("ต้องสำเร็จ แต่ได้ {other:?}"),
+        }
+        assert!(
+            spool.stored().is_empty(),
+            "ก๊อปไฟล์ของผู้ใช้ลง spool = กินดิสก์เป็นสองเท่าโดยไม่ได้อะไร"
+        );
+    }
+
+    /// ★ งานที่ถูกยกเลิกต้องไม่ทิ้งไฟล์ 78 MB ไว้ให้รอบเก็บกวาดมาลบทีหลัง
+    #[test]
+    fn a_cancelled_paste_never_reaches_the_spool() {
+        let spool = FakeSpool::new("spool-cancel");
+        let pool = spool_pool(FakeClipboard::with_image(16, 16), Arc::clone(&spool));
+        let job = clipboard_job(b"cancelled");
+        job.cancel.store(true, AtomicOrdering::Relaxed);
+        pool.submit(job);
+
+        match pool
+            .results()
+            .recv_timeout(Duration::from_secs(30))
+            .expect("ต้องได้ผลกลับมา")
+        {
+            JobResult::Cancelled { .. } => {}
+            other => panic!("ต้องถูกยกเลิก แต่ได้ {other:?}"),
+        }
+        assert!(spool.stored().is_empty());
     }
 
     /// ป้ายที่ไปโผล่ใน log ห้ามมี path เต็ม (docs/08 §5 — path มีชื่อผู้ใช้อยู่)

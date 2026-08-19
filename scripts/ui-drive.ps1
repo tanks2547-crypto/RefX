@@ -43,6 +43,9 @@
 #   pan|<x1>|<y1>|<x2>|<y2>          middle-button camera pan (P2-4 moved pan there)
 #   wheel|<x>|<y>|<notches>          zoom
 #   keydn|<vk> / keyup|<vk> / key|<vk>   virtual key codes (Ctrl = 17, Z = 90)
+#   copyimg|<png>                    put a real IMAGE on the clipboard, Ctrl+V it
+#                                    (the pasted-image path of P4-5 - 'paste'
+#                                     below carries text and never reaches it)
 #   paste|<text>                     put text on the clipboard then Ctrl+V it
 #                                    (the only reliable way to fill a NATIVE
 #                                     Save As / Open dialog - see the step body)
@@ -305,6 +308,34 @@ foreach ($step in $Steps) {
       Key-Down 17; Key-Down 86; Key-Up 86; Key-Up 17   # Ctrl+V
       Start-Sleep -Milliseconds 250
       Write-Output "paste '$($parts[1])'"
+    }
+    # Put a real IMAGE on the clipboard, then Ctrl+V it.  'paste' above carries
+    # TEXT, which exercises a completely different branch of the app: the text
+    # path ends in ClipboardContent::Files or NoImage and never touches the
+    # decode/spool path that P4-5 is about.  Proving the pasted-image path needs
+    # actual pixels in the clipboard, so this step exists.
+    #
+    # ! Clipboard.SetImage needs an STA thread.  powershell.exe 5.1 is STA by
+    #   default, but say so out loud rather than assume: if the apartment is
+    #   MTA the call throws and this step fails loudly instead of pasting
+    #   nothing and letting the run "succeed" with no image (docs/08 3.9 item 2).
+    'copyimg' {
+      if ([Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') {
+        Write-Output "NOT STA - Clipboard.SetImage cannot run here"; exit 1
+      }
+      Add-Type -AssemblyName System.Windows.Forms
+      $img = [System.Drawing.Image]::FromFile((Resolve-Path $parts[1]))
+      # copy into a new bitmap so the file handle is released before Ctrl+V
+      $bmp = New-Object System.Drawing.Bitmap $img
+      $img.Dispose()
+      [System.Windows.Forms.Clipboard]::SetImage($bmp)
+      Start-Sleep -Milliseconds 400
+      if (-not [System.Windows.Forms.Clipboard]::ContainsImage()) {
+        Write-Output "clipboard has no image after SetImage"; exit 1
+      }
+      Write-Output "copyimg $($parts[1]) $($bmp.Width)x$($bmp.Height)"
+      Key-Down 17; Key-Down 86; Key-Up 86; Key-Up 17   # Ctrl+V
+      Start-Sleep -Milliseconds 250
     }
     'shot'   { Shot $parts[1] }
     'sleep'  { Start-Sleep -Milliseconds ([int]$parts[1]) }

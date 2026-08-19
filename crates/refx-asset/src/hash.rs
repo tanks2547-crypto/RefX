@@ -22,6 +22,7 @@ pub const SAMPLE_BYTES: u64 = 1 << 20; // 1 MB
 /// แล้ว cache จะคืน thumbnail ผิดภาพ
 const TAG_FULL: u8 = 0x00;
 const TAG_SAMPLED: u8 = 0x01;
+const TAG_PASTED: u8 = 0x02;
 
 /// hash ของเนื้อไฟล์ (blake3-256)
 ///
@@ -49,6 +50,28 @@ pub fn hash_bytes(bytes: &[u8]) -> ContentHash {
     let mut hasher = blake3::Hasher::new();
     hasher.update(&[TAG_FULL]);
     hasher.update(bytes);
+    ContentHash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+/// ★★★ hash ของ **ภาพที่วางจาก clipboard** — คีย์ของ `AssetRef` และชื่อไฟล์ใน spool
+///
+/// ภาพที่วางไม่มีไฟล์ต้นทางให้ hash · คีย์ของมันจึงต้องมาจาก **พิกเซล** และ
+/// ต้องคำนวณได้ **ก่อน** encode เป็น PNG เพราะ `docs/07 §2` ห้ามให้การ encode
+/// (ระดับวินาที) มาขวางการที่ภาพขึ้นจอ ส่วนคีย์ต้องพร้อมตั้งแต่ตอนสร้าง item
+///
+/// ★★ **hash ทั้งก้อน ไม่ใช้ fast path แบบ [`hash_file`]** ถึงแม้ RGBA ของภาพ
+/// 6000×4000 จะเป็น 91 MB ก็ตาม: fast path ปลอดภัยได้เพราะ cache key มี `mtime`
+/// คร่อมจุดบอดไว้ (`HANDOFF §4` ข้อ 4) แต่ภาพที่วาง **ไม่มี mtime** — คีย์ที่ชนกัน
+/// จึงแปลว่า *ภาพใบที่สองถูกกลืนหายไปเงียบ ๆ* ซึ่งคือ I-3 ตรง ๆ
+///
+/// ★ ผสมขนาดเข้าไปด้วย — ภาพ 2×1 กับ 1×2 ที่พิกเซลชุดเดียวกันคือคนละภาพ
+#[must_use]
+pub fn hash_pasted(width: u32, height: u32, rgba: &[u8]) -> ContentHash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&[TAG_PASTED]);
+    hasher.update(&width.to_le_bytes());
+    hasher.update(&height.to_le_bytes());
+    hasher.update(rgba);
     ContentHash::from_bytes(*hasher.finalize().as_bytes())
 }
 
@@ -194,6 +217,59 @@ mod tests {
     fn missing_file_is_error_not_panic() {
         let path = temp_dir("missing").join("ไม่มีจริง.bin");
         assert!(hash_file(&path).is_err());
+    }
+
+    // ---------- ★ ภาพที่วางจาก clipboard ----------
+
+    /// ★★★ วางภาพเดิมซ้ำต้องได้ **คีย์เดียวกัน** — ไม่งั้น spool จะได้ไฟล์ละใบ
+    #[test]
+    fn pasting_the_same_pixels_twice_gives_the_same_key() {
+        let rgba = pattern(64 * 48 * 4, 71);
+        assert_eq!(hash_pasted(64, 48, &rgba), hash_pasted(64, 48, &rgba));
+    }
+
+    /// ★★ พิกเซลชุดเดียวกันแต่คนละขนาด = คนละภาพ
+    ///
+    /// ถ้าไม่ผสมขนาดเข้าไป ภาพ 2×1 กับ 1×2 จะกลายเป็นไฟล์เดียวกันใน spool
+    /// แล้วใบที่สองจะถูกกลืนหายไปเงียบ ๆ (I-3)
+    #[test]
+    fn the_same_pixels_at_a_different_size_are_a_different_image() {
+        let rgba = pattern(2 * 4, 73);
+        assert_ne!(hash_pasted(2, 1, &rgba), hash_pasted(1, 2, &rgba));
+    }
+
+    /// ★★★ **hash ทั้งก้อน ไม่ใช่ fast path** — ภาพที่วางไม่มี mtime มาคร่อมจุดบอด
+    ///
+    /// เทสต์นี้เป็นภาพสะท้อนกลับด้านของ `fast_path_known_blind_spot_is_documented`
+    /// ตรงนั้นยอมรับจุดบอดได้เพราะคีย์ของ cache มี `mtime` อยู่ด้วย ที่นี่ไม่มี —
+    /// คีย์ที่ชนกันแปลว่า **ภาพที่ผู้ใช้วางใบที่สองหายไป** โดยไม่มีอะไรเตือน
+    #[test]
+    fn a_pasted_image_is_hashed_in_full_however_big_it_is() {
+        let side = 2048u32; // 16 MB ของ RGBA — เกินช่วงหัว/ท้ายของ fast path
+        let len = (side as usize) * (side as usize) * 4;
+        assert!(
+            len as u64 > FULL_HASH_LIMIT.min(2 * SAMPLE_BYTES),
+            "เทสต์นี้จะไร้ความหมายถ้าภาพเล็กกว่าช่วงที่ fast path อ่าน"
+        );
+
+        let mut a = pattern(len, 79);
+        let mut b = a.clone();
+        let middle = len / 2;
+        a[middle] = 0x00;
+        b[middle] = 0xff;
+
+        assert_ne!(
+            hash_pasted(side, side, &a),
+            hash_pasted(side, side, &b),
+            "ต่างกันตรงกลางแล้วยังได้คีย์เดียวกัน = เดิน fast path อยู่"
+        );
+    }
+
+    /// ★ คนละวิธี hash ต้องคนละค่า — ป้ายกำกับ (`TAG_*`) มีไว้เพื่อข้อนี้
+    #[test]
+    fn a_pasted_key_never_collides_with_a_file_key() {
+        let bytes = pattern(16, 83);
+        assert_ne!(hash_pasted(2, 2, &bytes), hash_bytes(&bytes));
     }
 
     // ---------- fast path ----------

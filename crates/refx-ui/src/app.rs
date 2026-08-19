@@ -1451,6 +1451,13 @@ pub struct RefxApp {
     /// **ห้ามตกมาที่ `cache_dir`** ถ้าหาไม่เจอ (`docs/07 §4`) — ยอมไม่มี autosave
     /// ดีกว่าวางงานของผู้ใช้ไว้ในที่ที่มีคนตั้งใจจะลบเป็นระยะ
     recovery_dir: Option<std::path::PathBuf>,
+    /// ★★ โฟลเดอร์ `<data_local_dir>/pasted` — ที่พักของภาพที่วางจาก clipboard
+    ///
+    /// `None` = ไม่มีที่พัก · ภาพที่วางจะยังขึ้นจอได้ตามปกติแต่คมได้แค่ระดับ
+    /// thumbnail และหายไปตอนปิดโปรแกรม (`docs/07 §2`)
+    spool_dir: Option<std::path::PathBuf>,
+    /// ผลของการเก็บกวาด spool ที่ส่งไปทำบนเธรดอื่นแล้ว รอผลกลับ (ไม่บล็อก I-2)
+    spool_sweep: Option<crossbeam_channel::Receiver<refx_io::spool::Swept>>,
     /// dialog เลือกที่บันทึกที่กำลังเปิดอยู่ (รอผู้ใช้ตอบ — ไม่บล็อก I-2)
     save_dialog: Option<crossbeam_channel::Receiver<Option<std::path::PathBuf>>>,
     /// งานบันทึกที่ส่งไปเธรดแล้ว รอผลกลับ (ไม่บล็อก I-2)
@@ -1476,6 +1483,64 @@ pub struct RefxApp {
     /// working texture ต้อง decode ใหม่จากไฟล์จริง จึงต้องจำที่มาไว้จับคู่
     job_sources:
         std::collections::HashMap<refx_asset::hash::ContentHash, refx_asset::pool::JobSource>,
+}
+
+/// ★★★ คีย์และที่อยู่ของ asset ที่ผลลัพธ์ใบนี้จะกลายเป็น
+///
+/// แยกออกมาเป็นฟังก์ชันเพราะ **มันคือจุดที่ผิดแล้วภาพของผู้ใช้หายเงียบ ๆ** และ
+/// จุดเรียกจริงอยู่ในกลางลูปที่ต้องมี GPU ถึงจะรันได้ — เทสต์จึงเรียกตัวนี้ตรง ๆ
+/// ไม่ใช่เขียนตรรกะเลียนแบบขึ้นมาใหม่ (`docs/08 §3.9` ข้อ 9)
+///
+/// | ภาพมาจากไหน | คีย์ | path |
+/// |---|---|---|
+/// | ไฟล์ของผู้ใช้ | คีย์ของงาน (มาจาก path — คงที่ข้าม session) | path ของผู้ใช้ |
+/// | clipboard | ★ **hash ของเนื้อภาพ** | `<spool_dir>/<hash>.png` |
+///
+/// ★★ คีย์ของงาน clipboard เป็น `clipboard:N` ที่ต่างกันทุกครั้งที่วาง ถ้าเอามัน
+/// ไปเป็น `AssetRef::hash` จะพังสองทางพร้อมกัน: [`refx_io::spool::sweep`] จะหา
+/// ชื่อไฟล์ที่ board อ้างถึงไม่เจอ **แล้วลบภาพทิ้ง** (I-3) และวางภาพเดิมซ้ำ
+/// จะได้ไฟล์ละใบทั้งที่เนื้อเหมือนกัน
+fn pasted_asset_location(
+    spool_dir: Option<&std::path::Path>,
+    job_hash: refx_core::hash::ContentHash,
+    spooled: Option<refx_core::hash::ContentHash>,
+) -> (refx_core::hash::ContentHash, Option<std::path::PathBuf>) {
+    match spooled {
+        // ★ path หาได้จาก hash ล้วน ๆ จึงเขียนลง `AssetRef` ได้ **ตั้งแต่ตอนนี้**
+        //   ทั้งที่ไฟล์ยังเขียนไม่เสร็จ — จำเป็น เพราะ snapshot ที่ถูกเขียนใน
+        //   ช่วงนั้นต้องกู้คืนได้เหมือนกัน
+        Some(content) => (
+            content,
+            spool_dir.map(|dir| refx_io::spool::spool_path(dir, content)),
+        ),
+        None => (job_hash, None),
+    }
+}
+
+/// ★★ ที่พักของภาพที่วางตัวจริง — ห่อ [`refx_io::spool::store`] ให้ worker เรียกได้
+///
+/// trait อยู่ที่ `refx-core` เพราะ `refx-asset` (คนที่มีไบต์) พึ่ง `refx-io`
+/// (คนที่รู้ว่าไฟล์ไปไหน) ไม่ได้ — ARCHITECTURE §2 วางสองตัวนั้นไว้เป็นพี่น้องกัน
+/// **`refx-ui` เป็นชั้นเดียวที่รู้จักทั้งคู่ จึงเป็นคนต่อสาย** (หลักการเดียวกับ
+/// `SystemClipboard` และ `WakeHandle`)
+#[derive(Debug)]
+struct SpoolSink {
+    dir: std::path::PathBuf,
+}
+
+impl refx_core::spool::PastedImageStore for SpoolSink {
+    fn store(&self, hash: refx_core::hash::ContentHash, png: &[u8]) -> Option<std::path::PathBuf> {
+        match refx_io::spool::store(&self.dir, hash, png, refx_platform::fsops::rename_durable) {
+            Ok(path) => Some(path),
+            Err(err) => {
+                // ★ ไม่ใช่ error ที่ต้องหยุดงาน — ภาพขึ้นจอไปแล้ว สิ่งที่เสียคือ
+                //   ความคมตอนซูมกับความสามารถในการกู้คืน ซึ่งต้องถูก log ไว้
+                //   ไม่ใช่ทำให้การวางภาพล้มทั้งใบ (`refx_core::spool`)
+                tracing::warn!(%err, hash = %hash.short(), "cannot spool the pasted image");
+                None
+            }
+        }
+    }
 }
 
 /// ★ id ของ board ที่แอปนี้ใช้ — ตัวเดียวกับ `Board::default()`
@@ -1661,6 +1726,8 @@ impl RefxApp {
             session: refx_io::recovery::SessionId::new_unique(),
             // ผู้เรียก (`run`) เสียบให้ — ที่นี่ไม่รู้จัก `AppPaths`
             recovery_dir: None,
+            spool_dir: None,
+            spool_sweep: None,
             save_dialog: None,
             save_job: None,
             after_save: AfterSave::Stay,
@@ -1790,10 +1857,19 @@ impl RefxApp {
         // ★ `refx-ui` เป็นชั้นเดียวที่รู้จักทั้ง OS และ decode pool จึงเป็นคนเสียบ
         //   ของที่ต้องถาม OS ให้ (ARCHITECTURE §2, HANDOFF §2.0) — `refx-asset`
         //   ไม่ depend `refx-platform` แล้ว หลักการเดียวกับ `WakeHandle` กับ winit
+        //
+        // ★★ ที่พักของภาพที่วางก็เส้นเดียวกัน: worker เป็นคนมีไบต์ แต่คนที่รู้ว่า
+        //    ไฟล์ไปไหนและเขียนยังไงให้ atomic คือ `refx-io` ซึ่ง `refx-asset`
+        //    พึ่งไม่ได้ — ที่นี่คือชั้นเดียวที่รู้จักทั้งคู่
+        let spool: Option<std::sync::Arc<dyn refx_core::spool::PastedImageStore>> = self
+            .spool_dir
+            .clone()
+            .map(|dir| std::sync::Arc::new(SpoolSink { dir }) as _);
         let pool = DecodePool::with_defaults(
             refx_platform::memory::total_ram(),
             std::sync::Arc::new(refx_platform::clipboard::SystemClipboard),
             io_tx.clone(),
+            spool,
         );
         let (used, limit) = pool.ram_usage();
         self.shell.ram_used = used;
@@ -1852,6 +1928,7 @@ impl RefxApp {
                     thumb,
                     meta,
                     elapsed,
+                    spooled,
                 } => {
                     tracing::debug!(hash = %hash.short(), ?elapsed, "image decoded");
                     // ไม่รู้จักคีย์ = ไม่มีไฟล์ให้กลับไปอ่าน จึงถือเป็นภาพที่ขอคมกว่านี้
@@ -1861,7 +1938,27 @@ impl RefxApp {
                         .get(&hash)
                         .cloned()
                         .unwrap_or(refx_asset::pool::JobSource::Clipboard);
-                    done.push((hash, source, thumb, meta));
+                    done.push((hash, source, thumb, meta, spooled));
+                }
+                // ★★★ ภาพที่วางลงดิสก์แล้ว → **ปลดล็อกการขอภาพคมของใบนั้น**
+                //
+                //   ที่อยู่ของมันถูกเขียนลง `AssetRef::path` ไปตั้งแต่ตอน `Done`
+                //   แล้ว (path หาได้จาก hash ล้วน ๆ) สิ่งที่เพิ่งเปลี่ยนคือ
+                //   **ไฟล์มีอยู่จริงแล้ว** — ก่อนหน้านี้การขอ working texture
+                //   จะได้ error "เปิดภาพไม่ได้" ที่ผู้ใช้ทำอะไรกับมันไม่ได้
+                //
+                //   ★ `source` เป็นสถานะของชั้น UI ไม่ใช่ของ `Board` การแก้ตรงนี้
+                //   จึงไม่ต้องผ่าน `Command` และไม่ทำให้เอกสาร dirty
+                refx_asset::pool::JobResult::Spooled { hash, path } => {
+                    tracing::info!(hash = %hash.short(), "a pasted image now has a file of its own");
+                    let source = refx_asset::pool::JobSource::File(path);
+                    if let Some(gfx) = self.gfx.as_mut() {
+                        for state in gfx.render_state.values_mut() {
+                            if state.hash == hash {
+                                state.source = source.clone();
+                            }
+                        }
+                    }
                 }
                 refx_asset::pool::JobResult::ClipboardFiles { hash, paths } => {
                     // ก๊อปไฟล์จาก Explorer มาวาง — เดินเส้นทางเดียวกับลากไฟล์เข้ามา
@@ -1992,7 +2089,10 @@ impl RefxApp {
         if !done.is_empty()
             && let Some(gfx) = self.gfx.as_mut()
         {
-            for (hash, source, thumb, meta) in done {
+            for (hash, source, thumb, meta, spooled) in done {
+                // ★★★ คีย์และที่อยู่ของภาพใบนี้ — ดู `pasted_asset_location`
+                let (asset_hash, spooled_path) =
+                    pasted_asset_location(self.spool_dir.as_deref(), hash, spooled);
                 match Self::upload_thumb(gfx, &thumb.pixels) {
                     Ok(slot) => {
                         // ★★★ ภาพของ board ที่ **เปิดมาจากไฟล์** — item มีอยู่แล้ว
@@ -2036,11 +2136,17 @@ impl RefxApp {
                             Vec2::new(2000.0 + col as f32 * cell, 2000.0 + row as f32 * cell);
 
                         let item = Item::new(ItemKind::Image(AssetRef {
-                            hash,
-                            path: source
-                                .file()
-                                .map(std::path::Path::to_path_buf)
-                                .unwrap_or_default(),
+                            hash: asset_hash,
+                            // ★★ ภาพที่วางได้ที่อยู่ของมันใน spool · ภาพจากไฟล์ได้ path
+                            //    ของผู้ใช้ · **ไม่มีใบไหนที่ path ว่างอีกแล้ว** ซึ่งเป็น
+                            //    เงื่อนไขที่ `request_thumbnails_for_board` ใช้ตัดสินว่า
+                            //    ภาพใบนั้นกู้กลับมาได้หรือไม่ (`docs/07 §2` — I-3)
+                            path: spooled_path.clone().unwrap_or_else(|| {
+                                source
+                                    .file()
+                                    .map(std::path::Path::to_path_buf)
+                                    .unwrap_or_default()
+                            }),
                             px_size: glam::UVec2::new(sw, sh),
                             // ★ ยังไม่รู้ format จริงตรงนี้ — cache hit ไม่ได้แตะไบต์ของไฟล์เลย
                             //   เขียน `Unknown` ตรง ๆ ดีกว่าเดาจากนามสกุล (docs/02 §2.2.5 ข้อ 2)
@@ -2085,7 +2191,10 @@ impl RefxApp {
                             id,
                             ItemRender {
                                 source,
-                                hash,
+                                // ★ คีย์เดียวกับ `AssetRef::hash` เสมอ — มันคือคีย์ของ
+                                //   working texture ด้วย ภาพเดิมที่วางสองครั้งจึงใช้
+                                //   texture ใบเดียวกัน
+                                hash: asset_hash,
                                 // สีเด่นเก็บไว้ตลอดชีวิตของ item ไม่ใช่เฉพาะตอนเป็น
                                 // placeholder — ช่อง atlas หลุดเมื่อไหร่ก็หยิบมาใช้ได้ทันที
                                 tint: dominant_rgba(thumb.dominant),
@@ -3067,6 +3176,10 @@ impl RefxApp {
             Err(crossbeam_channel::TryRecvError::Disconnected) => None,
         };
         self.recovery_scan = None;
+        // ★★ กวาด spool ตรงนี้ **ไม่ว่าจะมีงานค้างหรือไม่** — รายชื่อ snapshot
+        //    ที่ต้องคุ้มครองนิ่งแล้วตั้งแต่การสแกนจบ · ถ้าผูกไว้กับ "ผู้ใช้ตอบ
+        //    แถบกู้คืน" อย่างเดียว เครื่องที่ไม่เคย crash เลยจะไม่มีวันกวาด
+        self.sweep_spool_folder();
         let Some(found) = found else {
             return;
         };
@@ -3126,6 +3239,9 @@ impl RefxApp {
         // ★ เก็บกวาดตามเพดาน **หลังผู้ใช้ตอบเสมอ** — ตอนนี้ไฟล์ที่เพิ่งถูกถาม
         //   มีไฟล์ประทับแล้ว เพดาน 10 ไฟล์ / 30 วันจึงมีของให้ทำงานด้วยจริง
         self.sweep_recovery_folder();
+        // ★★ แล้วค่อยกวาด spool — ลำดับสำคัญ: snapshot ที่ผู้ใช้เพิ่งสั่ง "ทิ้ง"
+        //    ต้องหายไปจากโฟลเดอร์ก่อน ภาพที่มีแต่มันรู้จักจึงจะกวาดได้
+        self.sweep_spool_folder();
         if let Some(gfx) = self.gfx.as_ref() {
             gfx.window.request_redraw();
         }
@@ -3154,6 +3270,101 @@ impl RefxApp {
         if let Err(err) = spawned {
             tracing::warn!(%err, "cannot spawn the recovery sweep thread");
         }
+    }
+
+    /// ★★★ เก็บกวาด spool ของภาพที่วาง — บนเธรดอื่น (I-2) และ **ถามครบทั้งสองฝั่ง**
+    ///
+    /// กติกา (`docs/07 §2` · `refx_io::spool`):
+    /// 1. ห้ามลบไฟล์ที่ **board ที่เปิดอยู่** อ้างถึง
+    /// 2. ★ ห้ามลบไฟล์ที่ **recovery snapshot ตัวใดก็ตามที่ยังอยู่** อ้างถึง
+    /// 3. ที่เหลือใช้เพดาน **ไบต์** (512 MB)
+    ///
+    /// ★★ ข้อ 2 คือข้อที่ทั้งกลไกนี้มีไว้เพื่อมัน — ลืมมันแล้วผู้ใช้จะ "กู้คืน
+    /// สำเร็จแต่ได้ board ที่เต็มไปด้วย `Missing`" ซึ่งแย่กว่าไม่มี snapshot เลย
+    /// เพราะเขาเชื่อไปแล้วว่าได้งานคืน · hash ของ board ที่เปิดอยู่อ่านที่นี่
+    /// (UI thread, ในหน่วยความจำ) ส่วนการอ่าน snapshot ทุกไฟล์เป็นงานดิสก์
+    /// จึงอยู่บนเธรด
+    fn sweep_spool_folder(&mut self) {
+        let (Some(spool_dir), Some(recovery_dir)) =
+            (self.spool_dir.clone(), self.recovery_dir.clone())
+        else {
+            return;
+        };
+        if self.spool_sweep.is_some() {
+            return; // รอบก่อนยังไม่จบ — ซ้อนกันไม่ได้อะไรเพิ่ม
+        }
+        let open_board = self
+            .gfx
+            .as_ref()
+            .map(|gfx| refx_io::spool::hashes_of(&gfx.board))
+            .unwrap_or_default();
+        let wake = self.assets.as_ref().map(|assets| assets.pool.wake_handle());
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let spawned = std::thread::Builder::new()
+            .name("refx-spool-sweep".to_owned())
+            .spawn(move || {
+                let mut referenced = open_board;
+                referenced.extend(refx_io::spool::referenced_by_recovery(
+                    &recovery_dir,
+                    default_board_id(),
+                ));
+                let swept = refx_io::spool::sweep(
+                    &spool_dir,
+                    &referenced,
+                    refx_io::spool::MAX_BYTES,
+                    refx_io::spool::MAX_AGE,
+                    std::time::SystemTime::now(),
+                );
+                let _ = tx.send(swept);
+                // ★ ปลุกให้มาเก็บผล — ไม่งั้นข้อความ "เกินเพดาน" จะค้างอยู่ในช่อง
+                //   จนกว่าผู้ใช้จะบังเอิญขยับเมาส์ · ปลุกครั้งเดียวจบ ไม่ใช่ลูป (I-1)
+                if let Some(wake) = wake {
+                    wake.wake();
+                }
+            });
+        if let Err(err) = spawned {
+            tracing::warn!(%err, "cannot spawn the spool sweep thread");
+            return;
+        }
+        self.spool_sweep = Some(rx);
+    }
+
+    /// เก็บผลการกวาด spool — เรียกต้นเฟรม **ไม่บล็อก**
+    ///
+    /// ★★★ สิ่งเดียวที่ผู้ใช้ต้องเห็นคือสภาพที่ **เพดานทำงานไม่ได้เพราะทุกไฟล์
+    /// ห้ามแตะ** — เงียบไว้แล้วปล่อยให้ดิสก์เต็มก็ผิด ลบทิ้งก็ผิดหนักกว่า
+    /// (`docs/07 §2` · รูปแบบเดียวกับ "board เต็ม" ใน `ROADMAP P3-3`)
+    fn poll_spool_sweep(&mut self) {
+        let Some(rx) = self.spool_sweep.as_ref() else {
+            return;
+        };
+        let swept = match rx.try_recv() {
+            Ok(swept) => swept,
+            Err(crossbeam_channel::TryRecvError::Empty) => return,
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                self.spool_sweep = None;
+                return;
+            }
+        };
+        self.spool_sweep = None;
+        if !swept.protected_over_cap(refx_io::spool::MAX_BYTES) {
+            return;
+        }
+        let mb = swept.protected_bytes / (1 << 20);
+        tracing::warn!(
+            mb,
+            files = swept.kept_because_referenced,
+            "the paste spool is over its cap and nothing in it may be deleted"
+        );
+        self.shell.status = text::fill(
+            self.shell.lang,
+            text::Template::SpoolOverCap,
+            &[
+                ("mb", &mb.to_string()),
+                ("cap", &(refx_io::spool::MAX_BYTES / (1 << 20)).to_string()),
+            ],
+        );
+        self.shell.status_warn = true;
     }
 
     /// `Ctrl+O` — ถามว่าจะเปิดไฟล์ไหน (P4-4)
@@ -4344,6 +4555,7 @@ impl AppDelegate for RefxApp {
         // ★ การเปิดไฟล์ + งานค้างจาก session ก่อน (P4-4) — ลำดับเดียวกับข้างบน
         self.poll_open();
         self.poll_recovery_scan();
+        self.poll_spool_sweep();
         if std::mem::take(&mut self.pending_open) {
             self.apply_open_request();
         }
@@ -5104,11 +5316,17 @@ pub fn run(
     args: AppArgs,
     cache_db: &std::path::Path,
     recovery_dir: &std::path::Path,
+    spool_dir: &std::path::Path,
 ) -> Result<(), refx_platform::window::RunError<DeviceError>> {
     let mut app = RefxApp::new(args);
     // ★ ที่อยู่ของงานที่ยังไม่เคยบันทึก — ถูกส่งเข้ามาเพราะ `AppPaths` เป็นของ
     //   ชั้น platform · ★★ ต้องเป็น `<data_dir>/recovery` เท่านั้น ห้าม cache
     app.recovery_dir = Some(recovery_dir.to_path_buf());
+    // ★★ ที่พักของภาพที่วาง — เหตุผลเดียวกับ `recovery/` เป๊ะ: ภาพจาก clipboard
+    //    สร้างใหม่ไม่ได้จากอะไรเลย ถ้าอยู่ใน `cache_dir` แล้ว eviction ลบมัน
+    //    ผู้ใช้เสียภาพถาวร (`docs/07 §2`)
+    app.spool_dir = Some(spool_dir.to_path_buf());
+    // ★ ต้องมาก่อน `start_assets` — pool รับที่พักตอนสร้างเท่านั้น เสียบทีหลังไม่ได้
     app.start_assets(cache_db);
     refx_platform::window::run(
         app,
@@ -6638,6 +6856,153 @@ mod tests {
         );
     }
 
+    // ---------- ★★★ P4-5: ภาพที่วางต้องมีไฟล์จริงและต้องไม่ถูกกวาดทิ้ง ----------
+
+    fn spool_temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "refx-ui-spool-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// board ที่มีภาพใบเดียวซึ่งอ้างถึง asset ตัวนี้
+    fn board_pointing_at(hash: refx_core::hash::ContentHash, path: &std::path::Path) -> Board {
+        use refx_core::board::{BoardParts, ItemParts};
+        Board::load(
+            default_board_id(),
+            BoardParts {
+                name: "pasted".to_owned(),
+                items: vec![ItemParts {
+                    item: Item::new(ItemKind::Image(AssetRef {
+                        hash,
+                        path: path.to_path_buf(),
+                        px_size: glam::UVec2::new(8, 8),
+                        format: ImageFormat::Unknown,
+                        embedded: false,
+                        mtime: 0,
+                        file_size: 0,
+                    })),
+                    group: None,
+                }],
+                ..BoardParts::default()
+            },
+        )
+    }
+
+    /// ★★★ **ภาพที่วางแล้วยังไม่ได้บันทึก ต้องไม่ถูก `sweep` ลบทิ้ง**
+    ///
+    /// นี่คือเส้นทางเต็มของกติกาข้อ 1: คีย์ที่ `pasted_asset_location` เลือก →
+    /// ชื่อไฟล์ที่ `SpoolSink` เขียน → hash ที่ `sweep` เห็นจาก board
+    /// **สามจุดนี้ต้องเป็นค่าเดียวกัน** ถ้าจุดไหนหลุด ผู้ใช้เสียภาพถาวร (I-3)
+    ///
+    /// ★ เทสต์เรียก `pasted_asset_location` **ตัวที่ `drain_decode_results` ใช้จริง**
+    /// ไม่ใช่ตรรกะที่เขียนเลียนแบบ (`docs/08 §3.9` ข้อ 9)
+    #[test]
+    fn a_pasted_image_the_board_points_at_is_never_swept() {
+        use refx_core::spool::PastedImageStore as _;
+
+        let dir = spool_temp_dir("kept");
+        let content = refx_asset::hash::hash_pasted(2, 2, &[7u8; 16]);
+        let job_key = refx_asset::hash::hash_bytes(b"clipboard:1");
+
+        let (asset_hash, path) = pasted_asset_location(Some(&dir), job_key, Some(content));
+        let path = path.expect("ภาพที่วางต้องได้ที่อยู่ของมัน");
+        assert_eq!(asset_hash, content, "คีย์ต้องเป็นของเนื้อภาพ ไม่ใช่ของงาน");
+
+        // เขียนไฟล์ผ่านตัวจริงที่ pool เรียก
+        let sink = SpoolSink { dir: dir.clone() };
+        let written = sink.store(asset_hash, b"png bytes").expect("เขียนไม่สำเร็จ");
+        assert_eq!(written, path, "ที่อยู่ที่บอก item ไว้ไม่ตรงกับที่ไฟล์ไปอยู่จริง");
+
+        let board = board_pointing_at(asset_hash, &path);
+        let swept = refx_io::spool::sweep(
+            &dir,
+            &refx_io::spool::hashes_of(&board),
+            0, // เพดาน 0 = กวาดทุกอย่างที่กวาดได้
+            std::time::Duration::ZERO,
+            std::time::SystemTime::now(),
+        );
+
+        assert!(path.exists(), "ภาพที่อยู่บน board ถูกกวาดทิ้ง");
+        assert_eq!(swept.kept_because_referenced, 1);
+        assert_eq!(swept.removed, 0);
+    }
+
+    /// ★★★ negative control ของข้อบน — **ใช้คีย์ของงานแล้วภาพหายจริง**
+    ///
+    /// ถ้าไม่มีเทสต์นี้ ข้อบนจะเขียวเท่ากันแม้ `pasted_asset_location` คืนคีย์อะไร
+    /// ก็ตาม เพราะทั้ง board และไฟล์จะใช้ค่าเดียวกันอยู่ดี · สิ่งที่พังจริงคือ
+    /// **สอง session**: `clipboard:1` ของวันนี้ไม่ใช่ `clipboard:1` ของพรุ่งนี้
+    #[test]
+    fn using_the_job_key_instead_is_what_loses_the_image() {
+        use refx_core::spool::PastedImageStore as _;
+
+        let dir = spool_temp_dir("lost");
+        let content = refx_asset::hash::hash_pasted(2, 2, &[9u8; 16]);
+        let job_key = refx_asset::hash::hash_bytes(b"clipboard:1");
+        assert_ne!(content, job_key);
+
+        let sink = SpoolSink { dir: dir.clone() };
+        let path = sink.store(content, b"png bytes").unwrap();
+
+        // ★ จงใจใส่ **คีย์ของงาน** ลง `AssetRef` แทนคีย์ของเนื้อ
+        let board = board_pointing_at(job_key, &path);
+        refx_io::spool::sweep(
+            &dir,
+            &refx_io::spool::hashes_of(&board),
+            0,
+            std::time::Duration::ZERO,
+            std::time::SystemTime::now(),
+        );
+
+        assert!(
+            !path.exists(),
+            "ใส่คีย์ผิดแล้วภาพยังอยู่ — แปลว่าเทสต์ข้างบนไม่ได้พิสูจน์อะไร"
+        );
+    }
+
+    /// ★★ **ภาพที่วางต้องมี `path` เสมอ** — ไม่งั้น `request_thumbnails_for_board`
+    /// ข้ามมันตอนกู้คืน แล้วผู้ใช้ได้ board ที่มีแต่ช่องว่าง
+    ///
+    /// path ถูกเขียนลง `AssetRef` **ตั้งแต่ตอน `Done`** ทั้งที่ไฟล์ยังเขียนไม่เสร็จ
+    /// (หาได้จาก hash ล้วน ๆ) — จำเป็น เพราะ snapshot ที่เขียนในช่วงนั้นต้องกู้ได้
+    #[test]
+    fn a_pasted_image_always_has_a_path_to_come_back_from() {
+        let dir = std::path::Path::new("/data/RefX/pasted");
+        let content = refx_asset::hash::hash_pasted(1, 1, &[1u8; 4]);
+        let (hash, path) = pasted_asset_location(
+            Some(dir),
+            refx_asset::hash::hash_bytes(b"job"),
+            Some(content),
+        );
+
+        let path = path.expect("ไม่มี path = ภาพหายตอนกู้คืน");
+        assert_eq!(hash, content);
+        assert_eq!(path.parent(), Some(dir));
+        assert_eq!(
+            path.file_name().unwrap().to_string_lossy(),
+            format!("{content}.png"),
+            "ชื่อไฟล์ต้องเป็น hash — sweep แปลงชื่อกลับเป็น hash เพื่อหาว่าใครอ้างถึง"
+        );
+    }
+
+    /// ภาพจากไฟล์ของผู้ใช้ต้องไม่ถูกแตะ — คีย์เดิม ไม่มี path ของ spool
+    #[test]
+    fn an_image_from_a_real_file_is_left_exactly_as_it_was() {
+        let job_key = refx_asset::hash::hash_bytes(b"C:/ref/cat.png");
+        let (hash, path) = pasted_asset_location(
+            Some(std::path::Path::new("/data/RefX/pasted")),
+            job_key,
+            None,
+        );
+        assert_eq!(hash, job_key);
+        assert_eq!(path, None, "ไฟล์ของผู้ใช้ถูกลากไปชี้ที่ spool");
+    }
+
     // ---------- ★★★ P4-4: งานที่ยังไม่เคยบันทึกต้องมีที่ให้ autosave ----------
 
     /// ★★★ **ยังไม่เคยกด `Ctrl+S` = ต้องยังมี snapshot** — ช่องที่ P4-3 เปิดค้าง
@@ -7017,14 +7382,29 @@ mod tests {
         assert_ne!(a.session, b.session, "สองหน้าต่างได้รหัส session เดียวกัน");
     }
 
-    /// ภาพที่วางมาจาก clipboard ไม่มีไฟล์ให้ decode ซ้ำ — ต้องไม่ไปขอ working texture
+    /// ★★ `JobSource` คือ **ประตูของ working texture** — ไม่มีไฟล์ = ไม่ขอภาพคม
+    ///
+    /// ★ แก้คำอธิบาย 19 ส.ค. 2026 (P4-5): เดิมเขียนว่า "ภาพจาก clipboard ต้องไม่
+    /// ไปขอ working texture" ซึ่ง **เลิกจริงไปแล้ว** — ตอนนี้มันขอได้ทันทีที่
+    /// `JobResult::Spooled` มาถึงแล้ว `drain_decode_results` สลับ `source` ของ
+    /// item นั้นเป็น `File(<spool>/<hash>.png)` · สิ่งที่ยังจริงคือ **ประตู**:
+    /// ตราบใดที่ยังไม่มีไฟล์ การขอภาพคมจะได้ error ที่ผู้ใช้ทำอะไรกับมันไม่ได้
     #[test]
-    fn clipboard_items_are_marked_as_having_no_source_file() {
+    fn only_an_item_with_a_file_behind_it_may_ask_for_a_sharper_image() {
         assert!(refx_asset::pool::JobSource::Clipboard.file().is_none());
         assert!(
             refx_asset::pool::JobSource::File(std::path::PathBuf::from("a.png"))
                 .file()
                 .is_some()
+        );
+        // ★ หลังถูกพักลง spool แล้ว item เดิมกลายเป็น "มีไฟล์" — ประตูเปิด
+        let spooled = refx_asset::pool::JobSource::File(refx_io::spool::spool_path(
+            std::path::Path::new("/data/RefX/pasted"),
+            refx_asset::hash::hash_pasted(1, 1, &[0u8; 4]),
+        ));
+        assert!(
+            spooled.file().is_some(),
+            "ภาพที่วางถูกพักไว้แล้วแต่ยังขอภาพคมไม่ได้ = หนี้ P1-8 ยังไม่ถูกปลด"
         );
     }
 

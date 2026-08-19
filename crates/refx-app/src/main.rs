@@ -162,6 +162,9 @@ fn main() -> anyhow::Result<()> {
         cli.args,
         &paths.cache_dir().join("cache.sqlite"),
         &paths.recovery_dir(),
+        // ★ ภาพที่วางจาก clipboard สร้างใหม่ไม่ได้จากอะไรเลย — เหตุผลเดียวกับ
+        //   `recovery_dir()` เป๊ะ จึงอยู่ใต้ data_local_dir ไม่ใช่ cache_dir
+        &paths.spool_dir(),
     )?;
     Ok(())
 }

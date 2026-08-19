@@ -26,6 +26,9 @@ cache.sqlite
 /logs/
 /testdata/
 
+# สคริปต์ตรวจด้วยมือใน `scripts/` เป็น Python — ไบต์โค้ดของมันไม่ใช่ของโปรเจกต์
+__pycache__/
+
 # ---- ขยะของ OS / editor ----
 Thumbs.db
 desktop.ini

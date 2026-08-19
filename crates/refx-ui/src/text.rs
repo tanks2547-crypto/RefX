@@ -611,6 +611,8 @@ pub enum Template {
     ErrClipboardUndecodable,
     /// `{w}` `{h}` — ภาพดิบมีจำนวนไบต์ไม่ตรงกับขนาดที่ประกาศ
     ErrMalformedPixels,
+    /// `{mb}` `{cap}` — ที่พักของภาพที่วางเกินเพดาน แต่ทุกไฟล์ยังมีคนอ้างถึงอยู่
+    SpoolOverCap,
 }
 
 /// เทมเพลตภาษาอังกฤษ — ต้องมีครบทุกตัว
@@ -688,6 +690,10 @@ Drag in a PNG, JPEG, WebP, GIF, BMP, TGA or TIFF instead."
              Close a board you are not using, or raise the memory limit in Settings."
         }
         Template::PastedImage => "Pasted an image from the clipboard in {ms} ms",
+        Template::SpoolOverCap => {
+            "Pasted images are using {mb} MB of space (the limit is {cap} MB), and none of them can be cleared yet\n\
+             They belong to work that has not been saved — save your boards, then restart RefX to free the space."
+        }
         Template::ErrClipboardEmpty => {
             "There is no image in the clipboard\n\
              Copy an image or an image file first, or drag the file into the window."
@@ -785,6 +791,10 @@ fn template_th(template: Template) -> Option<&'static str> {
              ลองปิด board ที่ไม่ได้ใช้ หรือเพิ่มเพดานหน่วยความจำในการตั้งค่า"
         }
         Template::PastedImage => "วางภาพจาก clipboard ใน {ms} ms",
+        Template::SpoolOverCap => {
+            "ภาพที่วางไว้ใช้พื้นที่ {mb} MB (เพดาน {cap} MB) และยังลบอะไรไม่ได้เลยสักไฟล์\n\
+             ทั้งหมดเป็นของงานที่ยังไม่ได้บันทึก — บันทึก board ให้เรียบร้อยแล้วเปิด RefX ใหม่ พื้นที่จะถูกคืน"
+        }
         Template::ErrClipboardEmpty => {
             "ใน clipboard ไม่มีภาพ\n\
              ลองก๊อปภาพหรือไฟล์ภาพมาก่อน หรือลากไฟล์เข้ามาในหน้าต่างก็ได้เหมือนกัน"
@@ -1096,6 +1106,7 @@ mod tests {
         Template::ErrClipboardUnavailable,
         Template::ErrClipboardUndecodable,
         Template::ErrMalformedPixels,
+        Template::SpoolOverCap,
     ];
 
     /// ★ กฎข้อ 2 ของ docs/03 §0: ห้ามมีทางที่ผู้ใช้จะเห็นช่องว่างหรือชื่อ key
