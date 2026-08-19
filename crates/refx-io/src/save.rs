@@ -91,7 +91,7 @@ pub enum SaveError {
 }
 
 impl SaveError {
-    fn io(step: &'static str, path: &Path, source: std::io::Error) -> Self {
+    pub(crate) fn io(step: &'static str, path: &Path, source: std::io::Error) -> Self {
         Self::Io {
             step,
             path: path.to_path_buf(),
@@ -229,6 +229,20 @@ fn read_header(doc: &Path) -> Option<Vec<u8>> {
 /// ★★ `sync_all()` คือขั้นที่แยก "เขียนแล้ว" ออกจาก "อยู่บนดิสก์แล้ว" — ถ้าไม่มี
 /// ข้อมูลจะค้างอยู่ใน page cache ของ OS แล้วไฟดับตรงนั้นจะได้ไฟล์ที่ **ขนาดถูก
 /// แต่ข้างในเป็นศูนย์** ซึ่งเป็นอาการที่พบบ่อยที่สุดของการเขียนไฟล์แบบไม่ fsync
+/// ★★ เขียนไบต์ลงไฟล์แบบ atomic — tmp → fsync → rename เหมือนทุกอย่างในโปรเจกต์นี้
+///
+/// ใช้กับของที่ **ไม่ใช่ `Board`** (ตอนนี้คือภาพใน spool ของ P4-5) · แยกออกมา
+/// เพื่อไม่ให้เกิดเส้นทางเขียนไฟล์เส้นที่สองที่ไม่มี fsync/rename ครบชุด
+///
+/// # Errors
+/// [`SaveError`] เมื่อเขียนไม่สำเร็จ — **ไฟล์เดิม (ถ้ามี) ยังอยู่ครบ**
+pub fn write_bytes_atomic(path: &Path, bytes: &[u8], rename: RenameFn) -> Result<(), SaveError> {
+    let tmp = path.with_extension("tmp");
+    write_and_sync(&tmp, bytes)?;
+    rename(&tmp, path).map_err(|err| SaveError::io("replace", path, err))?;
+    Ok(())
+}
+
 fn write_and_sync(path: &Path, bytes: &[u8]) -> Result<(), SaveError> {
     let mut file = std::fs::File::create(path).map_err(|err| SaveError::io("create", path, err))?;
     file.write_all(bytes)

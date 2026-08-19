@@ -103,6 +103,17 @@ impl AppPaths {
         self.data_dir.join("recovery")
     }
 
+    /// ★★★ โฟลเดอร์พักภาพที่ **ไม่มีไฟล์ต้นทาง** (P4-5)
+    ///
+    /// `<data_local_dir>/pasted/<hash>.png` ตาม `docs/07 §2` — ภาพที่วางจาก
+    /// clipboard **สร้างใหม่ไม่ได้จากอะไรเลย** (`arboard` คืน RGBA ไม่ใช่ไบต์
+    /// ของไฟล์) ถ้า cache eviction ลบมัน ผู้ใช้เสียภาพถาวร
+    /// → อยู่ข้าง ๆ `recovery/` ด้วยเหตุผลเดียวกันเป๊ะ **ห้ามย้ายไป `cache_dir`**
+    #[must_use]
+    pub fn spool_dir(&self) -> PathBuf {
+        self.data_dir.join("pasted")
+    }
+
     /// โฟลเดอร์ cache — `cache.sqlite`, thumbnail, lock file
     #[must_use]
     pub fn cache_dir(&self) -> &Path {
@@ -130,12 +141,14 @@ impl AppPaths {
     /// โฟลเดอร์จะไปโผล่ตอนที่ผู้ใช้ต้องการมันที่สุดพอดี
     pub fn ensure_exist(&self) -> Result<(), PathError> {
         let recovery = self.recovery_dir();
+        let spool = self.spool_dir();
         for dir in [
             &self.cache_dir,
             &self.config_dir,
             &self.log_dir,
             &self.data_dir,
             &recovery,
+            &spool,
         ] {
             std::fs::create_dir_all(dir).map_err(|source| PathError::CreateDir {
                 path: dir.clone(),
@@ -198,6 +211,23 @@ mod tests {
         assert_ne!(paths.data_dir(), paths.cache_dir());
     }
 
+    /// ★★★ spool ของภาพที่วาง **ต้องไม่อยู่ใต้ `cache_dir`** เหมือน `recovery/`
+    ///
+    /// ภาพจาก clipboard สร้างใหม่ไม่ได้จากอะไรเลย — วางไว้ในที่ที่ทั้ง OS
+    /// และตัวล้างดิสก์ของผู้ใช้ถือว่าลบได้ตามใจ คือการเสียภาพถาวร (`docs/07 §2`)
+    #[test]
+    fn the_paste_spool_never_lives_under_the_cache_dir() {
+        let paths = AppPaths::discover().unwrap();
+        let spool = paths.spool_dir();
+        assert!(
+            !spool.starts_with(paths.cache_dir()),
+            "ภาพที่วางถูกพักไว้ใน cache: {}",
+            spool.display()
+        );
+        assert!(spool.starts_with(paths.data_dir()));
+        assert_ne!(spool, paths.recovery_dir(), "สองโฟลเดอร์นี้ต้องไม่ปนกัน");
+    }
+
     /// ★★ **บน Windows ต้องอยู่ใต้ `%LOCALAPPDATA%` ไม่ใช่ Roaming** (`docs/07 §4`)
     ///
     /// `directories::ProjectDirs::data_dir()` ให้ **Roaming** มา ซึ่งดูถูกจากชื่อ
@@ -238,6 +268,7 @@ mod tests {
         };
         paths.ensure_exist().unwrap();
         assert!(paths.recovery_dir().is_dir());
+        assert!(paths.spool_dir().is_dir());
         let _ = std::fs::remove_dir_all(&root);
     }
 }
