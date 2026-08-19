@@ -20,7 +20,7 @@ pub mod board; // Board, Item, ItemCanvas, ItemMeta, AssetRef
 pub mod clipboard; // ชนิดข้อมูลกลาง + trait ให้ชั้นบนเสียบตัวอ่านจริง (ไม่มีโค้ด OS)
 pub mod command; // Command trait + History (undo/redo + merge/seal)
 pub mod geom; // Rect / Obb — รูปทรงสำหรับ culling, hit-test, rubber-band
-pub mod hash; // ContentHash — ชนิดล้วน ๆ ส่วนคนคำนวณอยู่ refx-asset
+pub mod hash;
 pub mod interact; // เครื่องสถานะของการเลือกบน canvas (คืน Command ไม่แก้ board เอง)
 pub mod layout; // layout engines — pure functions, deterministic
 pub mod panic_guard; // ธงบอก panic hook ว่า panic นี้ถูกดักไว้แล้ว (I-7)
@@ -28,5 +28,6 @@ pub mod pick; // color picker (world → pixel ต้นฉบับ) + measure 
 pub mod query; // sort + filter ของ Arrange — pure functions, deterministic
 pub mod selection;
 pub mod spatial; // loose uniform grid: culling + hit-test
+pub mod spool; // trait ที่พักภาพจาก clipboard — ชั้นบนเสียบตัวจริงให้ (P4-5) // ContentHash — ชนิดล้วน ๆ ส่วนคนคำนวณอยู่ refx-asset
 pub mod view; // Camera, ViewState, Mode
 pub mod zorder; // ย้ายชั้น (`[` `]`) — pure function คืนลำดับใหม่ ไม่แตะ board
