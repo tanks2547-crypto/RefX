@@ -15,21 +15,36 @@
 //! └────────────────────────────────────────────┘
 //! ```
 //!
-//! ## ★★★ ทำไม packed เป็น **v2** ทั้งที่ flag bit0 มีมาตั้งแต่ v1
+//! ## ★★★ `version = 2` แปลว่า **"ไฟล์นี้มี asset ฝังอยู่"** ไม่ใช่ "ผู้ใช้เลือก packed"
 //!
-//! รุ่นเก่าเปิดไฟล์ packed ได้ "สำเร็จ" โดยบังเอิญ — `decode` ตัดที่ `doc_len`
+//! รุ่นเก่าเปิดไฟล์ที่มี blob ได้ "สำเร็จ" โดยบังเอิญ — `decode` ตัดที่ `doc_len`
 //! อยู่แล้ว จึงมองข้าม blob ท้ายไฟล์ไปเงียบ ๆ แล้วแสดงภาพเป็น `Missing`
 //!
-//! **แล้วถ้าผู้ใช้กด Save ทับ รุ่นเก่าจะเขียน linked v1 ทับลงไป —
-//! ภาพต้นฉบับที่ฝังไว้หายถาวรทั้งหมด** ซึ่งเป็นเคสที่ `docs/07 §2` ห้ามไว้ตรง ๆ
-//! (*"Missing ต้องไม่หายไปจาก board และต้อง save กลับได้ครบ ... ต้องไม่เสียข้อมูลไป (I-3)"*)
+//! **แล้วถ้าผู้ใช้กด Save ทับ รุ่นเก่าจะเขียน v1 ทับลงไป — ภาพที่ฝังไว้หายถาวร**
+//! ซึ่งเป็นเคสที่ `docs/07 §2` ห้ามไว้ตรง ๆ (I-3)
 //!
-//! → ประกาศ v2 เพื่อให้รุ่นเก่า **ปฏิเสธทั้งการเปิดและการเขียนทับ**
-//! (`may_overwrite` กันไว้ให้แล้ว) · ยอมให้เขาเปิดไม่ได้ ดีกว่าปล่อยให้เขาทำลาย
-//! ของที่อยู่ข้างใน โดยที่ทั้งเขาและเราไม่รู้ตัว
+//! → ไฟล์ที่ **มี blob จริงอยู่ข้างใน** ประกาศ v2 เพื่อให้รุ่นเก่าปฏิเสธทั้ง
+//! การเปิดและการเขียนทับ (`may_overwrite` กันไว้ให้แล้ว) · ไฟล์ที่ไม่มี blob
+//! ยังเป็น v1 รุ่นเก่าจึงเปิดงานประจำวันได้ตามปกติ
+//! — **เสียความเข้ากันได้เฉพาะไฟล์ที่มีของให้เสีย**
 //!
-//! ★ **ไฟล์ linked ยังเขียนเป็น v1 เหมือนเดิม** ([`crate::dto::encode`]) รุ่นเก่า
-//! จึงเปิดงานประจำวันได้ตามปกติ — เสียความเข้ากันได้เฉพาะไฟล์ที่มีของให้เสีย
+//! ## ★★★ Linked **ก็ฝัง** — เฉพาะใบที่ไม่มีไฟล์ต้นทาง (ตัดสิน 18 ส.ค. 2026)
+//!
+//! ภาพที่ผู้ใช้วางจาก clipboard **ไม่มีไฟล์ต้นทางเลย** · ถ้าบันทึกเป็น linked
+//! ตรง ๆ `AssetRef` จะชี้ไป path ที่ไม่มีอยู่ → เปิดกลับมาได้ `Missing` →
+//! **ภาพหายถาวร** ซึ่งเป็นการละเมิด I-3 แบบเงียบที่สุดเท่าที่จะเป็นไปได้
+//!
+//! | โหมด | ทำอะไร |
+//! |---|---|
+//! | [`SaveMode::Packed`] | ฝังภาพ **ทุกใบ** |
+//! | [`SaveMode::Linked`] | ลิงก์ใบที่มีไฟล์ของผู้ใช้ · **ฝังเฉพาะใบที่ไม่มี** |
+//!
+//! ★★ **ห้ามแก้ด้วยการเตือนแล้วให้ผู้ใช้เลือก** — คนที่วางภาพจากเบราว์เซอร์
+//! ไม่รู้ว่า linked กับ packed ต่างกันยังไง การถามตอนเขากำลังจะบันทึกคือการ
+//! โยนการตัดสินใจที่เราควรตัดสินให้ ไปให้คนที่มีข้อมูลน้อยกว่าเรา
+//!
+//! ได้สามอย่างพร้อมกัน: ไม่มีทางเสียภาพที่วางไว้ · ไฟล์ linked ไม่โตโดยไม่จำเป็น
+//! · ภาพที่วางมีที่อยู่ถาวรแล้วจึงขอ working texture ได้ (ปลดหนี้ P1-8)
 //!
 //! ## ★★ `embedded` ไม่ได้ถูกเก็บลงไฟล์ — มัน **อนุมานจาก asset table**
 //!
@@ -90,6 +105,71 @@ pub struct PackSource {
     pub hash: ContentHash,
     /// ไฟล์ต้นฉบับบนดิสก์
     pub path: PathBuf,
+}
+
+/// โหมดที่ผู้ใช้เลือกตอนบันทึก (`docs/07 §2`)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SaveMode {
+    /// ★ ค่าปริยาย — ลิงก์ไปไฟล์ของผู้ใช้ **แต่ยังฝังใบที่ไม่มีไฟล์ต้นทาง**
+    #[default]
+    Linked,
+    /// ฝังทุกใบ — สำหรับส่งต่อ/สำรอง/ย้ายเครื่อง
+    Packed,
+}
+
+/// ★★★ ไบต์ของ asset ใบหนึ่ง **อยู่ที่ไหน และใครเป็นเจ้าของ**
+///
+/// การแยก [`Self::UserFile`] ออกจาก [`Self::Ours`] คือทั้งหมดของกฎ
+/// "linked ก็ฝัง" (ดูหัวโมดูล) — ไฟล์ของผู้ใช้ยังอยู่ของมันเองได้
+/// ส่วนไฟล์ที่มีอยู่เพราะ **เราสร้างมันขึ้นมาเอง** จะหายไปพร้อมเครื่องนี้
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssetBytes {
+    /// ไฟล์ที่ผู้ใช้เป็นเจ้าของ — ลิงก์ได้ใน linked mode
+    UserFile(PathBuf),
+    /// ★ ของที่ **มีอยู่เพราะเราสร้างไว้** (ภาพจาก clipboard ที่ถูกพักไว้)
+    ///
+    /// ผู้ใช้ไม่รู้ว่ามันอยู่ตรงนั้น ไม่ได้ตั้งใจเก็บไว้ และลบมันเมื่อไหร่ก็ได้
+    /// → **ต้องฝังเสมอ ไม่ว่าโหมดไหน** ไม่งั้นเปิดกลับมาแล้วภาพหาย
+    Ours(PathBuf),
+    /// หาไบต์ไม่เจอเลย — item จะเป็น `Missing` (relink เป็นเรื่องของ P4-6)
+    Missing,
+}
+
+/// ★★★ ตัดสินว่า asset ใบไหนต้องถูกฝัง — **กฎอยู่ที่เดียวในโปรเจกต์**
+///
+/// วางไว้ที่ชั้น io ไม่ใช่ชั้น UI โดยตั้งใจ: นี่คือกฎที่ปกป้อง I-3 ถ้ามันอยู่
+/// ในตัวเรียกใช้ ทุกตัวเรียกใหม่ต้องจำให้ได้เอง แล้ววันหนึ่งจะมีตัวที่ลืม
+///
+/// ★ ผู้เรียกตอบแค่ว่า "ไบต์ของใบนี้อยู่ที่ไหน" ([`AssetBytes`]) —
+/// ส่วนที่ว่า *อะไรควรถูกฝัง* ถูกตัดสินที่นี่
+#[must_use]
+pub fn plan_embeds(
+    board: &Board,
+    mode: SaveMode,
+    locate: impl Fn(&refx_core::board::AssetRef) -> AssetBytes,
+) -> Vec<PackSource> {
+    let mut plan = Vec::new();
+    for (_, item) in board.items_in_z_order() {
+        let refx_core::board::ItemKind::Image(asset) = &item.kind else {
+            continue;
+        };
+        // ★ ภาพเดียวกันวางหลายใบบน board = ฝังครั้งเดียว (คีย์คือเนื้อไฟล์)
+        if plan.iter().any(|s: &PackSource| s.hash == asset.hash) {
+            continue;
+        }
+        let path = match (locate(asset), mode) {
+            // ของเราเอง → ฝังเสมอ ทั้งสองโหมด (นี่คือหัวใจของกฎ)
+            (AssetBytes::Ours(path), _) => path,
+            // ไฟล์ของผู้ใช้ → ฝังเฉพาะตอน packed
+            (AssetBytes::UserFile(path), SaveMode::Packed) => path,
+            (AssetBytes::UserFile(_), SaveMode::Linked) | (AssetBytes::Missing, _) => continue,
+        };
+        plan.push(PackSource {
+            hash: asset.hash,
+            path,
+        });
+    }
+    plan
 }
 
 /// ฝัง/แกะไฟล์ไม่สำเร็จ
@@ -668,6 +748,193 @@ mod tests {
         std::fs::write(&out, dto::encode(&Board::default()).unwrap()).unwrap();
         let (mut file, len) = open(&out);
         assert!(read_index(&mut file, len).unwrap().is_empty());
+    }
+
+    // ---------- ★★★ กฎ "linked ก็ฝัง" ----------
+
+    /// ★★★ **ภาพที่วางจาก clipboard ต้องถูกฝังแม้ในโหมด linked**
+    ///
+    /// ถ้าไม่ฝัง `AssetRef` จะชี้ไปที่ที่ผู้ใช้ไม่รู้ว่ามีอยู่และลบเมื่อไหร่ก็ได้
+    /// → เปิดกลับมาได้ `Missing` → **ภาพหายถาวร** = I-3 ถูกละเมิดแบบเงียบที่สุด
+    #[test]
+    fn a_pasted_image_is_embedded_even_in_linked_mode() {
+        let dir = temp_dir("linked-embed");
+        let mine = plant_image(&dir, 20, 900); // ไฟล์ของผู้ใช้
+        let ours = plant_image(&dir, 21, 800); // ของที่เราพักไว้เอง (clipboard)
+        let board = board_of(&[(20, &mine), (21, &ours)]);
+
+        let plan = plan_embeds(&board, SaveMode::Linked, |asset| {
+            if asset.hash == hash_of(21) {
+                AssetBytes::Ours(ours.clone())
+            } else {
+                AssetBytes::UserFile(mine.clone())
+            }
+        });
+
+        assert_eq!(plan.len(), 1, "linked ต้องฝังเฉพาะใบที่ไม่มีไฟล์ต้นทาง");
+        assert_eq!(plan[0].hash, hash_of(21), "ฝังผิดใบ");
+    }
+
+    /// ★ board ที่ไม่มีภาพวางเลย → linked → **ไม่ฝังอะไร → ไฟล์ยังเป็น v1**
+    ///
+    /// ยืนยันจาก **ไบต์ในไฟล์** ไม่ใช่จากค่าที่เราตั้งเอง — รุ่นเก่าต้องยังเปิด
+    /// งานประจำวันได้ ไฟล์ที่ไม่มีอะไรฝังอยู่ไม่มีเหตุให้ตัดเขาออก
+    #[test]
+    fn a_board_with_nothing_to_embed_stays_v1() {
+        let dir = temp_dir("stays-v1");
+        let mine = plant_image(&dir, 22, 1_200);
+        let board = board_of(&[(22, &mine)]);
+        let plan = plan_embeds(&board, SaveMode::Linked, |_| {
+            AssetBytes::UserFile(mine.clone())
+        });
+        assert!(plan.is_empty());
+
+        let doc = dir.join("work.refx");
+        crate::save::save_document(&doc, &board, &plan, refx_platform::fsops::rename_durable)
+            .unwrap();
+
+        let bytes = read_all(&doc);
+        assert_eq!(
+            u16::from_le_bytes([bytes[4], bytes[5]]),
+            1,
+            "ไฟล์ที่ไม่มี asset ฝังอยู่ ถูกดันขึ้น v2 โดยไม่จำเป็น"
+        );
+        assert!(!dto::inspect(&bytes).unwrap().packed);
+    }
+
+    /// ★★★ negative control ของข้อบน — **มีของฝังเมื่อไหร่ ต้องเป็น v2 ทันที**
+    #[test]
+    fn a_board_with_something_embedded_becomes_v2() {
+        let dir = temp_dir("becomes-v2");
+        let ours = plant_image(&dir, 23, 640);
+        let board = board_of(&[(23, &ours)]);
+        let plan = plan_embeds(&board, SaveMode::Linked, |_| AssetBytes::Ours(ours.clone()));
+        assert_eq!(plan.len(), 1);
+
+        let doc = dir.join("work.refx");
+        crate::save::save_document(&doc, &board, &plan, refx_platform::fsops::rename_durable)
+            .unwrap();
+
+        let bytes = read_all(&doc);
+        assert_eq!(
+            u16::from_le_bytes([bytes[4], bytes[5]]),
+            PACKED_VERSION,
+            "ไฟล์ที่มี blob จริงอยู่ข้างในต้องประกาศ v2 ให้รุ่นเก่าปฏิเสธ"
+        );
+    }
+
+    /// ★★★ **packed → เปิดใหม่ได้ภาพครบ แม้ลบโฟลเดอร์ต้นฉบับไปแล้ว**
+    ///
+    /// นี่คือเหตุผลทั้งหมดที่ packed มีอยู่ (`docs/07 §2`: "ส่งให้คนอื่น /
+    /// ย้ายเครื่อง") — ถ้ายังต้องมีไฟล์ต้นฉบับอยู่ มันก็ไม่ต่างจาก linked
+    #[test]
+    fn a_packed_file_survives_losing_every_original() {
+        let dir = temp_dir("survives");
+        let src = dir.join("originals");
+        std::fs::create_dir_all(&src).unwrap();
+        let a = plant_image(&src, 24, 3_000);
+        let b = plant_image(&src, 25, 70_000);
+        let want_a = read_all(&a);
+        let want_b = read_all(&b);
+        let board = board_of(&[(24, &a), (25, &b)]);
+
+        let plan = plan_embeds(&board, SaveMode::Packed, |asset| {
+            AssetBytes::UserFile(if asset.hash == hash_of(24) {
+                a.clone()
+            } else {
+                b.clone()
+            })
+        });
+        assert_eq!(plan.len(), 2, "packed ต้องฝังทุกใบ");
+        let doc = dir.join("packed.refx");
+        crate::save::save_document(&doc, &board, &plan, refx_platform::fsops::rename_durable)
+            .unwrap();
+
+        // ★ ลบต้นฉบับทิ้งทั้งโฟลเดอร์ — เหมือนส่งไฟล์ไปเครื่องอื่น
+        std::fs::remove_dir_all(&src).unwrap();
+        assert!(!a.exists() && !b.exists());
+
+        let (mut file, len) = open(&doc);
+        let index = read_index(&mut file, len).unwrap();
+        for (n, want) in [(24u8, &want_a), (25u8, &want_b)] {
+            let entry = index.find(hash_of(n)).expect("ต้องเจอใน asset table");
+            let mut got = Vec::new();
+            extract(&mut file, entry, &mut got).unwrap();
+            assert_eq!(&got, want, "ภาพที่ {n} ไม่ครบหลังลบต้นฉบับ");
+        }
+        assert_eq!(dto::decode(&read_all(&doc), board_id()).unwrap(), board);
+    }
+
+    /// ★★ linked → packed → linked แล้วต้องได้ **board เท่าเดิม**
+    ///
+    /// การแปลงโหมดเป็นเรื่องของ *ที่เก็บไบต์* ไม่ใช่ของเนื้อหา — ถ้าเนื้อหาเปลี่ยน
+    /// แปลว่ามีอะไรรั่วจากชั้นเก็บขึ้นมาถึงชั้นเอกสาร
+    #[test]
+    fn converting_between_modes_never_changes_the_board() {
+        let dir = temp_dir("convert");
+        let a = plant_image(&dir, 26, 2_500);
+        let board = board_of(&[(26, &a)]);
+        let rename = refx_platform::fsops::rename_durable;
+
+        let linked = dir.join("a.refx");
+        let plan = plan_embeds(&board, SaveMode::Linked, |_| {
+            AssetBytes::UserFile(a.clone())
+        });
+        crate::save::save_document(&linked, &board, &plan, rename).unwrap();
+        let after_linked = dto::decode(&read_all(&linked), board_id()).unwrap();
+
+        let packed = dir.join("b.refx");
+        let plan = plan_embeds(&after_linked, SaveMode::Packed, |_| {
+            AssetBytes::UserFile(a.clone())
+        });
+        crate::save::save_document(&packed, &after_linked, &plan, rename).unwrap();
+        let after_packed = dto::decode(&read_all(&packed), board_id()).unwrap();
+
+        let back = dir.join("c.refx");
+        let plan = plan_embeds(&after_packed, SaveMode::Linked, |_| {
+            AssetBytes::UserFile(a.clone())
+        });
+        crate::save::save_document(&back, &after_packed, &plan, rename).unwrap();
+        let after_back = dto::decode(&read_all(&back), board_id()).unwrap();
+
+        assert_eq!(after_linked, board, "linked เปลี่ยนเนื้อหา");
+        assert_eq!(after_packed, board, "packed เปลี่ยนเนื้อหา");
+        assert_eq!(after_back, board, "แปลงกลับแล้วไม่เท่าเดิม");
+        // ★ และเวอร์ชันเดินตามของที่อยู่ข้างในจริง ๆ
+        let ver = |path: &Path| {
+            let b = read_all(path);
+            u16::from_le_bytes([b[4], b[5]])
+        };
+        assert_eq!(ver(&linked), 1);
+        assert_eq!(ver(&packed), PACKED_VERSION);
+        assert_eq!(ver(&back), 1);
+    }
+
+    /// ★ ภาพเดียวกันวางหลายใบบน board = ฝังครั้งเดียว (คีย์คือเนื้อไฟล์)
+    #[test]
+    fn the_same_image_used_twice_is_embedded_once() {
+        let dir = temp_dir("dedup");
+        let a = plant_image(&dir, 27, 512);
+        let board = board_of(&[(27, &a), (27, &a), (27, &a)]);
+        let plan = plan_embeds(&board, SaveMode::Packed, |_| {
+            AssetBytes::UserFile(a.clone())
+        });
+        assert_eq!(plan.len(), 1, "ฝังซ้ำ {} ครั้ง", plan.len());
+    }
+
+    /// ★ ใบที่หาไบต์ไม่เจอเลยต้องไม่ทำให้การบันทึกล้ม — มันเป็น `Missing`
+    /// ซึ่ง `docs/07 §2` บอกว่าต้อง save กลับได้ครบ ไม่ใช่ทำให้บันทึกไม่ได้
+    #[test]
+    fn an_image_with_no_bytes_anywhere_does_not_block_saving() {
+        let dir = temp_dir("missing");
+        let board = board_of(&[(28, Path::new("C:/หายไปแล้ว.jpg"))]);
+        let plan = plan_embeds(&board, SaveMode::Packed, |_| AssetBytes::Missing);
+        assert!(plan.is_empty());
+
+        let doc = dir.join("work.refx");
+        crate::save::save_document(&doc, &board, &plan, refx_platform::fsops::rename_durable)
+            .unwrap();
+        assert_eq!(dto::decode(&read_all(&doc), board_id()).unwrap(), board);
     }
 
     // ---------- ★★★ I-4: ทุกตัวเลขในไฟล์โกหกได้ ----------

@@ -75,6 +75,9 @@ pub enum SaveError {
     /// แปลง `Board` เป็นไบต์ไม่สำเร็จ — ยังไม่ได้แตะดิสก์
     #[error(transparent)]
     Encode(#[from] dto::SaveError),
+    /// ★ ฝังไฟล์ภาพเข้าเอกสารไม่สำเร็จ (P4-5)
+    #[error(transparent)]
+    Pack(#[from] crate::packed::PackError),
     /// ล้มระหว่างแตะดิสก์ — บอกด้วยว่าล้มที่ขั้นไหนและไฟล์ไหน
     #[error("could not {step} {}: {source}", path.display())]
     Io {
@@ -150,6 +153,57 @@ pub fn save_atomic(doc: &Path, board: &Board, rename: RenameFn) -> Result<(), Sa
     //
     // ★ `fs::rename` บน Windows ใช้ `MoveFileEx` พร้อม `MOVEFILE_REPLACE_EXISTING`
     //   จึงทับไฟล์ที่มีอยู่ได้และเป็น atomic เหมือนบน Unix
+    rename(&tmp, doc).map_err(|err| SaveError::io("replace", doc, err))?;
+    Ok(())
+}
+
+/// ★★★ บันทึกเอกสารพร้อม **ฝัง asset ที่ต้องฝัง** — เส้นทางเดียวของ P4-5
+///
+/// `embeds` มาจาก [`crate::packed::plan_embeds`] ซึ่งเป็นที่เดียวที่ตัดสินว่า
+/// อะไรควรถูกฝัง (ดูหัวโมดูล `packed`)
+///
+/// ★★ **ว่างเปล่า → เขียน v1 เหมือนเดิมทุกไบต์** · ไฟล์ที่ไม่มีอะไรฝังอยู่
+/// ไม่มีเหตุให้ตัดรุ่นเก่าออกจากการเปิดมัน · `version = 2` จึงแปลว่า
+/// *"ไฟล์นี้มี asset ฝังอยู่"* ไม่ใช่ *"ผู้ใช้เลือก packed"*
+///
+/// ทุกขั้นที่เหลือเหมือน [`save_atomic`] เป๊ะ — ตรวจเวอร์ชันไฟล์เดิม → tmp →
+/// fsync → สำรอง → rename · **ไฟล์เดิมยังอยู่ครบเสมอไม่ว่าล้มที่ขั้นไหน**
+///
+/// # Errors
+/// [`SaveError`] — ถูกปฏิเสธเพราะเวอร์ชัน · ฝังไฟล์ไม่ได้ · หรือระบบไฟล์ล้ม
+pub fn save_document(
+    doc: &Path,
+    board: &Board,
+    embeds: &[crate::packed::PackSource],
+    rename: RenameFn,
+) -> Result<(), SaveError> {
+    // ★ ไม่มีอะไรให้ฝัง = ไฟล์ v1 ธรรมดา — เส้นทางเดิมทั้งเส้น ไม่มีผิวใหม่
+    if embeds.is_empty() {
+        return save_atomic(doc, board, rename);
+    }
+
+    let existed = match read_header(doc) {
+        Some(header) => {
+            dto::may_overwrite(&header)?;
+            true
+        }
+        None => false,
+    };
+
+    // ---- เขียนลง tmp แบบสตรีม (ไฟล์ปลายทางใหญ่ระดับ GB ได้) ----
+    let tmp = tmp_path(doc);
+    {
+        let mut file =
+            std::fs::File::create(&tmp).map_err(|err| SaveError::io("create", &tmp, err))?;
+        crate::packed::write_packed(&mut file, board, embeds)?;
+        // ★ ขั้นที่แยก "เขียนแล้ว" ออกจาก "อยู่บนดิสก์แล้ว" (เหตุผลเดียวกับ `save_atomic`)
+        file.sync_all()
+            .map_err(|err| SaveError::io("flush", &tmp, err))?;
+    }
+
+    if existed {
+        backup(doc, rename)?;
+    }
     rename(&tmp, doc).map_err(|err| SaveError::io("replace", doc, err))?;
     Ok(())
 }
