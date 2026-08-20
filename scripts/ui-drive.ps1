@@ -47,8 +47,10 @@
 #                                    (the pasted-image path of P4-5 - 'paste'
 #                                     below carries text and never reaches it)
 #   paste|<text>                     put text on the clipboard then Ctrl+V it
-#                                    (the only reliable way to fill a NATIVE
-#                                     Save As / Open dialog - see the step body)
+#                                    (into RefX itself - forces main-window focus)
+#   dlgtype|<text>                   type into a NATIVE dialog + press Enter
+#                                    (Save As / Open / find-the-file - asserts a
+#                                     dialog of ours owns the foreground first)
 #   shot|<file>                      PNG of the client area
 #   sleep|<ms>
 #   kill                             stop refx and WAIT for the single-instance
@@ -77,6 +79,7 @@ public class W {
   [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
   [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, IntPtr extra);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, IntPtr pid);
+  [DllImport("user32.dll", EntryPoint="GetWindowThreadProcessId")] public static extern uint GetWindowPid(IntPtr h, out uint pid);
   [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a, uint b, bool attach);
   [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
   [DllImport("user32.dll")] public static extern IntPtr SendMessageTimeout(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint timeout, out IntPtr res);
@@ -182,6 +185,36 @@ function Btn-Up   { [W]::mouse_event($LEFTUP,   0, 0, 0, [IntPtr]::Zero); Start-
 function Wheel-By($n) { $d = [int64]([int]$n * 120) -band 0xFFFFFFFFL; [W]::mouse_event($WHEEL, 0, 0, [uint32]$d, [IntPtr]::Zero); Start-Sleep -Milliseconds 200 }
 function Key-Down($vk) { Assert-Focus "keydn"; [W]::keybd_event([byte]$vk, 0, 0, [IntPtr]::Zero); Start-Sleep -Milliseconds 60 }
 function Key-Up($vk) { [W]::keybd_event([byte]$vk, 0, $KEYUP, [IntPtr]::Zero); Start-Sleep -Milliseconds 60 }
+
+# ---------------------------------------------------------------------------
+# TYPING INTO A NATIVE DIALOG  (added 21 Aug 2026, P4-6)
+# ---------------------------------------------------------------------------
+# Assert-Focus forces the MAIN window to the foreground.  That is right for
+# every step that drives RefX itself and WRONG for a native Save As / Open /
+# pick-a-file dialog: forcing the main window steals focus from the dialog that
+# is supposed to receive the keystrokes, so the typing lands in the canvas and
+# the dialog sits there untouched.  HANDOFF recorded that as "cannot be
+# verified automatically" -- it was the check, not the app.
+#
+# The fix is not to drop the check.  It is to check the RIGHT window: the
+# foreground window must belong to the SAME process and must NOT be the main
+# window, i.e. a dialog of ours really is on top.  If no dialog is up we exit
+# non-zero instead of typing into whatever happens to be focused.
+function Assert-Dialog($what) {
+  Assert-Alive $what
+  $fg = [W]::GetForegroundWindow()
+  if ($fg -eq $script:hwnd) {
+    Write-Output "NO DIALOG before '$what' - the main window still has focus, typing would land in the canvas"
+    exit 1
+  }
+  $owner = 0
+  [void][W]::GetWindowPid($fg, [ref]$owner)
+  if ($owner -ne $script:pid2) {
+    Write-Output "FOREIGN WINDOW before '$what' - foreground belongs to pid $owner, not RefX ($($script:pid2))"
+    exit 1
+  }
+  Write-Output "dialog is up (pid $owner)"
+}
 
 function Shot($path) {
   Start-Sleep -Milliseconds 350
@@ -336,6 +369,68 @@ foreach ($step in $Steps) {
       Write-Output "copyimg $($parts[1]) $($bmp.Width)x$($bmp.Height)"
       Key-Down 17; Key-Down 86; Key-Up 86; Key-Up 17   # Ctrl+V
       Start-Sleep -Milliseconds 250
+    }
+    # Type a path into a NATIVE dialog and press Enter.
+    #
+    # ! deliberately does NOT call Assert-Focus: that helper forces the MAIN
+    #   window forward, which is exactly what breaks this case.  Assert-Dialog
+    #   checks the right thing instead (a dialog OF OURS owns the foreground).
+    'dlgtype' {
+      Assert-Dialog "dlgtype"
+      Set-Clipboard -Value $parts[1]
+      Start-Sleep -Milliseconds 300
+      # ! SendKeys, not keybd_event.  A native file dialog runs its own modal
+      #   message loop; the synthetic key-down/key-up pairs that RefX itself
+      #   receives fine are swallowed there (observed 21 Aug 2026: the path
+      #   pasted but Enter never committed, dialog just sat open).  SendKeys
+      #   goes through the same path a real keyboard does for that loop.
+      # ! retry: the first ^v after the dialog appears is sometimes swallowed
+      #   while the dialog is still settling, and then Enter dismisses an EMPTY
+      #   name box (seen 21 Aug 2026 - one run wrote the file, the next did not
+      #   with identical steps).  Re-sending is safe: if the paste did land the
+      #   dialog is already gone and the loop stops.
+      #   ★ and wait for the dialog to actually CLOSE before deciding to retry:
+      #   focus takes over a second to travel back, so "still up" and "just
+      #   slow" look identical if asked too early - a retry there fires a
+      #   second Enter into the main window instead (seen 21 Aug 2026).
+      #
+      # ! keybd_event, NOT SendKeys.  SendKeys' ^a/^v land on whichever child
+      #   control the dialog happens to focus (the file LIST, not the name box)
+      #   and then Enter dismisses an empty name - measured on 21 Aug 2026:
+      #   keybd_event wrote the file, the SendKeys version never did.
+      [W]::keybd_event(17, 0, 0, [IntPtr]::Zero)          # Ctrl down
+      [W]::keybd_event(86, 0, 0, [IntPtr]::Zero)          # V
+      [W]::keybd_event(86, 0, $KEYUP, [IntPtr]::Zero)
+      [W]::keybd_event(17, 0, $KEYUP, [IntPtr]::Zero)
+      Start-Sleep -Milliseconds 500
+      [W]::keybd_event(13, 0, 0, [IntPtr]::Zero)          # Enter
+      [W]::keybd_event(13, 0, $KEYUP, [IntPtr]::Zero)
+      $back = $false
+      for ($i = 0; $i -lt 24; $i++) {
+        Start-Sleep -Milliseconds 250
+        if ([W]::GetForegroundWindow() -eq $script:hwnd) { $back = $true; break }
+      }
+      # The dialog must be GONE afterwards - if it is still up the step did
+      # nothing and every later assertion would be about a state we never reached
+      if (-not $back) {
+        Write-Output "DIALOG STILL UP after 'dlgtype' - the path was not accepted"
+        exit 1
+      }
+      Write-Output "dlgtype '$($parts[1])'"
+    }
+    # Accept whatever a native dialog already has selected (no typing at all).
+    # Useful when the point is "does the dialog work", not "which path".
+    'dlgenter' {
+      Assert-Dialog "dlgenter"
+      [W]::keybd_event(13, 0, 0, [IntPtr]::Zero)
+      [W]::keybd_event(13, 0, $KEYUP, [IntPtr]::Zero)
+      $back = $false
+      for ($i = 0; $i -lt 24; $i++) {
+        Start-Sleep -Milliseconds 250
+        if ([W]::GetForegroundWindow() -eq $script:hwnd) { $back = $true; break }
+      }
+      if (-not $back) { Write-Output "DIALOG STILL UP after 'dlgenter'"; exit 1 }
+      Write-Output "dlgenter"
     }
     'shot'   { Shot $parts[1] }
     'sleep'  { Start-Sleep -Milliseconds ([int]$parts[1]) }

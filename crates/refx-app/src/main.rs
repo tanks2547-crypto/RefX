@@ -56,6 +56,12 @@ fn parse_cli() -> Result<Cli, String> {
                     return Err(format!("--mode รู้จักแค่ canvas กับ arrange แต่ได้ {other:?}"));
                 }
             });
+        } else if let Some(value) = arg.strip_prefix("--open=") {
+            // ★ เปิดเอกสาร `.refx` ตั้งแต่เริ่มโปรแกรม — เส้นทางเดียวกับ `Ctrl+O`
+            //   ทุกประการ ต่างแค่ไม่ต้องผ่าน dialog · นี่คือสิ่งที่ Explorer ทำ
+            //   ตอนผู้ใช้ดับเบิลคลิกไฟล์ `.refx` และเป็นทางเดียวที่ relink (P4-6)
+            //   ถูกยืนยันบนแอปจริงได้ (native dialog ขับด้วยสคริปต์ไม่ได้ — HANDOFF §2.26)
+            cli.args.open_document = Some(std::path::PathBuf::from(value));
         } else if let Some(value) = arg.strip_prefix("--open-dir=") {
             // สแกนโฟลเดอร์ตอนเริ่มโปรแกรม (ไม่ใช่ในลูปเฟรม) — ไม่ขัด I-2
             cli.args.open_files = scan_images(std::path::Path::new(value))?;
@@ -107,6 +113,7 @@ RefX — โปรแกรมจัดการภาพ reference สำหร
 ตัวเลือก:
   -h, --help                           แสดงข้อความนี้
       --lang=en|th                     บังคับภาษาของ UI (ไม่ใส่ = ตามภาษาของระบบ)
+      --open=FILE.refx                 เปิดเอกสารที่บันทึกไว้ (เหมือนดับเบิลคลิกไฟล์)
       --open-dir=PATH                  เปิดไฟล์ภาพทั้งโฟลเดอร์ (เหมือนลากเข้ามา)
       --demo-quads=N                   วาดสี่เหลี่ยมสีสุ่ม N อัน (ทดสอบ pipeline/pan-zoom)
       --bench-seconds=S                วัด frame time ต่อเนื่อง S วินาทีแล้วรายงานผล

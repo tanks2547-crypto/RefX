@@ -131,6 +131,18 @@ pub enum GroupView {
     Mixed,
 }
 
+/// ★★★ ภาพที่หาไฟล์ไม่เจอในสิ่งที่เลือกอยู่ — **ค่าสำหรับแสดงเท่านั้น** (P4-6)
+///
+/// `docs/07 §2` ขั้นที่ 4: item ที่หาไฟล์ไม่เจอ **ต้องไม่หายไปจาก board** และ
+/// ต้องบอกผู้ใช้ว่าไฟล์ไหนหาย ไม่ใช่แสดงช่องว่างเฉย ๆ
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingView {
+    /// ชื่อไฟล์ของใบแรกที่หาย (**ชื่อไฟล์ล้วน ไม่ใช่ path เต็ม** — `docs/08 §5`)
+    pub file: String,
+    /// เลือกไว้กี่ใบที่หาย
+    pub count: usize,
+}
+
 /// สิ่งที่ผู้ใช้ขอทำกับกลุ่มในเฟรมนี้ (P3-7)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GroupRequest {
@@ -335,6 +347,13 @@ pub struct ShellState {
     pub recover_prompt: Option<RecoverView>,
     /// ผู้ใช้ตอบแล้วในเฟรมนี้ — `None` = ยังไม่ตอบ
     pub recover_choice: Option<RecoverChoice>,
+    /// ★★★ ภาพที่ **หาไฟล์ไม่เจอ** ในสิ่งที่เลือกอยู่ (P4-6) — `None` = ไม่มี
+    ///
+    /// `docs/07 §2` ขั้นที่ 4 บังคับว่าต้องเห็น **ชื่อไฟล์** ไม่ใช่แค่ช่องว่าง
+    /// ผู้ใช้ที่ถอดฮาร์ดดิสก์ออกต้องอ่านออกว่าหายไปเพราะอะไรและไฟล์ไหน
+    pub missing: Option<MissingView>,
+    /// ผู้ใช้กด "หาไฟล์เอง" ในเฟรมนี้ (ขั้นที่ 5)
+    pub relink_request: bool,
     /// ★★ สิ่งที่ผู้ใช้ขอทำกับกลุ่มในเฟรมนี้ — `None` = ไม่ได้แตะ
     pub group_request: Option<GroupRequest>,
     /// ผู้ใช้ออกจากช่องชื่อกลุ่มแล้ว → ปิดหน้าต่าง merge
@@ -409,6 +428,8 @@ impl Default for ShellState {
             mode: Mode::default(),
             appearance: None,
             appearance_edit: None,
+            missing: None,
+            relink_request: false,
             arrange_request: None,
             appearance_sealed: false,
             board_grayscale: false,
@@ -975,6 +996,20 @@ fn canvas_inspector(ui: &mut egui::Ui, state: &mut ShellState) {
     let lang = state.lang;
     ui.label(text::t(lang, Key::InspectorCanvasGeometry));
     ui.separator();
+
+    // ★★★ ภาพที่หาไฟล์ไม่เจอ (P4-6 ขั้นที่ 4/5) — มาก่อนทุกช่อง เพราะถ้าภาพหาย
+    //   สิ่งที่ผู้ใช้อยากทำคือหามันให้เจอ ไม่ใช่ปรับ opacity ของช่องว่าง
+    if let Some(missing) = state.missing.clone() {
+        ui.label(text::fill(
+            lang,
+            text::Template::MissingImage,
+            &[("file", &missing.file), ("n", &missing.count.to_string())],
+        ));
+        if ui.button(text::t(lang, Key::FindFile)).clicked() {
+            state.relink_request = true;
+        }
+        ui.separator();
+    }
 
     // ★ โน้ตข้อความ (P2-11) — ช่องนี้มาก่อนเพราะเป็นทั้งหมดที่โน้ตมีให้แก้
     //   ★★ egui กิน keyboard ให้เองเมื่อช่องนี้มี focus และชั้น `app` หยุด
@@ -1730,6 +1765,9 @@ mod tests {
             // ★★ ปุ่มในแถบกู้คืน (P4-4) — "กู้คืน" **เปลี่ยน board ทั้งก้อน**
             //    ซึ่งแรงกว่าทุกช่องทางในรายการนี้ · ต้องนับเป็นการแก้เอกสารแน่นอน
             recover_choice,
+            // ★★ ปุ่ม "หาไฟล์เอง" (P4-6) — นำไปสู่ `RelinkAssets` ซึ่งเปลี่ยน
+            //    `ItemKind` ของ item จริง ๆ จึงเป็นช่องทางที่แก้เอกสารได้
+            relink_request,
 
             // ---- สถานะของ *มุมมอง* — เปลี่ยนได้ตามใจ ไม่แตะเอกสาร ----
             mode: _,
@@ -1750,6 +1788,7 @@ mod tests {
             note: _,               // ค่าสำหรับแสดง
             meta: _,               // ค่าสำหรับแสดง
             group: _,              // ค่าสำหรับแสดง
+            missing: _,            // ค่าสำหรับแสดง (ชื่อไฟล์ที่หาย)
             tag_input: _,          // ข้อความในช่องพิมพ์ ยังไม่ได้กด +
             picked: _,             // สีที่ picker อ่านได้
             measured: _,           // ไม้บรรทัด
@@ -1782,6 +1821,7 @@ mod tests {
             || close_choice.is_some()
             || recover_choice.is_some()
             || *arrange_apply
+            || *relink_request
     }
 
     /// ★★★ **ตัวบ่งชี้ "ยังไม่บันทึก" ต้องอยู่ตราบเท่าที่สภาวะยังอยู่** (docs/03 §1)

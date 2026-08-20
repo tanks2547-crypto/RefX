@@ -13,7 +13,8 @@ use refx_core::arena::ItemId;
 use refx_core::board::{AssetRef, Board, ImageFormat, Item, ItemCanvas, ItemKind};
 use refx_core::board::{Flip, ItemFilter, ItemMeta};
 use refx_core::command::{
-    AddItems, ApplyLayout, EditText, History, RemoveItems, ReorderZ, SetFilter, TransformItems,
+    AddItems, ApplyLayout, EditText, History, RelinkAssets, RemoveItems, ReorderZ, SetFilter,
+    TransformItems,
 };
 use refx_core::geom::Rect as WorldRect;
 use refx_core::interact::Tool;
@@ -65,6 +66,12 @@ pub struct AppArgs {
     ///
     /// ใช้ทั้งกับการเปิดจากบรรทัดคำสั่งและวัดเวลา "เปิดไฟล์ → ภาพขึ้นจอ"
     pub open_files: Vec<std::path::PathBuf>,
+    /// ★ เอกสาร `.refx` ที่จะเปิดตั้งแต่เริ่มโปรแกรม — **เส้นทางเดียวกับ `Ctrl+O`**
+    ///
+    /// นี่คือสิ่งที่ระบบปฏิบัติการทำตอนผู้ใช้ดับเบิลคลิกไฟล์ `.refx` และเป็น
+    /// ทางเดียวที่ relink (P4-6) ถูกยืนยันบนแอปจริงได้ เพราะ native dialog
+    /// ขับด้วยสคริปต์ไม่ได้ (HANDOFF §2.26)
+    pub open_document: Option<std::path::PathBuf>,
 }
 
 /// PRNG แบบ xorshift64* — **deterministic เสมอ**
@@ -963,6 +970,16 @@ const NOTE_STROKE: egui::Color32 = egui::Color32::from_rgb(198, 172, 96);
 /// สีตัวอักษรในโน้ต
 const NOTE_TEXT: egui::Color32 = egui::Color32::from_rgb(238, 230, 210);
 
+/// ★★ พื้นของภาพที่หาไฟล์ไม่เจอ (P4-6) — **ต้องเห็นชัดว่าที่นี่มีของอยู่**
+///
+/// `docs/07 §2`: item ที่หาไฟล์ไม่เจอต้องไม่หายไปจาก board · ถ้าไม่วาดอะไรเลย
+/// ผู้ใช้จะอ่านว่า "งานหาย" ซึ่งเป็นสิ่งที่ I-3 ห้ามให้เขารู้สึกตั้งแต่แรก
+const MISSING_FILL: egui::Color32 = egui::Color32::from_rgb(54, 40, 40);
+/// ขอบของภาพที่หาย — สีเตือน คนละสีกับกรอบเลือกและกรอบครอป
+const MISSING_STROKE: egui::Color32 = egui::Color32::from_rgb(214, 122, 108);
+/// สีชื่อไฟล์ที่เขียนบน placeholder
+const MISSING_TEXT: egui::Color32 = egui::Color32::from_rgb(240, 214, 208);
+
 /// ตัดข้อความเป็นบรรทัดให้พอดีกับความกว้างของโน้ต
 ///
 /// ★ ประมาณความกว้างตัวอักษรที่ `0.55 * font_size` แทนที่จะวัดจริงด้วย egui
@@ -1145,6 +1162,48 @@ impl RefxApp {
                     wrap_note(&note.text, frame.width(), size),
                     egui::FontId::proportional(size),
                     NOTE_TEXT,
+                );
+            }
+            let _ = id;
+        }
+
+        // ---- วาดภาพที่หาไฟล์ไม่เจอ (P4-6 ขั้นที่ 4) ----
+        //
+        // ★★★ `docs/07 §2`: **`Missing` ต้องไม่หายไปจาก board** · มันไม่มี quad
+        //   และไม่มีช่องใน atlas (ไม่มีพิกเซลให้อัด) `rebuild_quads` จึงข้ามมันไป
+        //   เหมือนโน้ต — ที่นี่คือที่เดียวที่ผู้ใช้จะได้เห็นว่ามันยังอยู่
+        //
+        // ★★ เขียน **ชื่อไฟล์** ลงไปด้วย ไม่ใช่กล่องเปล่า: ผู้ใช้ที่ถอดไดรฟ์ออก
+        //   ต้องอ่านออกว่าขาดไฟล์ไหน ถึงจะรู้ว่าต้องไปเสียบไดรฟ์ไหนกลับ
+        for (id, item) in board.items_in_z_order() {
+            let refx_core::board::ItemKind::Missing { original_path, .. } = &item.kind else {
+                continue;
+            };
+            if !item.canvas.visible {
+                continue;
+            }
+            let corners = item.canvas.obb().corners().map(to_point);
+            let frame = egui::Rect::from_two_pos(corners[0], corners[2]);
+            painter.rect_filled(frame, 2.0, MISSING_FILL);
+            painter.rect_stroke(
+                frame,
+                2.0,
+                egui::Stroke::new(1.0, MISSING_STROKE),
+                egui::StrokeKind::Middle,
+            );
+            let size = (11.0 * scale).clamp(1.0, 400.0);
+            if size >= 4.0 {
+                painter.text(
+                    frame.center(),
+                    egui::Align2::CENTER_CENTER,
+                    // ★ ชื่อไฟล์ล้วน ไม่ใช่ path เต็ม (docs/08 §5)
+                    wrap_note(
+                        &refx_asset::decode::file_label(original_path),
+                        frame.width(),
+                        size,
+                    ),
+                    egui::FontId::proportional(size),
+                    MISSING_TEXT,
                 );
             }
             let _ = id;
@@ -1458,6 +1517,16 @@ pub struct RefxApp {
     spool_dir: Option<std::path::PathBuf>,
     /// ผลของการเก็บกวาด spool ที่ส่งไปทำบนเธรดอื่นแล้ว รอผลกลับ (ไม่บล็อก I-2)
     spool_sweep: Option<crossbeam_channel::Receiver<refx_io::spool::Swept>>,
+    /// ★ ผลของการตามหาไฟล์ขั้น 1–3 ที่ส่งไปทำบนเธรดอื่นแล้ว (P4-6)
+    relink_scan: Option<LocateResults>,
+    /// dialog "หาไฟล์เอง" ที่กำลังเปิดอยู่ (ขั้นที่ 5)
+    relink_pick: Option<crossbeam_channel::Receiver<Option<std::path::PathBuf>>>,
+    /// ผลการจับคู่ไฟล์ที่เหลือในโฟลเดอร์ที่ผู้ใช้ชี้ (ขั้นที่ 5)
+    relink_match: Option<LocateResults>,
+    /// item ที่ผู้ใช้กด "หาไฟล์เอง" ให้ — รอ dialog ตอบ
+    relink_for: Option<ItemId>,
+    /// ★ ผลการตามหาไฟล์ที่รอรายงาน **ตอนจบงวด** (ดู `report_relink`)
+    relink_report: Option<RelinkReport>,
     /// dialog เลือกที่บันทึกที่กำลังเปิดอยู่ (รอผู้ใช้ตอบ — ไม่บล็อก I-2)
     save_dialog: Option<crossbeam_channel::Receiver<Option<std::path::PathBuf>>>,
     /// งานบันทึกที่ส่งไปเธรดแล้ว รอผลกลับ (ไม่บล็อก I-2)
@@ -1483,6 +1552,159 @@ pub struct RefxApp {
     /// working texture ต้อง decode ใหม่จากไฟล์จริง จึงต้องจำที่มาไว้จับคู่
     job_sources:
         std::collections::HashMap<refx_asset::hash::ContentHash, refx_asset::pool::JobSource>,
+}
+
+/// เขียนสรุปผลการตามหาไฟล์ลง status bar
+///
+/// ★ แยกเป็นฟังก์ชันอิสระเพราะจุดเรียกหนึ่งในสองอยู่กลาง `drain_decode_results`
+/// ซึ่งยืม `self.assets` ค้างอยู่ — เมธอดที่รับ `&mut self` เรียกตรงนั้นไม่ได้
+fn write_relink_status(shell: &mut crate::shell::ShellState, report: RelinkReport) {
+    let lang = shell.lang;
+    if report.lost > 0 {
+        shell.status = text::fill(
+            lang,
+            Template::RelinkMissing,
+            &[("n", &report.lost.to_string())],
+        );
+        shell.status_warn = true;
+    } else {
+        shell.status = text::fill(
+            lang,
+            Template::RelinkFound,
+            &[
+                ("found", &report.moved.to_string()),
+                ("total", &report.total.to_string()),
+            ],
+        );
+        shell.status_warn = false;
+    }
+}
+
+/// ★ สรุปผลการตามหาไฟล์ของงวดหนึ่ง — รอรายงานตอนงวด decode จบ
+#[derive(Debug, Clone, Copy)]
+struct RelinkReport {
+    /// เจอแต่ **ไม่ได้อยู่ที่เดิม** (ขั้น 2/3/5) กี่ใบ
+    moved: usize,
+    /// ตามหาไปทั้งหมดกี่ใบ
+    total: usize,
+    /// ยังหาไม่เจอกี่ใบ (ขั้นที่ 4)
+    lost: usize,
+}
+
+/// ผลการตามหาไฟล์ของ item หนึ่งใบ — `None` = ยังหาไม่เจอ (ขั้นที่ 4)
+type LocatedOne = (
+    refx_core::relink::Wanted,
+    Option<refx_core::relink::Located>,
+);
+
+/// ช่องที่เธรดค้นหาส่งผลทั้งชุดกลับมา
+type LocateResults = crossbeam_channel::Receiver<Vec<LocatedOne>>;
+
+/// ★★★ ที่มาที่ *ถูกต้อง* ของ item หลังเพิ่งอ่านไฟล์จริงได้สำเร็จ (P4-6)
+///
+/// `None` = ใบนี้ไม่ใช่เป้าของ relink (โน้ตข้อความ) หรือไม่มีไฟล์ให้ผูก
+///
+/// ## อะไรเปลี่ยนได้ อะไรห้ามเปลี่ยน
+///
+/// | ฟิลด์ | ทำอะไร | ทำไม |
+/// |---|---|---|
+/// | `path` | เขียนที่อยู่ที่เพิ่งเจอ | นี่คือทั้งหมดของคำว่า relink |
+/// | `hash` | ซ่อมเป็นคีย์ของเนื้อ **ถ้ามันไม่ตรง** | `docs/07 §2` — ตอน relink สำเร็จเท่านั้น |
+/// | `px_size`/`format`/`mtime`/`file_size` | **ไม่แตะของเดิม** | ไม่ใช่เรื่องของ relink · แตะแล้วเอกสารจะ dirty ทุกครั้งที่ mtime ขยับ |
+///
+/// ★★★ **ห้ามซ่อมคีย์ของภาพที่มาจาก clipboard** (`docs/07 §2`) — ชื่อไฟล์ใน
+/// spool คือ hash ของ *พิกเซล* ส่วนการ hash ไฟล์ PNG นั้นให้คนละค่า เขียนทับ
+/// เมื่อไหร่ `spool::sweep` จะหาไม่เจอว่ามีคนอ้างถึง **แล้วลบภาพทิ้ง** (I-3)
+///
+/// ★ ใบที่เป็น `Missing` มาก่อนไม่มีคีย์เดิมให้รักษา — มันได้คีย์ของเนื้อเต็ม ๆ
+/// และได้ `px_size` จากภาพที่เพิ่งอ่าน เพราะของเดิมไม่เคยมี
+fn relinked_kind(
+    current: &ItemKind,
+    resolved: Option<&std::path::Path>,
+    content: Option<refx_core::hash::ContentHash>,
+    spool_dir: Option<&std::path::Path>,
+    thumb: &refx_asset::thumb::Thumbnail,
+    meta: refx_asset::pool::SourceMeta,
+) -> Option<ItemKind> {
+    let path = resolved?.to_path_buf();
+    // ★ ไฟล์ในที่พักของภาพที่วาง — คีย์ของมันคือ hash ของพิกเซล ห้ามแตะ
+    let in_spool = spool_dir.is_some_and(|dir| path.starts_with(dir));
+
+    match current {
+        ItemKind::Text(_) => None,
+        ItemKind::Image(asset) => {
+            let hash = if in_spool {
+                asset.hash
+            } else {
+                content.unwrap_or(asset.hash)
+            };
+            Some(ItemKind::Image(AssetRef {
+                hash,
+                path,
+                ..asset.clone()
+            }))
+        }
+        ItemKind::Missing { .. } => Some(ItemKind::Image(AssetRef {
+            hash: content?,
+            path,
+            px_size: glam::UVec2::new(thumb.source_width.max(1), thumb.source_height.max(1)),
+            // ★ ยังไม่รู้ format จริง — เหตุผลเดียวกับเส้นทางลากไฟล์เข้ามา
+            format: ImageFormat::Unknown,
+            embedded: false,
+            mtime: meta.mtime_ms,
+            file_size: meta.bytes,
+        })),
+    }
+}
+
+/// ถาม cache ว่า hash นี้เคยเห็นที่ไหนบ้าง — ขั้นที่ 3 ของ relink (P4-6)
+///
+/// ★ **บน worker เท่านั้น** (รอคำตอบจาก IO thread) · ไม่มี cache = ไม่มีคำตอบ
+/// ซึ่งไม่ใช่ error: ขั้น 1/2 ยังทำงานได้ตามปกติ
+fn paths_known_for(
+    io: Option<&crossbeam_channel::Sender<IoRequest>>,
+    hash: refx_core::hash::ContentHash,
+) -> Vec<std::path::PathBuf> {
+    let Some(io) = io else {
+        return Vec::new();
+    };
+    let (reply, rx) = crossbeam_channel::bounded(1);
+    io.send(IoRequest::LookupHash { hash, reply })
+        .ok()
+        .and_then(|()| rx.recv_timeout(std::time::Duration::from_secs(5)).ok())
+        .unwrap_or_default()
+}
+
+/// ★★ hash ทุกไฟล์ภาพในโฟลเดอร์ที่ผู้ใช้ชี้ — ขั้นที่ 5 (P4-6)
+///
+/// ★ **บน worker เท่านั้น** · มีเพดาน [`refx_core::relink::MAX_FOLDER_SCAN`]
+/// เพราะผู้ใช้ชี้ไปที่โฟลเดอร์ไหนก็ได้ รวมถึงโฟลเดอร์ที่มีไฟล์เป็นแสน
+///
+/// ★★ ราคาคือการอ่านไฟล์ในโฟลเดอร์นั้นหนึ่งรอบ (ไฟล์ > 64 MB ใช้ fast path
+/// ของ `hash_file` อ่านแค่หัว/ท้าย) — ยอมจ่ายเพราะมันเกิดตอนผู้ใช้กดปุ่ม
+/// "หาไฟล์เอง" ซึ่งเป็นการกระทำที่เขาตั้งใจและเกิดครั้งเดียว ไม่ใช่ต่อเฟรม
+fn hash_folder(
+    dir: Option<&std::path::Path>,
+) -> Vec<(std::path::PathBuf, refx_core::hash::ContentHash)> {
+    let Some(dir) = dir else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for path in entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .take(refx_core::relink::MAX_FOLDER_SCAN)
+    {
+        if let Ok(hash) = refx_asset::hash::hash_file(&path) {
+            out.push((path, hash));
+        }
+    }
+    tracing::info!(files = out.len(), "scanned a folder for the missing images");
+    out
 }
 
 /// ★★★ คีย์และที่อยู่ของ asset ที่ผลลัพธ์ใบนี้จะกลายเป็น
@@ -1733,6 +1955,11 @@ impl RefxApp {
             recovery_dir: None,
             spool_dir: None,
             spool_sweep: None,
+            relink_scan: None,
+            relink_pick: None,
+            relink_match: None,
+            relink_for: None,
+            relink_report: None,
             save_dialog: None,
             save_job: None,
             after_save: AfterSave::Stay,
@@ -1748,6 +1975,12 @@ impl RefxApp {
 
     /// ไฟล์ที่สั่งเปิดจากบรรทัดคำสั่ง — เข้าคิวเหมือนลากเข้ามาทุกประการ
     fn queue_initial_files(&mut self) {
+        // ★ เอกสารมาก่อนภาพเดี่ยว ๆ — `--open` แทนที่ board ทั้งก้อน ส่วน
+        //   `--open-dir` เติมภาพเข้า board ที่มีอยู่ ลำดับกลับกันจะทำให้ภาพที่
+        //   เพิ่งเติมหายไปพร้อมกับ board เก่า
+        if let Some(doc) = self.args.open_document.take() {
+            self.start_load(&doc);
+        }
         let files = std::mem::take(&mut self.args.open_files);
         if !files.is_empty() {
             self.pending_drops.extend(files);
@@ -2090,6 +2323,10 @@ impl RefxApp {
             }
         }
 
+        // ★ ที่มาที่ต้องเขียนกลับลง `Board` — เก็บไว้ก่อนแล้วห่อเป็น `Command`
+        //   ทีเดียวหลังจบชุด (ยืม `gfx` อยู่ตลอดลูป จึงเรียก `apply_relink` ในนี้ไม่ได้)
+        let mut repairs: Vec<(ItemId, ItemKind)> = Vec::new();
+
         // อัดขึ้น atlas แล้ววาง quad ให้เห็นบน canvas
         if !done.is_empty()
             && let Some(gfx) = self.gfx.as_mut()
@@ -2106,35 +2343,45 @@ impl RefxApp {
                         //   /แท็ก/ดาว/กลุ่ม/โน้ต มาจากไฟล์ครบแล้ว · สร้างใบใหม่ตรงนี้
                         //   = ผู้ใช้เห็นภาพซ้ำสองชุด ชุดหนึ่งอยู่ผิดที่ทั้งหมด
                         if let Some(id) = self.relink_targets.remove(&hash) {
-                            // ★★★ item ที่มาจากไฟล์ **มีคีย์ของมันอยู่แล้ว** —
-                            //     งานนี้เอาแต่ *พิกเซล* มาเติม ไม่ได้มาตั้งชื่อใหม่
-                            //
-                            //     ★ ถ้าเขียนทับด้วยคีย์ที่เพิ่ง hash ได้ จะเพี้ยน
-                            //     ทันทีกับภาพที่วาง: ชื่อไฟล์ใน spool คือ hash ของ
-                            //     **พิกเซล** ส่วนการ hash ไฟล์ PNG นั้นให้คนละค่า
-                            //     — `render_state` กับ `Board` จะชี้คนละ asset
-                            //     ทั้งที่เป็นภาพใบเดียวกัน
-                            let stored = gfx.board.item(id).and_then(|item| match &item.kind {
-                                ItemKind::Image(asset) => Some(asset.hash),
-                                // โน้ต/ใบที่ยังเป็น Missing ไม่ใช่เป้าของ relink
-                                ItemKind::Text(_) | ItemKind::Missing { .. } => None,
-                            });
-                            if let Some(stored) = stored {
-                                gfx.render_state.insert(
-                                    id,
-                                    ItemRender {
-                                        source,
-                                        hash: stored,
-                                        tint: dominant_rgba(thumb.dominant),
-                                        thumb: *thumb,
-                                        slot: Some(slot),
-                                    },
-                                );
-                                self.drop.added += 1;
-                            } else {
+                            let Some(item) = gfx.board.item(id) else {
                                 // item ถูกลบไประหว่างที่งานเดินอยู่ (undo/เปิดไฟล์อื่นทับ)
                                 self.drop.cancelled += 1;
+                                continue;
+                            };
+                            // ★★★ ที่มาที่ *ถูกต้อง* ของใบนี้หลังจากเพิ่งอ่านไฟล์จริง
+                            //     — ดู `relinked_kind` ว่าอะไรเปลี่ยนได้บ้างและอะไรห้าม
+                            let desired = relinked_kind(
+                                &item.kind,
+                                source.file(),
+                                origin.map(|o| o.hash()),
+                                self.spool_dir.as_deref(),
+                                &thumb,
+                                meta,
+                            );
+                            let Some(desired) = desired else {
+                                self.drop.cancelled += 1;
+                                continue;
+                            };
+                            // ★ คีย์ที่ `render_state` ใช้ = คีย์ที่ `Board` จะถืออยู่
+                            //   หลังคำสั่งนี้ · สองฝั่งชี้คนละ asset ไม่ได้เด็ดขาด
+                            let render_hash = match &desired {
+                                ItemKind::Image(asset) => asset.hash,
+                                _ => asset_hash,
+                            };
+                            if desired != item.kind {
+                                repairs.push((id, desired));
                             }
+                            gfx.render_state.insert(
+                                id,
+                                ItemRender {
+                                    source,
+                                    hash: render_hash,
+                                    tint: dominant_rgba(thumb.dominant),
+                                    thumb: *thumb,
+                                    slot: Some(slot),
+                                },
+                            );
+                            self.drop.added += 1;
                             continue;
                         }
                         // จัดเป็นตารางง่าย ๆ ไปก่อน — layout จริงมาใน P2/P3
@@ -2277,6 +2524,18 @@ impl RefxApp {
                     );
                     self.shell.status = message;
                     self.shell.status_warn = true;
+                    self.relink_report = None; // board เต็มสำคัญกว่า — ทิ้งอันรองไป
+                } else if let Some(report) = self.relink_report.take() {
+                    // ★★ ผลการตามหาไฟล์มาก่อน "เปิด N ไฟล์ใน M ms" — ผู้ใช้ที่
+                    //    เพิ่งย้ายโฟลเดอร์ภาพต้องรู้ว่ามันถูกผูกใหม่/หายไปกี่ใบ
+                    //    ส่วนเวลาที่ใช้เปิดเป็นเรื่องรองในจังหวะนั้น (ยังอยู่ใน log)
+                    tracing::info!(
+                        ms,
+                        moved = report.moved,
+                        lost = report.lost,
+                        "relinked images are on screen"
+                    );
+                    write_relink_status(&mut self.shell, report);
                 } else if self.batch_from_clipboard {
                     tracing::info!(ms, "clipboard paste → image on screen");
                     self.shell.status = text::fill(
@@ -2317,6 +2576,13 @@ impl RefxApp {
                     self.cache_stats_rx = Some(rx);
                 }
             }
+        }
+
+        // ★★ ที่มาที่เพิ่งพิสูจน์ได้จากไฟล์จริง → เขียนกลับลง `Board` ผ่าน `Command`
+        //    (ต้องอยู่หลังจากเลิกยืม `gfx` แล้วเท่านั้น) · `RelinkAssets` merge
+        //    ตัวเองอยู่แล้ว งวดที่ทยอยกลับมาหลายเฟรมจึงเป็น undo ขั้นเดียว
+        if !repairs.is_empty() {
+            self.apply_relink(repairs);
         }
 
         // ★ ไฟล์จาก clipboard เข้าคิวเป็นชุดใหม่ — เส้นทางเดียวกับลากไฟล์เข้ามาเป๊ะ
@@ -2498,6 +2764,11 @@ impl RefxApp {
         let mut working_hits: Vec<(WorkingKey, ItemId)> = Vec::new();
 
         for (id, board_item) in gfx.board.items_in_z_order() {
+            // ★ ชนิดของ item มาจาก `Board` เสมอ — เหตุผลเดียวกับใน `rebuild_quads`
+            //   (ใบที่ relink ทำให้กลายเป็น `Missing` ยังมี `render_state` ค้างอยู่)
+            if !matches!(board_item.kind, ItemKind::Image(_)) {
+                continue;
+            }
             let Some(item) = gfx.render_state.get(&id) else {
                 continue;
             };
@@ -3527,22 +3798,144 @@ impl RefxApp {
         let Some(gfx) = self.gfx.as_ref() else {
             return;
         };
-        if self.assets.is_none() {
+        if self.assets.is_none() || self.relink_scan.is_some() {
             return;
         }
+        // ★★ ทุกใบที่เป็นภาพ **รวมทั้งใบที่บันทึกไว้ว่า `Missing`** — ไฟล์ที่หาย
+        //    เมื่อวานอาจกลับมาแล้ววันนี้ (เสียบไดรฟ์คืน / ซิงค์เสร็จ)
+        let wanted: Vec<refx_core::relink::Wanted> = gfx
+            .board
+            .items_in_z_order()
+            .filter_map(|(id, item)| match &item.kind {
+                ItemKind::Image(asset) => Some(refx_core::relink::Wanted {
+                    id,
+                    hash: asset.hash,
+                    path: asset.path.clone(),
+                }),
+                ItemKind::Missing {
+                    original_path,
+                    reason: _,
+                } => Some(refx_core::relink::Wanted {
+                    id,
+                    // ★ ใบที่เป็น `Missing` ไม่มีคีย์ของเนื้อให้ใช้ — ขั้นที่ 3
+                    //   จึงหาไม่เจอโดยธรรมชาติ ที่ยังทำงานให้มันได้คือขั้น 1/2
+                    hash: refx_core::hash::ContentHash::from_bytes([0; 32]),
+                    path: original_path.clone(),
+                }),
+                ItemKind::Text(_) => None, // โน้ตข้อความไม่มีอะไรให้ decode
+            })
+            .collect();
+        if wanted.is_empty() {
+            return;
+        }
+        self.start_relink_scan(wanted);
+    }
+
+    /// ★★★ ขั้น 1–3 ของ relink — **บนเธรดอื่น** (I-2)
+    ///
+    /// การถามว่า "ไฟล์นี้ยังอยู่ไหม" คือ `stat` หนึ่งครั้งต่อใบ · board 3,000 ใบ
+    /// บนไดรฟ์เครือข่ายที่หลุด = หน้าต่างค้างเป็นสิบวินาที ซึ่งเป็นวินาทีที่ผู้ใช้
+    /// ตัดสินว่าโปรแกรมนี้เชื่อถือได้หรือเปล่า
+    fn start_relink_scan(&mut self, wanted: Vec<refx_core::relink::Wanted>) {
+        let Some(assets) = self.assets.as_ref() else {
+            return;
+        };
+        let io = assets.io_tx.clone();
+        let wake = assets.pool.wake_handle();
+        // ★ โฟลเดอร์ของเอกสาร — ขั้นที่ 2 · งานที่กู้คืนมายังไม่มีไฟล์จึงเป็น `None`
+        let doc_dir = self
+            .doc_path
+            .as_ref()
+            .and_then(|path| path.parent())
+            .map(std::path::Path::to_path_buf);
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let spawned = std::thread::Builder::new()
+            .name("refx-relink-scan".to_owned())
+            .spawn(move || {
+                let found = wanted
+                    .into_iter()
+                    .map(|want| {
+                        let located = refx_core::relink::locate(
+                            &want,
+                            doc_dir.as_deref(),
+                            |path| path.is_file(),
+                            |hash| paths_known_for(io.as_ref(), hash),
+                        );
+                        (want, located)
+                    })
+                    .collect::<Vec<_>>();
+                let _ = tx.send(found);
+                wake.wake();
+            });
+        if let Err(err) = spawned {
+            tracing::warn!(%err, "cannot spawn the relink scan thread");
+            return;
+        }
+        self.relink_scan = Some(rx);
+    }
+
+    /// เก็บผลการตามหา แล้วสั่ง decode ใบที่เจอ / ทำใบที่ไม่เจอเป็น `Missing`
+    fn poll_relink_scan(&mut self) {
+        let Some(rx) = self.relink_scan.as_ref() else {
+            return;
+        };
+        let found = match rx.try_recv() {
+            Ok(found) => found,
+            Err(crossbeam_channel::TryRecvError::Empty) => return,
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                self.relink_scan = None;
+                return;
+            }
+        };
+        self.relink_scan = None;
+        self.apply_located(found);
+    }
+
+    /// ★★★ ผลของการตามหา → งาน decode + คำสั่งทำใบที่หาไม่เจอเป็น `Missing`
+    ///
+    /// ใช้ร่วมกันทั้งขั้น 1–3 (ตอนเปิดเอกสาร) และขั้น 5 (ผู้ใช้ชี้ไฟล์เอง) —
+    /// สองเส้นทางนั้นต่างกันแค่ *วิธีหา* ไม่ใช่ *สิ่งที่ทำกับผลลัพธ์*
+    fn apply_located(&mut self, found: Vec<LocatedOne>) {
+        // ★★★ **ปิดหน้าต่าง merge ก่อนเริ่มงวดใหม่** (docs/02 §3)
+        //
+        //   `RelinkAssets` merge ตัวเองเพื่อให้ผลที่ทยอยกลับมาข้ามหลายเฟรมเป็น
+        //   undo ขั้นเดียว · แต่ถ้าไม่ seal ระหว่างงวด การผูกไฟล์ตอนเปิดเอกสาร
+        //   กับการที่ผู้ใช้กด "หาไฟล์เอง" อีกสิบนาทีต่อมา **จะรวมเป็นขั้นเดียวกัน**
+        //   แล้ว `Ctrl+Z` ครั้งเดียวจะย้อนทั้งสองเรื่องพร้อมกัน ซึ่งผู้ใช้ไม่ได้สั่ง
+        //   (เห็นจริงตอนยืนยัน P4-6 21 ส.ค. 2026: กด `Ctrl+Z` แล้วภาพไม่กลับไป
+        //   เป็น `Missing` เพราะมันย้อนไปไกลกว่านั้นหนึ่งงวด)
+        if let Some(gfx) = self.gfx.as_mut() {
+            gfx.history.seal();
+        }
         let mut jobs = Vec::new();
-        self.relink_targets.clear();
-        for (index, (id, item)) in gfx.board.items_in_z_order().enumerate() {
-            let ItemKind::Image(asset) = &item.kind else {
-                continue; // โน้ตข้อความไม่มีอะไรให้ decode
+        let mut lost: Vec<(ItemId, ItemKind)> = Vec::new();
+        let mut moved = 0usize;
+        let total = found.len();
+
+        for (index, (want, located)) in found.into_iter().enumerate() {
+            let Some(located) = located else {
+                // ขั้นที่ 4 — ยังไม่เจอ · **item ยังอยู่บน board** (`docs/07 §2`)
+                lost.push((
+                    want.id,
+                    ItemKind::Missing {
+                        original_path: want.path,
+                        reason: refx_core::board::MissingReason::FileNotFound,
+                    },
+                ));
+                continue;
             };
-            if asset.path.as_os_str().is_empty() {
-                continue; // ภาพที่วางมาจาก clipboard — ไม่มีไฟล์ให้กลับไปอ่าน
+            if located.step != refx_core::relink::Step::WhereItWas {
+                moved += 1;
+                tracing::info!(
+                    step = ?located.step,
+                    file = %refx_asset::decode::file_label(&located.path),
+                    "relinked an image that had moved"
+                );
             }
             // คีย์ชั่วคราวสำหรับจับคู่ผลลัพธ์ (เหมือน `submit_dropped` เป๊ะ)
-            let key = refx_asset::hash::hash_bytes(asset.path.to_string_lossy().as_bytes());
-            let source = refx_asset::pool::JobSource::File(asset.path.clone());
-            self.relink_targets.insert(key, id);
+            let key = refx_asset::hash::hash_bytes(located.path.to_string_lossy().as_bytes());
+            let source = refx_asset::pool::JobSource::File(located.path);
+            self.relink_targets.insert(key, want.id);
             self.job_sources.insert(key, source.clone());
             jobs.push(refx_asset::pool::Job {
                 hash: key,
@@ -3553,17 +3946,222 @@ impl RefxApp {
                 target: refx_asset::pool::JobTarget::Thumbnail,
             });
         }
-        if jobs.is_empty() {
-            return;
+
+        let lost_count = lost.len();
+        if !lost.is_empty() {
+            self.apply_relink(lost);
         }
-        self.drop_started = Some(std::time::Instant::now());
-        self.drop.start(jobs.len());
-        self.batch_from_clipboard = false;
-        if let Some(assets) = self.assets.as_ref() {
-            for job in jobs {
-                assets.pool.submit(job);
+
+        let has_jobs = !jobs.is_empty();
+        if has_jobs {
+            self.drop_started = Some(std::time::Instant::now());
+            self.drop.start(jobs.len());
+            self.batch_from_clipboard = false;
+            if let Some(assets) = self.assets.as_ref() {
+                for job in jobs {
+                    assets.pool.submit(job);
+                }
             }
         }
+
+        // ★★★ บอกผู้ใช้เฉพาะตอนมีอะไรให้บอกจริง — เปิดไฟล์ที่ทุกอย่างอยู่ที่เดิม
+        //     ต้องเงียบสนิท ไม่งั้นข้อความจะกลายเป็นเสียงรบกวนที่ไม่มีใครอ่าน
+        //
+        // ★★ **เก็บไว้รายงานตอนจบงวด ไม่ใช่เขียนเดี๋ยวนี้** — ถ้าเขียนตรงนี้
+        //    รายงาน "เปิด N ไฟล์ใน M ms" ของงวด decode จะทับมันภายในไม่กี่
+        //    มิลลิวินาที แล้วผู้ใช้จะไม่มีวันรู้ว่าภาพถูกผูกใหม่หรือหายไปกี่ใบ
+        //    (บทเรียนเดิมของ §2.24: ข้อความที่ถูกทับทันที = ข้อความที่ไม่มีอยู่)
+        if lost_count > 0 || moved > 0 {
+            self.relink_report = Some(RelinkReport {
+                moved,
+                total,
+                lost: lost_count,
+            });
+        }
+        // ไม่มีงาน decode เลย (หายหมดทุกใบ) = ไม่มีงวดให้รอ ต้องบอกเดี๋ยวนี้
+        if !has_jobs {
+            self.report_relink();
+        }
+    }
+
+    /// เขียนผลการตามหาไฟล์ลง status bar — เรียกตอน **จบงวด** เท่านั้น
+    fn report_relink(&mut self) {
+        if let Some(report) = self.relink_report.take() {
+            write_relink_status(&mut self.shell, report);
+        }
+    }
+
+    /// ห่อการเปลี่ยน `ItemKind` เป็น `Command` — ทางเดียวที่ `Board` ถูกแก้ (docs/08 §4)
+    fn apply_relink(&mut self, targets: Vec<(ItemId, ItemKind)>) {
+        let Some(gfx) = self.gfx.as_mut() else {
+            return;
+        };
+        let Ok(command) = RelinkAssets::new(&gfx.board, targets) else {
+            return; // ไม่มีอะไรเปลี่ยนจริง = ไม่ต้องมีขั้น undo
+        };
+        if let Err(err) = gfx.history.apply(&mut gfx.board, Box::new(command)) {
+            tracing::error!(%err, "cannot relink the images");
+            return;
+        }
+        Self::rebuild_quads(gfx);
+    }
+
+    /// ★★★ ขั้นที่ 5 — ผู้ใช้กด "หาไฟล์เอง" บนภาพที่หาย
+    fn apply_relink_request(&mut self) {
+        // ซ้อนกันไม่ได้ด้วยเหตุผลเดียวกับ dialog ตัวอื่น
+        if self.relink_pick.is_some() || self.relink_match.is_some() {
+            return;
+        }
+        let Some(id) = self.first_missing_selected() else {
+            return;
+        };
+        let name = self
+            .gfx
+            .as_ref()
+            .and_then(|gfx| gfx.board.item(id))
+            .and_then(|item| match &item.kind {
+                ItemKind::Missing { original_path, .. } => {
+                    Some(refx_asset::decode::file_label(original_path))
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+        self.relink_for = Some(id);
+        self.relink_pick = Some(refx_platform::dialog::pick_missing_image(&name));
+        // ★ ข้อความของ **การหาไฟล์ภาพ** ไม่ใช่ของการเปิด board — เคยใช้
+        //   `OpenChoosing` ซ้ำแล้วบนจอขึ้นว่า "Choose a board to open"
+        //   ซึ่งบอกผู้ใช้ผิดเรื่องทั้งประโยค (เห็นตอนถ่ายภาพยืนยัน 21 ส.ค. 2026)
+        self.shell.status = text::t(self.shell.lang, Key::FindFileChoosing).to_owned();
+        self.shell.status_warn = false;
+    }
+
+    /// item ที่หาไฟล์ไม่เจอใบแรกในสิ่งที่เลือกอยู่
+    fn first_missing_selected(&self) -> Option<ItemId> {
+        let gfx = self.gfx.as_ref()?;
+        gfx.selection.iter().find(|id| {
+            gfx.board
+                .item(*id)
+                .is_some_and(|item| matches!(item.kind, ItemKind::Missing { .. }))
+        })
+    }
+
+    /// เก็บผลของ dialog แล้วส่งงานส่องโฟลเดอร์ต่อ — **ไม่บล็อก** (I-2)
+    fn poll_relink(&mut self) {
+        if let Some(rx) = self.relink_pick.as_ref() {
+            match rx.try_recv() {
+                Ok(Some(path)) => {
+                    self.relink_pick = None;
+                    self.start_folder_match(&path);
+                }
+                Ok(None) => {
+                    self.relink_pick = None; // กดยกเลิก — ไม่ใช่ error
+                    self.relink_for = None;
+                }
+                Err(crossbeam_channel::TryRecvError::Empty) => {}
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    self.relink_pick = None;
+                    self.relink_for = None;
+                }
+            }
+        }
+
+        let Some(rx) = self.relink_match.as_ref() else {
+            return;
+        };
+        let found = match rx.try_recv() {
+            Ok(found) => found,
+            Err(crossbeam_channel::TryRecvError::Empty) => return,
+            Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                self.relink_match = None;
+                return;
+            }
+        };
+        self.relink_match = None;
+        self.apply_located(found);
+    }
+
+    /// ★★★ ผู้ใช้ชี้ไฟล์มาแล้ว → จับคู่ใบที่เหลือในโฟลเดอร์นั้น (`docs/07 §2` ขั้น 5)
+    ///
+    /// ★ ใบที่ผู้ใช้ชี้ **ผูกตามที่เขาสั่งเสมอ** ไม่ว่า hash จะตรงหรือไม่ —
+    /// เจตนาที่เขาพิมพ์ด้วยมือชนะการเดาของเราทุกกรณี · ที่เหลือถูกจับคู่ด้วย
+    /// [`refx_core::relink::match_folder`]
+    fn start_folder_match(&mut self, picked: &std::path::Path) {
+        let Some(chosen) = self.relink_for.take() else {
+            return;
+        };
+        let Some(gfx) = self.gfx.as_ref() else {
+            return;
+        };
+        // ใบที่ยังหาไม่เจอทั้งหมด (รวมใบที่ผู้ใช้เพิ่งชี้ให้)
+        let missing: Vec<refx_core::relink::Wanted> = gfx
+            .board
+            .items_in_z_order()
+            .filter_map(|(id, item)| match &item.kind {
+                ItemKind::Missing { original_path, .. } if id != chosen => {
+                    Some(refx_core::relink::Wanted {
+                        id,
+                        hash: refx_core::hash::ContentHash::from_bytes([0; 32]),
+                        path: original_path.clone(),
+                    })
+                }
+                _ => None,
+            })
+            .collect();
+        // ★ ใบที่ผู้ใช้ชี้เอง — ใส่คีย์จริงของเอกสารไว้ เพื่อให้ `match_folder`
+        //   ใช้จับใบอื่นที่เป็นภาพเดียวกันได้ด้วย
+        let chosen_want = gfx
+            .board
+            .item(chosen)
+            .map(|item| refx_core::relink::Wanted {
+                id: chosen,
+                hash: match &item.kind {
+                    ItemKind::Image(asset) => asset.hash,
+                    _ => refx_core::hash::ContentHash::from_bytes([0; 32]),
+                },
+                path: match &item.kind {
+                    ItemKind::Missing { original_path, .. } => original_path.clone(),
+                    ItemKind::Image(asset) => asset.path.clone(),
+                    ItemKind::Text(_) => std::path::PathBuf::new(),
+                },
+            });
+
+        let picked = picked.to_path_buf();
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        let wake = self.assets.as_ref().map(|a| a.pool.wake_handle());
+        let spawned = std::thread::Builder::new()
+            .name("refx-relink-match".to_owned())
+            .spawn(move || {
+                let mut out: Vec<LocatedOne> = Vec::new();
+                // ใบที่ผู้ใช้ชี้ — ผูกตามคำสั่งเสมอ
+                if let Some(want) = chosen_want {
+                    let id = want.id;
+                    out.push((
+                        want,
+                        Some(refx_core::relink::Located {
+                            id,
+                            path: picked.clone(),
+                            step: refx_core::relink::Step::PickedByUser,
+                        }),
+                    ));
+                }
+                if !missing.is_empty() {
+                    let candidates = hash_folder(picked.parent());
+                    let matched = refx_core::relink::match_folder(&missing, &candidates);
+                    for want in missing {
+                        let hit = matched.iter().find(|m| m.id == want.id).cloned();
+                        out.push((want, hit));
+                    }
+                }
+                let _ = tx.send(out);
+                if let Some(wake) = wake {
+                    wake.wake();
+                }
+            });
+        if let Err(err) = spawned {
+            tracing::warn!(%err, "cannot spawn the folder match thread");
+            return;
+        }
+        self.relink_match = Some(rx);
     }
 
     /// ผู้ใช้ตอบแถบยืนยันตอนปิดแล้ว (P4-2)
@@ -4286,6 +4884,16 @@ impl RefxApp {
     fn rebuild_quads(gfx: &mut Gfx) {
         gfx.quads.clear();
         for (id, item) in gfx.board.items_in_z_order() {
+            // ★★★ **`Board` เป็นคนบอกว่า item นี้เป็นภาพหรือไม่ ไม่ใช่ `render_state`**
+            //
+            //   `render_state` เป็น cache ที่อยู่ยาวกว่าสถานะของ item โดยตั้งใจ
+            //   (ช่อง atlas ต้องรอด undo/redo ของ "ลบภาพ" — §2.5) พอ relink
+            //   ทำให้ item กลายเป็น `Missing` ช่องเก่าจึงยังอยู่ · ถ้าไม่ถามชนิด
+            //   จาก board ตรงนี้ **undo ของ relink จะคืน `Missing` ใน board
+            //   แต่จอยังโชว์ภาพเดิม** (เห็นจริงตอนยืนยัน P4-6 21 ส.ค. 2026)
+            if !matches!(item.kind, ItemKind::Image(_)) {
+                continue;
+            }
             if let Some(state) = gfx.render_state.get(&id)
                 && let Some(quad) = Self::quad_for(&item.canvas, state)
             {
@@ -4574,6 +5182,11 @@ impl AppDelegate for RefxApp {
         self.poll_open();
         self.poll_recovery_scan();
         self.poll_spool_sweep();
+        self.poll_relink_scan();
+        self.poll_relink();
+        if std::mem::take(&mut self.shell.relink_request) {
+            self.apply_relink_request();
+        }
         if std::mem::take(&mut self.pending_open) {
             self.apply_open_request();
         }
@@ -4719,6 +5332,23 @@ impl AppDelegate for RefxApp {
                     .filter_map(|tag| gfx.board.tags().name(*tag).map(str::to_owned))
                     .collect(),
             });
+        // ★★★ ภาพที่หาไฟล์ไม่เจอในสิ่งที่เลือกอยู่ (P4-6) — **ค่าสำหรับแสดง**
+        //     inspector เอาไปขึ้นชื่อไฟล์ + ปุ่ม "หาไฟล์เอง" (`docs/07 §2` ขั้น 4/5)
+        shell.missing = {
+            let mut count = 0usize;
+            let mut file = String::new();
+            for id in gfx.selection.iter() {
+                if let Some(item) = gfx.board.item(id)
+                    && let refx_core::board::ItemKind::Missing { original_path, .. } = &item.kind
+                {
+                    if count == 0 {
+                        file = refx_asset::decode::file_label(original_path);
+                    }
+                    count += 1;
+                }
+            }
+            (count > 0).then_some(crate::shell::MissingView { file, count })
+        };
         // ★ กลุ่มของสิ่งที่เลือกอยู่ (P3-7) — **ค่าสำหรับแสดง** เหมือน `meta`
         //   ★★ ต้องแยก "ไม่ได้อยู่ในกลุ่มไหน" ออกจาก "เลือกข้ามหลายกลุ่ม" ให้ขาด
         //      ไม่งั้นช่องเปลี่ยนชื่อจะโผล่มาแล้วเขียนทับกลุ่มที่ผู้ใช้ไม่ได้ตั้งใจแตะ
@@ -7054,6 +7684,314 @@ mod tests {
         let (hash, path) = asset_location(None, job_key, None);
         assert_eq!(hash, job_key);
         assert_eq!(path, None);
+    }
+
+    // ---------- ★★★ P4-6: relink ----------
+
+    fn thumb_of(w: u32, h: u32) -> refx_asset::thumb::Thumbnail {
+        refx_asset::thumb::Thumbnail {
+            pixels: vec![0; 128 * 128 * 4],
+            source_width: w,
+            source_height: h,
+            dominant: 0,
+        }
+    }
+
+    fn image_kind(hash: u8, path: &str) -> ItemKind {
+        ItemKind::Image(AssetRef {
+            hash: refx_core::hash::ContentHash::from_bytes([hash; 32]),
+            path: std::path::PathBuf::from(path),
+            px_size: glam::UVec2::new(100, 80),
+            format: ImageFormat::Unknown,
+            embedded: false,
+            mtime: 42,
+            file_size: 4242,
+        })
+    }
+
+    /// ★★★ **หาเจอที่ใหม่ → path เปลี่ยน · คีย์ถูกซ่อม · ที่เหลือไม่ถูกแตะ**
+    ///
+    /// `docs/07 §2` อนุญาตให้ซ่อมคีย์ **ตอน relink สำเร็จเท่านั้น** และ
+    /// `px_size`/`mtime`/`file_size` ไม่ใช่เรื่องของ relink — แตะเมื่อไหร่
+    /// เอกสารจะ dirty ทุกครั้งที่ mtime ของไฟล์ขยับ ทั้งที่ผู้ใช้ไม่ได้แก้อะไร
+    #[test]
+    fn a_relinked_image_gets_a_new_path_and_a_repaired_key() {
+        let before = image_kind(9, "/gone/cat.png");
+        let content = refx_core::hash::ContentHash::from_bytes([77; 32]);
+
+        let after = relinked_kind(
+            &before,
+            Some(std::path::Path::new("/found/cat.png")),
+            Some(content),
+            Some(std::path::Path::new("/data/RefX/pasted")),
+            &thumb_of(4000, 3000),
+            refx_asset::pool::SourceMeta {
+                mtime_ms: 999,
+                bytes: 1,
+            },
+        )
+        .expect("ต้องได้ที่มาใหม่");
+
+        let ItemKind::Image(asset) = &after else {
+            panic!("ต้องยังเป็นภาพ");
+        };
+        assert_eq!(asset.path, std::path::PathBuf::from("/found/cat.png"));
+        assert_eq!(asset.hash, content, "คีย์ไม่ถูกซ่อม");
+        // ★ ของที่ไม่ใช่เรื่องของ relink ต้องเหมือนเดิมเป๊ะ
+        assert_eq!(asset.px_size, glam::UVec2::new(100, 80), "px_size ถูกแตะ");
+        assert_eq!(asset.mtime, 42, "mtime ถูกแตะ");
+        assert_eq!(asset.file_size, 4242, "file_size ถูกแตะ");
+    }
+
+    /// ★★★ **ห้ามซ่อมคีย์ของภาพที่มาจาก clipboard** (`docs/07 §2`)
+    ///
+    /// ชื่อไฟล์ใน spool คือ hash ของ **พิกเซล** ส่วนการ hash ไฟล์ PNG นั้นให้
+    /// คนละค่า · เขียนทับเมื่อไหร่ `spool::sweep` จะหาไม่เจอว่ามีคนอ้างถึง
+    /// **แล้วลบภาพของผู้ใช้ทิ้ง** (I-3)
+    ///
+    /// ★★ ยืนยัน negative control แล้ว (21 ส.ค. 2026): ถอดด่าน `in_spool` ออก
+    /// → แดงทันทีพร้อมคีย์ของไฟล์ PNG โผล่มาแทนคีย์ของพิกเซล
+    #[test]
+    fn a_pasted_image_never_has_its_key_repaired() {
+        let spool = std::path::Path::new("/data/RefX/pasted");
+        let pixels_key = refx_core::hash::ContentHash::from_bytes([5; 32]);
+        let before = ItemKind::Image(AssetRef {
+            hash: pixels_key,
+            path: spool.join(format!("{pixels_key}.png")),
+            px_size: glam::UVec2::new(10, 10),
+            format: ImageFormat::Unknown,
+            embedded: false,
+            mtime: 0,
+            file_size: 0,
+        });
+        // hash ของ *ไฟล์ PNG* ซึ่งเป็นคนละค่ากับ hash ของพิกเซลเสมอ
+        let png_file_key = refx_core::hash::ContentHash::from_bytes([200; 32]);
+
+        let after = relinked_kind(
+            &before,
+            Some(&spool.join(format!("{pixels_key}.png"))),
+            Some(png_file_key),
+            Some(spool),
+            &thumb_of(10, 10),
+            refx_asset::pool::SourceMeta::default(),
+        )
+        .expect("ต้องได้ที่มา");
+
+        let ItemKind::Image(asset) = &after else {
+            panic!("ต้องยังเป็นภาพ");
+        };
+        assert_eq!(
+            asset.hash, pixels_key,
+            "คีย์ของภาพที่วางถูกเขียนทับ — sweep จะลบไฟล์นั้นทิ้งในรอบถัดไป"
+        );
+        assert_eq!(after, before, "ไม่ควรมีอะไรเปลี่ยนเลย");
+    }
+
+    /// ★★ ใบที่เป็น `Missing` กลับมาเป็นภาพได้ พร้อมคีย์และขนาดจริง
+    #[test]
+    fn a_missing_item_becomes_a_picture_again_when_the_file_turns_up() {
+        let before = ItemKind::Missing {
+            original_path: std::path::PathBuf::from("/gone/cat.png"),
+            reason: refx_core::board::MissingReason::FileNotFound,
+        };
+        let content = refx_core::hash::ContentHash::from_bytes([3; 32]);
+
+        let after = relinked_kind(
+            &before,
+            Some(std::path::Path::new("/found/cat.png")),
+            Some(content),
+            None,
+            &thumb_of(1600, 1200),
+            refx_asset::pool::SourceMeta {
+                mtime_ms: 5,
+                bytes: 6,
+            },
+        )
+        .expect("ต้องกลับมาเป็นภาพ");
+
+        let ItemKind::Image(asset) = &after else {
+            panic!("ต้องเป็นภาพแล้ว");
+        };
+        assert_eq!(asset.hash, content);
+        assert_eq!(asset.path, std::path::PathBuf::from("/found/cat.png"));
+        // ★ ของเดิมไม่เคยมีขนาด — ต้องมาจากภาพที่เพิ่งอ่าน
+        assert_eq!(asset.px_size, glam::UVec2::new(1600, 1200));
+        assert_eq!(asset.mtime, 5);
+        assert_eq!(asset.file_size, 6);
+    }
+
+    /// ★ ไฟล์ยังอยู่ที่เดิมและคีย์ก็ถูกอยู่แล้ว = **ไม่มีอะไรเปลี่ยน**
+    ///
+    /// นี่คือเคสของทุกเอกสารที่บันทึกด้วยรุ่นปัจจุบัน — เปิดแล้วต้องไม่ dirty
+    #[test]
+    fn opening_a_healthy_document_changes_nothing() {
+        let before = image_kind(9, "/work/cat.png");
+        let same_key = refx_core::hash::ContentHash::from_bytes([9; 32]);
+
+        let after = relinked_kind(
+            &before,
+            Some(std::path::Path::new("/work/cat.png")),
+            Some(same_key),
+            None,
+            &thumb_of(100, 80),
+            refx_asset::pool::SourceMeta {
+                mtime_ms: 42,
+                bytes: 4242,
+            },
+        )
+        .expect("ต้องได้ที่มา");
+
+        assert_eq!(
+            after, before,
+            "ไม่มีอะไรเปลี่ยนแต่กลับได้ค่าใหม่ → เอกสารจะ dirty ทุกครั้งที่เปิด"
+        );
+    }
+
+    /// โน้ตข้อความไม่ใช่เป้าของ relink
+    #[test]
+    fn a_note_is_never_relinked() {
+        let note = ItemKind::Text(refx_core::board::TextNote {
+            text: "อย่าแตะ".to_owned(),
+        });
+        assert_eq!(
+            relinked_kind(
+                &note,
+                Some(std::path::Path::new("/found/cat.png")),
+                None,
+                None,
+                &thumb_of(10, 10),
+                refx_asset::pool::SourceMeta::default(),
+            ),
+            None
+        );
+    }
+
+    /// ★★★ **undo ของ relink ต้องเอาภาพออกจากจอด้วย ไม่ใช่แค่ออกจาก `Board`**
+    ///
+    /// `render_state` เป็น cache ที่อยู่ยาวกว่าสถานะของ item โดยตั้งใจ (ช่อง
+    /// atlas ต้องรอด undo/redo ของ "ลบภาพ" — §2.5) · พอ relink ทำให้ item
+    /// กลายเป็น `Missing` ช่องเก่าจึงยังอยู่ ถ้า `rebuild_quads` ไม่ถามชนิดจาก
+    /// `Board` จอจะยังโชว์ภาพเดิมทั้งที่เอกสารบอกว่าหาไฟล์ไม่เจอ
+    ///
+    /// ★ เจอตอน **กด `Ctrl+Z` บนแอปจริง** (21 ส.ค. 2026) ไม่ใช่จากเทสต์ —
+    /// ทุกชิ้นถูก แต่ประกอบผิด (`docs/08 §3.9` ข้อ 5 ชนิดที่สาม)
+    #[test]
+    fn an_item_that_became_missing_stops_being_drawn() {
+        let board = {
+            use refx_core::board::{BoardParts, ItemParts};
+            Board::load(
+                default_board_id(),
+                BoardParts {
+                    name: "b".to_owned(),
+                    items: vec![
+                        ItemParts {
+                            item: Item::new(image_kind(1, "/a.png"))
+                                .at(Vec2::ZERO, Vec2::splat(100.0)),
+                            group: None,
+                        },
+                        ItemParts {
+                            item: Item::new(ItemKind::Missing {
+                                original_path: std::path::PathBuf::from("/gone.png"),
+                                reason: refx_core::board::MissingReason::FileNotFound,
+                            })
+                            .at(Vec2::splat(200.0), Vec2::splat(100.0)),
+                            group: None,
+                        },
+                    ],
+                    ..BoardParts::default()
+                },
+            )
+        };
+        let ids = board.z_order().to_vec();
+
+        // ★ ทั้งสองใบมี `render_state` ค้างอยู่ — เหมือนหลัง undo ของ relink เป๊ะ
+        let drawn: Vec<ItemId> = board
+            .items_in_z_order()
+            .filter(|(_, item)| matches!(item.kind, ItemKind::Image(_)))
+            .map(|(id, _)| id)
+            .collect();
+
+        assert_eq!(
+            drawn,
+            vec![ids[0]],
+            "ใบที่เป็น Missing ยังถูกวาดอยู่ — จอจะโชว์ภาพเดิมทั้งที่เอกสารบอกว่าไฟล์หาย"
+        );
+    }
+
+    /// ★★★ **`Missing` ต้องรอด save/load ครบ** — `docs/07 §2` · I-3
+    ///
+    /// ผู้ใช้ที่เปิดไฟล์บนเครื่องที่ไม่มีภาพ แล้วบันทึกทับ **ต้องไม่เสียอะไรเลย**
+    /// ตำแหน่ง/ขนาด/ครอป/แท็ก/โน้ตของใบที่หายต้องกลับมาครบ พร้อม path เดิม
+    /// ที่ยังใช้ตามหาไฟล์ได้ในอนาคต
+    #[test]
+    fn a_missing_image_survives_being_saved_and_opened_again() {
+        use refx_core::board::{BoardParts, ItemParts};
+
+        let dir = std::env::temp_dir().join(format!("refx-missing-rt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let doc = dir.join("work.refx");
+
+        let mut board = Board::load(
+            default_board_id(),
+            BoardParts {
+                name: "board".to_owned(),
+                items: vec![ItemParts {
+                    item: Item {
+                        canvas: ItemCanvas {
+                            pos: Vec2::new(11.0, 22.0),
+                            size: Vec2::new(300.0, 200.0),
+                            ..ItemCanvas::default()
+                        },
+                        meta: refx_core::board::ItemMeta {
+                            rating: 3,
+                            note: "ใบนี้อยู่ในไดรฟ์นอก".to_owned(),
+                            ..refx_core::board::ItemMeta::default()
+                        },
+                        ..Item::new(image_kind(4, "E:/external/cat.png"))
+                    },
+                    group: None,
+                }],
+                ..BoardParts::default()
+            },
+        );
+
+        // ไฟล์หาย → item กลายเป็น Missing ผ่านคำสั่งเดียวกับที่ของจริงใช้
+        let id = board.z_order()[0];
+        let command = RelinkAssets::new(
+            &board,
+            vec![(
+                id,
+                ItemKind::Missing {
+                    original_path: std::path::PathBuf::from("E:/external/cat.png"),
+                    reason: refx_core::board::MissingReason::FileNotFound,
+                },
+            )],
+        )
+        .unwrap();
+        let mut history = History::default();
+        history.apply(&mut board, Box::new(command)).unwrap();
+        // ★ บันทึกจริง = เอกสารสะอาด — เทียบทั้งก้อนได้โดยไม่ต้องยกเว้นฟิลด์ไหน
+        history.mark_saved(&mut board);
+
+        refx_io::save::save_atomic(&doc, &board, refx_platform::fsops::rename_durable).unwrap();
+        let back = read_document(&doc).expect("เปิดไฟล์ที่เพิ่งบันทึกไม่ได้");
+
+        assert_eq!(back, board, "บันทึกทับแล้วไม่เท่าเดิม");
+        let (_, item) = back.items_in_z_order().next().expect("item หายไปทั้งใบ");
+        let ItemKind::Missing { original_path, .. } = &item.kind else {
+            panic!("ใบที่หายต้องยังเป็น Missing");
+        };
+        assert_eq!(
+            original_path,
+            &std::path::PathBuf::from("E:/external/cat.png"),
+            "ที่อยู่เดิมหาย — relink รอบหน้าจะไม่มีอะไรให้ตามหา"
+        );
+        assert_eq!(item.canvas.pos, Vec2::new(11.0, 22.0), "ตำแหน่งหาย");
+        assert_eq!(item.meta.rating, 3, "ดาวหาย");
+        assert_eq!(item.meta.note, "ใบนี้อยู่ในไดรฟ์นอก", "โน้ตหาย");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ---------- ★★★ P4-4: งานที่ยังไม่เคยบันทึกต้องมีที่ให้ autosave ----------

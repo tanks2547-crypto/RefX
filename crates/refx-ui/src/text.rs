@@ -120,6 +120,10 @@ pub enum Key {
     NothingToDelete,
     /// เลือกภาพก่อนถึงจะปรับได้
     InspectorNoSelection,
+    /// ปุ่ม "หาไฟล์เอง" ของภาพที่หาย (P4-6 ขั้นที่ 5)
+    FindFile,
+    /// กำลังรอผู้ใช้ชี้ไฟล์ภาพที่หาย (P4-6 ขั้นที่ 5)
+    FindFileChoosing,
     /// ความทึบ
     Opacity,
     /// กลับสี
@@ -310,6 +314,8 @@ fn en(key: Key) -> &'static str {
         Key::NothingToRedo => "Nothing left to redo",
         Key::NothingToDelete => "Nothing to delete — select an unlocked image first",
         Key::InspectorNoSelection => "Select an image to adjust it",
+        Key::FindFile => "Find the file…",
+        Key::FindFileChoosing => "Choose the image file RefX could not find",
         Key::Opacity => "Opacity",
         Key::Invert => "Invert",
         Key::Brightness => "Brightness",
@@ -424,6 +430,8 @@ fn th(key: Key) -> Option<&'static str> {
         Key::NothingToRedo => "ไม่มีอะไรให้ทำซ้ำแล้ว",
         Key::NothingToDelete => "ไม่มีอะไรให้ลบ — เลือกภาพที่ไม่ได้ล็อกไว้ก่อน",
         Key::InspectorNoSelection => "เลือกภาพก่อนถึงจะปรับได้",
+        Key::FindFile => "หาไฟล์เอง…",
+        Key::FindFileChoosing => "เลือกไฟล์ภาพที่ RefX หาไม่เจอ",
         Key::Opacity => "ความทึบ",
         Key::Invert => "กลับสี",
         Key::Brightness => "ความสว่าง",
@@ -613,6 +621,12 @@ pub enum Template {
     ErrMalformedPixels,
     /// `{mb}` `{cap}` — ที่พักของภาพที่วางเกินเพดาน แต่ทุกไฟล์ยังมีคนอ้างถึงอยู่
     SpoolOverCap,
+    /// `{file}` `{n}` — ภาพที่หาไฟล์ไม่เจอ (แสดงใน inspector)
+    MissingImage,
+    /// `{found}` `{total}` — สรุปผลการตามหาไฟล์ตอนเปิดเอกสาร
+    RelinkFound,
+    /// `{n}` — เปิดเอกสารแล้วมีภาพที่หาไฟล์ไม่เจอ
+    RelinkMissing,
 }
 
 /// เทมเพลตภาษาอังกฤษ — ต้องมีครบทุกตัว
@@ -693,6 +707,15 @@ Drag in a PNG, JPEG, WebP, GIF, BMP, TGA or TIFF instead."
         Template::SpoolOverCap => {
             "Pasted images are using {mb} MB of space (the limit is {cap} MB), and none of them can be cleared yet\n\
              They belong to work that has not been saved — save your boards, then restart RefX to free the space."
+        }
+        Template::MissingImage => {
+            "{file} could not be found ({n} selected)\n\
+             The image is still on the board — point RefX at the file and the rest of that folder follows."
+        }
+        Template::RelinkFound => "Found {found} of {total} images that had moved",
+        Template::RelinkMissing => {
+            "{n} images could not be found\n\
+             Select one, then use Find the file — the rest of that folder is matched for you."
         }
         Template::ErrClipboardEmpty => {
             "There is no image in the clipboard\n\
@@ -794,6 +817,15 @@ fn template_th(template: Template) -> Option<&'static str> {
         Template::SpoolOverCap => {
             "ภาพที่วางไว้ใช้พื้นที่ {mb} MB (เพดาน {cap} MB) และยังลบอะไรไม่ได้เลยสักไฟล์\n\
              ทั้งหมดเป็นของงานที่ยังไม่ได้บันทึก — บันทึก board ให้เรียบร้อยแล้วเปิด RefX ใหม่ พื้นที่จะถูกคืน"
+        }
+        Template::MissingImage => {
+            "หาไฟล์ {file} ไม่เจอ (เลือกไว้ {n} ใบ)\n\
+             ภาพยังอยู่บน board — ชี้ไฟล์ให้ RefX แล้วที่เหลือในโฟลเดอร์นั้นจะตามมาเอง"
+        }
+        Template::RelinkFound => "หาไฟล์ที่ย้ายที่เจอ {found} จาก {total} ใบ",
+        Template::RelinkMissing => {
+            "หาไฟล์ไม่เจอ {n} ใบ\n\
+             เลือกใบใดใบหนึ่งแล้วกดปุ่มหาไฟล์เอง — ที่เหลือในโฟลเดอร์นั้นจะถูกจับคู่ให้"
         }
         Template::ErrClipboardEmpty => {
             "ใน clipboard ไม่มีภาพ\n\
@@ -988,6 +1020,8 @@ mod tests {
         Key::NothingToRedo,
         Key::NothingToDelete,
         Key::InspectorNoSelection,
+        Key::FindFile,
+        Key::FindFileChoosing,
         Key::Opacity,
         Key::Invert,
         Key::Brightness,
@@ -1107,6 +1141,9 @@ mod tests {
         Template::ErrClipboardUndecodable,
         Template::ErrMalformedPixels,
         Template::SpoolOverCap,
+        Template::MissingImage,
+        Template::RelinkFound,
+        Template::RelinkMissing,
     ];
 
     /// ★ กฎข้อ 2 ของ docs/03 §0: ห้ามมีทางที่ผู้ใช้จะเห็นช่องว่างหรือชื่อ key

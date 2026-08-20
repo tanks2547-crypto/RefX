@@ -94,6 +94,45 @@ pub fn pick_document_to_open() -> crossbeam_channel::Receiver<Option<PathBuf>> {
     rx
 }
 
+/// ★★★ ให้ผู้ใช้ชี้ไฟล์ภาพที่หายไป — ขั้นที่ 5 ของ relink (`docs/07 §2`, P4-6)
+///
+/// ★ **ไม่บล็อก UI thread** ด้วยเหตุผลเดียวกับ [`pick_document_to_open`] เป๊ะ:
+/// ผู้ใช้ที่กำลังไล่หาโฟลเดอร์ที่เขาย้ายภาพไปเมื่อเดือนก่อน อาจใช้เวลาเป็นนาที
+///
+/// ★★ ตัวกรองเป็นนามสกุลชุดเดียวกับที่ `decode_guarded` รับได้ — ถ้ากว้างกว่านั้น
+/// ผู้ใช้จะชี้ไฟล์ที่โปรแกรมเปิดไม่ได้แล้วได้ error ที่เขาทำอะไรกับมันไม่ได้
+#[must_use]
+pub fn pick_missing_image(file_name: &str) -> crossbeam_channel::Receiver<Option<PathBuf>> {
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    let title = if file_name.is_empty() {
+        "หาไฟล์ภาพที่หายไป".to_owned()
+    } else {
+        format!("หาไฟล์: {file_name}")
+    };
+    std::thread::Builder::new()
+        .name("refx-relink-dialog".to_owned())
+        .spawn(move || {
+            let picked = std::panic::catch_unwind(|| {
+                rfd::FileDialog::new()
+                    .set_title(&title)
+                    .add_filter(
+                        "Images",
+                        &[
+                            "png", "jpg", "jpeg", "webp", "gif", "bmp", "tga", "tiff", "tif",
+                        ],
+                    )
+                    .pick_file()
+            })
+            .unwrap_or(None);
+            let _ = tx.send(picked);
+        })
+        .map_or_else(
+            |err| tracing::error!(%err, "cannot spawn the relink dialog thread"),
+            drop,
+        );
+    rx
+}
+
 /// แจ้งผู้ใช้ว่าโปรแกรมพัง พร้อมบอกว่าไฟล์ log อยู่ไหน
 ///
 /// เรียกจาก panic hook เท่านั้น — **บล็อกได้** เพราะตอนนั้นโปรแกรมกำลังจะตายอยู่แล้ว
