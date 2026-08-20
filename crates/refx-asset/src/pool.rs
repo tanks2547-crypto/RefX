@@ -283,6 +283,46 @@ pub enum JobFailure {
     Clipboard(#[from] ClipboardError),
 }
 
+/// ★★★ hash ของ **เนื้อ** ที่ worker คำนวณได้ และเนื้อนั้นอยู่ที่ไหน
+///
+/// ## ทำไมคีย์ของงานใช้เป็น `AssetRef::hash` ไม่ได้
+///
+/// คีย์ของงานถูกตั้งบน UI thread **ก่อน** ใครจะได้แตะไฟล์ (`hash_bytes(path)`
+/// สำหรับไฟล์ · `clipboard:N` สำหรับภาพที่วาง) มันจึงเป็นคีย์ของ *ที่อยู่*
+/// ไม่ใช่ของ *เนื้อ* · `docs/02 §2.3` บังคับตรงข้าม และผูกสามอย่างไว้กับข้อนั้น:
+///
+/// | สัญญาใน `docs/02 §2.3` | พังยังไงถ้าคีย์มาจาก path |
+/// |---|---|
+/// | ย้ายไฟล์แล้ว thumbnail ไม่หาย | ย้ายแล้วได้คีย์ใหม่ = ของเก่ากลายเป็นขยะ |
+/// | relink หาไฟล์เจอด้วย hash | `docs/07 §2` ขั้น 3/5 ค้นด้วย hash — ไม่มีวันตรง (P4-6) |
+/// | ไฟล์ซ้ำถูกยุบอัตโนมัติ | สำเนาเดียวกันสองที่ = สอง asset |
+///
+/// ★ ส่วนภาพที่วางมีเหตุผลที่แรงกว่านั้นอีก: ชื่อไฟล์ใน spool **คือ** hash
+/// ถ้า `AssetRef::hash` ไม่ตรง `spool::sweep` จะไม่เห็นว่ามีคนอ้างถึงแล้ว
+/// **ลบภาพของผู้ใช้ทิ้ง** (I-3) — ดู `HANDOFF §4` ข้อ 25
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentOrigin {
+    /// ไฟล์ของผู้ใช้ — blake3 ของ**ไบต์ในไฟล์** (ผ่าน [`crate::hash::hash_file`]
+    /// จึงเป็นค่าเดียวกับที่ `cache.sqlite` ใช้เป็นคีย์อยู่แล้ว)
+    File(ContentHash),
+    /// ★ ภาพที่วาง — hash ของ**พิกเซล** และกำลังจะถูกพักลง spool
+    ///
+    /// แยกจาก [`Self::File`] เพราะผู้เรียกต้องรู้ว่า **จะมีไฟล์โผล่ที่
+    /// `<spool_dir>/<hash>.png`** จึงชี้ `AssetRef::path` ไปที่นั่นได้
+    /// · ถ้าไม่มีที่พักเสียบไว้ worker จะไม่ตอบ variant นี้เลย
+    Spooled(ContentHash),
+}
+
+impl ContentOrigin {
+    /// คีย์ของเนื้อ ไม่ว่ามันจะอยู่ที่ไหน
+    #[must_use]
+    pub fn hash(&self) -> ContentHash {
+        match self {
+            Self::File(hash) | Self::Spooled(hash) => *hash,
+        }
+    }
+}
+
 /// ผลของงาน decode
 #[derive(Debug)]
 pub enum JobResult {
@@ -298,21 +338,10 @@ pub enum JobResult {
         meta: SourceMeta,
         /// เวลาที่ใช้ตั้งแต่หยิบงานจนเสร็จ
         elapsed: Duration,
-        /// ★★★ hash ของ **เนื้อภาพ** สำหรับภาพที่ไม่มีไฟล์ต้นทาง (clipboard)
+        /// ★★★ **คีย์จริงของ asset ใบนี้** — ดู [`ContentOrigin`]
         ///
-        /// `Some` = ภาพใบนี้กำลังจะถูกพักลง spool ที่ `<spool_dir>/<hash>.png`
-        /// ผู้เรียกต้องใช้ค่านี้เป็น `AssetRef::hash` **ไม่ใช่คีย์ของงาน** เพราะ:
-        ///
-        /// | ใคร | ต้องการอะไร |
-        /// |---|---|
-        /// | `spool::sweep` | `AssetRef::hash` ต้องตรงกับ **ชื่อไฟล์ใน spool** ไม่งั้นมันจะถูกลบทิ้งทั้งที่ board อ้างถึงอยู่ |
-        /// | วางภาพเดิมซ้ำ | คีย์เดียวกัน → ไฟล์เดียว (คีย์ของงานเป็น `clipboard:N` ซึ่งต่างกันทุกครั้ง) |
-        ///
-        /// ★★ เป็น **hash ไม่ใช่ path** โดยตั้งใจ: ตอนที่ข้อความนี้ถูกส่ง ไฟล์ยัง
-        /// เขียนไม่เสร็จ · การ encode PNG ของภาพ 6000×4000 กินเวลา **1.07 วินาที**
-        /// ซึ่ง `docs/07 §2` ห้ามไม่ให้มาขวางการที่ภาพขึ้นจอ → ส่ง `Done` ออกไปก่อน
-        /// แล้วยืนยันด้วย [`JobResult::Spooled`] เมื่อไฟล์ลงดิสก์จริง
-        spooled: Option<ContentHash>,
+        /// `None` = คำนวณไม่ได้ ผู้เรียกต้องใช้คีย์ของงานต่อไปตามเดิม
+        origin: Option<ContentOrigin>,
     },
     /// working texture พร้อมใช้ (docs/04 §4 ชั้น B)
     Working {
@@ -568,7 +597,14 @@ pub struct DecodePool {
 /// ผลของการถาม cache ก่อน decode
 enum CacheLookup {
     /// เจอใน cache — ไม่ต้อง decode เลย
-    Hit(Box<Thumbnail>),
+    ///
+    /// ★ ต้องคืน `hash` มาด้วย ไม่ใช่แค่ thumbnail: cache hit คือเส้นทางที่
+    /// ผู้ใช้เจอทุกวัน ถ้าเส้นนี้ไม่รู้คีย์ของเนื้อ item ที่เกิดจากมันจะได้
+    /// คีย์ของ path แทน แล้วสัญญาใน `docs/02 §2.3` จะจริงเฉพาะตอน cache เย็น
+    Hit {
+        thumb: Box<Thumbnail>,
+        hash: ContentHash,
+    },
     /// ไม่เจอ — ต้อง decode พร้อมคีย์ที่จะใช้เก็บผล
     Miss(CacheKey),
     /// ไม่มี cache ให้ใช้ (เปิด DB ไม่ได้) — decode ตรง ๆ
@@ -849,15 +885,16 @@ fn run_job(job: &Job, ctx: &WorkerContext) -> (JobResult, Option<SpoolTask>) {
         (JobTarget::Thumbnail, Some(path)) => cache_lookup(path, io),
         _ => CacheLookup::Unavailable,
     };
-    if let CacheLookup::Hit(thumb) = lookup {
+    if let CacheLookup::Hit { thumb, hash } = lookup {
         return (
             JobResult::Done {
                 hash: job.hash,
                 thumb,
                 meta,
                 elapsed: started.elapsed(),
-                // cache hit เกิดกับไฟล์บนดิสก์เท่านั้น — clipboard ไม่เข้า cache
-                spooled: None,
+                // ★ cache hit เกิดกับไฟล์บนดิสก์เท่านั้น — และ hash ที่ cache
+                //   ใช้เป็นคีย์อยู่แล้วคือ hash ของเนื้อไฟล์พอดี
+                origin: Some(ContentOrigin::File(hash)),
             },
             None,
         );
@@ -962,24 +999,38 @@ fn run_job(job: &Job, ctx: &WorkerContext) -> (JobResult, Option<SpoolTask>) {
     // ขั้น 7 (BC7) ถูกตัดออกจาก P1 แล้ว — docs/04 §4
     let thumb = make_thumbnail(&image);
 
-    // ★★★ ภาพที่ **ไม่มีไฟล์ต้นทาง** ต้องได้คีย์จากพิกเซลของมันเอง
-    //
-    //   คีย์ของงานเป็น `clipboard:N` ซึ่งต่างกันทุกครั้งที่วาง · ถ้าเอาไปใช้เป็น
-    //   `AssetRef::hash` จะพังสองทางพร้อมกัน: วางภาพเดิมซ้ำได้ไฟล์ละใบใน spool
-    //   และ `spool::sweep` จะหาชื่อไฟล์ที่ board อ้างถึงไม่เจอ **แล้วลบทิ้ง**
+    // ★★★ คีย์ของ asset มาจาก **เนื้อ** เสมอ ไม่ใช่จากคีย์ของงาน (ดู `ContentOrigin`)
     //
     //   ★ ทำ **ก่อน** ส่ง `Done` เพราะ item ต้องมีคีย์ที่ถูกตั้งแต่ถูกสร้าง
     //   (ราคาคือการ hash ครั้งเดียว ไม่ใช่การ encode ที่กินเป็นวินาที)
-    let spooled = (ctx.spool.is_some() && job.source.file().is_none())
-        .then(|| crate::hash::hash_pasted(image.width(), image.height(), image.as_raw()));
+    let origin = match (job.source.file(), ctx.spool.is_some()) {
+        // ภาพที่วาง — hash ของพิกเซล และกำลังจะไปอยู่ใน spool
+        (None, true) => Some(ContentOrigin::Spooled(crate::hash::hash_pasted(
+            image.width(),
+            image.height(),
+            image.as_raw(),
+        ))),
+        (None, false) => None, // ไม่มีที่พัก = ไม่มีที่ให้ path ชี้ไป
+        // ★ ไฟล์ที่เดินมาถึงตรงนี้แปลว่า cache ตอบไม่ได้ (เปิด DB ไม่ได้ /
+        //   `stat` ล้ม) · ยังต้องรู้คีย์ของเนื้ออยู่ดี ไม่งั้นสัญญาใน
+        //   `docs/02 §2.3` จะจริงเฉพาะตอนที่ cache ทำงาน ซึ่งอ่านไม่ออกเลย
+        //   ว่าทำไมบางเครื่องยุบไฟล์ซ้ำได้ บางเครื่องไม่ได้
+        (Some(path), _) => match &lookup {
+            CacheLookup::Miss(key) => Some(ContentOrigin::File(key.hash)),
+            _ => crate::hash::hash_file(path).ok().map(ContentOrigin::File),
+        },
+    };
 
-    let deferred = spooled.map(|hash| SpoolTask {
-        hash,
-        image,
-        _reservation: reservation,
-    });
-    // ★ ภาพเต็มถูกส่งต่อให้ `SpoolTask` แล้วในกรณี clipboard — กรณีอื่นคืน RAM ทันที
-    //   (ไม่ต้องรอจบฟังก์ชัน) เหมือนเดิมทุกประการ
+    let deferred = match origin {
+        Some(ContentOrigin::Spooled(hash)) => Some(SpoolTask {
+            hash,
+            image,
+            _reservation: reservation,
+        }),
+        // ★ ไฟล์ของผู้ใช้มีที่อยู่ถาวรของมันเองแล้ว — ก๊อปลง spool = เปลืองดิสก์
+        //   สองเท่าโดยไม่ได้อะไร · ภาพเต็มกับใบจองคืน RAM ตรงนี้ทันที
+        _ => None,
+    };
 
     let elapsed = started.elapsed();
 
@@ -1037,7 +1088,7 @@ fn run_job(job: &Job, ctx: &WorkerContext) -> (JobResult, Option<SpoolTask>) {
             thumb: Box::new(thumb),
             meta,
             elapsed,
-            spooled,
+            origin,
         },
         deferred,
     )
@@ -1263,14 +1314,15 @@ fn cache_lookup(
         .flatten();
 
     match hit {
-        Some(entry) if entry.thumb.len() == EXPECTED_THUMB_BYTES => {
-            CacheLookup::Hit(Box::new(Thumbnail {
+        Some(entry) if entry.thumb.len() == EXPECTED_THUMB_BYTES => CacheLookup::Hit {
+            thumb: Box::new(Thumbnail {
                 pixels: entry.thumb,
                 source_width: entry.width,
                 source_height: entry.height,
                 dominant: entry.dominant,
-            }))
-        }
+            }),
+            hash,
+        },
         // แถวขนาดผิด = cache เพี้ยน ถือว่า miss แล้ว decode ใหม่ทับ
         _ => CacheLookup::Miss(key),
     }
@@ -2077,6 +2129,178 @@ mod tests {
         );
     }
 
+    // ---------- ★★★ คีย์ของ asset มาจากเนื้อ ไม่ใช่จาก path (docs/02 §2.3) ----------
+
+    /// เอา `ContentOrigin` ออกมาจากผลที่คาดว่าเป็น `Done`
+    fn origin_of(result: JobResult) -> Option<ContentOrigin> {
+        match result {
+            JobResult::Done { origin, .. } => origin,
+            other => panic!("ต้องสำเร็จ แต่ได้ {other:?}"),
+        }
+    }
+
+    /// ★★★ **สำเนาเดียวกันสองที่อยู่ = คีย์เดียวกัน** — สัญญาข้อ 3 ของ `docs/02 §2.3`
+    ///
+    /// ข้อนี้เป็นจริงไม่ได้เลยถ้าคีย์มาจาก path เพราะสอง path ย่อมต่างกันโดยนิยาม
+    /// · ผลที่ผู้ใช้เจอคือภาพเดียวกันสองใบกิน texture สองชุด และ packed mode
+    /// ฝังไฟล์เดียวกันสองครั้ง
+    /// ★★ ยืนยัน negative control แล้ว (20 ส.ค. 2026): ให้เส้นทางไฟล์คืน
+    /// `job.hash` → ตัวนี้กับ `moving_a_file_never_changes_its_key` และ
+    /// `the_key_does_not_depend_on_whether_the_cache_is_working` แดงทั้งสามตัว
+    #[test]
+    fn two_copies_of_one_file_get_one_key() {
+        let dir = temp_dir("same-bytes");
+        let here = dir.join("here.png");
+        let there = dir.join("somewhere-else.png");
+        // ★ ก๊อปไฟล์ตรง ๆ — ไบต์เหมือนกันเป๊ะ ต่างกันแค่ที่อยู่
+        let src = write_png("same-bytes-src", "src.png", 24, 16);
+        std::fs::copy(&src, &here).unwrap();
+        std::fs::copy(&src, &there).unwrap();
+
+        let pool = test_pool(2);
+        // ★ คีย์ของงานมาจาก path จึงต่างกันแน่นอน — นั่นคือประเด็นทั้งหมด
+        let a = job(here, 0.0, b"here");
+        let b = job(there, 1.0, b"there");
+        assert_ne!(a.hash, b.hash);
+        pool.submit(a);
+        pool.submit(b);
+
+        let mut keys = Vec::new();
+        for _ in 0..2 {
+            let result = pool
+                .results()
+                .recv_timeout(Duration::from_secs(30))
+                .expect("ต้องได้ผลกลับมา");
+            keys.push(origin_of(result).expect("ไฟล์ต้องได้คีย์ของเนื้อ").hash());
+        }
+        assert_eq!(keys[0], keys[1], "สำเนาเดียวกันได้คนละคีย์ — คีย์ยังมาจาก path");
+    }
+
+    /// ★★★ **ย้ายไฟล์แล้วคีย์ต้องไม่เปลี่ยน** — สัญญาข้อ 1 ของ `docs/02 §2.3`
+    ///
+    /// (thumbnail ที่ผูกกับคีย์นี้จึงไม่หายไปตอนผู้ใช้จัดโฟลเดอร์ใหม่)
+    #[test]
+    fn moving_a_file_never_changes_its_key() {
+        let dir = temp_dir("moved");
+        let before = dir.join("ก่อนย้าย.png");
+        let after = dir.join("หลังย้าย.png");
+        std::fs::copy(write_png("moved-src", "src.png", 20, 20), &before).unwrap();
+
+        let pool = test_pool(1);
+        pool.submit(job(before.clone(), 0.0, b"before"));
+        let first = origin_of(
+            pool.results()
+                .recv_timeout(Duration::from_secs(30))
+                .expect("ต้องได้ผลกลับมา"),
+        )
+        .expect("ต้องมีคีย์");
+
+        std::fs::rename(&before, &after).unwrap();
+        pool.submit(job(after, 0.0, b"after"));
+        let second = origin_of(
+            pool.results()
+                .recv_timeout(Duration::from_secs(30))
+                .expect("ต้องได้ผลกลับมา"),
+        )
+        .expect("ต้องมีคีย์");
+
+        assert_eq!(
+            first, second,
+            "ย้ายไฟล์แล้วคีย์เปลี่ยน — thumbnail จะหายทุกครั้งที่จัดโฟลเดอร์"
+        );
+    }
+
+    /// ★★★ **cache hit ก็ต้องรู้คีย์ของเนื้อ** — ไม่งั้นสัญญาจริงเฉพาะตอน cache เย็น
+    ///
+    /// นี่คือกิ่งที่ผู้ใช้เดินผ่านทุกวัน (เปิดไฟล์เดิมซ้ำ) · ถ้ามันลืมคีย์ไป
+    /// item ที่เกิดจาก cache hit จะได้คีย์ของ path แทน แล้วอาการที่ออกมาคือ
+    /// **"เครื่องนี้ยุบไฟล์ซ้ำได้ อีกเครื่องไม่ได้"** ซึ่งไล่หาสาเหตุแทบไม่ได้เลย
+    ///
+    /// เทสต์ตอบ cache เอง (ไม่ต้องมี sqlite จริง) แล้ว **ยิงคีย์สมมติ** เข้าไป
+    /// เพื่อให้เห็นได้ด้วยตาว่าค่าที่ออกมาคือค่าที่ cache ให้ ไม่ใช่ค่าที่บังเอิญตรง
+    ///
+    /// ★★ **กิ่ง cache hit มีเทสต์ตัวนี้ตัวเดียวที่จับได้** — ยืนยันแล้ว
+    /// (20 ส.ค. 2026): ให้กิ่งนั้นคืน `job.hash` → ตัวนี้แดงตัวเดียว ส่วนสาม
+    /// ตัวข้างบนยังเขียว เพราะมันไม่เคยเดินผ่านกิ่งนี้เลย
+    #[test]
+    fn a_cache_hit_still_carries_the_key_of_the_bytes() {
+        let sentinel = ContentHash::from_bytes([0xAB; 32]);
+        let (io_tx, io_rx) = crossbeam_channel::unbounded::<IoRequest>();
+        let responder = std::thread::spawn(move || {
+            for request in io_rx {
+                match request {
+                    IoRequest::LookupPath { reply, .. } => {
+                        let _ = reply.send(Some(sentinel));
+                    }
+                    IoRequest::GetThumb { reply, .. } => {
+                        let _ = reply.send(Some(ThumbEntry {
+                            width: 40,
+                            height: 30,
+                            format: 0,
+                            thumb_fmt: ThumbFormat::Rgba8,
+                            thumb: vec![7u8; EXPECTED_THUMB_BYTES],
+                            dominant: 0,
+                        }));
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let pool = DecodePool::new(
+            1,
+            Arc::new(RamBudget::new(64 << 20)),
+            Limits::default(),
+            Some(io_tx),
+            None,
+            None,
+        );
+        let path = write_png("cache-hit", "warm.png", 40, 30);
+        pool.submit(job(path, 0.0, b"warm"));
+        let result = pool
+            .results()
+            .recv_timeout(Duration::from_secs(30))
+            .expect("ต้องได้ผลกลับมา");
+        // ★ ยืนยันก่อนว่าเดินกิ่ง cache hit จริง (ไม่ได้ decode ใหม่)
+        match &result {
+            JobResult::Done { thumb, .. } => {
+                assert_eq!(thumb.pixels[0], 7, "ไม่ได้มาจาก cache — เทสต์นี้ตรวจผิดกิ่ง");
+            }
+            other => panic!("ต้องสำเร็จ แต่ได้ {other:?}"),
+        }
+        assert_eq!(
+            origin_of(result),
+            Some(ContentOrigin::File(sentinel)),
+            "cache hit ลืมคีย์ของเนื้อ → item จะได้คีย์ของ path แทน"
+        );
+
+        drop(pool);
+        responder.join().expect("responder ต้องจบปกติ");
+    }
+
+    /// ★ ไม่มี cache ให้ใช้เลย (เปิด DB ไม่ได้) **ก็ยังต้องได้คีย์เดียวกัน**
+    ///
+    /// ถ้าคีย์ขึ้นกับว่า cache เปิดได้ไหม ไฟล์ `.refx` ที่บันทึกบนเครื่องที่
+    /// cache พังจะอ้าง asset คนละตัวกับเครื่องปกติ ทั้งที่เป็นภาพใบเดียวกัน
+    #[test]
+    fn the_key_does_not_depend_on_whether_the_cache_is_working() {
+        let path = write_png("no-cache", "a.png", 18, 12);
+        let pool = test_pool(1); // ★ `io` เป็น None = ไม่มี cache
+        pool.submit(job(path.clone(), 0.0, b"no-cache"));
+        let from_pool = origin_of(
+            pool.results()
+                .recv_timeout(Duration::from_secs(30))
+                .expect("ต้องได้ผลกลับมา"),
+        )
+        .expect("ไม่มี cache ก็ต้องรู้คีย์");
+
+        assert_eq!(
+            from_pool,
+            ContentOrigin::File(crate::hash::hash_file(&path).unwrap()),
+            "คีย์ที่ได้ไม่ใช่ hash ของไฟล์"
+        );
+    }
+
     // ---------- ★★★ spool ของภาพที่วาง (P4-5) ----------
 
     /// ที่พักปลอม — จำทุกอย่างที่ถูกเก็บ และ **หน่วงได้ตามสั่ง**
@@ -2164,9 +2388,13 @@ mod tests {
             .recv_timeout(Duration::from_secs(10))
             .expect("Done ต้องมาก่อน โดยไม่ต้องรอ store");
         let spooled = match first {
-            JobResult::Done { thumb, spooled, .. } => {
+            JobResult::Done { thumb, origin, .. } => {
                 assert_eq!((thumb.source_width, thumb.source_height), (32, 24));
-                spooled.expect("ภาพที่วางต้องได้คีย์ของเนื้อภาพติดมาด้วย")
+                match origin.expect("ภาพที่วางต้องได้คีย์ของเนื้อภาพติดมาด้วย")
+                {
+                    ContentOrigin::Spooled(hash) => hash,
+                    other => panic!("ภาพที่วางต้องเป็น Spooled แต่ได้ {other:?}"),
+                }
             }
             other => panic!("ข้อความแรกต้องเป็น Done แต่ได้ {other:?}"),
         };
@@ -2214,13 +2442,13 @@ mod tests {
             pool.submit(job);
             // Done แล้ว Spooled สลับกันไป — worker ตัวเดียวจึงเป็นคู่ ๆ เสมอ
             for _ in 0..2 {
-                if let JobResult::Done { hash, spooled, .. } = pool
+                if let JobResult::Done { hash, origin, .. } = pool
                     .results()
                     .recv_timeout(Duration::from_secs(30))
                     .expect("ต้องได้ผลกลับมา")
                 {
                     assert_eq!(hash, job_keys[n as usize]);
-                    content_keys.push(spooled.expect("ต้องมีคีย์ของเนื้อภาพ"));
+                    content_keys.push(origin.expect("ต้องมีคีย์ของเนื้อภาพ").hash());
                 }
             }
         }
@@ -2275,8 +2503,8 @@ mod tests {
             .recv_timeout(Duration::from_secs(30))
             .expect("ต้องได้ผลกลับมา")
         {
-            JobResult::Done { spooled, .. } => assert!(
-                spooled.is_none(),
+            JobResult::Done { origin, .. } => assert!(
+                origin.is_none(),
                 "ไม่มีที่พักแต่ยังบอกว่าภาพถูกพักไว้ — path ที่ชี้ไปที่ว่างคือ I-3"
             ),
             other => panic!("ต้องสำเร็จ แต่ได้ {other:?}"),
@@ -2302,7 +2530,10 @@ mod tests {
             .recv_timeout(Duration::from_secs(30))
             .expect("ต้องได้ผลกลับมา")
         {
-            JobResult::Done { spooled, .. } => assert!(spooled.is_none()),
+            JobResult::Done { origin, .. } => assert!(
+                matches!(origin, Some(ContentOrigin::File(_))),
+                "ไฟล์ของผู้ใช้ต้องได้คีย์แบบ File ไม่ใช่ {origin:?}"
+            ),
             other => panic!("ต้องสำเร็จ แต่ได้ {other:?}"),
         }
         assert!(

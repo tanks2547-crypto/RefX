@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use glam::Vec2;
 use refx_asset::cache::{CacheStats, IoRequest, IoThread};
-use refx_asset::pool::DecodePool;
+use refx_asset::pool::{ContentOrigin, DecodePool};
 use refx_core::arena::ItemId;
 use refx_core::board::{AssetRef, Board, ImageFormat, Item, ItemCanvas, ItemKind};
 use refx_core::board::{Flip, ItemFilter, ItemMeta};
@@ -1491,28 +1491,33 @@ pub struct RefxApp {
 /// จุดเรียกจริงอยู่ในกลางลูปที่ต้องมี GPU ถึงจะรันได้ — เทสต์จึงเรียกตัวนี้ตรง ๆ
 /// ไม่ใช่เขียนตรรกะเลียนแบบขึ้นมาใหม่ (`docs/08 §3.9` ข้อ 9)
 ///
-/// | ภาพมาจากไหน | คีย์ | path |
+/// | worker ตอบอะไรมา | คีย์ | path |
 /// |---|---|---|
-/// | ไฟล์ของผู้ใช้ | คีย์ของงาน (มาจาก path — คงที่ข้าม session) | path ของผู้ใช้ |
-/// | clipboard | ★ **hash ของเนื้อภาพ** | `<spool_dir>/<hash>.png` |
+/// | `File(hash)` | ★ **hash ของไบต์ในไฟล์** | path ของผู้ใช้ (ผู้เรียกเติมเอง) |
+/// | `Spooled(hash)` | ★ **hash ของพิกเซล** | `<spool_dir>/<hash>.png` |
+/// | `None` | คีย์ของงาน (ทางถอยเมื่อ hash ไม่ได้) | path ของผู้ใช้ |
 ///
-/// ★★ คีย์ของงาน clipboard เป็น `clipboard:N` ที่ต่างกันทุกครั้งที่วาง ถ้าเอามัน
-/// ไปเป็น `AssetRef::hash` จะพังสองทางพร้อมกัน: [`refx_io::spool::sweep`] จะหา
-/// ชื่อไฟล์ที่ board อ้างถึงไม่เจอ **แล้วลบภาพทิ้ง** (I-3) และวางภาพเดิมซ้ำ
-/// จะได้ไฟล์ละใบทั้งที่เนื้อเหมือนกัน
-fn pasted_asset_location(
+/// ★★ **คีย์ของงานเป็นคีย์ของ *ที่อยู่* ไม่ใช่ของ *เนื้อ*** — `hash_bytes(path)`
+/// สำหรับไฟล์ และ `clipboard:N` สำหรับภาพที่วาง · `docs/02 §2.3` บังคับให้
+/// `AssetRef::hash` เป็นคีย์ของเนื้อ และผูกสามสัญญาไว้กับข้อนั้น (ย้ายไฟล์แล้ว
+/// thumbnail ไม่หาย · relink ค้นด้วย hash · ไฟล์ซ้ำถูกยุบ) — ดู [`ContentOrigin`]
+fn asset_location(
     spool_dir: Option<&std::path::Path>,
     job_hash: refx_core::hash::ContentHash,
-    spooled: Option<refx_core::hash::ContentHash>,
+    origin: Option<ContentOrigin>,
 ) -> (refx_core::hash::ContentHash, Option<std::path::PathBuf>) {
-    match spooled {
+    match origin {
         // ★ path หาได้จาก hash ล้วน ๆ จึงเขียนลง `AssetRef` ได้ **ตั้งแต่ตอนนี้**
         //   ทั้งที่ไฟล์ยังเขียนไม่เสร็จ — จำเป็น เพราะ snapshot ที่ถูกเขียนใน
         //   ช่วงนั้นต้องกู้คืนได้เหมือนกัน
-        Some(content) => (
+        Some(ContentOrigin::Spooled(content)) => (
             content,
             spool_dir.map(|dir| refx_io::spool::spool_path(dir, content)),
         ),
+        // ไฟล์ของผู้ใช้อยู่ที่เดิมของมัน — เปลี่ยนแค่ *คีย์* ไม่ใช่ที่อยู่
+        Some(ContentOrigin::File(content)) => (content, None),
+        // ★ ทางถอย: hash ไม่ได้ (ไฟล์หายระหว่างทาง) — ใช้คีย์ของงานต่อไป
+        //   ภาพยังขึ้นจอได้ แค่ไม่ถูกยุบกับสำเนาอื่นและ relink ด้วย hash ไม่ได้
         None => (job_hash, None),
     }
 }
@@ -1928,7 +1933,7 @@ impl RefxApp {
                     thumb,
                     meta,
                     elapsed,
-                    spooled,
+                    origin,
                 } => {
                     tracing::debug!(hash = %hash.short(), ?elapsed, "image decoded");
                     // ไม่รู้จักคีย์ = ไม่มีไฟล์ให้กลับไปอ่าน จึงถือเป็นภาพที่ขอคมกว่านี้
@@ -1938,7 +1943,7 @@ impl RefxApp {
                         .get(&hash)
                         .cloned()
                         .unwrap_or(refx_asset::pool::JobSource::Clipboard);
-                    done.push((hash, source, thumb, meta, spooled));
+                    done.push((hash, source, thumb, meta, origin));
                 }
                 // ★★★ ภาพที่วางลงดิสก์แล้ว → **ปลดล็อกการขอภาพคมของใบนั้น**
                 //
@@ -2089,10 +2094,10 @@ impl RefxApp {
         if !done.is_empty()
             && let Some(gfx) = self.gfx.as_mut()
         {
-            for (hash, source, thumb, meta, spooled) in done {
-                // ★★★ คีย์และที่อยู่ของภาพใบนี้ — ดู `pasted_asset_location`
+            for (hash, source, thumb, meta, origin) in done {
+                // ★★★ คีย์และที่อยู่ของภาพใบนี้ — ดู `asset_location`
                 let (asset_hash, spooled_path) =
-                    pasted_asset_location(self.spool_dir.as_deref(), hash, spooled);
+                    asset_location(self.spool_dir.as_deref(), hash, origin);
                 match Self::upload_thumb(gfx, &thumb.pixels) {
                     Ok(slot) => {
                         // ★★★ ภาพของ board ที่ **เปิดมาจากไฟล์** — item มีอยู่แล้ว
@@ -2101,12 +2106,25 @@ impl RefxApp {
                         //   /แท็ก/ดาว/กลุ่ม/โน้ต มาจากไฟล์ครบแล้ว · สร้างใบใหม่ตรงนี้
                         //   = ผู้ใช้เห็นภาพซ้ำสองชุด ชุดหนึ่งอยู่ผิดที่ทั้งหมด
                         if let Some(id) = self.relink_targets.remove(&hash) {
-                            if gfx.board.item(id).is_some() {
+                            // ★★★ item ที่มาจากไฟล์ **มีคีย์ของมันอยู่แล้ว** —
+                            //     งานนี้เอาแต่ *พิกเซล* มาเติม ไม่ได้มาตั้งชื่อใหม่
+                            //
+                            //     ★ ถ้าเขียนทับด้วยคีย์ที่เพิ่ง hash ได้ จะเพี้ยน
+                            //     ทันทีกับภาพที่วาง: ชื่อไฟล์ใน spool คือ hash ของ
+                            //     **พิกเซล** ส่วนการ hash ไฟล์ PNG นั้นให้คนละค่า
+                            //     — `render_state` กับ `Board` จะชี้คนละ asset
+                            //     ทั้งที่เป็นภาพใบเดียวกัน
+                            let stored = gfx.board.item(id).and_then(|item| match &item.kind {
+                                ItemKind::Image(asset) => Some(asset.hash),
+                                // โน้ต/ใบที่ยังเป็น Missing ไม่ใช่เป้าของ relink
+                                ItemKind::Text(_) | ItemKind::Missing { .. } => None,
+                            });
+                            if let Some(stored) = stored {
                                 gfx.render_state.insert(
                                     id,
                                     ItemRender {
                                         source,
-                                        hash,
+                                        hash: stored,
                                         tint: dominant_rgba(thumb.dominant),
                                         thumb: *thumb,
                                         slot: Some(slot),
@@ -6895,11 +6913,11 @@ mod tests {
 
     /// ★★★ **ภาพที่วางแล้วยังไม่ได้บันทึก ต้องไม่ถูก `sweep` ลบทิ้ง**
     ///
-    /// นี่คือเส้นทางเต็มของกติกาข้อ 1: คีย์ที่ `pasted_asset_location` เลือก →
+    /// นี่คือเส้นทางเต็มของกติกาข้อ 1: คีย์ที่ `asset_location` เลือก →
     /// ชื่อไฟล์ที่ `SpoolSink` เขียน → hash ที่ `sweep` เห็นจาก board
     /// **สามจุดนี้ต้องเป็นค่าเดียวกัน** ถ้าจุดไหนหลุด ผู้ใช้เสียภาพถาวร (I-3)
     ///
-    /// ★ เทสต์เรียก `pasted_asset_location` **ตัวที่ `drain_decode_results` ใช้จริง**
+    /// ★ เทสต์เรียก `asset_location` **ตัวที่ `drain_decode_results` ใช้จริง**
     /// ไม่ใช่ตรรกะที่เขียนเลียนแบบ (`docs/08 §3.9` ข้อ 9)
     #[test]
     fn a_pasted_image_the_board_points_at_is_never_swept() {
@@ -6909,7 +6927,8 @@ mod tests {
         let content = refx_asset::hash::hash_pasted(2, 2, &[7u8; 16]);
         let job_key = refx_asset::hash::hash_bytes(b"clipboard:1");
 
-        let (asset_hash, path) = pasted_asset_location(Some(&dir), job_key, Some(content));
+        let (asset_hash, path) =
+            asset_location(Some(&dir), job_key, Some(ContentOrigin::Spooled(content)));
         let path = path.expect("ภาพที่วางต้องได้ที่อยู่ของมัน");
         assert_eq!(asset_hash, content, "คีย์ต้องเป็นของเนื้อภาพ ไม่ใช่ของงาน");
 
@@ -6934,7 +6953,7 @@ mod tests {
 
     /// ★★★ negative control ของข้อบน — **ใช้คีย์ของงานแล้วภาพหายจริง**
     ///
-    /// ถ้าไม่มีเทสต์นี้ ข้อบนจะเขียวเท่ากันแม้ `pasted_asset_location` คืนคีย์อะไร
+    /// ถ้าไม่มีเทสต์นี้ ข้อบนจะเขียวเท่ากันแม้ `asset_location` คืนคีย์อะไร
     /// ก็ตาม เพราะทั้ง board และไฟล์จะใช้ค่าเดียวกันอยู่ดี · สิ่งที่พังจริงคือ
     /// **สอง session**: `clipboard:1` ของวันนี้ไม่ใช่ `clipboard:1` ของพรุ่งนี้
     #[test]
@@ -6974,10 +6993,10 @@ mod tests {
     fn a_pasted_image_always_has_a_path_to_come_back_from() {
         let dir = std::path::Path::new("/data/RefX/pasted");
         let content = refx_asset::hash::hash_pasted(1, 1, &[1u8; 4]);
-        let (hash, path) = pasted_asset_location(
+        let (hash, path) = asset_location(
             Some(dir),
             refx_asset::hash::hash_bytes(b"job"),
-            Some(content),
+            Some(ContentOrigin::Spooled(content)),
         );
 
         let path = path.expect("ไม่มี path = ภาพหายตอนกู้คืน");
@@ -6990,17 +7009,51 @@ mod tests {
         );
     }
 
-    /// ภาพจากไฟล์ของผู้ใช้ต้องไม่ถูกแตะ — คีย์เดิม ไม่มี path ของ spool
+    /// ★★★ **ไฟล์ของผู้ใช้ต้องได้คีย์ของ *เนื้อไฟล์* ไม่ใช่ของ path** (`docs/02 §2.3`)
+    ///
+    /// และต้อง **ไม่** ถูกลากไปชี้ที่ spool — มันมีที่อยู่ถาวรของมันเองอยู่แล้ว
     #[test]
-    fn an_image_from_a_real_file_is_left_exactly_as_it_was() {
+    fn a_file_gets_the_key_of_its_bytes_not_of_its_path() {
         let job_key = refx_asset::hash::hash_bytes(b"C:/ref/cat.png");
-        let (hash, path) = pasted_asset_location(
+        let content = refx_asset::hash::hash_bytes("ไบต์ของภาพแมว".as_bytes());
+        assert_ne!(content, job_key);
+
+        let (hash, path) = asset_location(
             Some(std::path::Path::new("/data/RefX/pasted")),
             job_key,
-            None,
+            Some(ContentOrigin::File(content)),
         );
-        assert_eq!(hash, job_key);
+        assert_eq!(hash, content, "คีย์ยังเป็นของ path อยู่");
         assert_eq!(path, None, "ไฟล์ของผู้ใช้ถูกลากไปชี้ที่ spool");
+    }
+
+    /// ★★★ **สำเนาเดียวกันสองที่อยู่ = คีย์เดียวกัน** — สัญญาข้อที่สามของ `docs/02 §2.3`
+    ///
+    /// นี่คือข้อที่ *เห็นไม่ได้เลย* ถ้าคีย์มาจาก path เพราะสอง path ย่อมต่างกัน
+    /// เสมอโดยนิยาม · ผลที่ผู้ใช้เจอคือ mood board ที่มีภาพเดียวกันสองใบกิน
+    /// texture สองชุด และ packed mode ฝังไฟล์เดียวกันสองครั้ง
+    #[test]
+    fn the_same_picture_in_two_places_collapses_to_one_asset() {
+        let content = refx_asset::hash::hash_bytes("ไบต์ชุดเดียวกัน".as_bytes());
+        let here = refx_asset::hash::hash_bytes(b"C:/ref/a/cat.png");
+        let there = refx_asset::hash::hash_bytes(b"D:/backup/b/cat-copy.png");
+        assert_ne!(here, there, "สอง path ต้องให้คีย์ของงานคนละตัว");
+
+        let (a, _) = asset_location(None, here, Some(ContentOrigin::File(content)));
+        let (b, _) = asset_location(None, there, Some(ContentOrigin::File(content)));
+        assert_eq!(a, b, "สำเนาเดียวกันได้คนละ asset");
+    }
+
+    /// ★ hash ไม่ได้ (ไฟล์หายระหว่างทาง) → **ถอยไปใช้คีย์ของงาน ไม่ใช่ล้ม**
+    ///
+    /// ภาพยังขึ้นจอได้ตามปกติ สิ่งที่เสียไปคือการยุบไฟล์ซ้ำกับการ relink ด้วย
+    /// hash ซึ่งทั้งคู่เป็นของแถม ส่วน "ภาพต้องขึ้นจอ" คือ I-3
+    #[test]
+    fn a_file_we_could_not_hash_still_becomes_a_picture() {
+        let job_key = refx_asset::hash::hash_bytes(b"C:/ref/gone.png");
+        let (hash, path) = asset_location(None, job_key, None);
+        assert_eq!(hash, job_key);
+        assert_eq!(path, None);
     }
 
     // ---------- ★★★ P4-4: งานที่ยังไม่เคยบันทึกต้องมีที่ให้ autosave ----------
