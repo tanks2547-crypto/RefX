@@ -26,6 +26,7 @@ pub mod layout; // layout engines — pure functions, deterministic
 pub mod panic_guard; // ธงบอก panic hook ว่า panic นี้ถูกดักไว้แล้ว (I-7)
 pub mod pick; // color picker (world → pixel ต้นฉบับ) + measure — pure functions
 pub mod query; // sort + filter ของ Arrange — pure functions, deterministic
+pub mod relink; // ตามหาไฟล์ที่หายไป 5 ขั้น — pure, IO ถูกส่งเข้ามาเป็น closure (P4-6)
 pub mod selection;
 pub mod spatial; // loose uniform grid: culling + hit-test
 pub mod spool; // trait ที่พักภาพจาก clipboard — ชั้นบนเสียบตัวจริงให้ (P4-5) // ContentHash — ชนิดล้วน ๆ ส่วนคนคำนวณอยู่ refx-asset

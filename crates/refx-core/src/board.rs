@@ -1317,6 +1317,45 @@ impl Board {
         Ok(previous)
     }
 
+    /// ★★★ เปลี่ยน **ที่มาของพิกเซล** ของ item คืนของเดิม — หัวใจของ relink (P4-6)
+    ///
+    /// นี่คือ mutator ตัวเดียวที่สลับ [`ItemKind`] ได้ และมันมีอยู่เพื่อสองการ
+    /// เปลี่ยนที่เป็นเรื่องเดียวกัน:
+    ///
+    /// | จาก | เป็น | เมื่อไหร่ |
+    /// |---|---|---|
+    /// | [`ItemKind::Missing`] | [`ItemKind::Image`] | หาไฟล์เจอแล้ว |
+    /// | [`ItemKind::Image`] | [`ItemKind::Missing`] | เปิดไฟล์มาแล้วภาพหาย |
+    /// | [`ItemKind::Image`] | [`ItemKind::Image`] | ซ่อมคีย์/ที่อยู่ (`docs/07 §2`) |
+    ///
+    /// ★★ **ปฏิเสธโน้ตข้อความ** ด้วยเหตุผลเดียวกับ [`Self::set_text`] ที่ปฏิเสธภาพ:
+    /// การเขียนทับข้าม kind ทำให้เนื้อหาที่ผู้ใช้พิมพ์หายทั้งก้อน (I-3)
+    ///
+    /// ★ ตำแหน่ง/ขนาด/หมุน/ครอป/ฟิลเตอร์/แท็ก **ไม่ถูกแตะ** — relink เปลี่ยนแค่
+    /// ว่าพิกเซลมาจากไหน ไม่ใช่ว่ามันวางอยู่ตรงไหน
+    ///
+    /// # Errors
+    /// [`BoardError::NoSuchItem`] ถ้า id ตายไปแล้ว หรือ item นั้นเป็นโน้ตข้อความ
+    pub(crate) fn set_source(
+        &mut self,
+        id: ItemId,
+        kind: ItemKind,
+    ) -> Result<ItemKind, BoardError> {
+        if matches!(kind, ItemKind::Text(_)) {
+            return Err(BoardError::NoSuchItem { id });
+        }
+        let item = self
+            .items
+            .get_mut(id)
+            .ok_or(BoardError::NoSuchItem { id })?;
+        if matches!(item.kind, ItemKind::Text(_)) {
+            return Err(BoardError::NoSuchItem { id });
+        }
+        let previous = std::mem::replace(&mut item.kind, kind);
+        self.touch();
+        Ok(previous)
+    }
+
     /// แก้ `ItemMeta` คืนค่าเดิม
     ///
     /// # Errors

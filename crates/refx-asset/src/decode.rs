@@ -302,9 +302,11 @@ pub fn read_file_guarded(path: &std::path::Path, limits: &Limits) -> Result<Vec<
 
 /// ชื่อไฟล์อย่างเดียว — **ห้ามใส่ path เต็มลง log** (มีชื่อผู้ใช้อยู่ในนั้น, docs/08 §5)
 ///
-/// `pub(crate)` เพราะ decode pool ต้องใช้กติกาเดียวกันตอนตั้งป้ายให้งาน
-/// ถ้าเขียนซ้ำอีกที่ วันหนึ่งจะมีที่ใดที่หนึ่งหลุด path เต็มลง log
-pub(crate) fn file_label(path: &std::path::Path) -> String {
+/// ★ เปิดเป็น `pub` ตอน P4-6 (เดิม `pub(crate)`) — ชั้น UI ต้องใช้กติกาเดียวกัน
+/// ตอนบอกผู้ใช้ว่า **ไฟล์ไหนหาย** และตอน log ผลการ relink · เหตุผลเดิมยังอยู่
+/// ครบ: ถ้าเขียนซ้ำอีกที่ วันหนึ่งจะมีที่ใดที่หนึ่งหลุด path เต็มลง log
+#[must_use]
+pub fn file_label(path: &std::path::Path) -> String {
     path.file_name().map_or_else(
         || "(unknown file)".to_owned(),
         |n| n.to_string_lossy().into_owned(),

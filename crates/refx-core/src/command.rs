@@ -22,7 +22,7 @@ use std::any::Any;
 use std::collections::VecDeque;
 
 use crate::arena::{GroupId, ItemId};
-use crate::board::{Board, BoardError, Group, Item, ItemCanvas, ItemMeta, TagId};
+use crate::board::{Board, BoardError, Group, Item, ItemCanvas, ItemKind, ItemMeta, TagId};
 use crate::geom::Rect;
 use crate::layout::Placed;
 
@@ -772,6 +772,152 @@ impl Command for ReorderZ {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RelinkAssets  (P4-6)
+// ---------------------------------------------------------------------------
+
+/// ★★★ ผูก item เข้ากับที่มาของพิกเซลใหม่ — relink (`docs/07 §2`)
+///
+/// คำสั่งเดียวครอบทั้งสามทิศ เพราะทั้งสามคือเรื่องเดียวกัน (*"พิกเซลของ item นี้
+/// มาจากไหน"*) และผู้ใช้เห็นมันเป็นการกระทำเดียว:
+///
+/// | จาก | เป็น | เกิดตอนไหน |
+/// |---|---|---|
+/// | `Missing` | `Image` | หาไฟล์เจอ (ขั้น 1–3 หรือผู้ใช้ชี้เอง) |
+/// | `Image` | `Missing` | เปิดไฟล์มาแล้วภาพหายจากเครื่อง |
+/// | `Image` | `Image` | ซ่อมคีย์ที่เป็น hash ของ *path* ให้เป็นของ *เนื้อ* |
+///
+/// ★★ **merge ได้** เพราะผลลัพธ์ทยอยกลับมาทีละใบข้ามหลายเฟรม · ถ้าไม่ merge
+/// การเปิดไฟล์ที่มีภาพหาย 200 ใบจะดัน undo stack 200 ขั้นที่ผู้ใช้ต้องกด Ctrl+Z
+/// สองร้อยครั้งเพื่อย้อนสิ่งที่เขาเห็นเป็นการกระทำเดียว
+///
+/// ★ ตำแหน่ง/ขนาด/หมุน/ครอป/แท็ก **ไม่ถูกแตะ** — ดู [`Board::set_source`]
+#[derive(Debug)]
+pub struct RelinkAssets {
+    changes: Vec<Change<ItemKind>>,
+}
+
+impl RelinkAssets {
+    /// สร้างคำสั่งจากรายการ (id, ที่มาใหม่)
+    ///
+    /// # Errors
+    /// [`CmdError::Empty`] ถ้ารายการว่าง หรือ id ไหนไม่มีอยู่/เป็นโน้ตข้อความ
+    pub fn new(board: &Board, targets: Vec<(ItemId, ItemKind)>) -> Result<Self, CmdError> {
+        let mut changes = Vec::with_capacity(targets.len());
+        for (id, after) in targets {
+            let Some(item) = board.item(id) else {
+                continue; // item ถูกลบไประหว่างที่งานค้นหาเดินอยู่
+            };
+            if matches!(item.kind, ItemKind::Text(_)) || matches!(after, ItemKind::Text(_)) {
+                continue;
+            }
+            // ★ ไม่มีอะไรเปลี่ยน = ไม่ต้องมีขั้น undo (เคสปกติของไฟล์ที่ยังอยู่ที่เดิม)
+            if item.kind == after {
+                continue;
+            }
+            changes.push(Change {
+                id,
+                before: Some(item.kind.clone()),
+                after,
+            });
+        }
+        if changes.is_empty() {
+            return Err(CmdError::Empty);
+        }
+        Ok(Self { changes })
+    }
+}
+
+impl Command for RelinkAssets {
+    fn apply(&mut self, board: &mut Board) -> Result<(), CmdError> {
+        let mut done: Vec<(ItemId, ItemKind)> = Vec::with_capacity(self.changes.len());
+        for change in &self.changes {
+            match board.set_source(change.id, change.after.clone()) {
+                Ok(previous) => done.push((change.id, previous)),
+                Err(err) => {
+                    // ★ ล้มกลางคัน — คืนของที่แก้ไปแล้วให้ครบก่อนรายงาน
+                    for (id, previous) in done.into_iter().rev() {
+                        let _ = board.set_source(id, previous);
+                    }
+                    return Err(err.into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn undo(&mut self, board: &mut Board) -> Result<(), CmdError> {
+        let mut done: Vec<(ItemId, ItemKind)> = Vec::with_capacity(self.changes.len());
+        for change in &self.changes {
+            // `before` ถูกเติมตั้งแต่ตอนสร้าง — ไม่มีทางว่างในคำสั่งนี้
+            let Some(before) = change.before.clone() else {
+                continue;
+            };
+            match board.set_source(change.id, before) {
+                Ok(previous) => done.push((change.id, previous)),
+                Err(err) => {
+                    for (id, previous) in done.into_iter().rev() {
+                        let _ = board.set_source(id, previous);
+                    }
+                    return Err(err.into());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// รวมงวดที่ทยอยกลับมาให้เป็นขั้นเดียว
+    ///
+    /// ★ item ที่โผล่ในทั้งสองงวดใช้ `after` ของงวดใหม่ แต่เก็บ `before` ของ
+    /// **งวดแรก** ไว้ — undo ต้องกลับไปที่สภาพก่อนเริ่มทั้งชุด ไม่ใช่สภาพกลางทาง
+    fn merge(&mut self, next: &dyn Command) -> bool {
+        let Some(next) = next.as_any().downcast_ref::<Self>() else {
+            return false;
+        };
+        for incoming in &next.changes {
+            if let Some(mine) = self.changes.iter_mut().find(|c| c.id == incoming.id) {
+                mine.after = incoming.after.clone();
+            } else {
+                self.changes.push(incoming.clone());
+            }
+        }
+        true
+    }
+
+    fn affected(&self) -> Vec<ItemId> {
+        self.changes.iter().map(|change| change.id).collect()
+    }
+
+    fn label(&self) -> &'static str {
+        "Relink images"
+    }
+
+    fn heap_size(&self) -> usize {
+        self.changes
+            .iter()
+            .map(|change| {
+                std::mem::size_of::<Change<ItemKind>>()
+                    + change.before.as_ref().map_or(0, kind_heap_size)
+                    + kind_heap_size(&change.after)
+            })
+            .sum()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// ไบต์บน heap ที่ `ItemKind` ตัวหนึ่งถือไว้ (I-6 — เพดานของ `History`)
+#[must_use]
+fn kind_heap_size(kind: &ItemKind) -> usize {
+    match kind {
+        ItemKind::Image(asset) => asset.path.as_os_str().len(),
+        ItemKind::Text(note) => note.text.len(),
+        ItemKind::Missing { original_path, .. } => original_path.as_os_str().len(),
     }
 }
 
@@ -1922,6 +2068,201 @@ mod tests {
             pos: Vec2::new(x, y),
             ..ItemCanvas::default()
         }
+    }
+
+    // ---------- P4-6: RelinkAssets ----------
+
+    fn missing_kind(path: &str) -> ItemKind {
+        ItemKind::Missing {
+            original_path: std::path::PathBuf::from(path),
+            reason: crate::board::MissingReason::FileNotFound,
+        }
+    }
+
+    /// ★★★ **relink เปลี่ยนแค่ที่มาของพิกเซล ไม่แตะสิ่งที่ผู้ใช้จัดไว้**
+    ///
+    /// ตำแหน่ง/ขนาด/หมุน/ครอป/ฟิลเตอร์/แท็ก/ดาว/โน้ต คือ *งาน* ของผู้ใช้
+    /// การหาไฟล์เจอไม่ควรแตะมันแม้แต่ค่าเดียว (I-3)
+    #[test]
+    fn relinking_never_touches_what_the_user_arranged() {
+        let mut board = Board::default();
+        let id = board.insert_item(image_item(1));
+        board
+            .set_canvas(id, moved_to(123.0, 456.0))
+            .expect("ตั้งตำแหน่งไม่ได้");
+        let meta = ItemMeta {
+            rating: 4,
+            note: "ใช้ใบนี้เป็นหลัก".to_owned(),
+            ..ItemMeta::default()
+        };
+        board.set_meta(id, meta.clone()).expect("ตั้ง meta ไม่ได้");
+        let canvas_before = board.item(id).unwrap().canvas;
+
+        let mut history = History::default();
+        let command = RelinkAssets::new(&board, vec![(id, missing_kind("1.png"))]).unwrap();
+        history.apply(&mut board, Box::new(command)).unwrap();
+
+        let item = board.item(id).unwrap();
+        assert!(matches!(item.kind, ItemKind::Missing { .. }), "ที่มาต้องเปลี่ยน");
+        assert_eq!(item.canvas, canvas_before, "ตำแหน่ง/ขนาดถูกแตะ");
+        assert_eq!(item.meta.rating, 4, "ดาวหาย");
+        assert_eq!(item.meta.note, "ใช้ใบนี้เป็นหลัก", "โน้ตหาย");
+    }
+
+    /// ★★★ undo ต้องคืน **สภาพก่อนหน้าเป๊ะ** ทั้งสองทิศ
+    #[test]
+    fn undo_puts_the_old_source_back_exactly() {
+        let mut board = Board::default();
+        let id = board.insert_item(image_item(3));
+        let before = board.item(id).unwrap().kind.clone();
+        let mut history = History::default();
+
+        let command = RelinkAssets::new(&board, vec![(id, missing_kind("3.png"))]).unwrap();
+        history.apply(&mut board, Box::new(command)).unwrap();
+        history.undo(&mut board).unwrap();
+
+        assert_eq!(board.item(id).unwrap().kind, before);
+
+        // และ redo ต้องกลับไปสภาพหลังได้ด้วย
+        history.redo(&mut board).unwrap();
+        assert!(matches!(
+            board.item(id).unwrap().kind,
+            ItemKind::Missing { .. }
+        ));
+    }
+
+    /// ★★ ผลลัพธ์ที่ทยอยกลับมาหลายงวด = **undo ขั้นเดียว**
+    ///
+    /// เปิดไฟล์ที่มีภาพหาย 200 ใบแล้วผลกลับมาคนละเฟรม ถ้าไม่ merge ผู้ใช้ต้อง
+    /// กด `Ctrl+Z` สองร้อยครั้งเพื่อย้อนสิ่งที่เขาเห็นเป็นการกระทำเดียว
+    #[test]
+    fn results_that_trickle_in_over_many_frames_are_one_undo_step() {
+        let mut board = Board::default();
+        let a = board.insert_item(image_item(1));
+        let b = board.insert_item(image_item(2));
+        let before_a = board.item(a).unwrap().kind.clone();
+        let before_b = board.item(b).unwrap().kind.clone();
+        let mut history = History::default();
+
+        for id in [a, b] {
+            let command = RelinkAssets::new(&board, vec![(id, missing_kind("x.png"))]).unwrap();
+            history.apply(&mut board, Box::new(command)).unwrap();
+        }
+        assert_eq!(history.undo_depth(), 1, "ควรยุบเป็นขั้นเดียว");
+
+        history.undo(&mut board).unwrap();
+        assert_eq!(board.item(a).unwrap().kind, before_a, "ใบแรกไม่ได้ถูกย้อน");
+        assert_eq!(board.item(b).unwrap().kind, before_b, "ใบที่สองไม่ได้ถูกย้อน");
+    }
+
+    /// ★★★ **สอง "งวด" ที่คนละเวลา ต้องเป็นคนละขั้น undo** (docs/02 §3 — `seal`)
+    ///
+    /// การผูกไฟล์ตอนเปิดเอกสาร กับการที่ผู้ใช้กด "หาไฟล์เอง" อีกสิบนาทีต่อมา
+    /// เป็นการกระทำคนละครั้งในสายตาเขา · ถ้ารวมกัน `Ctrl+Z` ครั้งเดียวจะย้อน
+    /// ทั้งสองเรื่องพร้อมกัน ซึ่งเป็นกับดักเดียวกับที่ `seal` มีไว้กันตอนลากเมาส์
+    ///
+    /// ★ เจอตอนยืนยันบนแอปจริง (21 ส.ค. 2026): กด `Ctrl+Z` หลัง relink แล้ว
+    /// ภาพไม่กลับไปเป็น `Missing` เพราะมันย้อนข้ามไปถึงสภาพตอนเปิดไฟล์
+    #[test]
+    fn a_sealed_run_is_never_merged_into_the_one_before_it() {
+        let mut board = Board::default();
+        let id = board.insert_item(image_item(1));
+        let mut history = History::default();
+
+        let first = RelinkAssets::new(&board, vec![(id, missing_kind("1.png"))]).unwrap();
+        history.apply(&mut board, Box::new(first)).unwrap();
+        history.seal(); // ← งวดแรกจบแล้ว (ของจริงเรียกตอนเริ่มงวดถัดไป)
+        let after_first = board.item(id).unwrap().kind.clone();
+
+        let second = RelinkAssets::new(&board, vec![(id, image_item(9).kind)]).unwrap();
+        history.apply(&mut board, Box::new(second)).unwrap();
+
+        assert_eq!(history.undo_depth(), 2, "สองงวดถูกยุบเป็นขั้นเดียว");
+        history.undo(&mut board).unwrap();
+        assert_eq!(
+            board.item(id).unwrap().kind,
+            after_first,
+            "undo ย้อนข้ามไปไกลกว่าหนึ่งงวด"
+        );
+    }
+
+    /// ★★★ merge แล้ว undo ต้องกลับไป **สภาพก่อนเริ่มทั้งชุด** ไม่ใช่สภาพกลางทาง
+    ///
+    /// item ใบเดียวถูกแก้สองงวด (เจอ → ซ่อมคีย์) · ถ้า merge เก็บ `before` ของ
+    /// งวดหลัง การ undo จะคืนสภาพกลางทางที่ผู้ใช้ไม่เคยเห็น
+    #[test]
+    fn merging_keeps_the_state_from_before_the_whole_run() {
+        let mut board = Board::default();
+        let id = board.insert_item(image_item(1));
+        let original = board.item(id).unwrap().kind.clone();
+        let mut history = History::default();
+
+        let first = RelinkAssets::new(&board, vec![(id, missing_kind("1.png"))]).unwrap();
+        history.apply(&mut board, Box::new(first)).unwrap();
+        let second = RelinkAssets::new(&board, vec![(id, image_item(9).kind)]).unwrap();
+        history.apply(&mut board, Box::new(second)).unwrap();
+
+        history.undo(&mut board).unwrap();
+        assert_eq!(
+            board.item(id).unwrap().kind,
+            original,
+            "undo คืนสภาพกลางทาง ไม่ใช่สภาพก่อนเริ่ม"
+        );
+    }
+
+    /// ★★ ไม่มีอะไรเปลี่ยน = **ไม่มีขั้น undo** (เคสปกติของไฟล์ที่ยังอยู่ที่เดิม)
+    ///
+    /// ถ้าปล่อยผ่าน การเปิดไฟล์ทุกครั้งจะดันขั้นเปล่าเข้า undo stack และทำให้
+    /// เอกสาร dirty ทั้งที่ไม่มีอะไรเปลี่ยน — ซึ่ง `docs/02 §2.9` เตือนไว้ตรง ๆ
+    #[test]
+    fn relinking_a_file_that_did_not_move_is_not_a_change_at_all() {
+        let mut board = Board::default();
+        let id = board.insert_item(image_item(1));
+        let same = board.item(id).unwrap().kind.clone();
+        board.mark_dirty(false);
+
+        assert!(matches!(
+            RelinkAssets::new(&board, vec![(id, same)]),
+            Err(CmdError::Empty)
+        ));
+        assert!(!board.is_dirty(), "ไม่มีอะไรเปลี่ยนแต่เอกสาร dirty");
+    }
+
+    /// ★★★ **โน้ตข้อความห้ามถูก relink ทับ** — ข้อความที่ผู้ใช้พิมพ์จะหายทั้งก้อน
+    #[test]
+    fn a_text_note_is_never_overwritten_by_a_relink() {
+        let mut board = Board::default();
+        let note = board.insert_item(Item::new(ItemKind::Text(crate::board::TextNote {
+            text: "อย่าลบฉัน".to_owned(),
+        })));
+
+        assert!(matches!(
+            RelinkAssets::new(&board, vec![(note, image_item(1).kind)]),
+            Err(CmdError::Empty)
+        ));
+        let ItemKind::Text(kept) = &board.item(note).unwrap().kind else {
+            panic!("โน้ตถูกเขียนทับ");
+        };
+        assert_eq!(kept.text, "อย่าลบฉัน");
+    }
+
+    /// item ที่ถูกลบไประหว่างที่งานค้นหาเดินอยู่ — ข้ามไป ไม่ใช่ล้มทั้งชุด
+    #[test]
+    fn an_item_deleted_while_the_search_was_running_is_skipped() {
+        let mut board = Board::default();
+        let alive = board.insert_item(image_item(1));
+        let gone = board.insert_item(image_item(2));
+        board.remove_item(gone);
+
+        let command = RelinkAssets::new(
+            &board,
+            vec![
+                (gone, missing_kind("2.png")),
+                (alive, missing_kind("1.png")),
+            ],
+        )
+        .unwrap();
+        assert_eq!(command.affected(), vec![alive]);
     }
 
     // ---------- P3-5: ApplyLayout (Arrange → Canvas) ----------

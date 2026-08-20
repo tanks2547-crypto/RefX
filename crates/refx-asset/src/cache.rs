@@ -118,6 +118,12 @@ pub enum CacheError {
     },
 }
 
+/// ★ เพดานจำนวนที่อยู่ที่ตอบกลับต่อ hash หนึ่งตัว (I-6)
+///
+/// ไฟล์เดียวกันอาจถูกก๊อปไว้หลายที่จนตารางมีเป็นร้อยแถว · ผู้เรียกใช้แค่ตัวแรก
+/// ที่ยังเปิดได้ การขนทั้งหมดกลับมาจึงเป็นการจอง `Vec` ให้ใหญ่โดยไม่ได้อะไร
+const MAX_PATHS_PER_HASH: usize = 32;
+
 /// schema ของ cache — ตรงตาม docs/05 §5
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS thumbs (
@@ -360,6 +366,35 @@ impl CacheDb {
         Ok(Some(ContentHash::from_bytes(bytes)))
     }
 
+    /// ★★★ ทางกลับของ [`Self::lookup_path`] — **hash นี้เคยเห็นที่ไหนบ้าง** (P4-6)
+    ///
+    /// ขั้นที่ 3 ของ relink (`docs/07 §2`): ผู้ใช้ย้ายไฟล์ไปที่อื่นบนเครื่องเดิม
+    /// ตารางนี้จำที่อยู่ที่เคยเห็นไว้อยู่แล้ว จึงตอบได้โดยไม่ต้องเดินทั้งดิสก์
+    ///
+    /// ★ **สิ่งที่คืนมาคือที่อยู่ที่ *เคยมี* ไม่ใช่ที่อยู่ที่ *ยังมี*** — ผู้เรียก
+    /// ต้องตรวจว่าไฟล์ยังเปิดได้ก่อนใช้เสมอ (`refx_core::relink::locate` ทำให้แล้ว)
+    ///
+    /// ★★ ไม่มี index บนคอลัมน์ `hash` โดยตั้งใจ — การเพิ่ม index คือการแก้ schema
+    /// ซึ่ง `CLAUDE.md` บังคับให้ถามก่อน · ตารางนี้มีขนาดเท่าจำนวนไฟล์ที่เครื่อง
+    /// เคยเปิด (หลักหมื่น) และ query นี้เกิดตอน **เปิดไฟล์ที่มีภาพหาย** เท่านั้น
+    /// ไม่ใช่ต่อเฟรม · ถ้าวันหนึ่งมันช้าจริงค่อยกลับมาคุยเรื่อง index พร้อมตัวเลข
+    ///
+    /// # Errors
+    /// คืน error เมื่อ query ล้มเหลว
+    pub fn paths_for_hash(&self, hash: &ContentHash) -> Result<Vec<PathBuf>, CacheError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT path FROM paths WHERE hash = ?1 LIMIT ?2")?;
+        let rows = statement.query_map(
+            params![
+                &hash.as_bytes()[..],
+                i64::try_from(MAX_PATHS_PER_HASH).unwrap_or(i64::MAX)
+            ],
+            |row| row.get::<_, String>(0),
+        )?;
+        Ok(rows.filter_map(Result::ok).map(PathBuf::from).collect())
+    }
+
     /// บันทึกความสัมพันธ์ path → hash
     ///
     /// # Errors
@@ -471,6 +506,13 @@ pub enum IoRequest {
         fingerprint: PathFingerprint,
         /// ช่องส่งคำตอบกลับ
         reply: crossbeam_channel::Sender<Option<ContentHash>>,
+    },
+    /// ★ ทางกลับ: hash นี้เคยเห็นที่ไหนบ้าง — ขั้นที่ 3 ของ relink (P4-6)
+    LookupHash {
+        /// คีย์ของเนื้อที่กำลังตามหา
+        hash: ContentHash,
+        /// ช่องส่งคำตอบกลับ — **ที่อยู่ที่เคยมี ไม่ใช่ที่ยังมี** ผู้เรียกต้องตรวจเอง
+        reply: crossbeam_channel::Sender<Vec<PathBuf>>,
     },
     /// บันทึก path → hash
     RecordPath {
@@ -622,6 +664,13 @@ fn io_loop(db: &CacheDb, rx: &crossbeam_channel::Receiver<IoRequest>) {
                 let result = db.lookup_path(&path, fingerprint).unwrap_or_else(|err| {
                     tracing::warn!(%err, "cannot look up a path in the cache");
                     None
+                });
+                let _ = reply.send(result);
+            }
+            IoRequest::LookupHash { hash, reply } => {
+                let result = db.paths_for_hash(&hash).unwrap_or_else(|err| {
+                    tracing::warn!(%err, "cannot look up a hash in the cache");
+                    Vec::new()
                 });
                 let _ = reply.send(result);
             }
@@ -838,6 +887,49 @@ mod tests {
     }
 
     // ---------- paths table ----------
+
+    /// ★★★ ขั้นที่ 3 ของ relink — **hash นี้เคยเห็นที่ไหนบ้าง** (`docs/07 §2`)
+    ///
+    /// ผู้ใช้ย้ายไฟล์ไปที่อื่นบนเครื่องเดิม · ตารางนี้จำที่อยู่เก่าไว้อยู่แล้ว
+    /// จึงตอบได้โดยไม่ต้องเดินทั้งดิสก์
+    #[test]
+    fn a_hash_remembers_every_place_it_has_been_seen() {
+        let db = CacheDb::open_or_recreate(&temp_db("byhash")).unwrap();
+        let hash = crate::hash::hash_bytes("หมาน้อย".as_bytes());
+        let other = crate::hash::hash_bytes("แมวอ้วน".as_bytes());
+        let fp = PathFingerprint {
+            mtime: 1,
+            size: 100,
+        };
+
+        assert!(db.paths_for_hash(&hash).unwrap().is_empty(), "ยังไม่เคยเห็น");
+
+        db.record_path(Path::new("C:/เก่า/dog.png"), &hash, fp)
+            .unwrap();
+        db.record_path(Path::new("D:/ใหม่/dog.png"), &hash, fp)
+            .unwrap();
+        db.record_path(Path::new("C:/เก่า/cat.png"), &other, fp)
+            .unwrap();
+
+        let found = db.paths_for_hash(&hash).unwrap();
+        assert_eq!(found.len(), 2, "ได้ {found:?}");
+        assert!(found.contains(&PathBuf::from("D:/ใหม่/dog.png")));
+        // ★ hash คนละตัวต้องไม่ปนมา — ไม่งั้น relink จะผูกภาพผิดใบ
+        assert!(!found.iter().any(|p| p.ends_with("cat.png")));
+    }
+
+    /// ★ เพดานจำนวนที่อยู่ต่อ hash (I-6) — ไฟล์ที่ถูกก๊อปไว้เป็นร้อยที่
+    #[test]
+    fn the_answer_is_capped_however_many_copies_exist() {
+        let db = CacheDb::open_or_recreate(&temp_db("byhash-cap")).unwrap();
+        let hash = crate::hash::hash_bytes("ก๊อปเยอะมาก".as_bytes());
+        let fp = PathFingerprint { mtime: 1, size: 1 };
+        for i in 0..(MAX_PATHS_PER_HASH * 2) {
+            db.record_path(&PathBuf::from(format!("C:/copies/{i}.png")), &hash, fp)
+                .unwrap();
+        }
+        assert_eq!(db.paths_for_hash(&hash).unwrap().len(), MAX_PATHS_PER_HASH);
+    }
 
     #[test]
     fn path_fingerprint_roundtrip() {
