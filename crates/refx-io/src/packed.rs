@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! ┌────────────────────────────────────────────┐
-//! │ header 22 B   magic·version=2·flags(packed)│
+//! │ header 20 B   magic·version=2·flags(packed)│
 //! │               ·doc_len·doc_crc             │
 //! ├────────────────────────────────────────────┤
 //! │ document      postcard + zstd (เหมือน v1)   │

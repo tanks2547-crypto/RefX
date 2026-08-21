@@ -103,6 +103,69 @@ pub fn store(
     Ok(path)
 }
 
+/// แกะ blob ออกจากเอกสาร packed ไม่สำเร็จ
+#[derive(Debug, thiserror::Error)]
+pub enum UnpackError {
+    /// ตารางหรือ blob ในไฟล์ไม่สมเหตุสมผล (รวม checksum ไม่ตรง)
+    #[error(transparent)]
+    Read(#[from] crate::dto::OpenError),
+    /// เขียนลง spool ไม่ได้ (ดิสก์เต็ม / ไม่มีสิทธิ์)
+    #[error(transparent)]
+    Write(#[from] SaveError),
+}
+
+/// ★★★ แกะ blob จากเอกสาร packed **กลับลง spool** — ทางกลับของ [`store`]
+///
+/// `docs/07 §2` บังคับให้สองทิศสมมาตรกัน: ภาพที่วางถูก encode ลง spool แล้ว
+/// ฝังเข้า `.refx` ตอนบันทึก · เปิดกลับมาบนเครื่องที่ไม่มีไฟล์ต้นฉบับเลย
+/// blob ต้องกลายเป็นไฟล์จริงอีกครั้งเพื่อให้ **ขอ working texture ได้**
+/// (ชั้น decode รับ *ไฟล์* ไม่ใช่ไบต์ในเอกสาร)
+///
+/// ★★ **สตรีมทั้งเส้น** — เอกสาร packed ใหญ่ระดับ GB ได้ ไม่มีจุดไหนที่ถือ
+/// blob ทั้งก้อนไว้ใน RAM (เหตุผลเดียวกับ [`crate::packed::write_packed`])
+///
+/// ★★★ **ไฟล์ที่มีอยู่แล้ว ถือว่าสำเร็จทันที ไม่เขียนทับเด็ดขาด** — เหมือน
+/// [`store`] แต่ที่นี่มันเป็น *เกราะ* ไม่ใช่แค่การประหยัด: `hash` ในตารางมาจาก
+/// ไฟล์ ซึ่ง I-4 บอกว่าโกหกได้ · ถ้ายอมเขียนทับ เอกสารที่ถูกดัดแปลงจะแทนที่
+/// ภาพที่ผู้ใช้วางไว้เอง (ซึ่งไม่มีต้นฉบับอยู่ที่อื่นแล้ว) ได้ด้วยการอ้าง hash
+/// ของมัน · เขียนใหม่เฉพาะชื่อที่ยังว่างจึงไม่มีของใครถูกแทนที่ได้เลย
+///
+/// # Errors
+/// [`UnpackError`] — blob เสีย (crc ไม่ตรง) หรือเขียนไฟล์ไม่ได้
+/// · **ของที่เขียนค้างถูกลบทิ้ง** ไม่มีไฟล์ครึ่ง ๆ ค้างใน spool
+pub fn unpack<R: std::io::Read + std::io::Seek>(
+    dir: &Path,
+    entry: crate::packed::Entry,
+    source: &mut R,
+    rename: RenameFn,
+) -> Result<PathBuf, UnpackError> {
+    let path = spool_path(dir, entry.hash);
+    if path.exists() {
+        return Ok(path);
+    }
+    std::fs::create_dir_all(dir)
+        .map_err(|err| SaveError::io("create the spool folder for", &path, err))?;
+
+    // ★ tmp → fsync → rename เหมือนทุกการเขียนในโปรเจกต์นี้ · ผู้อ่านคนอื่น
+    //   (sweep / decode pool) จึงไม่มีวันเห็นไฟล์ที่เขียนค้างอยู่
+    let tmp = path.with_extension("tmp");
+    let outcome = (|| -> Result<(), UnpackError> {
+        let mut file =
+            std::fs::File::create(&tmp).map_err(|err| SaveError::io("create", &tmp, err))?;
+        crate::packed::extract(source, entry, &mut file)?;
+        file.sync_all()
+            .map_err(|err| SaveError::io("flush", &tmp, err))?;
+        Ok(())
+    })();
+    if let Err(err) = outcome {
+        // ★ crc ไม่ตรง = ไบต์ที่เขียนไปแล้วเชื่อไม่ได้ ต้องไม่เหลือไว้ให้ใครหยิบไปใช้
+        let _ = std::fs::remove_file(&tmp);
+        return Err(err);
+    }
+    rename(&tmp, &path).map_err(|err| SaveError::io("replace", &path, err))?;
+    Ok(path)
+}
+
 /// hash ทุกตัวที่ board นี้อ้างถึง
 #[must_use]
 pub fn hashes_of(board: &Board) -> BTreeSet<ContentHash> {
@@ -655,5 +718,137 @@ mod tests {
             sweep(&dir, &BTreeSet::new(), 0, Duration::ZERO, SystemTime::now()),
             Swept::default()
         );
+    }
+
+    // ---------- ★★★ ทางกลับ: เอกสาร packed → spool ----------
+
+    /// สร้างเอกสาร packed ที่ฝังไฟล์เดียว แล้วคืน `(path ของเอกสาร, ไบต์ที่ฝัง)`
+    fn packed_document(dir: &Path, n: u8, bytes: usize) -> (PathBuf, Vec<u8>) {
+        let body: Vec<u8> = (0..bytes).map(|i| (i as u8).wrapping_mul(n | 1)).collect();
+        let source = dir.join(format!("source-{n}.png"));
+        std::fs::write(&source, &body).unwrap();
+        let doc = dir.join(format!("packed-{n}.refx"));
+        let mut file = std::fs::File::create(&doc).unwrap();
+        crate::packed::write_packed(
+            &mut file,
+            &board_of(&[n]),
+            &[crate::packed::PackSource {
+                hash: hash_of(n),
+                path: source,
+            }],
+        )
+        .unwrap();
+        file.sync_all().unwrap();
+        (doc, body)
+    }
+
+    fn index_of(doc: &Path) -> (std::fs::File, crate::packed::Index) {
+        let mut file = std::fs::File::open(doc).unwrap();
+        let len = file.metadata().unwrap().len();
+        let index = crate::packed::read_index(&mut file, len).unwrap();
+        (file, index)
+    }
+
+    fn read_all(path: &Path) -> Vec<u8> {
+        use std::io::Read as _;
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)
+            .unwrap()
+            .read_to_end(&mut bytes)
+            .unwrap();
+        bytes
+    }
+
+    /// ★★★ **ภาพที่ฝังไว้ต้องกลายเป็นไฟล์จริงอีกครั้ง ไบต์ต่อไบต์**
+    ///
+    /// นี่คือครึ่งที่ทำให้ *"ลบโฟลเดอร์ต้นฉบับทิ้งแล้วยังเปิดได้"* เป็นจริง —
+    /// ถ้าไบต์ไม่ตรง ภาพจะ decode ไม่ออกหรือได้ภาพผิดใบ
+    #[test]
+    fn an_embedded_image_becomes_a_real_file_again() {
+        let dir = temp_dir("unpack");
+        // ★ ใหญ่กว่าบัฟเฟอร์ 64 KB หลายรอบ — เส้นทางสตรีมต้องถูกเดินจริง
+        let (doc, body) = packed_document(&dir, 7, 150_000);
+        let (mut file, index) = index_of(&doc);
+        let entry = index.find(hash_of(7)).expect("ไม่มี entry ของภาพที่ฝังไว้");
+
+        let spool_dir = dir.join("pasted");
+        let path = unpack(&spool_dir, entry, &mut file, rename_durable).unwrap();
+
+        assert_eq!(path, spool_path(&spool_dir, hash_of(7)), "ชื่อไฟล์ไม่ใช่ hash");
+        assert_eq!(read_all(&path), body, "ไบต์ที่แกะออกมาไม่ตรงกับที่ฝังไว้");
+        // ★ เรียกซ้ำต้องเงียบและได้ที่เดิม (เปิดเอกสารเดิมสองครั้งเป็นเรื่องปกติ)
+        let again = unpack(&spool_dir, entry, &mut file, rename_durable).unwrap();
+        assert_eq!(again, path);
+    }
+
+    /// ★★★ **blob ที่เสียต้องไม่ทิ้งไฟล์ครึ่ง ๆ ไว้ให้ใครหยิบไปใช้**
+    ///
+    /// ★★ input ถูกต้องทุกอย่างยกเว้นสิ่งที่กำลังทดสอบ (`docs/08 §3.9` ข้อ 1b):
+    /// พลิกไบต์ใน **blob** ซึ่ง `table_crc` ไม่ได้ครอบอยู่แล้ว — ตารางจึงยัง
+    /// ผ่านทุกด่าน และของที่ล้มคือ crc ของ blob ตัวเดียว ซึ่งคือด่านที่ทดสอบพอดี
+    #[test]
+    fn a_corrupted_blob_leaves_nothing_behind() {
+        use std::io::{Seek as _, SeekFrom, Write as _};
+
+        let dir = temp_dir("unpack-corrupt");
+        let (doc, _) = packed_document(&dir, 9, 4_096);
+        let (mut file, index) = index_of(&doc);
+        let entry = index.find(hash_of(9)).unwrap();
+        drop(file);
+
+        // พลิกไบต์กลาง blob — ตารางยังถูกต้องครบทุกช่อง
+        let mut writable = std::fs::OpenOptions::new().write(true).open(&doc).unwrap();
+        writable
+            .seek(SeekFrom::Start(entry.offset + entry.len / 2))
+            .unwrap();
+        writable.write_all(&[0xAB]).unwrap();
+        writable.sync_all().unwrap();
+        drop(writable);
+
+        file = std::fs::File::open(&doc).unwrap();
+        let spool_dir = dir.join("pasted");
+        let err = unpack(&spool_dir, entry, &mut file, rename_durable)
+            .expect_err("blob ที่ถูกแก้ไบต์กลางต้องไม่ผ่าน");
+        assert!(matches!(
+            err,
+            UnpackError::Read(crate::dto::OpenError::Corrupt)
+        ));
+        let left: Vec<_> = std::fs::read_dir(&spool_dir)
+            .map(|entries| entries.filter_map(Result::ok).map(|e| e.path()).collect())
+            .unwrap_or_default();
+        assert!(left.is_empty(), "เหลือไฟล์ค้างไว้: {left:?}");
+    }
+
+    /// ★★★ **เอกสารห้ามเขียนทับภาพที่อยู่ใน spool อยู่แล้ว** (I-4)
+    ///
+    /// `hash` ในตารางมาจากไฟล์ จึงอ้างเป็นอะไรก็ได้ · ถ้าการแกะยอมเขียนทับ
+    /// เอกสารที่ถูกดัดแปลงจะแทนที่ภาพที่ผู้ใช้วางไว้เอง — ซึ่ง**ไม่มีต้นฉบับ
+    /// อยู่ที่อื่นแล้ว** (I-3 เงียบที่สุด)
+    #[test]
+    fn the_document_never_replaces_an_image_already_in_the_spool() {
+        let dir = temp_dir("unpack-poison");
+        let (doc, body) = packed_document(&dir, 11, 2_048);
+        let (mut file, index) = index_of(&doc);
+        let entry = index.find(hash_of(11)).unwrap();
+
+        // ภาพของผู้ใช้ที่อยู่ก่อนแล้วภายใต้คีย์เดียวกัน
+        let spool_dir = dir.join("pasted");
+        let mine = store(
+            &spool_dir,
+            hash_of(11),
+            b"the image I pasted",
+            rename_durable,
+        )
+        .unwrap();
+
+        let path = unpack(&spool_dir, entry, &mut file, rename_durable).unwrap();
+
+        assert_eq!(path, mine);
+        assert_eq!(
+            read_all(&mine),
+            b"the image I pasted",
+            "เอกสารเขียนทับภาพที่ผู้ใช้วางไว้"
+        );
+        assert_ne!(read_all(&mine), body);
     }
 }
