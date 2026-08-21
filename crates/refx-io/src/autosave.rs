@@ -186,12 +186,21 @@ pub fn write_snapshot(doc: &Path, board: &Board, rename: RenameFn) -> Result<(),
 ///
 /// ลบไม่สำเร็จ **ไม่ใช่ error ที่ต้องบอกผู้ใช้** — ผลที่แย่ที่สุดคือรอบหน้า
 /// เขาถูกถามว่าจะกู้คืนไหมทั้งที่ไม่จำเป็น ซึ่งน่ารำคาญแต่ไม่ทำงานหาย
+/// ★★ **ลบไฟล์บริวารด้วย** — [`write_snapshot`] ใช้ `save_atomic` ซึ่งทิ้ง
+/// `.bak` ของ snapshot รอบก่อนไว้ข้าง ๆ เสมอ · ถ้าลบแต่ตัวหลัก จะเหลือสำเนา
+/// ที่ **ไม่มีใครอ่านและไม่มีใครเก็บกวาด** นอนอยู่ในโฟลเดอร์งานของผู้ใช้ตลอดไป
+/// — และตอนที่ผู้ใช้กด *"ทิ้งไป"* มันคือของที่เขาเพิ่งสั่งให้ทิ้งพอดี
+/// (หลักการเดียวกับ `remove_recovery_file` ของ P4-4 ที่ลบทั้งชุดอยู่แล้ว)
 pub fn discard(doc: &Path) {
-    let path = autosave_path(doc);
-    match std::fs::remove_file(&path) {
-        Ok(()) => tracing::debug!("removed the autosave snapshot"),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-        Err(err) => tracing::warn!(%err, "cannot remove the autosave snapshot"),
+    for path in [
+        autosave_path(doc),
+        crate::save::backup_path(&autosave_path(doc)),
+    ] {
+        match std::fs::remove_file(&path) {
+            Ok(()) => tracing::debug!(file = %path.display(), "removed the autosave snapshot"),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => tracing::warn!(%err, "cannot remove the autosave snapshot"),
+        }
     }
 }
 
@@ -474,6 +483,38 @@ mod tests {
         assert!(!autosave_path(&doc).exists());
         discard(&doc); // ไม่มีไฟล์แล้ว — ต้องเงียบ ไม่ใช่ล้ม
         assert!(find_pending(&doc, board_id()).is_none());
+    }
+
+    /// ★★★ **"ทิ้งไป" ต้องไม่เหลือสำเนาไว้ในโฟลเดอร์งานของผู้ใช้**
+    ///
+    /// `write_snapshot` เขียนผ่าน `save_atomic` ซึ่งทิ้ง `.bak` ของรอบก่อนไว้เสมอ
+    /// (เห็นของจริงข้างเอกสาร: `work.refx.refx.bak`) · ไฟล์นั้นไม่มีใครอ่านและ
+    /// ไม่มีใครเก็บกวาด — และตอนผู้ใช้กด "ทิ้งไป" มันคือ**ของที่เขาเพิ่งสั่งให้ทิ้ง**
+    #[test]
+    fn discarding_leaves_no_copy_of_the_snapshot_behind() {
+        let dir = temp_dir("discard-bak");
+        let doc = dir.join("work.refx");
+        // เขียนสองรอบ — รอบที่สองคือตัวที่ทำให้ `.bak` ของรอบแรกโผล่มา
+        write_snapshot(&doc, &board_named("x", 1), rename_durable).unwrap();
+        write_snapshot(&doc, &board_named("x", 2), rename_durable).unwrap();
+        let backup = crate::save::backup_path(&autosave_path(&doc));
+        assert!(backup.exists(), "เทสต์นี้ต้องมี `.bak` อยู่จริงถึงจะพิสูจน์อะไรได้");
+
+        discard(&doc);
+
+        assert!(!autosave_path(&doc).exists());
+        assert!(
+            !backup.exists(),
+            "เหลือสำเนาของ snapshot ไว้: {}",
+            backup.display()
+        );
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .collect();
+        // เทสต์นี้ไม่ได้สร้างตัวเอกสารเอง — โฟลเดอร์จึงต้องว่างสนิทหลังทิ้ง
+        assert!(left.is_empty(), "เหลือไฟล์ของ snapshot ไว้: {left:?}");
     }
 
     /// ★★★ snapshot ที่เสียหายต้องอ่านเป็น "ไม่มีอะไรให้กู้" **ไม่ใช่เปิดโปรแกรมไม่ได้**
