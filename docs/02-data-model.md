@@ -31,11 +31,12 @@ enum Slot<T> { Occupied { gen: u32, value: T }, Vacant { gen: u32 } }
 ## 2. โครงหลัก
 
 ```rust
-pub struct Workspace {
-    pub boards: Arena<Board>,
-    pub active: BoardId,
-    pub order: Vec<BoardId>,          // ลำดับแท็บ
-}
+// ❌ ยกเลิก 21 ส.ค. 2026 — ดู §2.10
+// pub struct Workspace {
+//     pub boards: Arena<Board>,
+//     pub active: BoardId,
+//     pub order: Vec<BoardId>,
+// }
 
 pub struct Board {
     pub id: BoardId,
@@ -272,6 +273,28 @@ Command ที่ต้องมี:
 | `GroupItems` / `Ungroup` | ✗ | |
 
 **เรื่อง `merge` ที่พลาดกันบ่อย:** ระหว่างลากเมาส์ต้อง merge เพื่อไม่ให้ undo stack ท่วม แต่ต้อง **ปิด merge ทันทีที่ปล่อยปุ่ม** (`history.seal()`) ไม่งั้นการลากสองครั้งติดกันจะกลายเป็น undo เดียว ผู้ใช้จะงง
+
+---
+
+## 2.10 ★ ไม่มี `Workspace` ใน `refx-core` (ตัดสิน 21 ส.ค. 2026)
+
+เอกสารฉบับแรกวาง `Workspace { boards, active, order }` ไว้ใน `refx-core`
+**ยกเลิก** — เพราะสิ่งที่เป็น "ต่อแท็บ" จริง ๆ **ครึ่งหนึ่งอยู่ใน core ไม่ได้**:
+
+`History` · `Selection` · `render_state` · camera ของ UI · ช่องใน atlas · `SpatialIndex`
+ทั้งหมดเป็นชั้น UI/GPU ซึ่ง `refx-core` ห้ามพึ่ง
+
+ถ้าทำตามตัวอักษรจะได้ `Workspace` ใน core เดินคู่กับ `HashMap<BoardId, DocUi>` ใน ui
+= **แหล่งความจริงที่สอง** · แท็บที่มีใน `order` แต่ไม่มี `DocUi` คือสภาพที่ต้องตัดสินว่าเชื่ออันไหน
+ซึ่งเป็นปัญหาเดียวกับที่เราเลี่ยงมาแล้วสองครั้ง (`AssetRef::embedded` ที่ไม่เก็บซ้ำ ·
+โหมด linked/packed ที่ไม่เก็บ "ความตั้งใจ" ลงไฟล์ — `docs/07 §2`)
+
+→ **`Doc` ถือ `Board` ของตัวเองอยู่ใน `refx-ui`** เจ้าของเดียว ไม่มีอะไรให้ซิงค์
+   `refx-core` ยังคงไม่รู้จักคำว่า "แท็บ" เลย ซึ่งถูกต้องตาม ARCHITECTURE §2
+
+> `BoardId` ยังมีอยู่และต้อง **แจกให้ไม่ซ้ำกันจริง** — `ItemId` เป็นแค่ `index+generation`
+> ไม่ผูกกับ board สอง board จึงแจก `ItemId` ชุดเดียวกันเป๊ะ
+> ทุกอย่างที่คีย์ด้วย `ItemId` ต้องอยู่ **ต่อแท็บ** ไม่ใช่ระดับแอป
 
 ---
 
