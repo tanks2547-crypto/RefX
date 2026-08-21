@@ -1463,16 +1463,39 @@ pub struct RefxApp {
     snapshot_revision: Option<u64>,
     /// ★ ที่อยู่ของเอกสารปัจจุบัน — `None` = ยังไม่เคยบันทึก
     doc_path: Option<std::path::PathBuf>,
+    /// ★★★ โหมดการบันทึกของเอกสารนี้ (P4-5) — **สภาวะ ไม่ใช่เหตุการณ์**
+    ///
+    /// เปลี่ยนได้จากสองทางเท่านั้น:
+    ///
+    /// | เมื่อไหร่ | ค่าที่ได้ |
+    /// |---|---|
+    /// | เปิดไฟล์ | อนุมานจากตารางของไฟล์นั้น ([`mode_of_document`]) |
+    /// | บันทึก**สำเร็จ** | สิ่งที่ผู้ใช้สั่งในครั้งนั้น |
+    ///
+    /// ★★★ **ห้ามอนุมานใหม่ทุกครั้งที่บันทึก** — board ที่มีแต่ภาพจาก clipboard
+    /// ถูกฝังครบทุกใบอยู่แล้วแม้ในโหมด linked (§4 ข้อ 23) ถ้าเราอ่านสภาพไฟล์
+    /// กลับมาเป็นโหมด เอกสารนั้นจะกลายเป็น packed เอง แล้ว `Ctrl+S` ครั้งถัดไป
+    /// จะเริ่มฝังภาพจากไฟล์ของผู้ใช้เข้าไปด้วย **ทั้งที่เขาไม่เคยสั่ง**
+    ///
+    /// ★ ตอนเปิดไฟล์เราไม่มีทางเลือกอื่น (รูปแบบไฟล์ไม่ได้เก็บ "ผู้ใช้เลือกอะไร"
+    /// และการเพิ่มบิตลงหัวไฟล์คือการแก้ format ซึ่ง `CLAUDE.md` บังคับให้ถามก่อน)
+    /// — ผลคือเอกสารที่มีแต่ภาพวางล้วนจะเปิดกลับมาเป็น packed ซึ่ง**ไม่ทำให้
+    /// อะไรหาย** แค่ไฟล์ครั้งต่อไปใหญ่กว่าที่ควร และผู้ใช้กดสลับกลับได้ทันที
+    save_mode: refx_io::packed::SaveMode,
+    /// ★★ asset table ของเอกสารที่เปิดอยู่ — ว่าง = ไม่มีภาพฝังอยู่
+    ///
+    /// มีไว้สองอย่าง: บอกโหมดบนแถบสถานะ และ**แกะ blob กลับลง spool** ตอนที่
+    /// relink หาไฟล์บนเครื่องนี้ไม่เจอ (ขั้นก่อน `Missing` — ดู `start_relink_scan`)
+    doc_assets: refx_io::packed::Index,
+    /// ★ โหมดที่ผู้ใช้เลือกไว้สำหรับ dialog "บันทึกเป็น" ที่กำลังเปิดอยู่
+    save_as_mode: refx_io::packed::SaveMode,
     /// ผู้ใช้กด `Ctrl+O` ในรอบ event ที่ผ่านมา (P4-4)
     pending_open: bool,
     /// dialog เลือกไฟล์ที่จะเปิดที่กำลังรอผู้ใช้ตอบ (ไม่บล็อก I-2)
     open_dialog: Option<crossbeam_channel::Receiver<Option<std::path::PathBuf>>>,
     /// งานอ่าน+decode ไฟล์ที่ส่งไปเธรดแล้ว (ไม่บล็อก I-2)
     ///
-    /// ★ `Box<Board>` เพราะ `Board` ใหญ่ — clippy `large_enum_variant` ไม่ชอบ
-    /// ให้มันนั่งอยู่ใน `Result` ที่ถูกส่งข้ามช่อง
-    #[allow(clippy::type_complexity, reason = "ชนิดของช่องรับผลอ่านตรง ๆ ชัดกว่า alias")]
-    load_job: Option<crossbeam_channel::Receiver<Result<(std::path::PathBuf, Box<Board>), String>>>,
+    load_job: Option<crossbeam_channel::Receiver<Result<LoadedDoc, String>>>,
     /// ★★★ งานค้างจาก session ก่อนที่กำลังถามผู้ใช้อยู่ — `None` = ไม่มี
     pending_recovery: Option<PendingRecovery>,
     /// งานสแกนโฟลเดอร์ recovery ตอนเปิดโปรแกรม (แตะดิสก์ → ต้องอยู่เธรดอื่น I-2)
@@ -1530,7 +1553,7 @@ pub struct RefxApp {
     /// dialog เลือกที่บันทึกที่กำลังเปิดอยู่ (รอผู้ใช้ตอบ — ไม่บล็อก I-2)
     save_dialog: Option<crossbeam_channel::Receiver<Option<std::path::PathBuf>>>,
     /// งานบันทึกที่ส่งไปเธรดแล้ว รอผลกลับ (ไม่บล็อก I-2)
-    save_job: Option<crossbeam_channel::Receiver<Result<std::path::PathBuf, String>>>,
+    save_job: Option<crossbeam_channel::Receiver<Result<SavedDoc, String>>>,
     /// ★ ทำอะไรต่อหลังบันทึกเสร็จ — ใช้ตอนผู้ใช้เลือก "บันทึกแล้วปิด"
     after_save: AfterSave,
     /// ผู้ใช้กดปิดหน้าต่างทั้งที่ยังมีงานไม่ได้บันทึก → รอเขาตอบ
@@ -1567,6 +1590,15 @@ fn write_relink_status(shell: &mut crate::shell::ShellState, report: RelinkRepor
             &[("n", &report.lost.to_string())],
         );
         shell.status_warn = true;
+    } else if report.unpacked > 0 {
+        // ★ ภาพมาจากไฟล์งานเอง ไม่ใช่จากการตามหาบนเครื่อง — บอกให้ตรงกับที่เกิดขึ้น
+        //   ("เจอ 4 จาก 4 ใบที่ย้ายที่" จะทำให้ผู้ใช้ไปหาว่ามันย้ายไปไหนทั้งที่ไม่มีอะไรย้าย)
+        shell.status = text::fill(
+            lang,
+            Template::RelinkUnpacked,
+            &[("n", &report.unpacked.to_string())],
+        );
+        shell.status_warn = false;
     } else {
         shell.status = text::fill(
             lang,
@@ -1585,10 +1617,43 @@ fn write_relink_status(shell: &mut crate::shell::ShellState, report: RelinkRepor
 struct RelinkReport {
     /// เจอแต่ **ไม่ได้อยู่ที่เดิม** (ขั้น 2/3/5) กี่ใบ
     moved: usize,
+    /// ★ แกะออกมาจากตัวเอกสารเอง (packed — P4-5) กี่ใบ
+    unpacked: usize,
     /// ตามหาไปทั้งหมดกี่ใบ
     total: usize,
     /// ยังหาไม่เจอกี่ใบ (ขั้นที่ 4)
     lost: usize,
+}
+
+/// ★ เอกสารที่เพิ่งอ่านจากดิสก์สำเร็จ — สิ่งที่เธรดเปิดไฟล์ส่งกลับมา
+///
+/// ★ `Box<Board>` เพราะ `Board` ใหญ่ — clippy `large_enum_variant` ไม่ชอบให้มัน
+/// นั่งอยู่ใน `Result` ที่ถูกส่งข้ามช่อง
+#[derive(Debug)]
+struct LoadedDoc {
+    /// ไฟล์ที่อ่านมา
+    path: std::path::PathBuf,
+    /// เนื้อเอกสาร
+    board: Box<Board>,
+    /// ★★ asset table ของไฟล์นั้น (ว่าง = linked ล้วน ไม่มีอะไรฝังอยู่)
+    assets: refx_io::packed::Index,
+}
+
+/// ★ ไฟล์ที่เพิ่งเขียนลงดิสก์สำเร็จ — สิ่งที่เธรดบันทึกส่งกลับมา (P4-5)
+///
+/// ★★ `assets` อ่านจาก **ไฟล์ที่เพิ่งเขียนจริง** ไม่ใช่จากแผนที่ส่งเข้าไป —
+/// ตัวเลข "กี่ใบอยู่ข้างใน" บนแถบสถานะจึงมาจากดิสก์เสมอ
+///
+/// ★★★ ส่วน `mode` คือ **สิ่งที่ผู้ใช้สั่ง** ไม่ใช่สิ่งที่อนุมานจากไฟล์ —
+/// ดูเหตุผลที่ [`RefxApp::save_mode`]
+#[derive(Debug)]
+struct SavedDoc {
+    /// ไฟล์ที่เขียนไป
+    path: std::path::PathBuf,
+    /// asset table ของไฟล์นั้นหลังเขียนเสร็จ (ว่าง = ไม่มีอะไรฝังอยู่)
+    assets: refx_io::packed::Index,
+    /// โหมดที่ผู้ใช้สั่งให้บันทึกครั้งนี้
+    mode: refx_io::packed::SaveMode,
 }
 
 /// ผลการตามหาไฟล์ของ item หนึ่งใบ — `None` = ยังหาไม่เจอ (ขั้นที่ 4)
@@ -1638,9 +1703,25 @@ fn relinked_kind(
             } else {
                 content.unwrap_or(asset.hash)
             };
+            // ★★★ **การอ่านสำเนาใน spool ไม่ใช่การย้ายบ้านของภาพ** (P4-5)
+            //
+            //   เอกสาร packed พกสำเนามาเอง · ตอนเปิดบนเครื่องที่ไม่มีไฟล์ต้นฉบับ
+            //   เราแกะ blob ลง spool แล้วอ่านจากที่นั่น — แต่ **ที่อยู่ที่เอกสาร
+            //   จำไว้คือของเอกสาร** ถ้าเขียนทับด้วย path ของ spool จะได้สามอย่าง
+            //   ที่ผู้ใช้ไม่ได้สั่งพร้อมกัน: เอกสาร dirty ทันทีที่เปิด · มีขั้น undo
+            //   โผล่มาจากที่ไหนไม่รู้ · และ **ที่อยู่จริงของภาพหายไปตลอดกาล**
+            //   ทั้งที่วันหนึ่งผู้ใช้อาจกลับไปเครื่องที่มีไฟล์นั้นอยู่
+            //
+            //   ★ ภาพที่วางจาก clipboard ไม่ได้รับผลอะไร — `path` ของมันคือไฟล์
+            //     ใน spool อยู่แล้ว ค่าที่ได้จึงเท่าเดิมเป๊ะทั้งสองทาง
+            let keep_old_path = in_spool && !asset.path.as_os_str().is_empty();
             Some(ItemKind::Image(AssetRef {
                 hash,
-                path,
+                path: if keep_old_path {
+                    asset.path.clone()
+                } else {
+                    path
+                },
                 ..asset.clone()
             }))
         }
@@ -1673,6 +1754,44 @@ fn paths_known_for(
         .ok()
         .and_then(|()| rx.recv_timeout(std::time::Duration::from_secs(5)).ok())
         .unwrap_or_default()
+}
+
+/// ★★★ ภาพใบนี้อยู่ในเอกสารเองหรือเปล่า — ถ้าใช่ แกะลง spool แล้วใช้ไฟล์นั้น (P4-5)
+///
+/// `None` = ไม่มีในตาราง หรือแกะไม่สำเร็จ → ผู้เรียกเดินต่อไปที่ขั้นที่ 4 (`Missing`)
+///
+/// ★★ **บน worker เท่านั้น** — สตรีมไบต์จากเอกสารลงดิสก์ (`docs/07 §2`)
+///
+/// ★ ล้มแล้ว **ไม่ล้มทั้งงวด**: เอกสารที่ blob เสียใบเดียวยังต้องเปิดได้ครบทุกใบ
+/// ที่เหลือ (I-7 หลักการเดียวกับ decode) · ใบที่เสียกลายเป็น `Missing` ซึ่งผู้ใช้
+/// ยังเห็นชื่อไฟล์และ relink เองได้
+fn unpack_embedded(
+    want: &refx_core::relink::Wanted,
+    index: &refx_io::packed::Index,
+    spool_dir: &std::path::Path,
+    source: &mut std::fs::File,
+) -> Option<refx_core::relink::Located> {
+    let entry = index.find(want.hash)?;
+    match refx_io::spool::unpack(
+        spool_dir,
+        entry,
+        source,
+        refx_platform::fsops::rename_durable,
+    ) {
+        Ok(path) => Some(refx_core::relink::Located {
+            id: want.id,
+            path,
+            step: refx_core::relink::Step::Embedded,
+        }),
+        Err(err) => {
+            tracing::warn!(
+                %err,
+                hash = %want.hash.short(),
+                "cannot unpack an image stored inside the document"
+            );
+            None
+        }
+    }
 }
 
 /// ★★ hash ทุกไฟล์ภาพในโฟลเดอร์ที่ผู้ใช้ชี้ — ขั้นที่ 5 (P4-6)
@@ -1741,6 +1860,101 @@ fn asset_location(
         // ★ ทางถอย: hash ไม่ได้ (ไฟล์หายระหว่างทาง) — ใช้คีย์ของงานต่อไป
         //   ภาพยังขึ้นจอได้ แค่ไม่ถูกยุบกับสำเนาอื่นและ relink ด้วย hash ไม่ได้
         None => (job_hash, None),
+    }
+}
+
+/// ★★★ ไบต์ของ asset ใบนี้อยู่ที่ไหน — คำตอบที่ [`plan_embeds`] ใช้ตัดสินว่าจะฝังไหม
+///
+/// [`plan_embeds`]: refx_io::packed::plan_embeds
+///
+/// ★★ **ที่นี่ตอบแค่ว่า "ไบต์อยู่ที่ไหน และใครเป็นเจ้าของ"** ส่วนกฎว่า *อะไร
+/// ควรถูกฝัง* อยู่ที่ `refx-io` ที่เดียว (§4 ข้อ 23) — ถ้าย้ายกฎมาไว้ตรงนี้
+/// ทุกจุดเรียกใหม่ต้องจำเอง แล้ววันหนึ่งจะมีตัวที่ลืม
+///
+/// | สภาพของใบนั้น | ตอบว่า | ผลใน linked mode |
+/// |---|---|---|
+/// | อยู่ในโฟลเดอร์ spool | `Ours` | **ฝัง** — ของที่เราสร้างเอง ผู้ใช้ลบเมื่อไหร่ก็ได้ |
+/// | เป็นไฟล์ของผู้ใช้ที่ยังอยู่ | `UserFile` | ลิงก์ |
+/// | ★ path เดิมหายแล้ว แต่ spool มีสำเนาของ hash นี้ | `Ours` | **ฝัง** |
+/// | ไม่เหลืออะไรเลย | `Missing` | เป็น `Missing` ต่อไป (ยังอยู่บน board — I-3) |
+///
+/// ★★★ แถวที่สามคือแถวที่ทำให้ **เปิดเอกสาร packed บนเครื่องที่ไม่มีภาพเลย
+/// แล้วบันทึกทับ ไม่ทำให้ภาพหาย** — สำเนาที่แกะออกมาลง spool ตอนเปิดคือ
+/// ต้นฉบับเดียวที่เหลืออยู่บนเครื่องนั้น การลิงก์ไปหา path ที่ว่างเปล่าแทน
+/// จะทำให้ไฟล์ที่บันทึกใหม่ไม่มีภาพอยู่ข้างในเลย (I-3 เงียบที่สุด)
+fn locate_bytes(
+    spool_dir: Option<&std::path::Path>,
+    asset: &AssetRef,
+) -> refx_io::packed::AssetBytes {
+    use refx_io::packed::AssetBytes;
+
+    let in_spool = spool_dir.is_some_and(|dir| asset.path.starts_with(dir));
+    let have_file = !asset.path.as_os_str().is_empty() && asset.path.is_file();
+    if have_file {
+        return if in_spool {
+            AssetBytes::Ours(asset.path.clone())
+        } else {
+            AssetBytes::UserFile(asset.path.clone())
+        };
+    }
+    // ★ ไฟล์เดิมไม่อยู่แล้ว — สำเนาใน spool (ถ้ามี) คือของที่เหลืออยู่
+    match spool_dir.map(|dir| refx_io::spool::spool_path(dir, asset.hash)) {
+        Some(path) if path.is_file() => AssetBytes::Ours(path),
+        _ => AssetBytes::Missing,
+    }
+}
+
+/// ข้อความยืนยันตอนผู้ใช้เลือกโหมดของ board ที่ยังไม่มีไฟล์
+fn mode_message(mode: refx_io::packed::SaveMode) -> Key {
+    match mode {
+        refx_io::packed::SaveMode::Linked => Key::SaveModeLinkedHint,
+        refx_io::packed::SaveMode::Packed => Key::SaveModePackedHint,
+    }
+}
+
+/// ★★ asset table ของเอกสารที่เปิดอยู่ — อ่าน **หัวไฟล์กับตาราง** เท่านั้น
+///
+/// ★ ไม่แตะ blob สักไบต์ · ไฟล์ linked คืนตารางว่าง (ไม่ใช่ error) และไฟล์ที่
+/// อ่านไม่ออกก็คืนตารางว่างเช่นกัน — การเปิดเอกสารสำเร็จไปแล้วในเส้นทางหลัก
+/// การที่เราอ่านตารางไม่ได้จึงแปลว่า "ไม่มีภาพฝังอยู่" ไม่ใช่ "เปิดไม่ได้"
+fn read_asset_table(path: &std::path::Path) -> refx_io::packed::Index {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return refx_io::packed::Index::default();
+    };
+    let len = file.metadata().map(|meta| meta.len()).unwrap_or(0);
+    refx_io::packed::read_index(&mut file, len).unwrap_or_else(|err| {
+        tracing::warn!(%err, file = %path.display(), "cannot read the asset table");
+        refx_io::packed::Index::default()
+    })
+}
+
+/// ★★★ โหมดของเอกสารที่ **อ่านจากของจริงในไฟล์** ไม่ใช่ธงที่ใครจำไว้
+///
+/// `docs/07 §2` แยกสองโหมดด้วยคำถามเดียวที่ผู้ใช้สนใจจริง ๆ:
+/// *"ย้ายไฟล์นี้ไปเครื่องอื่นแล้วภาพยังอยู่ไหม"* → **ทุกใบอยู่ข้างในหรือเปล่า**
+///
+/// ★★ ไฟล์ไม่ได้เก็บ "ผู้ใช้เลือกโหมดไหน" ไว้ และ**ไม่ควรเก็บ** — `version = 2`
+/// แปลว่า *"มี asset ฝังอยู่"* เท่านั้น (§4 ข้อ 22) · board แบบ linked ที่มี
+/// ภาพวางจาก clipboard ก็เป็น v2 เหมือนกัน แต่มันไม่ใช่ packed เพราะภาพจากไฟล์
+/// ยังอยู่ข้างนอก · การอ่านสภาพจริงจึงตอบถูกทั้งสองกรณีโดยไม่ต้องเดา
+/// (บทเรียนของ §2.25: ประตูที่จำสถานะไว้แทนที่จะอ่านสถานะจริง)
+///
+/// ★ ใบที่เป็น `Missing` ไม่นับ — มันไม่มีไบต์ให้ฝังตั้งแต่ต้น การนับมันจะทำให้
+/// เอกสาร packed ที่บันทึกตอนภาพหายไปแล้วหนึ่งใบกลายเป็น "linked" ตลอดกาล
+fn mode_of_document(board: &Board, index: &refx_io::packed::Index) -> refx_io::packed::SaveMode {
+    use refx_io::packed::SaveMode;
+
+    if index.is_empty() {
+        return SaveMode::Linked;
+    }
+    let all_inside = board.items_in_z_order().all(|(_, item)| match &item.kind {
+        ItemKind::Image(asset) => index.find(asset.hash).is_some(),
+        _ => true,
+    });
+    if all_inside {
+        SaveMode::Packed
+    } else {
+        SaveMode::Linked
     }
 }
 
@@ -1941,6 +2155,11 @@ impl RefxApp {
             autosave_job: None,
             snapshot_revision: None,
             doc_path: None,
+            // ★ ค่าปริยายของ `docs/07 §2` — และ board ที่ยังไม่มีไฟล์ก็ยังไม่มี
+            //   อะไรฝังอยู่จริง ๆ อยู่แล้ว
+            save_mode: refx_io::packed::SaveMode::Linked,
+            doc_assets: refx_io::packed::Index::default(),
+            save_as_mode: refx_io::packed::SaveMode::Linked,
             pending_open: false,
             open_dialog: None,
             load_job: None,
@@ -3508,6 +3727,8 @@ impl RefxApp {
                 };
                 // ★ กู้คืนแล้ว **ยังไม่มี path** — งานชุดนี้ไม่เคยถูกบันทึกมาก่อน
                 //   จึงต้อง dirty ต่อไปและถูก autosave ต่อไปตามปกติ
+                //   ★★ และยังไม่มีไฟล์ `.refx` ที่ฝังอะไรไว้ → ตารางว่าง
+                self.doc_assets = refx_io::packed::Index::default();
                 self.adopt_board(board, None);
                 // ★ ยังไม่ลบไฟล์เก่า — รอให้ snapshot ของ session นี้ลงดิสก์ก่อน
                 //   (ดู `adopted_recovery`) · ระหว่างนี้มีสำเนาอยู่หนึ่งชุดเสมอ
@@ -3677,12 +3898,25 @@ impl RefxApp {
     /// ตั้งแต่วันแรก ไม่ใช่ "ค่อยย้ายทีหลังตอนมันช้า"
     fn start_load(&mut self, path: &std::path::Path) {
         let path = path.to_path_buf();
+        // ★ เหตุผลเดียวกับเธรดบันทึก: อ่านไฟล์ packed ระดับ GB ใช้เวลาจริง
+        //   และแอปหลับระหว่างรอ (I-1) — ไม่ปลุก = เอกสารไม่ขึ้นจอจนกว่าจะมี event
+        let waker = self.waker.clone();
         let (tx, rx) = crossbeam_channel::bounded(1);
         let spawned = std::thread::Builder::new()
             .name("refx-open".to_owned())
             .spawn(move || {
-                let result = read_document(&path).map(|board| (path, Box::new(board)));
+                let result = read_document(&path).map(|board| LoadedDoc {
+                    // ★★ อ่าน **ตาราง** ของไฟล์เดียวกันต่อทันที (หัวไฟล์ + ตาราง
+                    //    เท่านั้น ไม่แตะ blob) — เอกสาร packed พกภาพมาเอง และ
+                    //    ตารางนี้คือสิ่งที่บอกว่าใบไหนอยู่ข้างในบ้าง
+                    assets: read_asset_table(&path),
+                    path,
+                    board: Box::new(board),
+                });
                 let _ = tx.send(result);
+                if let Some(waker) = waker {
+                    waker.wake();
+                }
             });
         if spawned.is_err() {
             self.shell.status = text::t(self.shell.lang, Key::OpenFailed).to_owned();
@@ -3728,10 +3962,15 @@ impl RefxApp {
         };
         self.load_job = None;
         match done {
-            Ok((path, board)) => {
+            Ok(LoadedDoc {
+                path,
+                board,
+                assets,
+            }) => {
                 let name = path
                     .file_name()
                     .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+                self.doc_assets = assets;
                 self.adopt_board(*board, Some(path));
                 self.shell.status = text::fill(lang, text::Template::Opened, &[("name", &name)]);
                 self.shell.status_warn = false;
@@ -3778,7 +4017,12 @@ impl RefxApp {
         // ★★ `doc_path`/นาฬิกา autosave ต้องเปลี่ยนพร้อมกันกับ board เสมอ —
         //    ถ้าตั้ง path ใหม่แต่ลืมรีเซ็ตนาฬิกา snapshot แรกของเอกสารใหม่จะ
         //    ถูกเลื่อนไปจนครบรอบของเอกสารเก่า
+        // ★★ โหมดของเอกสารใหม่ **อ่านจากตารางของไฟล์นั้น** — ผู้เรียกเป็นคนเติม
+        //    `doc_assets` มาก่อนเสมอ (ตารางว่างสำหรับงานที่กู้คืนมา ซึ่งยังไม่มีไฟล์)
+        let mode = mode_of_document(&gfx.board, &self.doc_assets);
+
         self.doc_path = path;
+        self.save_mode = mode;
         self.snapshot_revision = None;
         self.autosaver.reset();
         self.request_thumbnails_for_board();
@@ -3831,11 +4075,22 @@ impl RefxApp {
         self.start_relink_scan(wanted);
     }
 
-    /// ★★★ ขั้น 1–3 ของ relink — **บนเธรดอื่น** (I-2)
+    /// ★★★ ขั้น 1–3 ของ relink **+ สำเนาที่เอกสารพกมาเอง** — บนเธรดอื่น (I-2)
     ///
     /// การถามว่า "ไฟล์นี้ยังอยู่ไหม" คือ `stat` หนึ่งครั้งต่อใบ · board 3,000 ใบ
     /// บนไดรฟ์เครือข่ายที่หลุด = หน้าต่างค้างเป็นสิบวินาที ซึ่งเป็นวินาทีที่ผู้ใช้
     /// ตัดสินว่าโปรแกรมนี้เชื่อถือได้หรือเปล่า
+    ///
+    /// ## ★★★ ทำไมการแกะ blob อยู่ **หลัง** ขั้น 1–3 ไม่ใช่ก่อน
+    ///
+    /// ทั้งสามขั้นแรกคืนไฟล์ที่ **ผู้ใช้เป็นเจ้าของ** ส่วน blob ในเอกสารเป็นสำเนา
+    /// ที่เราจะแกะลง spool ซึ่งเป็นโฟลเดอร์ที่ถูกเก็บกวาดตามเพดาน · เมื่อทั้งสอง
+    /// ทางให้เนื้อเดียวกันเป๊ะ (คีย์คือ hash ของเนื้อ) การเลือกไฟล์จริงของผู้ใช้
+    /// ก่อนจึงดีกว่าเสมอ — ไม่กินดิสก์เพิ่ม และ `docs/07 §2` ขั้นที่ 1 ยังคุ้มครอง
+    /// ไฟล์ที่ไม่เคยย้ายไปไหนตามเดิม
+    ///
+    /// ★★ **แต่ต้องมาก่อนขั้นที่ 4 เสมอ** — เอกสารที่พกภาพมาเองแล้วขึ้น
+    /// *"หาไฟล์ไม่เจอ"* คือการโกหกผู้ใช้ ทั้งที่ภาพอยู่ในไฟล์ที่เขาเพิ่งเปิด
     fn start_relink_scan(&mut self, wanted: Vec<refx_core::relink::Wanted>) {
         let Some(assets) = self.assets.as_ref() else {
             return;
@@ -3848,22 +4103,42 @@ impl RefxApp {
             .as_ref()
             .and_then(|path| path.parent())
             .map(std::path::Path::to_path_buf);
+        // ★ ของที่ต้องมีครบทั้งสามอย่างการแกะ blob ถึงจะเป็นไปได้
+        let embedded = self
+            .doc_path
+            .clone()
+            .filter(|_| !self.doc_assets.is_empty())
+            .zip(self.spool_dir.clone())
+            .map(|(doc, spool)| (doc, spool, self.doc_assets.clone()));
         let (tx, rx) = crossbeam_channel::bounded(1);
         let spawned = std::thread::Builder::new()
             .name("refx-relink-scan".to_owned())
             .spawn(move || {
-                let found = wanted
-                    .into_iter()
-                    .map(|want| {
-                        let located = refx_core::relink::locate(
-                            &want,
-                            doc_dir.as_deref(),
-                            |path| path.is_file(),
-                            |hash| paths_known_for(io.as_ref(), hash),
-                        );
-                        (want, located)
-                    })
-                    .collect::<Vec<_>>();
+                // ★ เปิดเอกสารครั้งเดียวสำหรับทั้งงวด ไม่ใช่ครั้งละใบ — และเปิด
+                //   ก็ต่อเมื่อมีอะไรฝังอยู่จริง (เอกสาร linked ไม่ถูกแตะเลย)
+                let mut source = embedded.as_ref().and_then(|(doc, _, _)| {
+                    std::fs::File::open(doc)
+                        .map_err(|err| {
+                            tracing::warn!(%err, "cannot reopen the document to unpack its images");
+                        })
+                        .ok()
+                });
+                let mut found = Vec::with_capacity(wanted.len());
+                for want in wanted {
+                    let mut located = refx_core::relink::locate(
+                        &want,
+                        doc_dir.as_deref(),
+                        |path| path.is_file(),
+                        |hash| paths_known_for(io.as_ref(), hash),
+                    );
+                    if located.is_none()
+                        && let (Some((_, spool, index)), Some(file)) =
+                            (embedded.as_ref(), source.as_mut())
+                    {
+                        located = unpack_embedded(&want, index, spool, file);
+                    }
+                    found.push((want, located));
+                }
                 let _ = tx.send(found);
                 wake.wake();
             });
@@ -3910,6 +4185,7 @@ impl RefxApp {
         let mut jobs = Vec::new();
         let mut lost: Vec<(ItemId, ItemKind)> = Vec::new();
         let mut moved = 0usize;
+        let mut unpacked = 0usize;
         let total = found.len();
 
         for (index, (want, located)) in found.into_iter().enumerate() {
@@ -3924,13 +4200,25 @@ impl RefxApp {
                 ));
                 continue;
             };
-            if located.step != refx_core::relink::Step::WhereItWas {
-                moved += 1;
-                tracing::info!(
-                    step = ?located.step,
-                    file = %refx_asset::decode::file_label(&located.path),
-                    "relinked an image that had moved"
-                );
+            match located.step {
+                // ที่เดิม = ไม่ใช่การ relink ในสายตาผู้ใช้ (เงียบสนิท)
+                refx_core::relink::Step::WhereItWas => {}
+                // ★ ภาพที่อยู่ในไฟล์งานเองไม่ได้ "ย้ายที่" — คนละเรื่องกันสำหรับผู้ใช้
+                refx_core::relink::Step::Embedded => {
+                    unpacked += 1;
+                    tracing::info!(
+                        file = %refx_asset::decode::file_label(&located.path),
+                        "unpacked an image stored inside the document"
+                    );
+                }
+                _ => {
+                    moved += 1;
+                    tracing::info!(
+                        step = ?located.step,
+                        file = %refx_asset::decode::file_label(&located.path),
+                        "relinked an image that had moved"
+                    );
+                }
             }
             // คีย์ชั่วคราวสำหรับจับคู่ผลลัพธ์ (เหมือน `submit_dropped` เป๊ะ)
             let key = refx_asset::hash::hash_bytes(located.path.to_string_lossy().as_bytes());
@@ -3971,9 +4259,10 @@ impl RefxApp {
         //    รายงาน "เปิด N ไฟล์ใน M ms" ของงวด decode จะทับมันภายในไม่กี่
         //    มิลลิวินาที แล้วผู้ใช้จะไม่มีวันรู้ว่าภาพถูกผูกใหม่หรือหายไปกี่ใบ
         //    (บทเรียนเดิมของ §2.24: ข้อความที่ถูกทับทันที = ข้อความที่ไม่มีอยู่)
-        if lost_count > 0 || moved > 0 {
+        if lost_count > 0 || moved > 0 || unpacked > 0 {
             self.relink_report = Some(RelinkReport {
                 moved,
+                unpacked,
                 total,
                 lost: lost_count,
             });
@@ -4206,48 +4495,136 @@ impl RefxApp {
         if self.save_job.is_some() || self.save_dialog.is_some() {
             return;
         }
+        // ★★★ **`Ctrl+S` ใช้โหมดของเอกสารเดิมเสมอ ห้ามถามซ้ำ** (P4-5)
+        //
+        //   เอกสารที่ผู้ใช้เคยบันทึกแบบ packed มีภาพอยู่ข้างในไฟล์ · ถ้าการกด
+        //   `Ctrl+S` เขียน linked ทับ **ภาพที่ฝังไว้หายหมดในครั้งเดียว** ซึ่งคือ
+        //   ความพังที่ `docs/07 §1` ยกเป็นเหตุผลของการมี version 2 อยู่แล้ว —
+        //   ต่างกันแค่คราวนี้คนที่ทำคือรุ่นปัจจุบันของเราเอง ไม่ใช่รุ่นเก่า
         let known_path = match request {
             SaveRequest::Save => self.doc_path.clone(),
             // บันทึกเป็น = ถามที่ใหม่เสมอ ต่อให้เคยบันทึกแล้ว
             SaveRequest::SaveAs => None,
         };
         match known_path {
-            Some(path) => self.start_save(&path),
+            Some(path) => self.start_save(&path, self.save_mode),
+            // ★ ถามโหมดก่อน แล้วค่อยถามที่เก็บ (`docs/07 §2`: "Save As มีตัวเลือกนี้
+            //   ชัดเจน") · native dialog ใส่ตัวเลือกของเราเองเข้าไปไม่ได้ แถบใน
+            //   หน้าต่างจึงเป็นที่เดียวที่ใส่ได้ — และมันไม่บล็อก UI thread ด้วย (I-2)
             None => {
-                let name = self
-                    .doc_path
-                    .as_ref()
-                    .and_then(|path| path.file_name())
-                    .map_or_else(
-                        || "board.refx".to_owned(),
-                        |name| name.to_string_lossy().into_owned(),
-                    );
-                self.save_dialog = Some(refx_platform::dialog::pick_save_location(&name));
-                self.shell.status = text::t(self.shell.lang, Key::SaveChoosing).to_owned();
+                self.shell.save_as_prompt = true;
+                self.shell.status = text::t(self.shell.lang, Key::SaveModeAsk).to_owned();
+                self.shell.status_warn = false;
+            }
+        }
+    }
+
+    /// ผู้ใช้ตอบแถบ "บันทึกเป็นแบบไหน" แล้ว → ถามที่เก็บต่อ
+    fn apply_save_as_choice(&mut self, choice: crate::shell::SaveAsChoice) {
+        use crate::shell::SaveAsChoice;
+
+        self.shell.save_as_prompt = false;
+        let mode = match choice {
+            SaveAsChoice::Linked => refx_io::packed::SaveMode::Linked,
+            SaveAsChoice::Packed => refx_io::packed::SaveMode::Packed,
+            SaveAsChoice::Cancel => {
+                // ★ ยกเลิกตรงนี้ต้อง **ยกเลิกการปิดด้วย** เหมือนยกเลิกที่ dialog
+                //   ไม่งั้นผู้ใช้ที่กด "บันทึกแล้วปิด" แล้วเปลี่ยนใจจะโดนปิดหน้าต่าง
+                self.after_save = AfterSave::Stay;
+                self.shell.status = text::t(self.shell.lang, Key::SaveCancelled).to_owned();
+                self.shell.status_warn = false;
+                return;
+            }
+        };
+        if self.save_dialog.is_some() || self.save_job.is_some() {
+            return;
+        }
+        let name = self
+            .doc_path
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .map_or_else(
+                || "board.refx".to_owned(),
+                |name| name.to_string_lossy().into_owned(),
+            );
+        self.save_as_mode = mode;
+        self.save_dialog = Some(refx_platform::dialog::pick_save_location(&name));
+        self.shell.status = text::t(self.shell.lang, Key::SaveChoosing).to_owned();
+        self.shell.status_warn = false;
+    }
+
+    /// ★★ ผู้ใช้กดสลับโหมดบนแถบสถานะ — เอกสารที่มีไฟล์แล้วถูก **เขียนใหม่ทันที**
+    ///
+    /// ★★★ ทำไมไม่ใช่แค่จำไว้แล้วรอ `Ctrl+S`: ตัวบ่งชี้บนแถบสถานะเป็น **สภาวะ
+    /// ของไฟล์** (`docs/03 §1`) ถ้ามันเปลี่ยนทันทีที่กดแต่ไฟล์ยังเหมือนเดิม
+    /// มันจะกลายเป็นคำโกหกที่อยู่ค้างบนจอ — ผู้ใช้ที่กด "เก็บภาพไว้ข้างใน"
+    /// แล้วส่งไฟล์ให้เพื่อนทันทีจะส่งไฟล์ที่ไม่มีภาพอยู่ข้างในเลย
+    ///
+    /// ★ board ที่ยังไม่มีไฟล์ทำอะไรไม่ได้นอกจากจำไว้ — และนั่นถูกต้อง เพราะ
+    /// ยังไม่มีไฟล์ให้พูดถึง (แถบสถานะบอกว่า "จะบันทึกแบบนี้")
+    fn apply_mode_request(&mut self, mode: refx_io::packed::SaveMode) {
+        if mode == self.save_mode {
+            return;
+        }
+        match self.doc_path.clone() {
+            Some(path) => self.start_save(&path, mode),
+            None => {
+                self.save_mode = mode;
+                self.shell.status = text::t(self.shell.lang, mode_message(mode)).to_owned();
+                self.shell.status_warn = false;
             }
         }
     }
 
     /// ส่งงานเขียนไฟล์ไปเธรด — ไม่รอผล
-    fn start_save(&mut self, path: &std::path::Path) {
+    ///
+    /// ★★★ **การตัดสินว่าจะฝังภาพใบไหน อยู่บนเธรดนี้ด้วย** (P4-5) —
+    /// `plan_embeds` ถาม `locate_bytes` ซึ่งแตะดิสก์ทุกใบ (`is_file`) · board
+    /// 3,000 ใบบนไดรฟ์เครือข่ายที่หลุด = หน้าต่างค้างเป็นสิบวินาทีถ้าทำบน UI (I-2)
+    fn start_save(&mut self, path: &std::path::Path, mode: refx_io::packed::SaveMode) {
         let Some(gfx) = self.gfx.as_ref() else {
             return;
         };
         // ★ โคลน ณ จังหวะที่ผู้ใช้สั่ง (ดูเหตุผลใน `apply_save_request`)
         let board = gfx.board.clone();
         let path = path.to_path_buf();
+        let spool_dir = self.spool_dir.clone();
+        // ★★★ **ต้องปลุก UI ตอนเขียนเสร็จ** — แอปหลับสนิทระหว่างรอดิสก์ (I-1)
+        //   ถ้าไม่ปลุก `poll_save` จะไม่ถูกเรียกจนกว่าผู้ใช้จะบังเอิญขยับเมาส์
+        //   แล้วจอจะค้างที่คำว่า "กำลังบันทึก" ทั้งที่ไฟล์ลงดิสก์ไปแล้ว —
+        //   ผู้ใช้ที่เห็นแบบนั้นจะไม่กล้าปิดโปรแกรม (เห็นจริงตอนยืนยัน P4-5)
+        let waker = self.waker.clone();
         let (tx, rx) = crossbeam_channel::bounded(1);
         let spawned = std::thread::Builder::new()
             .name("refx-save".to_owned())
             .spawn(move || {
+                // ★★ กฎว่าอะไรต้องถูกฝังอยู่ที่ `refx-io` ที่เดียว — ที่นี่ตอบแค่ว่า
+                //    ไบต์ของแต่ละใบอยู่ที่ไหน (§4 ข้อ 23 · ดู `locate_bytes`)
+                let embeds = refx_io::packed::plan_embeds(&board, mode, |asset| {
+                    locate_bytes(spool_dir.as_deref(), asset)
+                });
                 // ★★ ส่ง `rename_durable` ของชั้น platform เข้าไป — ตัวที่ทำให้
                 //    การสลับไฟล์เองทนไฟดับ (`MOVEFILE_WRITE_THROUGH` / fsync dir)
                 //    `refx-io` เรียกเองไม่ได้เพราะพึ่ง `refx-platform` ไม่ได้
-                let result =
-                    refx_io::save::save_atomic(&path, &board, refx_platform::fsops::rename_durable)
-                        .map(|()| path)
-                        .map_err(|err| err.to_string());
+                let result = refx_io::save::save_document(
+                    &path,
+                    &board,
+                    &embeds,
+                    refx_platform::fsops::rename_durable,
+                )
+                .map_err(|err| err.to_string())
+                .map(|()| SavedDoc {
+                    // ★ อ่านตารางของไฟล์ที่ **เพิ่งเขียนจริง** กลับมา ไม่ใช่เชื่อ
+                    //   แผนที่เราส่งเข้าไป — สองอย่างนี้ต่างกันได้ (board ที่ไม่มี
+                    //   ภาพเลยได้ v1 ที่ไม่มีตาราง ทั้งที่ผู้ใช้สั่ง packed)
+                    assets: read_asset_table(&path),
+                    path,
+                    mode,
+                });
                 let _ = tx.send(result);
+                if let Some(waker) = waker {
+                    waker.wake();
+                }
             });
         if spawned.is_err() {
             self.shell.status = text::t(self.shell.lang, Key::SaveFailed).to_owned();
@@ -4268,7 +4645,7 @@ impl RefxApp {
             match rx.try_recv() {
                 Ok(Some(path)) => {
                     self.save_dialog = None;
-                    self.start_save(&path);
+                    self.start_save(&path, self.save_as_mode);
                 }
                 Ok(None) => {
                     // กดยกเลิก — ไม่ใช่ error และ **ต้องยกเลิกการปิดด้วย**
@@ -4299,7 +4676,7 @@ impl RefxApp {
         };
         self.save_job = None;
         match done {
-            Ok(path) => {
+            Ok(SavedDoc { path, assets, mode }) => {
                 // ★★ `mark_saved` คือสิ่งที่ทำให้ `dirty` กลับเป็น false — และมันต้อง
                 //    เกิด **หลังเขียนสำเร็จเท่านั้น** ไม่ใช่ตอนสั่ง ไม่งั้นผู้ใช้จะ
                 //    ปิดโปรแกรมโดยคิดว่างานถูกบันทึกแล้วทั้งที่ดิสก์เต็ม
@@ -4322,6 +4699,12 @@ impl RefxApp {
                 }
                 self.autosaver.reset();
                 self.doc_path = Some(path);
+                // ★★★ โหมดของเอกสารเปลี่ยน **หลังไฟล์ลงดิสก์แล้วเท่านั้น** —
+                //     เหตุผลเดียวกับ `mark_saved` เป๊ะ: ผู้ใช้ที่ดิสก์เต็มต้องไม่
+                //     เห็นคำว่า packed แล้วเชื่อว่าไฟล์ที่เขากำลังจะส่งให้เพื่อน
+                //     มีภาพอยู่ข้างใน ทั้งที่การเขียนล้มไปแล้ว
+                self.save_mode = mode;
+                self.doc_assets = assets;
                 self.shell.status = text::fill(lang, text::Template::Saved, &[("name", &name)]);
                 self.shell.status_warn = false;
                 if self.after_save == AfterSave::Close {
@@ -5203,6 +5586,18 @@ impl AppDelegate for RefxApp {
         if let Some(choice) = self.shell.close_choice.take() {
             self.apply_close_choice(choice);
         }
+        // ★ ผู้ใช้ตอบแถบ "บันทึกเป็นแบบไหน" เมื่อเฟรมที่แล้ว (P4-5)
+        if let Some(choice) = self.shell.save_as_choice.take() {
+            self.apply_save_as_choice(choice);
+        }
+        // ★ ผู้ใช้กดสลับโหมดบนแถบสถานะเมื่อเฟรมที่แล้ว (P4-5)
+        if let Some(packed) = self.shell.storage_request.take() {
+            self.apply_mode_request(if packed {
+                refx_io::packed::SaveMode::Packed
+            } else {
+                refx_io::packed::SaveMode::Linked
+            });
+        }
         // ค่าที่ผู้ใช้ปรับใน inspector เมื่อเฟรมที่แล้ว
         self.apply_inspector_edit();
         // ข้อความที่ผู้ใช้พิมพ์ลงโน้ตเมื่อเฟรมที่แล้ว (P2-11)
@@ -5262,6 +5657,8 @@ impl AppDelegate for RefxApp {
             pick_in_flight,
             pick_count,
             doc_path,
+            save_mode,
+            doc_assets,
             ..
         } = self;
         let gfx = gfx.as_mut()?;
@@ -5287,6 +5684,25 @@ impl AppDelegate for RefxApp {
             path.file_name()
                 .map(|name| name.to_string_lossy().into_owned())
         });
+        // ★★★ สภาวะ "ภาพเก็บไว้ที่ไหน" (P4-5 · `docs/07 §2`) — เติมทุกเฟรมเหมือน
+        //   `unsaved` · ตัวเลขนับจาก **ตารางของไฟล์จริง** ไม่ใช่จากธงที่จำไว้
+        shell.storage = crate::shell::StorageView {
+            packed: *save_mode == refx_io::packed::SaveMode::Packed,
+            images: gfx
+                .board
+                .items_in_z_order()
+                .filter(|(_, item)| matches!(item.kind, ItemKind::Image(_)))
+                .count(),
+            inside: gfx
+                .board
+                .items_in_z_order()
+                .filter(|(_, item)| match &item.kind {
+                    ItemKind::Image(asset) => doc_assets.find(asset.hash).is_some(),
+                    _ => false,
+                })
+                .count(),
+            has_file: doc_path.is_some(),
+        };
         // ★ ปุ่มบน toolbar เป็นภาพสะท้อนของ `gfx.tool` เท่านั้น — เจ้าของมีคนเดียว
         shell.tool = gfx.tool;
         // ★ inspector อ่านค่าจากภาพ **ตัวแรกในชุดที่เลือก** (anchor ของการเลือก)
@@ -8533,5 +8949,356 @@ two"
                 );
             }
         }
+    }
+
+    // ---------- ★★★ P4-5 ชิ้นที่ 2: บันทึก packed · เปิดแล้วแตก blob กลับ ----------
+
+    /// ไฟล์ภาพปลอมที่มีเนื้อต่างกันจริง — พอสำหรับทุกอย่างที่ไม่ต้อง decode
+    fn plant_file(dir: &std::path::Path, name: &str, fill: u8) -> std::path::PathBuf {
+        let path = dir.join(name);
+        let body: Vec<u8> = (0..2_048)
+            .map(|i| (i as u8).wrapping_mul(fill | 1))
+            .collect();
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    fn content_hash(n: u8) -> refx_core::hash::ContentHash {
+        refx_core::hash::ContentHash::from_bytes([n; 32])
+    }
+
+    /// ★★★ **ใบที่ไม่มีไฟล์ต้นทางแล้ว ต้องถูกฝังแม้ในโหมด linked** (§4 ข้อ 23)
+    ///
+    /// นี่คือฟังก์ชันที่เธรดบันทึกเรียกจริง ไม่ใช่ตรรกะเลียนแบบ
+    /// (`docs/08 §3.9` ข้อ 9) · ทั้งสี่แถวคือทั้งหมดที่มันต้องตอบให้ถูก
+    #[test]
+    fn where_the_bytes_of_an_asset_live() {
+        use refx_io::packed::AssetBytes;
+
+        let dir = spool_temp_dir("locate-bytes");
+        let spool = dir.join("pasted");
+        std::fs::create_dir_all(&spool).unwrap();
+        let user_file = plant_file(&dir, "cat.png", 3);
+        let pasted = refx_io::spool::store(
+            &spool,
+            content_hash(7),
+            b"pasted pixels",
+            refx_platform::fsops::rename_durable,
+        )
+        .unwrap();
+
+        let asset = |hash: u8, path: &std::path::Path| AssetRef {
+            hash: content_hash(hash),
+            path: path.to_path_buf(),
+            px_size: glam::UVec2::new(8, 8),
+            format: ImageFormat::Unknown,
+            embedded: false,
+            mtime: 0,
+            file_size: 0,
+        };
+
+        // ไฟล์ของผู้ใช้ที่ยังอยู่ → ลิงก์ได้
+        assert_eq!(
+            locate_bytes(Some(&spool), &asset(3, &user_file)),
+            AssetBytes::UserFile(user_file.clone()),
+        );
+        // ภาพที่วาง (อยู่ในโฟลเดอร์ spool) → ของเรา ฝังเสมอ
+        assert_eq!(
+            locate_bytes(Some(&spool), &asset(7, &pasted)),
+            AssetBytes::Ours(pasted.clone()),
+        );
+        // ★★★ เปิดเอกสาร packed บนเครื่องที่ไม่มีไฟล์เลย แล้วบันทึกทับ:
+        //     path เดิมชี้ไปที่ว่าง แต่สำเนาที่แกะไว้ตอนเปิดยังอยู่ → **ต้องฝัง**
+        //     ถ้าตรงนี้ตอบ `Missing` ไฟล์ที่บันทึกใหม่จะไม่มีภาพอยู่ข้างในเลย
+        assert_eq!(
+            locate_bytes(
+                Some(&spool),
+                &asset(7, std::path::Path::new("E:/gone/away.png"))
+            ),
+            AssetBytes::Ours(pasted),
+        );
+        // ไม่เหลืออะไรเลย
+        assert_eq!(
+            locate_bytes(
+                Some(&spool),
+                &asset(9, std::path::Path::new("E:/gone/away.png"))
+            ),
+            AssetBytes::Missing,
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ★★★ **โหมดของเอกสารอ่านจากของจริงในไฟล์ ไม่ใช่ธงที่จำไว้**
+    ///
+    /// `version = 2` แปลว่า "มี asset ฝังอยู่" เท่านั้น (§4 ข้อ 22) — board แบบ
+    /// linked ที่มีภาพจาก clipboard ก็เป็น v2 เหมือนกัน · ตัวบ่งชี้บนแถบสถานะ
+    /// จึงต้องตอบคำถามที่ผู้ใช้ถามจริง: **ทุกใบอยู่ข้างในหรือเปล่า**
+    #[test]
+    fn a_document_is_packed_only_when_every_image_is_inside_it() {
+        use refx_core::board::{BoardParts, ItemParts};
+        use refx_io::packed::SaveMode;
+
+        let board = Board::load(
+            default_board_id(),
+            BoardParts {
+                name: "mixed".to_owned(),
+                items: vec![
+                    ItemParts {
+                        item: Item::new(image_kind(1, "E:/photos/a.png")),
+                        group: None,
+                    },
+                    ItemParts {
+                        item: Item::new(image_kind(2, "E:/pasted/b.png")),
+                        group: None,
+                    },
+                ],
+                ..BoardParts::default()
+            },
+        );
+        let index_of = |hashes: &[u8]| {
+            let dir = spool_temp_dir(&format!("mode-{}", hashes.len()));
+            let sources: Vec<_> = hashes
+                .iter()
+                .map(|n| refx_io::packed::PackSource {
+                    hash: content_hash(*n),
+                    path: plant_file(&dir, &format!("blob{n}.bin"), *n),
+                })
+                .collect();
+            let doc = dir.join("doc.refx");
+            let mut file = std::fs::File::create(&doc).unwrap();
+            refx_io::packed::write_packed(&mut file, &board, &sources).unwrap();
+            drop(file);
+            let index = read_asset_table(&doc);
+            (dir, index)
+        };
+
+        // ไม่มีอะไรฝังอยู่ = linked (ไฟล์ v1 ธรรมดา)
+        assert_eq!(
+            mode_of_document(&board, &refx_io::packed::Index::default()),
+            SaveMode::Linked,
+        );
+        // ★ ฝังแค่ภาพที่วาง (กฎ "linked ก็ฝัง") — **ยังเป็น linked**
+        let (dir_one, one) = index_of(&[2]);
+        assert_eq!(one.len(), 1);
+        assert_eq!(mode_of_document(&board, &one), SaveMode::Linked);
+        // ฝังครบทุกใบ = packed
+        let (dir_all, all) = index_of(&[1, 2]);
+        assert_eq!(mode_of_document(&board, &all), SaveMode::Packed);
+
+        let _ = std::fs::remove_dir_all(&dir_one);
+        let _ = std::fs::remove_dir_all(&dir_all);
+    }
+
+    /// ★★★ **ลบโฟลเดอร์ต้นฉบับทั้งโฟลเดอร์ → เปิดแล้วภาพยังครบ**
+    ///
+    /// เกณฑ์ผ่านข้อแรกของ P4-5 · เดินทั้งเส้นด้วยของจริงทุกชิ้น:
+    /// `locate_bytes` → `plan_embeds` → `save_document` → `read_document` →
+    /// `read_asset_table` → `spool::unpack` — ไม่มีตัวจำลองสักตัว
+    #[test]
+    fn a_packed_document_survives_losing_every_source_file() {
+        use refx_io::packed::SaveMode;
+
+        let root = spool_temp_dir("packed-survives");
+        let photos = root.join("photos");
+        std::fs::create_dir_all(&photos).unwrap();
+        let spool = root.join("pasted");
+        let a = plant_file(&photos, "a.png", 5);
+        let b = plant_file(&photos, "b.png", 9);
+        let original: Vec<Vec<u8>> = [&a, &b]
+            .iter()
+            .map(|path| {
+                use std::io::Read as _;
+                let mut bytes = Vec::new();
+                std::fs::File::open(path)
+                    .unwrap()
+                    .read_to_end(&mut bytes)
+                    .unwrap();
+                bytes
+            })
+            .collect();
+
+        let mut board = board_pointing_at(content_hash(5), &a);
+        {
+            use refx_core::command::AddItems;
+            let mut history = History::default();
+            history
+                .apply(
+                    &mut board,
+                    Box::new(
+                        AddItems::new(vec![Item::new(ItemKind::Image(AssetRef {
+                            hash: content_hash(9),
+                            path: b.clone(),
+                            px_size: glam::UVec2::new(8, 8),
+                            format: ImageFormat::Unknown,
+                            embedded: false,
+                            mtime: 0,
+                            file_size: 0,
+                        }))])
+                        .unwrap(),
+                    ),
+                )
+                .unwrap();
+            // ★ บันทึกจริง = เอกสารสะอาด — เทียบทั้งก้อนได้โดยไม่ต้องยกเว้นฟิลด์ไหน
+            history.mark_saved(&mut board);
+        }
+
+        // ---- บันทึกแบบ packed (เส้นทางเดียวกับที่เธรดบันทึกเดิน) ----
+        let doc = root.join("board.refx");
+        let embeds = refx_io::packed::plan_embeds(&board, SaveMode::Packed, |asset| {
+            locate_bytes(Some(&spool), asset)
+        });
+        assert_eq!(embeds.len(), 2, "ต้องฝังทั้งสองใบ");
+        refx_io::save::save_document(&doc, &board, &embeds, refx_platform::fsops::rename_durable)
+            .unwrap();
+
+        // ---- ★ ลบโฟลเดอร์ต้นฉบับทั้งโฟลเดอร์ ----
+        std::fs::remove_dir_all(&photos).unwrap();
+        assert!(!a.exists() && !b.exists());
+
+        // ---- เปิดกลับมา ----
+        let back = read_document(&doc).expect("เปิดไฟล์ packed ไม่ได้");
+        let index = read_asset_table(&doc);
+        assert_eq!(back, board, "เนื้อเอกสารไม่เท่าเดิม");
+        assert_eq!(
+            mode_of_document(&back, &index),
+            SaveMode::Packed,
+            "แถบสถานะจะบอกโหมดผิด"
+        );
+
+        // ---- ★★★ ภาพต้องกลับมาเป็นไฟล์จริงได้ครบ ไบต์ต่อไบต์ ----
+        let mut file = std::fs::File::open(&doc).unwrap();
+        for (n, want) in [(5u8, &original[0]), (9, &original[1])] {
+            let entry = index
+                .find(content_hash(n))
+                .unwrap_or_else(|| panic!("ไม่มี blob ของ {n} ในไฟล์"));
+            let path = refx_io::spool::unpack(
+                &spool,
+                entry,
+                &mut file,
+                refx_platform::fsops::rename_durable,
+            )
+            .unwrap();
+            use std::io::Read as _;
+            let mut got = Vec::new();
+            std::fs::File::open(&path)
+                .unwrap()
+                .read_to_end(&mut got)
+                .unwrap();
+            assert_eq!(&got, want, "ภาพ {n} ที่แกะออกมาไม่ตรงกับต้นฉบับ");
+        }
+
+        // ---- ★★ เปิดแล้วบันทึกทับแบบ linked ต้อง **ไม่ทำให้ภาพหาย** ----
+        //      ไฟล์ต้นฉบับไม่มีแล้ว สำเนาใน spool คือของที่เหลืออยู่
+        let relinked = refx_io::packed::plan_embeds(&back, SaveMode::Linked, |asset| {
+            locate_bytes(Some(&spool), asset)
+        });
+        assert_eq!(
+            relinked.len(),
+            2,
+            "บันทึก linked ทับแล้วภาพหลุดออกจากไฟล์ — งานของผู้ใช้หายถาวร"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// ★★★ **board ที่ไม่มีอะไรให้ฝัง ต้องยังเป็น v1** (§4 ข้อ 22)
+    ///
+    /// ไฟล์ที่ไม่มีของให้เสีย ไม่มีเหตุให้ตัดรุ่นเก่าออกจากการเปิดมัน ·
+    /// ยืนยันจาก **ไบต์ในไฟล์** ไม่ใช่จากค่าที่เราส่งเข้าไป
+    #[test]
+    fn a_board_with_nothing_to_embed_is_still_version_one() {
+        use refx_io::packed::SaveMode;
+        use std::io::Read as _;
+
+        let root = spool_temp_dir("still-v1");
+        let doc = root.join("empty.refx");
+        let board = Board::new(default_board_id(), "empty".to_owned());
+
+        for mode in [SaveMode::Linked, SaveMode::Packed] {
+            let embeds =
+                refx_io::packed::plan_embeds(&board, mode, |asset| locate_bytes(None, asset));
+            assert!(embeds.is_empty());
+            refx_io::save::save_document(
+                &doc,
+                &board,
+                &embeds,
+                refx_platform::fsops::rename_durable,
+            )
+            .unwrap();
+
+            let mut header = [0u8; refx_io::dto::HEADER_LEN];
+            std::fs::File::open(&doc)
+                .unwrap()
+                .read_exact(&mut header)
+                .unwrap();
+            let info = refx_io::dto::inspect(&header).unwrap();
+            assert_eq!(
+                info.version,
+                refx_io::dto::LINKED_VERSION,
+                "{mode:?}: ไฟล์ที่ไม่มี blob ต้องเป็น v1 รุ่นเก่าจึงเปิดงานประจำวันได้"
+            );
+            assert!(!info.packed, "{mode:?}: ตั้งธง packed ทั้งที่ไม่มีอะไรฝังอยู่");
+            // ★ และแถบสถานะต้องบอกว่า linked ตามสภาพจริงของไฟล์
+            assert_eq!(
+                mode_of_document(&board, &read_asset_table(&doc)),
+                SaveMode::Linked,
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// ★★★ **การอ่านสำเนาใน spool ต้องไม่เขียนที่อยู่ของเอกสารทิ้ง**
+    ///
+    /// เปิดเอกสาร packed บนเครื่องที่ไม่มีไฟล์ → เราแกะ blob ลง spool แล้วอ่าน
+    /// จากที่นั่น · ถ้าผลนั้นถูกเขียนกลับลง `Board` จะได้สามอย่างที่ผู้ใช้ไม่ได้สั่ง
+    /// พร้อมกัน: เอกสาร dirty ทันทีที่เปิด · มีขั้น undo โผล่มา · และ**ที่อยู่จริง
+    /// ของภาพหายตลอดกาล** ทั้งที่วันหนึ่งเขาอาจกลับไปเครื่องที่มีไฟล์นั้น
+    #[test]
+    fn reading_the_copy_inside_the_document_never_rewrites_the_document() {
+        let spool = std::path::Path::new("/data/RefX/pasted");
+        let thumb = thumb_of(100, 80);
+        let meta = refx_asset::pool::SourceMeta {
+            mtime_ms: 999,
+            bytes: 12345,
+        };
+
+        // ใบที่เอกสารจำที่อยู่เดิมไว้ (ไฟล์นั้นไม่มีอยู่บนเครื่องนี้แล้ว)
+        let from_file = image_kind(9, "E:/photos/cat.png");
+        let unpacked = spool.join("aabb.png");
+        let desired = relinked_kind(
+            &from_file,
+            Some(&unpacked),
+            Some(content_hash(9)),
+            Some(spool),
+            &thumb,
+            meta,
+        )
+        .expect("ใบที่เป็นภาพต้องมีผลลัพธ์เสมอ");
+        assert_eq!(
+            desired, from_file,
+            "อ่านจากสำเนาในเอกสารแล้วเอกสารเปลี่ยน — เปิดไฟล์มาก็ dirty ทันที"
+        );
+
+        // ★ ภาพที่วางจาก clipboard ไม่ได้รับผลอะไร — path ของมันคือไฟล์ใน spool อยู่แล้ว
+        let pasted_path = spool.join("ccdd.png");
+        let pasted = ItemKind::Image(AssetRef {
+            hash: content_hash(4),
+            path: pasted_path.clone(),
+            px_size: glam::UVec2::new(100, 80),
+            format: ImageFormat::Unknown,
+            embedded: false,
+            mtime: 42,
+            file_size: 4242,
+        });
+        let desired = relinked_kind(
+            &pasted,
+            Some(&pasted_path),
+            Some(content_hash(77)),
+            Some(spool),
+            &thumb,
+            meta,
+        )
+        .unwrap();
+        assert_eq!(desired, pasted, "ภาพที่วางเปลี่ยนไปจากเดิม");
     }
 }

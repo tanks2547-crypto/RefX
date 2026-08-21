@@ -265,6 +265,30 @@ pub enum Key {
     /// คำอธิบายแท็บตอนทุกอย่างลงไฟล์แล้ว
     SavedHint,
 
+    // ---- P4-5: packed mode ----
+    /// ★ กำลังถามว่าจะบันทึกเป็นแบบไหน (สถานะบนแถบล่าง)
+    SaveModeAsk,
+    /// หัวข้อของแถบ "บันทึกเป็นแบบไหน"
+    SaveModeTitle,
+    /// ปุ่ม "ลิงก์ไปไฟล์เดิม"
+    SaveModeLinked,
+    /// คำอธิบายของ linked — ต้องบอกทั้งข้อดีและราคาที่จ่าย
+    SaveModeLinkedHint,
+    /// ปุ่ม "เก็บภาพไว้ในไฟล์"
+    SaveModePacked,
+    /// คำอธิบายของ packed
+    SaveModePackedHint,
+    /// ★★★ ตัวบ่งชี้ถาวร: ภาพอยู่นอกไฟล์ (`docs/07 §2`)
+    StorageLinked,
+    /// ตัวบ่งชี้ถาวร: ภาพทุกใบอยู่ในไฟล์
+    StoragePacked,
+    /// คำอธิบาย + วิธีเปลี่ยนของตัวบ่งชี้ตอนเป็น linked
+    StorageLinkedHint,
+    /// คำอธิบาย + วิธีเปลี่ยนของตัวบ่งชี้ตอนเป็น packed
+    StoragePackedHint,
+    /// คำอธิบายตอนเอกสารยังไม่มีไฟล์ — ตัวเลือกมีผลตอนบันทึกครั้งแรก
+    StorageUnsavedHint,
+
     // ---- P3-7: group / ungroup ----
     /// หัวข้อกลุ่มในแผง Arrange
     GroupTitle,
@@ -388,6 +412,29 @@ fn en(key: Key) -> &'static str {
         Key::OpenChoosing => "Choose a board to open",
         Key::UnsavedHint => "Not saved to a file yet - press Ctrl+S to keep this work",
         Key::SavedHint => "Everything is saved to the file",
+        Key::SaveModeAsk => "Choose how the images should be stored",
+        Key::SaveModeTitle => "Where should the images live?",
+        Key::SaveModeLinked => "Link to the image files",
+        Key::SaveModeLinkedHint => {
+            "Small file. The images stay where they are, so this board needs them \
+             to still be on this computer - pasted images are always stored inside anyway"
+        }
+        Key::SaveModePacked => "Store the images inside",
+        Key::SaveModePackedHint => {
+            "Big file, but it carries every image with it - use this to send the board \
+             to someone else, back it up, or move it to another computer"
+        }
+        Key::StorageLinked => "Linked",
+        Key::StoragePacked => "Packed",
+        Key::StorageLinkedHint => {
+            "The rest of the images are files on this computer. \
+             Click to store every image inside the board file instead."
+        }
+        Key::StoragePackedHint => {
+            "This board file carries its images with it - it opens anywhere. \
+             Click to link them to their files instead."
+        }
+        Key::StorageUnsavedHint => "This is how the images will be stored when you save.",
         Key::GroupTitle => "Group",
         Key::GroupNone => "Not in a group",
         Key::GroupDefaultName => "Group",
@@ -498,6 +545,22 @@ fn th(key: Key) -> Option<&'static str> {
         Key::OpenChoosing => "เลือกกระดานที่จะเปิด",
         Key::UnsavedHint => "ยังไม่ได้บันทึกลงไฟล์ — กด Ctrl+S เพื่อเก็บงานนี้ไว้",
         Key::SavedHint => "ทุกอย่างถูกบันทึกลงไฟล์แล้ว",
+        Key::SaveModeAsk => "เลือกว่าจะเก็บภาพไว้แบบไหน",
+        Key::SaveModeTitle => "จะเก็บภาพไว้ที่ไหน",
+        Key::SaveModeLinked => "ลิงก์ไปไฟล์ภาพ",
+        Key::SaveModeLinkedHint => {
+            "ไฟล์เล็ก · ภาพยังอยู่ที่เดิมของมัน กระดานนี้จึงต้องใช้บนเครื่องที่มีภาพอยู่ \
+             — ภาพที่วางจาก clipboard ถูกเก็บไว้ข้างในให้เสมออยู่แล้ว"
+        }
+        Key::SaveModePacked => "เก็บภาพไว้ในไฟล์",
+        Key::SaveModePackedHint => {
+            "ไฟล์ใหญ่ แต่พกภาพไปด้วยทุกใบ — ใช้ตอนส่งกระดานให้คนอื่น สำรองไว้ หรือย้ายเครื่อง"
+        }
+        Key::StorageLinked => "ลิงก์ภาพ",
+        Key::StoragePacked => "ภาพอยู่ในไฟล์",
+        Key::StorageLinkedHint => "ภาพที่เหลือเป็นไฟล์บนเครื่องนี้ · กดเพื่อเก็บภาพทุกใบไว้ในไฟล์กระดานแทน",
+        Key::StoragePackedHint => "ไฟล์กระดานนี้พกภาพไปด้วย เปิดที่ไหนก็ได้ · กดเพื่อกลับไปลิงก์ไฟล์ภาพแทน",
+        Key::StorageUnsavedHint => "ภาพจะถูกเก็บแบบนี้ตอนบันทึก",
         Key::GroupTitle => "กลุ่ม",
         Key::GroupNone => "ไม่ได้อยู่ในกลุ่มไหน",
         Key::GroupDefaultName => "กลุ่ม",
@@ -627,6 +690,10 @@ pub enum Template {
     RelinkFound,
     /// `{n}` — เปิดเอกสารแล้วมีภาพที่หาไฟล์ไม่เจอ
     RelinkMissing,
+    /// ★ `{n}` — ภาพที่แกะออกมาจากตัวเอกสารเอง (packed — P4-5)
+    RelinkUnpacked,
+    /// `{inside}` `{images}` — กี่ใบที่อยู่ในไฟล์งานแล้ว (ตัวบ่งชี้โหมด)
+    StorageInside,
 }
 
 /// เทมเพลตภาษาอังกฤษ — ต้องมีครบทุกตัว
@@ -717,6 +784,8 @@ Drag in a PNG, JPEG, WebP, GIF, BMP, TGA or TIFF instead."
             "{n} images could not be found\n\
              Select one, then use Find the file — the rest of that folder is matched for you."
         }
+        Template::RelinkUnpacked => "Loaded {n} images stored inside this board file",
+        Template::StorageInside => "{inside} of {images} images are inside the board file",
         Template::ErrClipboardEmpty => {
             "There is no image in the clipboard\n\
              Copy an image or an image file first, or drag the file into the window."
@@ -827,6 +896,8 @@ fn template_th(template: Template) -> Option<&'static str> {
             "หาไฟล์ไม่เจอ {n} ใบ\n\
              เลือกใบใดใบหนึ่งแล้วกดปุ่มหาไฟล์เอง — ที่เหลือในโฟลเดอร์นั้นจะถูกจับคู่ให้"
         }
+        Template::RelinkUnpacked => "ใช้ภาพ {n} ใบที่เก็บอยู่ในไฟล์กระดานนี้",
+        Template::StorageInside => "ภาพอยู่ในไฟล์กระดานแล้ว {inside} จาก {images} ใบ",
         Template::ErrClipboardEmpty => {
             "ใน clipboard ไม่มีภาพ\n\
              ลองก๊อปภาพหรือไฟล์ภาพมาก่อน หรือลากไฟล์เข้ามาในหน้าต่างก็ได้เหมือนกัน"
@@ -1089,6 +1160,17 @@ mod tests {
         Key::OpenChoosing,
         Key::UnsavedHint,
         Key::SavedHint,
+        Key::SaveModeAsk,
+        Key::SaveModeTitle,
+        Key::SaveModeLinked,
+        Key::SaveModeLinkedHint,
+        Key::SaveModePacked,
+        Key::SaveModePackedHint,
+        Key::StorageLinked,
+        Key::StoragePacked,
+        Key::StorageLinkedHint,
+        Key::StoragePackedHint,
+        Key::StorageUnsavedHint,
         Key::GroupTitle,
         Key::GroupNone,
         Key::GroupDefaultName,
@@ -1144,6 +1226,8 @@ mod tests {
         Template::MissingImage,
         Template::RelinkFound,
         Template::RelinkMissing,
+        Template::RelinkUnpacked,
+        Template::StorageInside,
     ];
 
     /// ★ กฎข้อ 2 ของ docs/03 §0: ห้ามมีทางที่ผู้ใช้จะเห็นช่องว่างหรือชื่อ key

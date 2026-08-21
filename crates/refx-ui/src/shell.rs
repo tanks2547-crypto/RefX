@@ -69,6 +69,40 @@ pub struct MetaView {
     pub tags: Vec<String>,
 }
 
+/// ★★★ **สภาวะ: ภาพของ board นี้เก็บไว้ที่ไหน** (P4-5 · `docs/07 §2`)
+///
+/// `docs/07 §2` บังคับว่า *"แถบสถานะบอกเสมอว่า board ปัจจุบันเป็นแบบไหน"* —
+/// ซึ่งเป็น **สภาวะ ไม่ใช่เหตุการณ์** (`docs/03 §1`) จึงต้องเป็นตัวบ่งชี้ถาวร
+/// ไม่ใช่ข้อความชั่วคราวที่ถูกเขียนทับใน 3 มิลลิวินาที
+///
+/// ★ คำถามที่ผู้ใช้สนใจจริง ๆ คือ *"ย้ายไฟล์นี้ไปเครื่องอื่นแล้วภาพยังอยู่ไหม"*
+/// ตัวเลขจึงเป็น **จำนวนใบที่อยู่ข้างในไฟล์** ไม่ใช่ชื่อโหมดลอย ๆ
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StorageView {
+    /// โหมดของไฟล์ที่บันทึกไว้ล่าสุด (หรือโหมดที่จะใช้ ถ้ายังไม่เคยบันทึก)
+    pub packed: bool,
+    /// ภาพทั้งหมดบน board
+    pub images: usize,
+    /// ★ กี่ใบที่อยู่ **ในไฟล์งาน** แล้วจริง ๆ
+    pub inside: usize,
+    /// เอกสารนี้มีไฟล์บนดิสก์แล้วหรือยัง
+    pub has_file: bool,
+}
+
+/// ผู้ใช้ตอบอะไรกับ "จะบันทึกเป็นแบบไหน" (P4-5)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveAsChoice {
+    /// ลิงก์ไปไฟล์ของผู้ใช้ (ค่าปริยายตาม `docs/07 §2`)
+    ///
+    /// ★ ใบที่ไม่มีไฟล์ต้นทางยังถูกฝังอยู่ดี — และ**ห้ามถามผู้ใช้เรื่องนั้น**
+    /// (§4 ข้อ 23) กฎนั้นอยู่ที่ `refx-io` ไม่ใช่ที่ปุ่มนี้
+    Linked,
+    /// ฝังภาพทุกใบไว้ในไฟล์
+    Packed,
+    /// ไม่บันทึกแล้ว
+    Cancel,
+}
+
 /// ผู้ใช้ตอบอะไรกับคำถาม "ปิดทั้งที่ยังไม่ได้บันทึก" (P4-2)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloseChoice {
@@ -343,6 +377,19 @@ pub struct ShellState {
     ///
     /// **ค่าสำหรับแสดงเท่านั้น** · แหล่งความจริงคือ `RefxApp::doc_path`
     pub doc_name: Option<String>,
+    /// ★★★ **สภาวะ: ภาพเก็บไว้ที่ไหน** (P4-5) — ดู [`StorageView`]
+    ///
+    /// **ค่าสำหรับแสดงเท่านั้น** ชั้น `app` เติมทุกเฟรม
+    pub storage: StorageView,
+    /// ★ ผู้ใช้กดสลับโหมดบนแถบสถานะในเฟรมนี้ — `Some(true)` = ขอให้ฝังทุกใบ
+    ///
+    /// เป็น **คำขอ** ไม่ใช่สถานะ ด้วยเหตุผลเดียวกับ `tool_request`:
+    /// widget ไม่ลงมือเอง ชั้น `app` เป็นคนตัดสินและลงมือ
+    pub storage_request: Option<bool>,
+    /// ★★ กำลังถามว่า "บันทึกเป็นแบบไหน" (`Ctrl+Shift+S` — `docs/07 §2`)
+    pub save_as_prompt: bool,
+    /// ผู้ใช้ตอบแล้วในเฟรมนี้ — `None` = ยังไม่ตอบ
+    pub save_as_choice: Option<SaveAsChoice>,
     /// ★★★ เจองานที่ยังไม่ได้บันทึกจาก session ก่อน (P4-4) — `None` = ไม่มีอะไรค้าง
     pub recover_prompt: Option<RecoverView>,
     /// ผู้ใช้ตอบแล้วในเฟรมนี้ — `None` = ยังไม่ตอบ
@@ -471,6 +518,10 @@ impl Default for ShellState {
             close_choice: None,
             unsaved: false,
             doc_name: None,
+            storage: StorageView::default(),
+            storage_request: None,
+            save_as_prompt: false,
+            save_as_choice: None,
             recover_prompt: None,
             recover_choice: None,
             group_request: None,
@@ -581,6 +632,41 @@ pub fn draw_in_ui(
                     .clicked()
                 {
                     state.close_choice = Some(CloseChoice::DiscardAndClose);
+                }
+            });
+        });
+    }
+
+    // ---- ★★ แถบ "บันทึกเป็นแบบไหน" (P4-5 · `docs/07 §2`) ----
+    //
+    //   native dialog ของ `rfd` ใส่ตัวเลือกของเราเองเข้าไปไม่ได้ · ถามในหน้าต่าง
+    //   ก่อนแล้วค่อยเปิด dialog จึงเป็นทางเดียว — และมันไม่บล็อก UI thread (I-2)
+    //
+    //   ★ ถามเฉพาะ **บันทึกเป็น** เท่านั้น · `Ctrl+S` ใช้โหมดเดิมของเอกสารเงียบ ๆ
+    //     (คำถามที่โผล่ทุกครั้งที่กดบันทึก คือคำถามที่คนกดผ่านโดยไม่อ่าน)
+    if state.save_as_prompt {
+        egui::Panel::top("refx-save-as").show_inside(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new(text::t(lang, Key::SaveModeTitle)).strong());
+                ui.separator();
+                // ★ ค่าปริยายของ docs/07 §2 มาก่อน — และเป็นตัวที่ผู้ใช้ส่วนใหญ่ต้องการ
+                if ui
+                    .button(text::t(lang, Key::SaveModeLinked))
+                    .on_hover_text(text::t(lang, Key::SaveModeLinkedHint))
+                    .clicked()
+                {
+                    state.save_as_choice = Some(SaveAsChoice::Linked);
+                }
+                if ui
+                    .button(text::t(lang, Key::SaveModePacked))
+                    .on_hover_text(text::t(lang, Key::SaveModePackedHint))
+                    .clicked()
+                {
+                    state.save_as_choice = Some(SaveAsChoice::Packed);
+                }
+                ui.separator();
+                if ui.button(text::t(lang, Key::CloseCancel)).clicked() {
+                    state.save_as_choice = Some(SaveAsChoice::Cancel);
                 }
             });
         });
@@ -718,6 +804,8 @@ pub fn draw_in_ui(
                 Template::ItemCount,
                 &[("n", &state.item_count.to_string())],
             ));
+            ui.separator();
+            storage_indicator(ui, state);
             // ★★ หลักฐานของเกณฑ์ P3-3 ที่เห็นได้ด้วยตา — "10,000 ใบ วาดจริง < 60"
             //    โชว์เฉพาะโหมด Arrange เพราะเป็นตัวเลขของ virtual scrolling
             //    (Canvas วาดทั้ง board อยู่แล้ว ตัวเลขจะไม่มีความหมายที่นั่น)
@@ -888,6 +976,56 @@ pub fn draw_in_ui(
         .show_inside(ui, |ui| viewport(ui, mode))
         .response
         .rect
+}
+
+/// ★★★ **ตัวบ่งชี้ถาวรว่าภาพของ board นี้เก็บไว้ที่ไหน** (P4-5 · `docs/07 §2`)
+///
+/// ## ทำไมเป็น *สภาวะ* ไม่ใช่ *เหตุการณ์*
+///
+/// "ไฟล์นี้พกภาพไปด้วยหรือเปล่า" เป็นจริงค้างอยู่จนกว่าจะบันทึกใหม่ ไม่ใช่สิ่งที่
+/// เกิดแล้วจบ · ข้อความชั่วคราวบนแถบสถานะถูกเขียนทับได้ใน 3 มิลลิวินาที
+/// (เกิดจริงสองครั้งแล้วในโปรเจกต์นี้ — §2.24, §2.30) แล้วคนที่กำลังจะส่งไฟล์
+/// ให้เพื่อนจะไม่มีทางรู้ว่าเพื่อนจะได้ board ที่ว่างเปล่า
+///
+/// ## ★★ ทำไมมันกดได้
+///
+/// การแปลงเอกสารที่มีอยู่แล้วให้พกภาพไปด้วย เป็นสิ่งที่ผู้ใช้ต้องการ *หลัง*
+/// ทำงานเสร็จ ("จะส่งให้เพื่อนแล้ว") ไม่ใช่ตอนตั้งชื่อไฟล์ครั้งแรก · การบังคับ
+/// ให้เขาไป Save As แล้วตั้งชื่อใหม่ทั้งที่ต้องการไฟล์เดิม คือการสร้างไฟล์ซ้ำสอง
+/// ใบที่เขาต้องมาตามลบเอง
+fn storage_indicator(ui: &mut egui::Ui, state: &mut ShellState) {
+    let lang = state.lang;
+    let view = state.storage;
+    let label = if view.packed {
+        text::t(lang, Key::StoragePacked)
+    } else {
+        text::t(lang, Key::StorageLinked)
+    };
+    // ★ บอก **ตัวเลขจริง** ไม่ใช่แค่ชื่อโหมด — "3 จาก 5 ใบอยู่ข้างใน" ตอบคำถาม
+    //   ที่ผู้ใช้ถามจริง ๆ ได้ ส่วนชื่อโหมดลอย ๆ ต้องรู้ศัพท์ของเราก่อนถึงจะอ่านออก
+    let counts = text::fill(
+        lang,
+        Template::StorageInside,
+        &[
+            ("inside", &view.inside.to_string()),
+            ("images", &view.images.to_string()),
+        ],
+    );
+    let hint = if view.packed {
+        text::t(lang, Key::StoragePackedHint)
+    } else if view.has_file {
+        text::t(lang, Key::StorageLinkedHint)
+    } else {
+        // ยังไม่มีไฟล์ = ยังไม่มีอะไรให้แปลง ตัวเลือกมีผลตอนบันทึกครั้งแรก
+        text::t(lang, Key::StorageUnsavedHint)
+    };
+    if ui
+        .selectable_label(view.packed, label)
+        .on_hover_text(format!("{counts}\n{hint}"))
+        .clicked()
+    {
+        state.storage_request = Some(!view.packed);
+    }
 }
 
 /// ปุ่มเครื่องมือของ Canvas mode
@@ -1768,6 +1906,11 @@ mod tests {
             // ★★ ปุ่ม "หาไฟล์เอง" (P4-6) — นำไปสู่ `RelinkAssets` ซึ่งเปลี่ยน
             //    `ItemKind` ของ item จริง ๆ จึงเป็นช่องทางที่แก้เอกสารได้
             relink_request,
+            // ★★ ปุ่มตอบ "บันทึกเป็นแบบไหน" และปุ่มสลับโหมดบนแถบสถานะ (P4-5)
+            //    — ทั้งคู่นำไปสู่การ **เขียนไฟล์จริง** แล้ว `mark_saved` ตามมา
+            //    (แตะธง `dirty` ของ `Board`) เหมือน `close_choice` เป๊ะ
+            save_as_choice,
+            storage_request,
 
             // ---- สถานะของ *มุมมอง* — เปลี่ยนได้ตามใจ ไม่แตะเอกสาร ----
             mode: _,
@@ -1775,6 +1918,8 @@ mod tests {
             recover_prompt: _,  // เหมือนกัน — แค่ "มีอะไรค้างให้ถามไหม"
             unsaved: _,         // ตัวบ่งชี้สภาวะ อ่านจาก board ไม่ได้เขียนกลับ
             doc_name: _,        // ชื่อไฟล์สำหรับแสดงบนแท็บ
+            save_as_prompt: _,  // แถบถามโหมดโผล่อยู่ไหม — ไม่ใช่คำขอแก้อะไร
+            storage: _,         // ★ ตัวบ่งชี้สภาวะของ **ไฟล์** ไม่ใช่ของเอกสารในหน่วยความจำ
             appearance: _,      // ค่าสำหรับแสดงของ inspector
             board_grayscale: _, // สวิตช์การมองเห็นทั้ง board (P2-8) ไม่ลงไฟล์
             tool: _,
@@ -1820,6 +1965,8 @@ mod tests {
             || group_request.is_some()
             || close_choice.is_some()
             || recover_choice.is_some()
+            || save_as_choice.is_some()
+            || storage_request.is_some()
             || *arrange_apply
             || *relink_request
     }
