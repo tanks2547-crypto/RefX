@@ -254,6 +254,12 @@ pub enum Key {
     RecoverWhenUnknown,
     /// กู้คืนแล้ว แต่ยังไม่ได้บันทึกลงไฟล์จริง
     RecoveredNotSavedYet,
+    /// ★★ หัวข้อของแถบกู้คืนตอนที่**เอกสารที่เพิ่งเปิด**มีของค้าง (P4-3)
+    RecoverDocTitle,
+    /// คำอธิบายของ "เก็บไว้ก่อน" กรณีเอกสาร — ต้องบอกว่าการแก้งานต่อจะเขียนทับ
+    RecoverDocLaterHint,
+    /// เอากลับมาแล้ว และมันยังไม่อยู่ในไฟล์ของมัน
+    RecoveredIntoDocument,
     /// เปิดไฟล์ไม่สำเร็จ
     OpenFailed,
     /// กำลังเปิดไฟล์ที่ผู้ใช้เลือก
@@ -405,6 +411,13 @@ fn en(key: Key) -> &'static str {
         Key::RecoveredNotSavedYet => {
             "Restored - this board still has no file, press Ctrl+S to keep it"
         }
+        Key::RecoverDocTitle => "This board has changes that never reached the file",
+        Key::RecoverDocLaterHint => {
+            "Nothing is deleted right now - but editing this board overwrites it in seconds"
+        }
+        Key::RecoveredIntoDocument => {
+            "Brought the unsaved changes back - press Ctrl+S to write them to the file"
+        }
         Key::OpenFailed => {
             "Could not open that board - the file may be damaged or from a newer RefX"
         }
@@ -540,6 +553,11 @@ fn th(key: Key) -> Option<&'static str> {
         Key::RecoverDiscardHint => "งานชุดนั้นจะถูกลบถาวร",
         Key::RecoverWhenUnknown => "รอบก่อน",
         Key::RecoveredNotSavedYet => "เอากลับมาแล้ว — กระดานนี้ยังไม่มีไฟล์ กด Ctrl+S เพื่อเก็บไว้",
+        Key::RecoverDocTitle => "กระดานนี้มีการแก้ที่ยังไม่เคยถูกเขียนลงไฟล์",
+        Key::RecoverDocLaterHint => {
+            "ตอนนี้ยังไม่มีอะไรถูกลบ — แต่ถ้าแก้กระดานนี้ต่อ งานชุดนั้นจะถูกเขียนทับภายในไม่กี่วินาที ตัดสินใจก่อนทำงานต่อ"
+        }
+        Key::RecoveredIntoDocument => "เอาการแก้ที่ค้างอยู่กลับมาแล้ว — กด Ctrl+S เพื่อเขียนลงไฟล์",
         Key::OpenFailed => "เปิดกระดานไม่ได้ — ไฟล์อาจเสียหาย หรือถูกเขียนด้วย RefX รุ่นใหม่กว่า",
         Key::OpenInProgress => "กำลังเปิด",
         Key::OpenChoosing => "เลือกกระดานที่จะเปิด",
@@ -1155,6 +1173,9 @@ mod tests {
         Key::RecoverDiscardHint,
         Key::RecoverWhenUnknown,
         Key::RecoveredNotSavedYet,
+        Key::RecoverDocTitle,
+        Key::RecoverDocLaterHint,
+        Key::RecoveredIntoDocument,
         Key::OpenFailed,
         Key::OpenInProgress,
         Key::OpenChoosing,

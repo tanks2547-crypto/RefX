@@ -132,13 +132,28 @@ pub enum RecoverChoice {
     Later,
 }
 
-/// งานค้างที่เจอตอนเปิดโปรแกรม — **ค่าสำหรับแสดงเท่านั้น** (P4-4)
+/// ★★ งานที่กู้ได้มาจากไหน — **สองที่มา คนละเรื่องในสายตาผู้ใช้**
+///
+/// ปุ่มสามตัวเหมือนกันเป๊ะทั้งสองแบบ (`docs/07 §4`) แต่ประโยคที่ถูกต้องต่างกัน
+/// คนละเรื่อง: *"เจองานค้างจากรอบก่อน"* กับ *"ไฟล์นี้มีของที่ยังไม่ได้เขียนลงไป"*
+/// — ถามผิดประโยค ผู้ใช้จะตอบผิดปุ่ม
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoverScope {
+    /// งานที่ **ไม่เคยมีไฟล์เลย** จาก session ก่อน (P4-4 · `recovery/`)
+    LastSession,
+    /// ★ เอกสารที่เพิ่งเปิดมี `<doc>.refx.autosave` ที่ใหม่กว่าไฟล์ (P4-3)
+    ThisDocument,
+}
+
+/// งานค้างที่เจอตอนเปิดโปรแกรม/เปิดเอกสาร — **ค่าสำหรับแสดงเท่านั้น** (P4-4)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoverView {
     /// เขียนไว้เมื่อไหร่ (ข้อความพร้อมแสดงแล้ว) — `None` = ระบบไฟล์ไม่บอก
     pub when: Option<String>,
     /// มีกี่ชิ้นอยู่ในนั้น — ช่วยผู้ใช้จำว่าเป็นงานชิ้นไหน
     pub items: usize,
+    /// มาจากไหน — ตัวเลือกที่ผู้ใช้เห็นเหมือนกัน แต่ข้อความต้องตรงกับความจริง
+    pub scope: RecoverScope,
 }
 
 /// กลุ่มของสิ่งที่เลือกอยู่ — **ค่าสำหรับแสดงเท่านั้น** (P3-7)
@@ -679,8 +694,13 @@ pub fn draw_in_ui(
     if let Some(found) = state.recover_prompt.clone() {
         egui::Panel::top("refx-recover").show_inside(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
+                // ★ ประโยคต้องตรงกับที่มาของงาน ไม่ใช่ประโยคเดียวใช้ทุกกรณี
+                let title = match found.scope {
+                    RecoverScope::LastSession => Key::RecoverTitle,
+                    RecoverScope::ThisDocument => Key::RecoverDocTitle,
+                };
                 ui.label(
-                    egui::RichText::new(text::t(lang, Key::RecoverTitle))
+                    egui::RichText::new(text::t(lang, title))
                         .strong()
                         .color(WARN_COLOR),
                 );
@@ -705,9 +725,18 @@ pub fn draw_in_ui(
                     state.recover_choice = Some(RecoverChoice::Restore);
                 }
                 // ★★★ ตัวที่สาม — สำคัญที่สุดตาม docs/07 §4 · **ไม่แตะไฟล์เลย**
+                // ★★ คำอธิบายของ "เก็บไว้ก่อน" ต้อง **บอกความจริงของแต่ละกรณี**:
+                //    snapshot ของ session ก่อนอยู่คนละไฟล์กับที่เราเขียน จึงรอดแน่
+                //    ส่วนของเอกสารอยู่ที่ `<doc>.refx.autosave` ซึ่งเป็นไฟล์เดียวกับ
+                //    ที่ autosave ของเราจะเขียนทับเมื่อผู้ใช้แก้อะไรต่อ — ปิดบังข้อนี้
+                //    แล้วปุ่มจะกลายเป็นคำโกหกในอีกสิบวินาทีถัดมา
+                let later_hint = match found.scope {
+                    RecoverScope::LastSession => Key::RecoverLaterHint,
+                    RecoverScope::ThisDocument => Key::RecoverDocLaterHint,
+                };
                 if ui
                     .button(text::t(lang, Key::RecoverLater))
-                    .on_hover_text(text::t(lang, Key::RecoverLaterHint))
+                    .on_hover_text(text::t(lang, later_hint))
                     .clicked()
                 {
                     state.recover_choice = Some(RecoverChoice::Later);
@@ -1869,6 +1898,60 @@ mod tests {
         );
     }
     // ---------- P3-8: สลับ mode แล้วข้อมูลต้องไม่เปลี่ยน ----------
+
+    /// ★★★ **แถบเดียวถามได้สองเรื่อง — ประโยคต้องตรงกับเรื่องที่ถาม**
+    ///
+    /// "เจองานค้างจากรอบก่อน" กับ "ไฟล์นี้มีของที่ยังไม่ได้เขียนลงไป" เป็นคนละ
+    /// สถานการณ์: อันแรกคืองานที่ไม่เคยมีไฟล์ อันหลังคือไฟล์ที่ผู้ใช้เพิ่งสั่งเปิด
+    /// · ถามผิดประโยค ผู้ใช้จะตอบผิดปุ่ม แล้วปุ่มหนึ่งในสามลบงานของเขาถาวร
+    #[test]
+    fn the_recovery_bar_says_which_work_it_is_asking_about() {
+        let ctx = egui::Context::default();
+        let ask = |scope: RecoverScope| {
+            let mut state = ShellState {
+                recover_prompt: Some(RecoverView {
+                    when: Some("2 h ago".to_owned()),
+                    items: 7,
+                    scope,
+                }),
+                ..ShellState::default()
+            };
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                let _ = draw_in_ui(ui, &mut state, |_, _| {});
+            });
+            shell_text(&output)
+        };
+
+        let session = ask(RecoverScope::LastSession);
+        let document = ask(RecoverScope::ThisDocument);
+        let lang = Lang::default();
+        assert!(
+            session.contains(text::t(lang, Key::RecoverTitle)),
+            "งานกำพร้าจาก session ก่อนต้องถูกถามด้วยประโยคของมันเอง"
+        );
+        assert!(
+            document.contains(text::t(lang, Key::RecoverDocTitle)),
+            "งานของเอกสารที่เปิดอยู่ถูกถามด้วยประโยคของ session ก่อน"
+        );
+        // ★ ทั้งสองแบบต้องมีสามทางเลือกครบเสมอ (`docs/07 §4`) — และตัวเลข
+        //   "7 ชิ้น จาก 2 h ago" คือสิ่งเดียวที่ช่วยผู้ใช้จำได้ว่างานชิ้นไหน
+        for (name, shown) in [("session", &session), ("document", &document)] {
+            for key in [Key::RecoverRestore, Key::RecoverLater, Key::RecoverDiscard] {
+                assert!(
+                    shown.contains(text::t(lang, key)),
+                    "{name}: ตัวเลือก {key:?} หายไปจากแถบ"
+                );
+            }
+            assert!(shown.contains('7'), "{name}: ไม่บอกว่ามีกี่ชิ้น");
+        }
+    }
 
     /// ★ ช่องทางทั้งหมดที่ shell ใช้ "ขอให้เขียนลง `Board`" — คืน `true` ถ้ามีอันไหนดังอยู่
     ///

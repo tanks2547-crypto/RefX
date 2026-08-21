@@ -1498,6 +1498,13 @@ pub struct RefxApp {
     load_job: Option<crossbeam_channel::Receiver<Result<LoadedDoc, String>>>,
     /// ★★★ งานค้างจาก session ก่อนที่กำลังถามผู้ใช้อยู่ — `None` = ไม่มี
     pending_recovery: Option<PendingRecovery>,
+    /// ★★★ งานของ **เอกสารที่เปิดอยู่** ที่ยังไม่เคยไปถึงไฟล์ (P4-3 · `<doc>.refx.autosave`)
+    ///
+    /// แยกช่องจาก [`Self::pending_recovery`] เพราะทั้งสองอย่างค้างพร้อมกันได้
+    /// (เปิดโปรแกรมด้วย `--open` ทั้งที่มีงานกำพร้าจาก session ก่อน) — ใช้ช่อง
+    /// เดียวกันเมื่อไหร่ อันหนึ่งจะกลืนอีกอันหายไปเงียบ ๆ · แถบบนจอยังมีอันเดียว
+    /// และถามทีละเรื่องตามหลักการเดิมของ P4-4
+    pending_snapshot: Option<Box<refx_io::autosave::Pending>>,
     /// งานสแกนโฟลเดอร์ recovery ตอนเปิดโปรแกรม (แตะดิสก์ → ต้องอยู่เธรดอื่น I-2)
     recovery_scan: Option<crossbeam_channel::Receiver<Option<PendingRecovery>>>,
     /// ★★ ถามเรื่องงานค้างไปแล้วในการรันครั้งนี้ — **ครั้งเดียวตลอดอายุโปรแกรม**
@@ -1637,6 +1644,10 @@ struct LoadedDoc {
     board: Box<Board>,
     /// ★★ asset table ของไฟล์นั้น (ว่าง = linked ล้วน ไม่มีอะไรฝังอยู่)
     assets: refx_io::packed::Index,
+    /// ★★★ งานที่ยังไม่เคยไปถึงไฟล์ของเอกสารนี้ — `None` = ไม่มีอะไรให้ถาม
+    ///
+    /// `Box` เพราะมันถือ `Board` ทั้งก้อน (เหตุผลเดียวกับ `board` ข้างบน)
+    pending: Option<Box<refx_io::autosave::Pending>>,
 }
 
 /// ★ ไฟล์ที่เพิ่งเขียนลงดิสก์สำเร็จ — สิ่งที่เธรดบันทึกส่งกลับมา (P4-5)
@@ -2060,6 +2071,35 @@ fn read_document(path: &std::path::Path) -> Result<Board, String> {
     refx_io::dto::decode(&bytes, default_board_id()).map_err(|err| err.to_string())
 }
 
+/// ★★★ snapshot ของเอกสารนี้ที่ **ยังไม่เคยไปถึงไฟล์** — `None` = ไม่มีอะไรให้ถาม
+///
+/// ## ทำไมต้องมีฟังก์ชันนี้ (รูที่ P4-3 เปิดค้างไว้ตั้งแต่ต้น)
+///
+/// `<doc>.refx.autosave` ถูกเขียนทุก ๆ [`DEFAULT_MIN_INTERVAL`] ที่เอกสาร dirty
+/// มาตั้งแต่ P4-3 · แต่ **ไม่เคยมีใครอ่านมันกลับมาเลยสักครั้ง** — `find_pending`
+/// มีเทสต์ครบแต่ไม่มีผู้เรียกในโปรแกรม ผลคือผู้ใช้ที่แก้งานสองชั่วโมงแล้วไฟดับ
+/// เปิดโปรแกรมมาได้เวอร์ชันที่บันทึกล่าสุด **โดยไม่มีใครถามถึง snapshot**
+/// แล้วมันถูกลบทิ้งตอนเขากด `Ctrl+S` ครั้งแรก (`autosave::discard`)
+///
+/// เป็นรูปแบบเดียวกับ `on_wake` ที่ไม่มีกิ่งรับใน §2.24: กลไกครบ เทสต์เขียว
+/// แต่ไม่เคยเดินจริง (`docs/08 §3.9` ข้อ 2)
+///
+/// ## ★★ เทียบกับเอกสารก่อนถามเสมอ
+///
+/// snapshot ที่ **เหมือนไฟล์เป๊ะ** ไม่มีอะไรให้กู้ — เกิดได้จริงเมื่อโปรแกรมตาย
+/// *หลัง* เขียนไฟล์สำเร็จแต่ *ก่อน* ลบ snapshot · ถามในกรณีนั้นคือการสอนผู้ใช้
+/// ให้กดปุ่มผ่าน ๆ โดยไม่อ่าน ซึ่งวันที่มีของจริงให้กู้เขาจะกดผ่านเหมือนกัน
+///
+/// ★ **รันบนเธรดอื่นเท่านั้น** (I-2) — อ่าน+คลายบีบไฟล์ระดับ MB
+fn newer_snapshot(doc: &std::path::Path, saved: &Board) -> Option<refx_io::autosave::Pending> {
+    let pending = refx_io::autosave::find_pending(doc, default_board_id())?;
+    if pending.board == *saved {
+        tracing::info!("the autosave snapshot matches the document — nothing to recover");
+        return None;
+    }
+    Some(pending)
+}
+
 /// ลบ snapshot ที่ผู้ใช้สั่งทิ้ง พร้อมไฟล์บริวารของมัน
 fn remove_recovery_file(snapshot: &std::path::Path) {
     for path in [
@@ -2164,6 +2204,7 @@ impl RefxApp {
             open_dialog: None,
             load_job: None,
             pending_recovery: None,
+            pending_snapshot: None,
             recovery_scan: None,
             recovery_checked: false,
             adopted_recovery: None,
@@ -3701,6 +3742,7 @@ impl RefxApp {
         self.shell.recover_prompt = Some(crate::shell::RecoverView {
             when: found.when.clone(),
             items: found.items,
+            scope: crate::shell::RecoverScope::LastSession,
         });
         self.pending_recovery = Some(found);
         if let Some(gfx) = self.gfx.as_ref() {
@@ -3708,11 +3750,43 @@ impl RefxApp {
         }
     }
 
+    /// ★★★ เสนอ snapshot ของ **เอกสารที่เพิ่งเปิด** ให้ผู้ใช้ตัดสิน (P4-3)
+    ///
+    /// ★ แถบมีอันเดียวบนจอ — ถ้ามีงานกำพร้าจาก session ก่อนค้างอยู่ก่อนแล้ว
+    /// เรื่องของเอกสาร **ขึ้นก่อน** เพราะมันคือสิ่งที่ผู้ใช้เพิ่งสั่งเปิดเดี๋ยวนี้
+    /// · อีกเรื่องไม่หายไปไหน (`pending_recovery` ยังถืออยู่) แล้วจะถูกถามต่อ
+    fn offer_pending_snapshot(&mut self, pending: Option<Box<refx_io::autosave::Pending>>) {
+        let Some(pending) = pending else {
+            return;
+        };
+        self.shell.recover_prompt = Some(crate::shell::RecoverView {
+            when: pending.written_at.map(format_when),
+            items: pending.board.len(),
+            scope: crate::shell::RecoverScope::ThisDocument,
+        });
+        self.pending_snapshot = Some(pending);
+        if let Some(gfx) = self.gfx.as_ref() {
+            gfx.window.request_redraw();
+        }
+    }
+
     /// ★★★ ผู้ใช้ตอบแถบกู้คืนแล้ว — **สามทาง และมีทางเดียวที่ลบไฟล์**
+    ///
+    /// แถบเดียวถามได้สองเรื่อง (ดู [`crate::shell::RecoverScope`]) — เรื่องของ
+    /// เอกสารที่เปิดอยู่มาก่อนเสมอถ้าค้างพร้อมกัน
     fn apply_recover_choice(&mut self, choice: crate::shell::RecoverChoice) {
         use crate::shell::RecoverChoice;
 
-        self.shell.recover_prompt = None;
+        let scope = self
+            .shell
+            .recover_prompt
+            .take()
+            .map(|view| view.scope)
+            .unwrap_or(crate::shell::RecoverScope::LastSession);
+        if scope == crate::shell::RecoverScope::ThisDocument {
+            self.apply_document_recover_choice(choice);
+            return;
+        }
         let Some(found) = self.pending_recovery.take() else {
             return;
         };
@@ -3752,6 +3826,54 @@ impl RefxApp {
         // ★★ แล้วค่อยกวาด spool — ลำดับสำคัญ: snapshot ที่ผู้ใช้เพิ่งสั่ง "ทิ้ง"
         //    ต้องหายไปจากโฟลเดอร์ก่อน ภาพที่มีแต่มันรู้จักจึงจะกวาดได้
         self.sweep_spool_folder();
+        if let Some(gfx) = self.gfx.as_ref() {
+            gfx.window.request_redraw();
+        }
+    }
+
+    /// ★★★ ผู้ใช้ตอบแถบของ **เอกสารที่เปิดอยู่** — สามทางเดียวกัน คนละไฟล์
+    ///
+    /// | ตอบ | ทำอะไรกับ `<doc>.refx.autosave` |
+    /// |---|---|
+    /// | เอากลับมา | ★ ไม่ลบ — `autosave` ของเราจะเขียนทับที่เดิมด้วยเนื้อเดียวกัน |
+    /// | ทิ้งไป | ลบทันที (ทางเดียวที่ลบตามคำสั่งคน) |
+    /// | เก็บไว้ก่อน | ไม่แตะเลย — แต่ **การแก้งานต่อจะเขียนทับมันในไม่กี่วินาที** |
+    ///
+    /// ★★★ ตัวที่สามมีข้อจำกัดจริงที่ปุ่มต้องบอก (`Key::RecoverDocLaterHint`):
+    /// ต่างจากงานกำพร้าของ P4-4 ที่อยู่คนละไฟล์กับที่เราเขียน · ที่นี่มันคือ
+    /// **ไฟล์เดียวกัน** การเงียบไว้แล้วเขียนทับคือการทำงานหายโดยผู้ใช้เพิ่งบอกว่า
+    /// "ยังไม่ตัดสินใจ" — ปิดช่องด้วยการพูดความจริง ไม่ใช่ด้วยการหยุด autosave
+    /// (ซึ่งจะทิ้งงานใหม่ของเขาไว้กลางอากาศแทน)
+    fn apply_document_recover_choice(&mut self, choice: crate::shell::RecoverChoice) {
+        use crate::shell::RecoverChoice;
+
+        let Some(pending) = self.pending_snapshot.take() else {
+            return;
+        };
+        let Some(doc) = self.doc_path.clone() else {
+            return; // เอกสารถูกปิด/แทนที่ไปแล้วระหว่างรอคำตอบ
+        };
+        match choice {
+            RecoverChoice::Restore => {
+                self.adopt_board(pending.board, Some(doc));
+                // ★★★ **ธง "ยังไม่บันทึก" ต้องติดทันที** — เนื้อที่เพิ่งขึ้นจอ
+                //     ไม่เหมือนไฟล์บนดิสก์ตามนิยาม · ถ้าไม่ติด ตัวบ่งชี้ถาวรบนแท็บ
+                //     จะบอกว่าทุกอย่างอยู่ในไฟล์แล้ว แล้วผู้ใช้จะปิดโปรแกรมทิ้ง
+                //     อีกรอบ — วนกลับไปที่เดิมพอดี (`History::mark_unsaved`)
+                if let Some(gfx) = self.gfx.as_mut() {
+                    gfx.history.mark_unsaved(&mut gfx.board);
+                }
+                self.shell.status = text::t(self.shell.lang, Key::RecoveredIntoDocument).to_owned();
+                self.shell.status_warn = true;
+            }
+            RecoverChoice::Discard => {
+                refx_io::autosave::discard(&doc);
+                self.shell.status = text::t(self.shell.lang, Key::Ready).to_owned();
+                self.shell.status_warn = false;
+            }
+            // ไม่แตะไฟล์ — ปุ่มบอกไปแล้วว่าการแก้งานต่อจะเขียนทับมัน
+            RecoverChoice::Later => {}
+        }
         if let Some(gfx) = self.gfx.as_ref() {
             gfx.window.request_redraw();
         }
@@ -3910,6 +4032,9 @@ impl RefxApp {
                     //    เท่านั้น ไม่แตะ blob) — เอกสาร packed พกภาพมาเอง และ
                     //    ตารางนี้คือสิ่งที่บอกว่าใบไหนอยู่ข้างในบ้าง
                     assets: read_asset_table(&path),
+                    // ★★★ ถามเรื่อง snapshot **บนเธรดนี้ด้วย** (I-2) — มันคือการ
+                    //     อ่าน+คลายบีบไฟล์อีกก้อน ไม่ใช่การ stat เฉย ๆ
+                    pending: newer_snapshot(&path, &board).map(Box::new),
                     path,
                     board: Box::new(board),
                 });
@@ -3966,6 +4091,7 @@ impl RefxApp {
                 path,
                 board,
                 assets,
+                pending,
             }) => {
                 let name = path
                     .file_name()
@@ -3974,6 +4100,11 @@ impl RefxApp {
                 self.adopt_board(*board, Some(path));
                 self.shell.status = text::fill(lang, text::Template::Opened, &[("name", &name)]);
                 self.shell.status_warn = false;
+                // ★★★ **เอกสารขึ้นจอก่อนเสมอ แล้วค่อยถามเรื่อง snapshot**
+                //
+                //   ผู้ใช้ต้องเห็นไฟล์ที่เขาสั่งเปิดก่อน ถึงจะตัดสินใจได้ว่าจะเอา
+                //   ของที่ค้างอยู่กลับมาไหม · ถามบนจอว่างเปล่าคือการขอให้เขาเดา
+                self.offer_pending_snapshot(pending);
             }
             Err(err) => {
                 tracing::error!(%err, "cannot open the document");
@@ -8516,6 +8647,7 @@ mod tests {
         app.shell.recover_prompt = Some(crate::shell::RecoverView {
             when: None,
             items: 0,
+            scope: crate::shell::RecoverScope::LastSession,
         });
 
         app.apply_recover_choice(crate::shell::RecoverChoice::Later);
@@ -9300,5 +9432,117 @@ two"
         )
         .unwrap();
         assert_eq!(desired, pasted, "ภาพที่วางเปลี่ยนไปจากเดิม");
+    }
+
+    // ---------- ★★★ P4-7a: snapshot ของเอกสารต้องถูกเสนอกลับให้ผู้ใช้ ----------
+
+    /// เอกสารที่บันทึกแล้วจริง ๆ บนดิสก์ พร้อม path ของมัน
+    fn saved_document(
+        dir: &std::path::Path,
+        name: &str,
+        items: usize,
+    ) -> (std::path::PathBuf, Board) {
+        use refx_core::board::{BoardParts, ItemParts};
+
+        let board = Board::load(
+            default_board_id(),
+            BoardParts {
+                name: "work".to_owned(),
+                items: (0..items)
+                    .map(|n| ItemParts {
+                        item: Item::new(image_kind(n as u8, &format!("E:/photos/{n}.png"))),
+                        group: None,
+                    })
+                    .collect(),
+                ..BoardParts::default()
+            },
+        );
+        let doc = dir.join(name);
+        refx_io::save::save_atomic(&doc, &board, refx_platform::fsops::rename_durable).unwrap();
+        (doc, board)
+    }
+
+    /// ★★★ **snapshot ที่ต่างจากไฟล์ ต้องถูกเสนอกลับ — ไม่ใช่ปล่อยให้เงียบ**
+    ///
+    /// นี่คือรูที่ P4-3 เปิดค้างไว้: `<doc>.refx.autosave` ถูกเขียนทุก 10 วินาที
+    /// มาตลอด แต่ไม่มีผู้เรียก `find_pending` ในโปรแกรมเลย ผู้ใช้ที่ไฟดับจึงได้
+    /// เวอร์ชันที่บันทึกล่าสุดโดยไม่มีใครถามถึงงานที่ค้างอยู่ แล้วมันถูกลบตอน
+    /// เขากด `Ctrl+S` ครั้งแรก
+    ///
+    /// ★ เรียก `newer_snapshot` **ตัวที่เธรดเปิดไฟล์ใช้จริง** (`docs/08 §3.9` ข้อ 9)
+    #[test]
+    fn a_snapshot_that_never_reached_the_file_is_offered_back() {
+        let dir = spool_temp_dir("pending-offer");
+        let (doc, saved) = saved_document(&dir, "work.refx", 1);
+
+        // ยังไม่มี snapshot = ไม่มีอะไรให้ถาม
+        assert!(
+            newer_snapshot(&doc, &saved).is_none(),
+            "ถามทั้งที่ไม่มี snapshot อยู่เลย"
+        );
+
+        // ผู้ใช้แก้งานต่อ แล้ว autosave เขียน snapshot ไว้ — จากนั้นโปรแกรมตาย
+        let mut newer = saved.clone();
+        let mut history = History::default();
+        history
+            .apply(
+                &mut newer,
+                Box::new(
+                    AddItems::new(vec![Item::new(image_kind(9, "E:/photos/late.png"))]).unwrap(),
+                ),
+            )
+            .unwrap();
+        refx_io::autosave::write_snapshot(&doc, &newer, refx_platform::fsops::rename_durable)
+            .unwrap();
+
+        let pending = newer_snapshot(&doc, &saved).expect("งานที่ค้างอยู่ถูกเมิน");
+        // ★ เทียบ **เนื้อ** ไม่ใช่ทั้งก้อน — snapshot ที่อ่านกลับมาย่อมมีธง `dirty`
+        //   ดับเสมอ (DTO ไม่เก็บธงนั้น) ส่วนตัวที่อยู่ในมือตอนเขียนยัง dirty อยู่
+        assert_ne!(pending.board, saved, "สิ่งที่เสนอกลับคือไฟล์เดิม ไม่ใช่งานที่ค้าง");
+        assert_eq!(
+            pending.board.len(),
+            saved.len() + 1,
+            "จำนวนชิ้นที่บอกผู้ใช้ต้องเป็นของ snapshot ไม่ใช่ของไฟล์"
+        );
+        assert_eq!(pending.board.len(), newer.len());
+        let paths: Vec<_> = pending
+            .board
+            .items_in_z_order()
+            .filter_map(|(_, item)| match &item.kind {
+                ItemKind::Image(asset) => Some(asset.path.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            paths.contains(&std::path::PathBuf::from("E:/photos/late.png")),
+            "ใบที่ผู้ใช้เพิ่มหลังบันทึกครั้งสุดท้ายไม่ได้ถูกเสนอกลับ: {paths:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ★★★ **snapshot ที่เหมือนไฟล์เป๊ะ ต้องไม่ถูกถาม**
+    ///
+    /// เกิดจริงเมื่อโปรแกรมตาย *หลัง* เขียนไฟล์สำเร็จแต่ *ก่อน* ลบ snapshot ·
+    /// การถามในกรณีนั้นสอนให้ผู้ใช้กดปุ่มผ่าน ๆ โดยไม่อ่าน แล้ววันที่มีของจริง
+    /// ให้กู้เขาจะกดผ่านเหมือนกัน — คำถามที่ไม่จำเป็นทำลายคำถามที่จำเป็น
+    #[test]
+    fn a_snapshot_that_matches_the_file_is_never_offered() {
+        let dir = spool_temp_dir("pending-same");
+        let (doc, saved) = saved_document(&dir, "work.refx", 2);
+
+        refx_io::autosave::write_snapshot(&doc, &saved, refx_platform::fsops::rename_durable)
+            .unwrap();
+        assert!(
+            refx_io::autosave::find_pending(&doc, default_board_id()).is_some(),
+            "เทสต์นี้ต้องมี snapshot อยู่จริงถึงจะพิสูจน์อะไรได้"
+        );
+
+        assert!(
+            newer_snapshot(&doc, &saved).is_none(),
+            "ถามผู้ใช้ทั้งที่ snapshot เหมือนไฟล์ทุกอย่าง"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
