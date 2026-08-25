@@ -260,6 +260,12 @@ pub enum Key {
     RecoverDocLaterHint,
     /// เอากลับมาแล้ว และมันยังไม่อยู่ในไฟล์ของมัน
     RecoveredIntoDocument,
+    /// ★★ หัวข้อของแถบตอนเสนอ snapshot ที่ผู้ใช้เคยสั่ง "เก็บไว้ก่อน"
+    RecoverKeptTitle,
+    /// เก็บไว้ให้แล้ว — บอกด้วยว่ามันจะไม่ถูกเขียนทับอีก
+    RecoverKeptSaved,
+    /// เก็บไว้ไม่สำเร็จ — ต้องบอก เพราะของเดิมกำลังจะถูกเขียนทับ
+    RecoverKeepFailed,
     /// เปิดไฟล์ไม่สำเร็จ
     OpenFailed,
     /// กำลังเปิดไฟล์ที่ผู้ใช้เลือก
@@ -412,6 +418,11 @@ fn en(key: Key) -> &'static str {
             "Restored - this board still has no file, press Ctrl+S to keep it"
         }
         Key::RecoverDocTitle => "This board has changes that never reached the file",
+        Key::RecoverKeptTitle => "You kept some unsaved changes for this board",
+        Key::RecoverKeptSaved => "Kept - it will be offered again every time you open this board",
+        Key::RecoverKeepFailed => {
+            "Could not set that work aside - it is still there but the next autosave will replace it"
+        }
         Key::RecoverDocLaterHint => {
             "Nothing is deleted right now - but editing this board overwrites it in seconds"
         }
@@ -554,6 +565,9 @@ fn th(key: Key) -> Option<&'static str> {
         Key::RecoverWhenUnknown => "รอบก่อน",
         Key::RecoveredNotSavedYet => "เอากลับมาแล้ว — กระดานนี้ยังไม่มีไฟล์ กด Ctrl+S เพื่อเก็บไว้",
         Key::RecoverDocTitle => "กระดานนี้มีการแก้ที่ยังไม่เคยถูกเขียนลงไฟล์",
+        Key::RecoverKeptTitle => "คุณเก็บงานที่ยังไม่ได้บันทึกของกระดานนี้ไว้",
+        Key::RecoverKeptSaved => "เก็บไว้ให้แล้ว — จะถามใหม่ทุกครั้งที่เปิดกระดานนี้",
+        Key::RecoverKeepFailed => "เก็บงานชุดนั้นไว้ไม่สำเร็จ — มันยังอยู่ แต่ autosave รอบหน้าจะเขียนทับ",
         Key::RecoverDocLaterHint => {
             "ตอนนี้ยังไม่มีอะไรถูกลบ — แต่ถ้าแก้กระดานนี้ต่อ งานชุดนั้นจะถูกเขียนทับภายในไม่กี่วินาที ตัดสินใจก่อนทำงานต่อ"
         }
@@ -1176,6 +1190,9 @@ mod tests {
         Key::RecoverDocTitle,
         Key::RecoverDocLaterHint,
         Key::RecoveredIntoDocument,
+        Key::RecoverKeptTitle,
+        Key::RecoverKeptSaved,
+        Key::RecoverKeepFailed,
         Key::OpenFailed,
         Key::OpenInProgress,
         Key::OpenChoosing,

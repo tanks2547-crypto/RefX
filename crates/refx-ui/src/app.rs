@@ -1505,6 +1505,16 @@ pub struct RefxApp {
     /// เดียวกันเมื่อไหร่ อันหนึ่งจะกลืนอีกอันหายไปเงียบ ๆ · แถบบนจอยังมีอันเดียว
     /// และถามทีละเรื่องตามหลักการเดิมของ P4-4
     pending_snapshot: Option<Box<refx_io::autosave::Pending>>,
+    /// ★★★ งานที่ผู้ใช้เคยสั่ง **"เก็บไว้ก่อน"** ของเอกสารที่เปิดอยู่ (`docs/07 §4`)
+    ///
+    /// รอถามหลังผู้ใช้ตอบ `pending_snapshot` เสร็จ (ตัวใหม่กว่ามาก่อน) ·
+    /// ไฟล์ `.kept` **ไม่ถูกลบอัตโนมัติเลย** จึงถูกเสนอใหม่ทุกครั้งที่เปิดเอกสาร
+    pending_kept: Option<Box<refx_io::autosave::Pending>>,
+    /// ★ `.kept` ที่เพิ่งกู้กลับมา — ลบหลัง snapshot ของ session นี้ลงดิสก์แล้ว
+    ///
+    /// หลักการเดียวกับ [`Self::adopted_recovery`] เป๊ะ: ระหว่างนั้นต้องมีสำเนา
+    /// อยู่บนดิสก์เสมอหนึ่งชุด — ลบก่อนหน้านั้นคือช่วงที่งานไม่มีสำเนาเลย
+    adopted_kept: Option<std::path::PathBuf>,
     /// งานสแกนโฟลเดอร์ recovery ตอนเปิดโปรแกรม (แตะดิสก์ → ต้องอยู่เธรดอื่น I-2)
     recovery_scan: Option<crossbeam_channel::Receiver<Option<PendingRecovery>>>,
     /// ★★ ถามเรื่องงานค้างไปแล้วในการรันครั้งนี้ — **ครั้งเดียวตลอดอายุโปรแกรม**
@@ -1648,6 +1658,8 @@ struct LoadedDoc {
     ///
     /// `Box` เพราะมันถือ `Board` ทั้งก้อน (เหตุผลเดียวกับ `board` ข้างบน)
     pending: Option<Box<refx_io::autosave::Pending>>,
+    /// ★★ งานที่ผู้ใช้เคยสั่ง **"เก็บไว้ก่อน"** ของเอกสารนี้ (`docs/07 §4`)
+    kept: Option<Box<refx_io::autosave::Pending>>,
 }
 
 /// ★ ไฟล์ที่เพิ่งเขียนลงดิสก์สำเร็จ — สิ่งที่เธรดบันทึกส่งกลับมา (P4-5)
@@ -2092,9 +2104,31 @@ fn read_document(path: &std::path::Path) -> Result<Board, String> {
 ///
 /// ★ **รันบนเธรดอื่นเท่านั้น** (I-2) — อ่าน+คลายบีบไฟล์ระดับ MB
 fn newer_snapshot(doc: &std::path::Path, saved: &Board) -> Option<refx_io::autosave::Pending> {
-    let pending = refx_io::autosave::find_pending(doc, default_board_id())?;
+    worth_offering(
+        refx_io::autosave::find_pending(doc, default_board_id()),
+        saved,
+    )
+}
+
+/// ★★★ snapshot ที่ผู้ใช้เคยสั่ง **"เก็บไว้ก่อน"** ของเอกสารนี้ (`docs/07 §4`)
+///
+/// ถูกเสนอกลับ **ทุกครั้งที่เปิดเอกสารนี้** จนกว่าเขาจะกู้หรือทิ้ง — ไฟล์นี้
+/// ไม่มีอะไรลบมันอัตโนมัติเลย รวมถึงตอนบันทึกสำเร็จ
+///
+/// ★ ยังเทียบกับเอกสารก่อนถามเหมือนกัน: ผู้ใช้ที่เก็บไว้แล้วมาบันทึกเนื้อเดียวกัน
+/// ทีหลัง ไม่มีอะไรให้กู้อีกแล้ว — ถามต่อไปคือการสอนให้เขากดผ่าน ๆ
+fn kept_snapshot(doc: &std::path::Path, saved: &Board) -> Option<refx_io::autosave::Pending> {
+    worth_offering(refx_io::autosave::find_kept(doc, default_board_id()), saved)
+}
+
+/// snapshot นี้มีอะไรให้กู้จริงไหม — ตัวร่วมของทั้งสองแบบ
+fn worth_offering(
+    found: Option<refx_io::autosave::Pending>,
+    saved: &Board,
+) -> Option<refx_io::autosave::Pending> {
+    let pending = found?;
     if pending.board == *saved {
-        tracing::info!("the autosave snapshot matches the document — nothing to recover");
+        tracing::info!("the snapshot matches the document — nothing to recover");
         return None;
     }
     Some(pending)
@@ -2205,6 +2239,8 @@ impl RefxApp {
             load_job: None,
             pending_recovery: None,
             pending_snapshot: None,
+            pending_kept: None,
+            adopted_kept: None,
             recovery_scan: None,
             recovery_checked: false,
             adopted_recovery: None,
@@ -3598,6 +3634,15 @@ impl RefxApp {
                     if let Some(old) = self.adopted_recovery.take() {
                         remove_recovery_file(&old);
                     }
+                    // ★ เหตุผลเดียวกันเป๊ะกับ `adopted_recovery` — ของที่ผู้ใช้
+                    //   สั่งเก็บไว้แล้วกู้กลับมา หมดหน้าที่ก็ต่อเมื่อ session นี้
+                    //   มีสำเนาของตัวเองบนดิสก์แล้ว
+                    if let Some(old) = self.adopted_kept.take()
+                        && let Err(err) = std::fs::remove_file(&old)
+                        && err.kind() != std::io::ErrorKind::NotFound
+                    {
+                        tracing::warn!(%err, "cannot remove the kept snapshot after adopting it");
+                    }
                 }
                 Ok(Err(err)) => {
                     tracing::warn!(%err, "autosave snapshot failed");
@@ -3770,9 +3815,30 @@ impl RefxApp {
         }
     }
 
+    /// ★★ เสนอ snapshot ที่ผู้ใช้เคยสั่ง "เก็บไว้ก่อน" — **เฉพาะตอนแถบว่าง**
+    ///
+    /// ถ้ายังมีคำถามอื่นค้างอยู่บนจอ ตัวนี้รอคิว (`pending_kept` ยังถืออยู่)
+    /// แล้วถูกเสนอทันทีที่ผู้ใช้ตอบคำถามก่อนหน้า
+    fn offer_kept_snapshot(&mut self) {
+        if self.shell.recover_prompt.is_some() {
+            return;
+        }
+        let Some(kept) = self.pending_kept.as_ref() else {
+            return;
+        };
+        self.shell.recover_prompt = Some(crate::shell::RecoverView {
+            when: kept.written_at.map(format_when),
+            items: kept.board.len(),
+            scope: crate::shell::RecoverScope::KeptForLater,
+        });
+        if let Some(gfx) = self.gfx.as_ref() {
+            gfx.window.request_redraw();
+        }
+    }
+
     /// ★★★ ผู้ใช้ตอบแถบกู้คืนแล้ว — **สามทาง และมีทางเดียวที่ลบไฟล์**
     ///
-    /// แถบเดียวถามได้สองเรื่อง (ดู [`crate::shell::RecoverScope`]) — เรื่องของ
+    /// แถบเดียวถามได้สามเรื่อง (ดู [`crate::shell::RecoverScope`]) — เรื่องของ
     /// เอกสารที่เปิดอยู่มาก่อนเสมอถ้าค้างพร้อมกัน
     fn apply_recover_choice(&mut self, choice: crate::shell::RecoverChoice) {
         use crate::shell::RecoverChoice;
@@ -3783,9 +3849,18 @@ impl RefxApp {
             .take()
             .map(|view| view.scope)
             .unwrap_or(crate::shell::RecoverScope::LastSession);
-        if scope == crate::shell::RecoverScope::ThisDocument {
-            self.apply_document_recover_choice(choice);
-            return;
+        match scope {
+            crate::shell::RecoverScope::ThisDocument => {
+                self.apply_document_recover_choice(choice);
+                // ★ ตอบตัวใหม่กว่าแล้ว — ตัวที่ "เก็บไว้ก่อน" ขึ้นถามต่อได้
+                self.offer_kept_snapshot();
+                return;
+            }
+            crate::shell::RecoverScope::KeptForLater => {
+                self.apply_kept_recover_choice(choice);
+                return;
+            }
+            crate::shell::RecoverScope::LastSession => {}
         }
         let Some(found) = self.pending_recovery.take() else {
             return;
@@ -3804,6 +3879,16 @@ impl RefxApp {
                 //   ★★ และยังไม่มีไฟล์ `.refx` ที่ฝังอะไรไว้ → ตารางว่าง
                 self.doc_assets = refx_io::packed::Index::default();
                 self.adopt_board(board, None);
+                // ★★★ **ธงต้องติดที่นี่ด้วย ไม่ใช่แค่เส้นทางของเอกสาร** (docs/03 §1)
+                //
+                //   `History::default()` ถือว่า board ที่รับมา = สถานะที่บันทึกแล้ว
+                //   ซึ่งผิดเสมอกับ snapshot · ก่อนหน้านี้เส้นทางนี้พึ่งข้อความ
+                //   `RecoveredNotSavedYet` อย่างเดียว ซึ่งเป็น **ข้อความชั่วคราว**
+                //   ที่ถูกรายงานความคืบหน้าของ decode เขียนทับใน ~3 ms —
+                //   ลูปเดิมเป๊ะ: กู้งานคืน → เห็นว่าสะอาด → ปิดโปรแกรม → **หายอีกรอบ**
+                if let Some(gfx) = self.gfx.as_mut() {
+                    gfx.history.mark_unsaved(&mut gfx.board);
+                }
                 // ★ ยังไม่ลบไฟล์เก่า — รอให้ snapshot ของ session นี้ลงดิสก์ก่อน
                 //   (ดู `adopted_recovery`) · ระหว่างนี้มีสำเนาอยู่หนึ่งชุดเสมอ
                 self.adopted_recovery = Some(found.path.clone());
@@ -3871,7 +3956,82 @@ impl RefxApp {
                 self.shell.status = text::t(self.shell.lang, Key::Ready).to_owned();
                 self.shell.status_warn = false;
             }
-            // ไม่แตะไฟล์ — ปุ่มบอกไปแล้วว่าการแก้งานต่อจะเขียนทับมัน
+            // ★★★ **ย้ายออกจากทางของ autosave** (`docs/07 §4` — ตัดสิน 22 ส.ค. 2026)
+            //
+            //   ก่อนหน้านี้ตัวเลือกนี้ "ไม่แตะไฟล์" ซึ่งฟังดูปลอดภัยที่สุดแต่เป็น
+            //   ทางที่อันตรายที่สุด: `<doc>.refx.autosave` คือไฟล์เดียวกับที่
+            //   autosave เขียนทับในไม่กี่วินาที ปุ่ม "เก็บไว้ก่อน" จึงเท่ากับ
+            //   "ทิ้งใน 10 วินาที" สำหรับคนที่แก้งานต่อ
+            //
+            //   ★ ย้ายไป `.kept` แล้วทั้งสองอย่างรอด: ของเก่าอยู่ในชื่อที่ไม่มีใคร
+            //     เขียนทับ ส่วนงานใหม่ได้ snapshot ของตัวเองตามปกติ
+            RecoverChoice::Later => {
+                match refx_io::autosave::keep(&doc, refx_platform::fsops::rename_durable) {
+                    Ok(_) => {
+                        // ★★★ **คำถามที่ค้างคิวอยู่ต้องหายไปด้วย** — `keep` เพิ่งเขียนทับ
+                        //     ไฟล์ `.kept` ตัวเก่าด้วยตัวที่ใหม่กว่า (`docs/07 §4`:
+                        //     "มีได้ไฟล์เดียวต่อเอกสาร · ตัวใหม่ทับตัวเก่า") · ถ้ายังถาม
+                        //     ต่อ ผู้ใช้จะถูกถามถึงเนื้อที่ **ไม่มีอยู่บนดิสก์แล้ว** และถ้า
+                        //     เขากด "เอากลับมา" เราจะลบไฟล์ที่เพิ่งเก็บให้เขาไปด้วย
+                        //     (เห็นบนแอปจริงตอนยืนยัน 25 ส.ค. 2026)
+                        self.pending_kept = None;
+                        self.shell.status =
+                            text::t(self.shell.lang, Key::RecoverKeptSaved).to_owned();
+                        self.shell.status_warn = false;
+                    }
+                    Err(err) => {
+                        // ★ ย้ายไม่สำเร็จ = ของเดิมยังอยู่ที่เดิม แต่ **จะถูกเขียนทับ**
+                        //   ผู้ใช้ต้องรู้ ไม่ใช่เชื่อว่าเก็บไว้แล้ว
+                        tracing::error!(%err, "cannot keep the snapshot");
+                        self.shell.status =
+                            text::t(self.shell.lang, Key::RecoverKeepFailed).to_owned();
+                        self.shell.status_warn = true;
+                    }
+                }
+            }
+        }
+        if let Some(gfx) = self.gfx.as_ref() {
+            gfx.window.request_redraw();
+        }
+    }
+
+    /// ★★★ ผู้ใช้ตอบแถบของ snapshot ที่ **เคยสั่งเก็บไว้** (`.kept`)
+    ///
+    /// | ตอบ | ทำอะไรกับ `<doc>.refx.autosave.kept` |
+    /// |---|---|
+    /// | เอากลับมา | ★ ลบ **หลัง** snapshot ของ session นี้ลงดิสก์ (ดู `adopted_kept`) |
+    /// | ทิ้งไป | ลบทันที — ผู้ใช้สั่งเอง |
+    /// | เก็บไว้ก่อน (อีกครั้ง) | **ไม่แตะเลย** · ถูกถามใหม่รอบหน้าที่เปิดเอกสารนี้ |
+    ///
+    /// ★★ ตัวที่สามที่นี่ปลอดภัยจริง ๆ ต่างจากตอนมันยังอยู่ในชื่อ `.autosave`:
+    /// ไม่มีอะไรเขียนทับ `.kept` เลย ผู้ใช้จึงเลื่อนการตัดสินใจได้ไม่จำกัดรอบ
+    fn apply_kept_recover_choice(&mut self, choice: crate::shell::RecoverChoice) {
+        use crate::shell::RecoverChoice;
+
+        let Some(kept) = self.pending_kept.take() else {
+            return;
+        };
+        let Some(doc) = self.doc_path.clone() else {
+            return;
+        };
+        match choice {
+            RecoverChoice::Restore => {
+                let path = refx_io::autosave::kept_path(&doc);
+                self.adopt_board(kept.board, Some(doc));
+                if let Some(gfx) = self.gfx.as_mut() {
+                    gfx.history.mark_unsaved(&mut gfx.board);
+                }
+                // ★ ยังไม่ลบ — รอ snapshot ของ session นี้ลงดิสก์ก่อน (I-3)
+                self.adopted_kept = Some(path);
+                self.shell.status = text::t(self.shell.lang, Key::RecoveredIntoDocument).to_owned();
+                self.shell.status_warn = true;
+            }
+            RecoverChoice::Discard => {
+                refx_io::autosave::discard_kept(&doc);
+                self.shell.status = text::t(self.shell.lang, Key::Ready).to_owned();
+                self.shell.status_warn = false;
+            }
+            // ไม่แตะเลย — ไฟล์นี้ไม่มีอะไรเขียนทับมัน ถามใหม่รอบหน้าได้เรื่อย ๆ
             RecoverChoice::Later => {}
         }
         if let Some(gfx) = self.gfx.as_ref() {
@@ -4035,6 +4195,7 @@ impl RefxApp {
                     // ★★★ ถามเรื่อง snapshot **บนเธรดนี้ด้วย** (I-2) — มันคือการ
                     //     อ่าน+คลายบีบไฟล์อีกก้อน ไม่ใช่การ stat เฉย ๆ
                     pending: newer_snapshot(&path, &board).map(Box::new),
+                    kept: kept_snapshot(&path, &board).map(Box::new),
                     path,
                     board: Box::new(board),
                 });
@@ -4092,6 +4253,7 @@ impl RefxApp {
                 board,
                 assets,
                 pending,
+                kept,
             }) => {
                 let name = path
                     .file_name()
@@ -4104,7 +4266,12 @@ impl RefxApp {
                 //
                 //   ผู้ใช้ต้องเห็นไฟล์ที่เขาสั่งเปิดก่อน ถึงจะตัดสินใจได้ว่าจะเอา
                 //   ของที่ค้างอยู่กลับมาไหม · ถามบนจอว่างเปล่าคือการขอให้เขาเดา
+                // ★★ ตัวที่ **ใหม่กว่า** ขึ้นก่อน แล้วตัวที่ผู้ใช้สั่งเก็บไว้ตามมา
+                //    หลังเขาตอบตัวแรก (`docs/07 §4`) — สองคำถามติดกันยอมรับได้
+                //    เพราะเกิดยากและทั้งสองอันคืองานของเขาจริง ๆ
+                self.pending_kept = kept;
                 self.offer_pending_snapshot(pending);
+                self.offer_kept_snapshot();
             }
             Err(err) => {
                 tracing::error!(%err, "cannot open the document");

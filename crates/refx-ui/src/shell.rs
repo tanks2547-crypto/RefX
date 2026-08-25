@@ -143,6 +143,11 @@ pub enum RecoverScope {
     LastSession,
     /// ★ เอกสารที่เพิ่งเปิดมี `<doc>.refx.autosave` ที่ใหม่กว่าไฟล์ (P4-3)
     ThisDocument,
+    /// ★★ ของที่ผู้ใช้เคยกด **"เก็บไว้ก่อน"** ไว้เอง (`<doc>.refx.autosave.kept`)
+    ///
+    /// ต่างจาก [`Self::ThisDocument`] ตรงที่เขา **เคยเห็นและเคยเลื่อนมันมาแล้ว**
+    /// — ประโยคต้องเตือนความจำ ไม่ใช่แจ้งข่าวใหม่
+    KeptForLater,
 }
 
 /// งานค้างที่เจอตอนเปิดโปรแกรม/เปิดเอกสาร — **ค่าสำหรับแสดงเท่านั้น** (P4-4)
@@ -698,6 +703,7 @@ pub fn draw_in_ui(
                 let title = match found.scope {
                     RecoverScope::LastSession => Key::RecoverTitle,
                     RecoverScope::ThisDocument => Key::RecoverDocTitle,
+                    RecoverScope::KeptForLater => Key::RecoverKeptTitle,
                 };
                 ui.label(
                     egui::RichText::new(text::t(lang, title))
@@ -731,7 +737,8 @@ pub fn draw_in_ui(
                 //    ที่ autosave ของเราจะเขียนทับเมื่อผู้ใช้แก้อะไรต่อ — ปิดบังข้อนี้
                 //    แล้วปุ่มจะกลายเป็นคำโกหกในอีกสิบวินาทีถัดมา
                 let later_hint = match found.scope {
-                    RecoverScope::LastSession => Key::RecoverLaterHint,
+                    RecoverScope::LastSession | RecoverScope::KeptForLater => Key::RecoverLaterHint,
+                    // ★ ตัวนี้ย้ายไฟล์จริง จึงพูดได้เต็มปากว่าไม่มีอะไรถูกเขียนทับ
                     RecoverScope::ThisDocument => Key::RecoverDocLaterHint,
                 };
                 if ui
