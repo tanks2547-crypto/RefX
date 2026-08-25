@@ -122,6 +122,41 @@ pub fn backup_path(doc: &Path) -> PathBuf {
 /// [`SaveError`] — เมื่อถูกปฏิเสธเพราะเวอร์ชัน, แปลงไม่ได้, หรือระบบไฟล์ล้ม
 /// · **ไฟล์เดิมยังอยู่ครบเสมอ** ไม่ว่าล้มที่ขั้นไหน
 pub fn save_atomic(doc: &Path, board: &Board, rename: RenameFn) -> Result<(), SaveError> {
+    write_document(doc, board, rename, Backup::Keep)
+}
+
+/// ★★★ เขียน **snapshot** แบบ atomic — เหมือน [`save_atomic`] ทุกอย่าง **ยกเว้นไม่ทำ `.bak`**
+///
+/// `.bak` ถูกต้องสำหรับ *เอกสารของผู้ใช้*: มันคือรุ่นก่อนหน้าที่เขากลับไปหาได้
+/// · แต่ **ผิดสำหรับ snapshot** ซึ่งถูกเขียนทับทุกสิบวินาทีอยู่แล้ว —
+/// **สำเนาของสำเนาไม่มีค่า** และผลของมันคือไฟล์ชื่อ `<doc>.refx.refx.bak`
+/// ที่ไม่มีใครอ่านและไม่มีใครกวาด นอนอยู่ในโฟลเดอร์งานของผู้ใช้ตลอดไป
+/// (`docs/07 §4` — ตัดสิน 22 ส.ค. 2026)
+///
+/// ★ ความทนทานไม่ได้ลดลงเลย: ขั้น tmp → fsync → rename ยังครบเหมือนเดิมทุกขั้น
+/// สิ่งที่หายไปคือ *สำเนาของรุ่นก่อน* ซึ่ง snapshot ไม่เคยมีใครขอย้อนกลับไปหา
+///
+/// # Errors
+/// [`SaveError`] — เหมือน [`save_atomic`] ทุกประการ
+pub fn write_snapshot_atomic(doc: &Path, board: &Board, rename: RenameFn) -> Result<(), SaveError> {
+    write_document(doc, board, rename, Backup::Skip)
+}
+
+/// ทำ `.bak` ของไฟล์เดิมไหม — ดู [`write_snapshot_atomic`] ว่าทำไมต้องมีสองแบบ
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Backup {
+    /// เอกสารของผู้ใช้ — รุ่นก่อนหน้าต้องกลับไปหาได้เสมอ
+    Keep,
+    /// snapshot — ถูกเขียนทับทุกสิบวินาทีอยู่แล้ว
+    Skip,
+}
+
+fn write_document(
+    doc: &Path,
+    board: &Board,
+    rename: RenameFn,
+    backup_policy: Backup,
+) -> Result<(), SaveError> {
     // ---- 0. ถ้ามีไฟล์เดิมอยู่ ต้องอ่านหัวมันก่อนว่าเราทับได้ไหม ----
     //
     // ★★ อ่าน **แค่หัวไฟล์** ไม่ใช่ทั้งไฟล์ — สองเหตุผล:
@@ -145,7 +180,7 @@ pub fn save_atomic(doc: &Path, board: &Board, rename: RenameFn) -> Result<(), Sa
     write_and_sync(&tmp, &bytes)?;
 
     // ---- 2. สำรองไฟล์เดิมไว้ (ถ้ามี) ----
-    if existed {
+    if existed && backup_policy == Backup::Keep {
         backup(doc, rename)?;
     }
 

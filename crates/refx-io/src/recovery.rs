@@ -45,7 +45,7 @@ use std::time::{Duration, SystemTime};
 use refx_core::arena::BoardId;
 use refx_core::board::Board;
 
-use crate::save::{RenameFn, SaveError, save_atomic};
+use crate::save::{RenameFn, SaveError, write_snapshot_atomic};
 
 /// นามสกุลของ snapshot — **เป็นไฟล์ `.refx` ที่ถูกต้องทุกประการ**
 ///
@@ -165,7 +165,7 @@ pub fn write_snapshot(
             source,
         });
     }
-    save_atomic(&path, board, rename)
+    write_snapshot_atomic(&path, board, rename)
 }
 
 /// ★★ ทิ้ง snapshot ของ session นี้ — **เมื่อบันทึกลง path จริงสำเร็จเท่านั้น**
@@ -497,22 +497,29 @@ mod tests {
     }
 
     /// บันทึกลง path จริงสำเร็จ = ทิ้ง snapshot **พร้อมบริวารทั้งหมด**
+    ///
+    /// ★ แก้ 22 ส.ค. 2026: snapshot **ไม่สร้าง `.bak` อีกแล้ว** (`docs/07 §4` —
+    /// สำเนาของสำเนาไม่มีค่า) เทสต์จึงตรวจสองอย่าง: เขียนซ้ำแล้วต้อง**ไม่มี** `.bak`
+    /// โผล่มา · และ `.bak` ที่ **รุ่นเก่าทิ้งไว้บนดิสก์ผู้ใช้** ต้องยังถูกกวาดอยู่
     #[test]
     fn saving_for_real_removes_the_whole_family() {
         let dir = temp_dir("handover");
         let session = SessionId::new_unique();
         let board = board_named("x", 2);
-        // เขียนสองรอบ — รอบที่สองทำให้เกิด `.bak` ของรอบแรก
+        // เขียนสองรอบ — รอบที่สองคือรอบที่ `save_atomic` เคยทำ `.bak` ของรอบแรก
         write_snapshot(&dir, &session, &board, rename_durable).unwrap();
         write_snapshot(&dir, &session, &board, rename_durable).unwrap();
         let snapshot = snapshot_path(&dir, &session);
+        let backup = snapshot.with_extension(crate::save::BAK_SUFFIX);
         mark_asked(&snapshot);
-        assert!(snapshot.with_extension(crate::save::BAK_SUFFIX).exists());
+        assert!(!backup.exists(), "snapshot ไม่ควรสร้าง `.bak` อีกแล้ว");
+        // จำลองของที่รุ่นก่อน 22 ส.ค. 2026 ทิ้งไว้ — ต้องยังถูกกวาด
+        std::fs::write(&backup, b"left by an older build").unwrap();
 
         discard(&dir, &session);
 
         assert!(!snapshot.exists());
-        assert!(!snapshot.with_extension(crate::save::BAK_SUFFIX).exists());
+        assert!(!backup.exists(), "ของที่รุ่นเก่าทิ้งไว้ยังอยู่");
         assert!(!asked_marker(&snapshot).exists());
         assert!(scan(&dir, &SessionId::new_unique()).is_empty());
         discard(&dir, &session); // ทิ้งซ้ำต้องเงียบ ไม่ใช่ล้ม

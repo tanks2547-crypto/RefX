@@ -39,10 +39,15 @@ use std::time::{Duration, Instant};
 
 use refx_core::board::Board;
 
-use crate::save::{RenameFn, SaveError, save_atomic};
+use crate::save::{RenameFn, SaveError, write_snapshot_atomic};
 
 /// นามสกุลของไฟล์ autosave
 pub const AUTOSAVE_SUFFIX: &str = "refx.autosave";
+
+/// ★★★ นามสกุลของ snapshot ที่ผู้ใช้สั่ง **"เก็บไว้ก่อน ตัดสินใจทีหลัง"**
+///
+/// `docs/07 §4` (ตัดสิน 22 ส.ค. 2026) — ดู [`keep`] ว่าทำไมต้องเปลี่ยนชื่อไฟล์
+pub const KEPT_SUFFIX: &str = "refx.autosave.kept";
 
 /// ระยะเว้นขั้นต่ำระหว่างการเขียนสอง**ครั้ง** (`docs/07 §4` — "อย่างน้อย N วินาที")
 ///
@@ -57,6 +62,16 @@ pub const DEFAULT_MIN_INTERVAL: Duration = Duration::from_secs(10);
 #[must_use]
 pub fn autosave_path(doc: &Path) -> PathBuf {
     doc.with_extension(AUTOSAVE_SUFFIX)
+}
+
+/// เส้นทางของ snapshot ที่ถูก "เก็บไว้ก่อน" ของเอกสารนี้ — [`KEPT_SUFFIX`]
+///
+/// ★ อนุมานจาก path ของเอกสารเหมือน [`autosave_path`] → จับคู่ผิดไฟล์ไม่ได้
+/// · **มีได้ไฟล์เดียวต่อเอกสาร** กด "เก็บไว้ก่อน" ซ้ำ = ตัวใหม่ทับตัวเก่า
+/// (ตัวใหม่ใหม่กว่าเสมอ จึงไม่มีอะไรหาย)
+#[must_use]
+pub fn kept_path(doc: &Path) -> PathBuf {
+    doc.with_extension(KEPT_SUFFIX)
 }
 
 /// ★★★ ตัวตัดสินว่า "ตอนนี้ควรเขียน autosave ไหม" — **ฟังก์ชันบริสุทธิ์**
@@ -176,7 +191,7 @@ impl Autosaver {
 /// [`SaveError`] เมื่อเขียนไม่สำเร็จ — ผู้เรียกควร log แล้วไปต่อ ไม่ใช่หยุดโปรแกรม
 /// (autosave ที่ล้มไม่ได้แปลว่างานที่ผู้ใช้เห็นอยู่หายไปไหน)
 pub fn write_snapshot(doc: &Path, board: &Board, rename: RenameFn) -> Result<(), SaveError> {
-    save_atomic(&autosave_path(doc), board, rename)
+    write_snapshot_atomic(&autosave_path(doc), board, rename)
 }
 
 /// ทิ้ง autosave ของเอกสารนี้ — **เรียกเมื่อ save สำเร็จเท่านั้น** (`docs/07 §4`)
@@ -223,11 +238,71 @@ pub struct Pending {
 /// เป๊ะไม่มีอะไรให้กู้ (เกิดได้ถ้าโปรแกรมตายหลัง save แต่ก่อนลบ autosave)
 #[must_use]
 pub fn find_pending(doc: &Path, id: refx_core::arena::BoardId) -> Option<Pending> {
+    read_snapshot(&autosave_path(doc), id)
+}
+
+/// ★★★ snapshot ที่ผู้ใช้สั่ง **"เก็บไว้ก่อน"** ของเอกสารนี้ — `None` = ไม่มี
+///
+/// ถูกเสนอกลับ **ทุกครั้งที่เปิดเอกสารนี้** จนกว่าเขาจะกู้หรือทิ้ง (`docs/07 §4`)
+#[must_use]
+pub fn find_kept(doc: &Path, id: refx_core::arena::BoardId) -> Option<Pending> {
+    read_snapshot(&kept_path(doc), id)
+}
+
+/// ★★★ **ย้าย snapshot ออกจากทางของ autosave** — ทางที่ทำให้ปุ่ม "เก็บไว้ก่อน" จริง
+///
+/// ## ปัญหาที่มันแก้ (`docs/07 §4` — ตัดสิน 22 ส.ค. 2026)
+///
+/// snapshot ของเอกสารอยู่ที่ `<doc>.refx.autosave` ซึ่งเป็น **ไฟล์เดียวกับที่
+/// autosave จะเขียนทับในไม่กี่วินาที** · ผู้ใช้ที่กด *"เก็บไว้ก่อน ตัดสินใจทีหลัง"*
+/// แล้วแก้งานต่ออีกนิดเดียว จะเสียของที่เพิ่งสั่งให้เก็บไว้โดยไม่มีอะไรเตือน —
+/// ปุ่มนั้นกลายเป็น *"ทิ้งใน 10 วินาที"*
+///
+/// ★★ ทางที่ตกไป: **หยุด autosave จนกว่าจะตอบ** (เอางานใหม่ไปเสี่ยงแทนงานเก่า
+/// = แลกของหายกับของหาย) และ **เตือนบน tooltip แล้วปล่อยให้ทับ** (คนที่ไม่อ่าน
+/// ยังเสียของอยู่ดี · คำเตือนไม่ใช่การป้องกัน)
+///
+/// → **การเก็บทั้งสองอย่างดีกว่าการเลือกว่าจะเสียอันไหน** ราคาคือชื่อไฟล์เพิ่มหนึ่งชื่อ
+///
+/// ★ ใช้ `rename` ตัวเดียวกับ `save_atomic` จึงเป็นการสลับแบบ atomic —
+/// ไม่มีจังหวะไหนที่ snapshot หายไปจากดิสก์ทั้งสองชื่อพร้อมกัน
+///
+/// คืน `false` เมื่อไม่มี snapshot ให้ย้าย (ไม่ใช่ error — ผู้ใช้อาจตอบช้ากว่า
+/// ที่ไฟล์ถูกลบไปด้วยเหตุอื่น)
+///
+/// # Errors
+/// [`SaveError`] เมื่อย้ายไม่สำเร็จ — **ของเดิมยังอยู่ที่เดิมครบ**
+pub fn keep(doc: &Path, rename: RenameFn) -> Result<bool, SaveError> {
+    let from = autosave_path(doc);
+    if !from.exists() {
+        return Ok(false);
+    }
+    let to = kept_path(doc);
+    rename(&from, &to).map_err(|err| SaveError::io("keep", &to, err))?;
+    tracing::info!(file = %to.display(), "kept the snapshot the user has not answered yet");
+    Ok(true)
+}
+
+/// ทิ้ง snapshot ที่ถูกเก็บไว้ — **เรียกเมื่อผู้ใช้สั่งเท่านั้น**
+///
+/// ★★★ ต่างจาก [`discard`] ตรงที่ **ไม่มีอะไรลบไฟล์นี้อัตโนมัติเลย** ไม่ว่าจะ
+/// บันทึกสำเร็จหรือปิดโปรแกรม — มันคือของที่ผู้ใช้ **สั่งให้เก็บไว้เอง**
+/// การลบมันโดยเขาไม่ได้ตอบคือการทำในสิ่งที่ตัวเลือกที่สามมีไว้ห้ามพอดี
+pub fn discard_kept(doc: &Path) {
+    let path = kept_path(doc);
+    match std::fs::remove_file(&path) {
+        Ok(()) => tracing::debug!(file = %path.display(), "removed the kept snapshot"),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => tracing::warn!(%err, "cannot remove the kept snapshot"),
+    }
+}
+
+/// อ่าน snapshot หนึ่งไฟล์ — ตัวร่วมของ [`find_pending`] และ [`find_kept`]
+fn read_snapshot(path: &Path, id: refx_core::arena::BoardId) -> Option<Pending> {
     use std::io::Read as _;
 
-    let path = autosave_path(doc);
     let mut bytes = Vec::new();
-    let mut file = std::fs::File::open(&path).ok()?;
+    let mut file = std::fs::File::open(path).ok()?;
     // ★ เพดานเดียวกับตัวอ่านเอกสาร — ไฟล์ที่โตผิดปกติต้องไม่ถูกสูบเข้า RAM ทั้งก้อน
     file.by_ref()
         .take(crate::dto::MAX_COMPRESSED_BYTES + crate::dto::HEADER_LEN as u64)
@@ -485,27 +560,27 @@ mod tests {
         assert!(find_pending(&doc, board_id()).is_none());
     }
 
-    /// ★★★ **"ทิ้งไป" ต้องไม่เหลือสำเนาไว้ในโฟลเดอร์งานของผู้ใช้**
+    /// ★★★ **snapshot ต้องไม่สร้าง `.bak` ตั้งแต่ต้น** (`docs/07 §4` — 22 ส.ค. 2026)
     ///
-    /// `write_snapshot` เขียนผ่าน `save_atomic` ซึ่งทิ้ง `.bak` ของรอบก่อนไว้เสมอ
-    /// (เห็นของจริงข้างเอกสาร: `work.refx.refx.bak`) · ไฟล์นั้นไม่มีใครอ่านและ
-    /// ไม่มีใครเก็บกวาด — และตอนผู้ใช้กด "ทิ้งไป" มันคือ**ของที่เขาเพิ่งสั่งให้ทิ้ง**
+    /// `.bak` ถูกต้องสำหรับเอกสารของผู้ใช้ แต่ผิดสำหรับ snapshot ซึ่งถูกเขียนทับ
+    /// ทุกสิบวินาทีอยู่แล้ว — **สำเนาของสำเนาไม่มีค่า** · ผลของเวอร์ชันก่อนคือไฟล์
+    /// ชื่อ `work.refx.refx.bak` (เห็นของจริงข้างเอกสารตอนยืนยัน P4-7a) ที่ไม่มี
+    /// ใครอ่านและไม่มีใครกวาด
+    ///
+    /// ★ ก่อนหน้านี้แก้ด้วยการ **ตามลบทีหลัง** ใน `discard` ซึ่งยังทิ้งไฟล์ไว้
+    /// ตลอดช่วงที่ผู้ใช้ยังไม่บันทึก — ตอนนี้แก้ที่ต้นทางแล้ว
     #[test]
-    fn discarding_leaves_no_copy_of_the_snapshot_behind() {
-        let dir = temp_dir("discard-bak");
+    fn a_snapshot_never_leaves_a_backup_beside_the_document() {
+        let dir = temp_dir("no-bak");
         let doc = dir.join("work.refx");
-        // เขียนสองรอบ — รอบที่สองคือตัวที่ทำให้ `.bak` ของรอบแรกโผล่มา
+        // เขียนสองรอบ — รอบที่สองคือรอบที่ `save_atomic` จะทำ `.bak` ของรอบแรก
         write_snapshot(&doc, &board_named("x", 1), rename_durable).unwrap();
         write_snapshot(&doc, &board_named("x", 2), rename_durable).unwrap();
+
         let backup = crate::save::backup_path(&autosave_path(&doc));
-        assert!(backup.exists(), "เทสต์นี้ต้องมี `.bak` อยู่จริงถึงจะพิสูจน์อะไรได้");
-
-        discard(&doc);
-
-        assert!(!autosave_path(&doc).exists());
         assert!(
             !backup.exists(),
-            "เหลือสำเนาของ snapshot ไว้: {}",
+            "snapshot สร้าง `.bak` ทิ้งไว้: {}",
             backup.display()
         );
         let left: Vec<_> = std::fs::read_dir(&dir)
@@ -513,8 +588,115 @@ mod tests {
             .filter_map(Result::ok)
             .map(|entry| entry.file_name())
             .collect();
-        // เทสต์นี้ไม่ได้สร้างตัวเอกสารเอง — โฟลเดอร์จึงต้องว่างสนิทหลังทิ้ง
-        assert!(left.is_empty(), "เหลือไฟล์ของ snapshot ไว้: {left:?}");
+        assert_eq!(left.len(), 1, "เหลือไฟล์เกิน snapshot ตัวเดียว: {left:?}");
+
+        // ★ snapshot ล่าสุดต้องยังอ่านได้ครบ — ความทนทานไม่ได้ลดลงเพราะไม่มี `.bak`
+        let pending = find_pending(&doc, board_id()).expect("อ่าน snapshot ไม่ได้");
+        assert_eq!(pending.board.len(), 2);
+    }
+
+    /// ★★ `.bak` ของ **รุ่นเก่า** ที่ค้างอยู่บนดิสก์ผู้ใช้ต้องถูกเก็บกวาดตอนทิ้ง
+    ///
+    /// รุ่นก่อน 22 ส.ค. 2026 สร้างมันไว้จริง (เห็นของจริงชื่อ `edit.refx.refx.bak`)
+    /// · ไฟล์พวกนั้นไม่หายไปเองเมื่อเราแก้ที่ต้นทาง — ตอนผู้ใช้กด "ทิ้งไป"
+    /// คือจังหวะเดียวที่เรามีสิทธิ์ลบมัน
+    #[test]
+    fn discarding_also_sweeps_a_backup_left_by_an_older_build() {
+        let dir = temp_dir("legacy-bak");
+        let doc = dir.join("work.refx");
+        write_snapshot(&doc, &board_named("x", 1), rename_durable).unwrap();
+        // จำลองของที่รุ่นเก่าทิ้งไว้
+        let legacy = crate::save::backup_path(&autosave_path(&doc));
+        std::fs::write(&legacy, b"snapshot from an older build").unwrap();
+
+        discard(&doc);
+
+        assert!(!autosave_path(&doc).exists());
+        assert!(!legacy.exists(), "ของที่รุ่นเก่าทิ้งไว้ยังอยู่: {}", legacy.display());
+    }
+
+    /// ★★★ **"เก็บไว้ก่อน" ต้องรอดจาก autosave รอบถัดไป** (`docs/07 §4`)
+    ///
+    /// นี่คือทั้งหมดของเหตุผลที่ `.kept` มีอยู่: ก่อนหน้านี้ snapshot ที่ผู้ใช้
+    /// สั่งเก็บไว้อยู่ที่ `<doc>.refx.autosave` ซึ่งเป็น **ไฟล์เดียวกับที่ autosave
+    /// เขียนทับทุกสิบวินาที** ปุ่ม "เก็บไว้ก่อน" จึงเท่ากับ "ทิ้งใน 10 วินาที"
+    ///
+    /// ★ เทสต์นี้เดินเรื่องจริงทั้งเส้น: ผู้ใช้ตอบ "เก็บไว้ก่อน" → ทำงานต่อ →
+    /// autosave เขียนรอบใหม่ → **ของเก่าต้องยังอยู่และเนื้อไม่เปลี่ยน**
+    #[test]
+    fn work_the_user_kept_survives_the_next_autosave() {
+        let dir = temp_dir("kept");
+        let doc = dir.join("work.refx");
+
+        // งานที่ค้างจาก session ก่อน (3 ใบ)
+        write_snapshot(&doc, &board_named("before the crash", 3), rename_durable).unwrap();
+        assert!(keep(&doc, rename_durable).unwrap(), "ไม่มีอะไรถูกย้าย");
+        assert!(!autosave_path(&doc).exists(), "ของเดิมยังขวางทาง autosave อยู่");
+        assert!(kept_path(&doc).exists());
+
+        // ผู้ใช้ทำงานต่อ — autosave เขียนรอบใหม่ทับที่เดิมสองรอบ
+        write_snapshot(&doc, &board_named("new work", 1), rename_durable).unwrap();
+        write_snapshot(&doc, &board_named("new work", 2), rename_durable).unwrap();
+
+        let kept = find_kept(&doc, board_id()).expect("ของที่สั่งเก็บไว้หายไป");
+        assert_eq!(kept.board.len(), 3, "ของที่สั่งเก็บไว้ถูกเขียนทับด้วยงานใหม่");
+        assert_eq!(kept.board.name(), "before the crash");
+        // ★ และงานใหม่ก็ไม่ได้เสี่ยงอะไรเลย — มันมี snapshot ของตัวเองตามปกติ
+        let pending = find_pending(&doc, board_id()).expect("งานใหม่ไม่มี snapshot");
+        assert_eq!(pending.board.len(), 2);
+    }
+
+    /// ★★ กด "เก็บไว้ก่อน" ซ้ำ = ตัวใหม่ทับตัวเก่า · และไม่มีอะไรให้ย้ายก็ต้องเงียบ
+    #[test]
+    fn keeping_twice_leaves_one_file_and_the_newer_content() {
+        let dir = temp_dir("kept-twice");
+        let doc = dir.join("work.refx");
+
+        write_snapshot(&doc, &board_named("older", 1), rename_durable).unwrap();
+        keep(&doc, rename_durable).unwrap();
+        write_snapshot(&doc, &board_named("newer", 4), rename_durable).unwrap();
+        keep(&doc, rename_durable).unwrap();
+
+        let kept = find_kept(&doc, board_id()).unwrap();
+        assert_eq!(kept.board.len(), 4, "ตัวใหม่ไม่ได้ทับตัวเก่า");
+        let files: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name())
+            .collect();
+        assert_eq!(files.len(), 1, "มีได้ไฟล์เดียวต่อเอกสาร: {files:?}");
+
+        // ไม่มี snapshot ให้ย้าย = เงียบ ไม่ใช่ error
+        assert!(!keep(&doc, rename_durable).unwrap());
+        assert!(
+            find_kept(&doc, board_id()).is_some(),
+            "การเรียกซ้ำลบของที่เก็บไว้"
+        );
+    }
+
+    /// ★★★ **บันทึกสำเร็จต้องไม่ลบของที่ผู้ใช้สั่งเก็บไว้** (`docs/07 §4`)
+    ///
+    /// `discard` ถูกเรียกทุกครั้งที่ save สำเร็จ · ถ้ามันกวาด `.kept` ไปด้วย
+    /// ตัวเลือกที่สามจะตายเงียบ ๆ อีกทางหนึ่ง — ผู้ใช้ที่ยังไม่ตัดสินใจแล้วเผลอ
+    /// กด `Ctrl+S` จะไม่มีวันได้ถูกถามอีก
+    #[test]
+    fn saving_never_removes_what_the_user_asked_to_keep() {
+        let dir = temp_dir("kept-vs-save");
+        let doc = dir.join("work.refx");
+        write_snapshot(&doc, &board_named("kept", 2), rename_durable).unwrap();
+        keep(&doc, rename_durable).unwrap();
+        write_snapshot(&doc, &board_named("current", 5), rename_durable).unwrap();
+
+        discard(&doc); // ← สิ่งที่เกิดขึ้นตอนกด Ctrl+S สำเร็จ
+
+        assert!(!autosave_path(&doc).exists(), "snapshot ของงานปัจจุบันต้องถูกทิ้ง");
+        assert!(kept_path(&doc).exists(), "ของที่ผู้ใช้สั่งเก็บไว้ถูกลบตอนบันทึก");
+        assert_eq!(find_kept(&doc, board_id()).unwrap().board.len(), 2);
+
+        // ทางเดียวที่มันหายคือผู้ใช้สั่งเอง
+        discard_kept(&doc);
+        assert!(!kept_path(&doc).exists());
+        discard_kept(&doc); // ซ้ำแล้วต้องเงียบ
     }
 
     /// ★★★ snapshot ที่เสียหายต้องอ่านเป็น "ไม่มีอะไรให้กู้" **ไม่ใช่เปิดโปรแกรมไม่ได้**
