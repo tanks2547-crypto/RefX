@@ -635,6 +635,74 @@ fn clear_colour(board: &Board) -> wgpu::Color {
         a: 1.0,
     }
 }
+/// ★★★ **เอกสารหนึ่งฉบับกับทุกอย่างที่ผูกกับมัน** — งานของผู้ใช้ ไม่ใช่ของ GPU
+///
+/// ## ทำไมมันไม่อยู่ใน [`Gfx`] (P4-7 ชิ้น b)
+///
+/// `Gfx` คือ **ของที่ผูกกับ device** ซึ่งต้องสร้างใหม่ทั้งชุดทุกครั้งที่ driver
+/// สะดุด (`docs/04 §7`) · การที่ `board`/`history`/`selection` เคยนั่งอยู่ในนั้น
+/// ทำให้โครงสร้างของโค้ดพูดว่า *"งานของผู้ใช้เป็นทรัพยากรของ device"* ซึ่งผิด
+/// และอันตรายพอที่ `recover_device` ต้องเขียนคำเตือนไว้เอง:
+///
+/// > ห้ามเปลี่ยนตรงนี้ไปเป็น "สร้าง `Gfx` ใหม่ทั้งก้อน" … **board ของผู้ใช้จะหาย
+/// > ทันทีที่ driver อัปเดต** โดยไม่มี error ที่ไหนเลย
+///
+/// **กฎที่ต้องจำเอง คือกฎที่วันหนึ่งจะมีคนลืม** (§4 ข้อ 16 บอกไว้ตรง ๆ) —
+/// ตอนนี้มันเป็นกฎที่โครงสร้างบังคับแทน: เอกสารอยู่บน [`RefxApp`] คนละชั้นกับ
+/// device ทั้งก้อน สร้าง `Gfx` ใหม่กี่ครั้งก็ **ไม่แตะเอกสารเลย**
+///
+/// ## ★★ ทำไมทุกฟิลด์ที่นี่ต้องมาด้วยกัน
+///
+/// ทุกตัวคีย์ด้วย `ItemId` หรือเป็นมุมมองของ board ใบนี้โดยเฉพาะ · `ItemId`
+/// เป็นแค่ `index+generation` **ไม่ผูกกับ board** (`docs/02 §1`) สองเอกสารจึง
+/// แจกคีย์ชุดเดียวกันเป๊ะ — ปล่อยให้ตัวไหนหลุดไปอยู่ที่อื่น แท็บหนึ่งจะอ่าน
+/// สถานะของอีกแท็บโดยไม่มีอะไรฟ้อง (นั่นคือสิ่งที่ชิ้น c ต้องยืนอยู่บน)
+struct Doc {
+    /// ★ เอกสารของผู้ใช้ — แหล่งความจริงเดียวของเรขาคณิตและลำดับชั้น
+    board: Board,
+    /// undo/redo — ทุกการแก้ `board` ผ่านที่นี่ (I-3)
+    history: History,
+    /// index สำหรับ hit-test/culling — ตามหลัง `board` เสมอ
+    index: SpatialIndex,
+    /// สถานะฝั่ง render ต่อ item (atlas slot, thumbnail, ต้นทาง)
+    render_state: std::collections::HashMap<ItemId, ItemRender>,
+    /// ★ สิ่งที่ผู้ใช้เลือกอยู่ — **อยู่นอก `Board` โดยตั้งใจ** (docs/02 §2.9)
+    ///
+    /// ไม่ persist ไม่ undo ไม่ทำให้เอกสาร dirty — คลิกดูภาพเฉย ๆ ต้องไม่ทำให้
+    /// ผู้ใช้โดนถาม "บันทึกไหม" ตอนปิด
+    selection: Selection,
+    /// เครื่องสถานะของการเลือก (คลิก · Ctrl+คลิก · ลากกรอบ)
+    select_tool: SelectTool,
+    /// กรอบ rubber-band ที่กำลังลากอยู่ (world) — `None` = ไม่ต้องวาด
+    rubber_band: Option<WorldRect>,
+    /// เส้นไกด์ที่ต้องวาดตอนนี้ (P2-9) — ว่างเมื่อไม่ได้ลากหรือไม่มีอะไรตรงกัน
+    guides: Vec<refx_core::align::Guide>,
+    /// ★ มุมมอง Arrange + virtual scrolling (P3-3) — ดู `crate::arrange`
+    ///
+    /// แยกจาก `camera`/`quads` ของ Canvas ทั้งชุด เพราะสองโหมดเป็น **สอง view
+    /// บนเอกสารก้อนเดียวกัน** (ARCHITECTURE §4) สลับไปมาต้องไม่ลากตำแหน่งของกันและกัน
+    arrange: crate::arrange::ArrangeView,
+    /// กล้อง pan/zoom (P0-7)
+    camera: Camera,
+}
+
+impl Default for Doc {
+    fn default() -> Self {
+        Self {
+            board: Board::default(),
+            history: History::default(),
+            index: SpatialIndex::new(refx_core::spatial::DEFAULT_CELL_SIZE),
+            render_state: std::collections::HashMap::new(),
+            selection: Selection::new(),
+            select_tool: SelectTool::new(),
+            rubber_band: None,
+            guides: Vec::new(),
+            arrange: crate::arrange::ArrangeView::new(),
+            // เริ่มที่กลาง world ของ demo เพื่อให้เห็นสี่เหลี่ยมทันทีที่เปิด
+            camera: Camera::new(Vec2::splat(2000.0), 0.25),
+        }
+    }
+}
 
 /// สถานะกราฟิกทั้งหมด — เกิดหลังหน้าต่างพร้อมเท่านั้น
 struct Gfx {
@@ -661,27 +729,8 @@ struct Gfx {
     /// [`RefxApp::rebuild_quads`] เท่านั้น ห้ามมีใครแก้ตรง ๆ
     /// (เดิมตำแหน่งภาพถูกคำนวณสด ๆ ตอน ingest แล้วเก็บไว้ที่นี่ที่เดียว)
     quads: Vec<QuadInstance>,
-    /// ★ เอกสารของผู้ใช้ — แหล่งความจริงเดียวของเรขาคณิตและลำดับชั้น
-    board: Board,
-    /// undo/redo — ทุกการแก้ `board` ผ่านที่นี่ (I-3)
-    history: History,
-    /// index สำหรับ hit-test/culling — ตามหลัง `board` เสมอ
-    index: SpatialIndex,
-    /// สถานะฝั่ง render ต่อ item (atlas slot, thumbnail, ต้นทาง)
-    render_state: std::collections::HashMap<ItemId, ItemRender>,
-    /// ★ สิ่งที่ผู้ใช้เลือกอยู่ — **อยู่นอก `Board` โดยตั้งใจ** (docs/02 §2.9)
-    ///
-    /// ไม่ persist ไม่ undo ไม่ทำให้เอกสาร dirty — คลิกดูภาพเฉย ๆ ต้องไม่ทำให้
-    /// ผู้ใช้โดนถาม "บันทึกไหม" ตอนปิด
-    selection: Selection,
-    /// เครื่องสถานะของการเลือก (คลิก · Ctrl+คลิก · ลากกรอบ)
-    select_tool: SelectTool,
     /// เครื่องมือที่ผู้ใช้เลือกอยู่ (`V` เลือก · `C` ครอป — docs/03 §2)
     tool: Tool,
-    /// กรอบ rubber-band ที่กำลังลากอยู่ (world) — `None` = ไม่ต้องวาด
-    rubber_band: Option<WorldRect>,
-    /// เส้นไกด์ที่ต้องวาดตอนนี้ (P2-9) — ว่างเมื่อไม่ได้ลากหรือไม่มีอะไรตรงกัน
-    guides: Vec<refx_core::align::Guide>,
     /// ★ thumbnail ของทุก item บน board เก็บไว้เติม atlas กลับหลังกู้ device
     ///
     /// docs/04 §4: ถ้าไม่เติมกลับ ผู้ใช้จะเห็น **board ว่างเปล่า** หลัง driver อัปเดต
@@ -697,17 +746,10 @@ struct Gfx {
     working_pending: std::collections::HashSet<WorkingKey>,
     /// batch ที่จะวาดเฟรมนี้ — เก็บไว้เป็นฟิลด์เพื่อไม่ต้องจองใหม่ทุกเฟรม
     working_quads: Vec<(WorkingKey, QuadInstance)>,
-    /// ★ มุมมอง Arrange + virtual scrolling (P3-3) — ดู `crate::arrange`
-    ///
-    /// แยกจาก `camera`/`quads` ของ Canvas ทั้งชุด เพราะสองโหมดเป็น **สอง view
-    /// บนเอกสารก้อนเดียวกัน** (ARCHITECTURE §4) สลับไปมาต้องไม่ลากตำแหน่งของกันและกัน
-    arrange: crate::arrange::ArrangeView,
     /// instance ของแถบที่ Arrange ต้องวาดเฟรมนี้ — ★ ไม่ใช่ทั้ง board
     ///
     /// ถือเป็นฟิลด์เพื่อไม่จองใหม่ทุกเฟรม (CLAUDE.md: ห้ามสร้าง buffer ใหม่ทุกเฟรม)
     arrange_quads: Vec<QuadInstance>,
-    /// กล้อง pan/zoom (P0-7)
-    camera: Camera,
     /// ปุ่มค้าง (Ctrl/Shift/Alt) ล่าสุด — winit ส่งมาแยก event ไม่ได้แนบมากับปุ่ม
     modifiers: ModifiersState,
     /// ★ กรอบของช่อง canvas จริง (physical pixel) — **ไม่ใช่ขนาดหน้าต่างทั้งบาน**
@@ -1461,6 +1503,8 @@ pub struct RefxApp {
     /// `revision` คือคำถามที่ถูก: *เปลี่ยนไปจากที่บันทึกไว้ล่าสุดหรือยัง*
     /// (ตัวเดียวกับที่ P3-4 ใช้เป็นคีย์ cache — มันไม่ขยับตอนกล้องเลื่อน)
     snapshot_revision: Option<u64>,
+    /// ★★★ **เอกสารที่เปิดอยู่** — อยู่ที่นี่ **ไม่ใช่ใน [`Gfx`]** (ดู [`Doc`])
+    doc: Doc,
     /// ★ ที่อยู่ของเอกสารปัจจุบัน — `None` = ยังไม่เคยบันทึก
     doc_path: Option<std::path::PathBuf>,
     /// ★★★ โหมดการบันทึกของเอกสารนี้ (P4-5) — **สภาวะ ไม่ใช่เหตุการณ์**
@@ -2228,6 +2272,7 @@ impl RefxApp {
             autosaver: refx_io::autosave::Autosaver::default(),
             autosave_job: None,
             snapshot_revision: None,
+            doc: Doc::default(),
             doc_path: None,
             // ★ ค่าปริยายของ `docs/07 §2` — และ board ที่ยังไม่มีไฟล์ก็ยังไม่มี
             //   อะไรฝังอยู่จริง ๆ อยู่แล้ว
@@ -2486,8 +2531,8 @@ impl RefxApp {
                 refx_asset::pool::JobResult::Spooled { hash, path } => {
                     tracing::info!(hash = %hash.short(), "a pasted image now has a file of its own");
                     let source = refx_asset::pool::JobSource::File(path);
-                    if let Some(gfx) = self.gfx.as_mut() {
-                        for state in gfx.render_state.values_mut() {
+                    if self.gfx.is_some() {
+                        for state in self.doc.render_state.values_mut() {
                             if state.hash == hash {
                                 state.source = source.clone();
                             }
@@ -2631,7 +2676,7 @@ impl RefxApp {
                 // ★★★ คีย์และที่อยู่ของภาพใบนี้ — ดู `asset_location`
                 let (asset_hash, spooled_path) =
                     asset_location(self.spool_dir.as_deref(), hash, origin);
-                match Self::upload_thumb(gfx, &thumb.pixels) {
+                match Self::upload_thumb(gfx, &mut self.doc, &thumb.pixels) {
                     Ok(slot) => {
                         // ★★★ ภาพของ board ที่ **เปิดมาจากไฟล์** — item มีอยู่แล้ว
                         //
@@ -2639,7 +2684,7 @@ impl RefxApp {
                         //   /แท็ก/ดาว/กลุ่ม/โน้ต มาจากไฟล์ครบแล้ว · สร้างใบใหม่ตรงนี้
                         //   = ผู้ใช้เห็นภาพซ้ำสองชุด ชุดหนึ่งอยู่ผิดที่ทั้งหมด
                         if let Some(id) = self.relink_targets.remove(&hash) {
-                            let Some(item) = gfx.board.item(id) else {
+                            let Some(item) = self.doc.board.item(id) else {
                                 // item ถูกลบไประหว่างที่งานเดินอยู่ (undo/เปิดไฟล์อื่นทับ)
                                 self.drop.cancelled += 1;
                                 continue;
@@ -2667,7 +2712,7 @@ impl RefxApp {
                             if desired != item.kind {
                                 repairs.push((id, desired));
                             }
-                            gfx.render_state.insert(
+                            self.doc.render_state.insert(
                                 id,
                                 ItemRender {
                                     source,
@@ -2682,7 +2727,7 @@ impl RefxApp {
                         }
                         // จัดเป็นตารางง่าย ๆ ไปก่อน — layout จริงมาใน P2/P3
                         // ★ ตำแหน่งไปอยู่ใน `ItemCanvas` แล้ว ไม่ได้คำนวณลง quad ตรง ๆ
-                        let n = u32::try_from(gfx.board.len()).unwrap_or(u32::MAX);
+                        let n = u32::try_from(self.doc.board.len()).unwrap_or(u32::MAX);
                         let (col, row) = (n % 16, n / 16);
                         let cell = 160.0;
                         // คงอัตราส่วนภาพเดิมไว้ ไม่บีบให้เป็นจัตุรัส
@@ -2736,19 +2781,23 @@ impl RefxApp {
                         let Ok(command) = AddItems::new(vec![item]) else {
                             continue;
                         };
-                        if let Err(err) = gfx.history.apply(&mut gfx.board, Box::new(command)) {
+                        if let Err(err) = self
+                            .doc
+                            .history
+                            .apply(&mut self.doc.board, Box::new(command))
+                        {
                             tracing::error!(%err, "cannot add the dropped image to the board");
                             continue;
                         }
                         // `insert_item` ต่อท้าย z-order เสมอ ตัวที่เพิ่งเพิ่มจึงอยู่ท้ายสุด
-                        let Some(id) = gfx.board.z_order().last().copied() else {
+                        let Some(id) = self.doc.board.z_order().last().copied() else {
                             continue;
                         };
 
-                        if let Some(item) = gfx.board.item(id) {
-                            gfx.index.insert(id, &item.canvas);
+                        if let Some(item) = self.doc.board.item(id) {
+                            self.doc.index.insert(id, &item.canvas);
                         }
-                        gfx.render_state.insert(
+                        self.doc.render_state.insert(
                             id,
                             ItemRender {
                                 source,
@@ -2795,7 +2844,7 @@ impl RefxApp {
             }
             // ★ instance ที่ส่งให้ GPU สร้างใหม่จาก board **หลังจบชุด** ไม่ใช่ทีละใบ
             //   (ลากเข้ามา 100 ไฟล์ = สร้างครั้งเดียว ไม่ใช่ 100 ครั้ง)
-            Self::rebuild_quads(gfx);
+            Self::rebuild_quads(gfx, &mut self.doc);
 
             // ★ เวลาจริงที่ผู้ใช้รู้สึก: ลากเข้ามา → ภาพขึ้นจอ
             if !self.drop.reported
@@ -2808,7 +2857,7 @@ impl RefxApp {
                 // ★★★ board เต็มมาก่อนทุกข้อความ — "เปิด 3,072 ไฟล์ใน 9 วินาที"
                 //   ที่ขึ้นตอนผู้ใช้ลากมา 10,000 ไฟล์ **เป็นความจริงที่หลอก**
                 //   เขาจะอ่านว่าสำเร็จครบแล้วนับภาพเองไม่ได้ (ROADMAP P3-3)
-                let capacity = self.gfx.as_ref().map_or(0, |g| g.board.len());
+                let capacity = self.gfx.as_ref().map_or(0, |_| self.doc.board.len());
                 if let Some(message) = board_full_message(self.shell.lang, capacity, self.drop) {
                     tracing::warn!(
                         capacity,
@@ -2846,7 +2895,10 @@ impl RefxApp {
                         ms,
                         // ★ หลักฐานว่าการเพิ่มภาพเดินผ่าน `AddItems` เข้า `History` จริง
                         //   ไม่ใช่ push เข้า Vec ตรง ๆ เหมือนก่อนย้าย — undo ได้ทุกใบ
-                        undo_depth = self.gfx.as_ref().map_or(0, |g| g.history.undo_depth()),
+                        undo_depth = self
+                            .gfx
+                            .as_ref()
+                            .map_or(0, |_| self.doc.history.undo_depth()),
                         "drag & drop → every image on screen"
                     );
                     println!("ลากไฟล์ {} ไฟล์ → ขึ้นจอครบใน {ms:.1} ms", self.drop.requested);
@@ -2965,13 +3017,16 @@ impl RefxApp {
         gfx.egui_winit = egui_winit;
         gfx.egui_renderer = egui_renderer;
 
-        // ★★ ห้ามเปลี่ยนตรงนี้ไปเป็น "สร้าง `Gfx` ใหม่ทั้งก้อน"
+        // ★★ **กับดักเดิมตรงนี้ถูกปิดด้วยโครงสร้างแล้ว** (P4-7 ชิ้น b)
         //
-        //   `Gfx` ถือ `board` / `history` / `selection` ซึ่งเป็น **งานของผู้ใช้**
-        //   ไม่ใช่ของที่ผูกกับ device (บ้านที่ผิด — ควรย้ายออกตอน P4-7 multi-board)
-        //   ตอนนี้ปลอดภัยเพราะฟังก์ชันนี้แก้ทีละฟิลด์ ของที่ไม่ได้แตะจึงรอด
-        //   แต่ถ้าวันหนึ่งมีคนเขียนเป็น `*gfx = Gfx::new(...)` **board ของผู้ใช้จะหาย
-        //   ทันทีที่ driver อัปเดต** โดยไม่มี error ที่ไหนเลย = ผิด I-3 เต็ม ๆ
+        //   เดิม `Gfx` ถือ `board`/`history`/`selection` ซึ่งเป็น **งานของผู้ใช้**
+        //   ความปลอดภัยจึงขึ้นกับ "ฟังก์ชันนี้แก้ทีละฟิลด์" — ใครเขียนเป็น
+        //   `*gfx = Gfx::new(...)` วันหนึ่ง **board ของผู้ใช้จะหายทันทีที่ driver
+        //   อัปเดต** โดยไม่มี error ที่ไหนเลย (I-3) · กฎที่ต้องจำเอง คือกฎที่
+        //   วันหนึ่งจะมีคนลืม
+        //
+        //   ตอนนี้เอกสารอยู่ที่ `RefxApp::doc` คนละชั้นกับ device ทั้งก้อน —
+        //   สร้าง `Gfx` ใหม่ทั้งก้อนกี่ครั้งก็ **แตะเอกสารไม่ได้เลย** ดู [`Doc`]
         //
         // ★ resource ที่ผูกกับ device เดิม **ต้องสร้างใหม่ทั้งชุด** (docs/04 §7 ข้อ 3)
         //   สร้างผ่านจุดเดียวกับตอนเปิดโปรแกรม แล้วรับด้วยการ destructure
@@ -3005,7 +3060,7 @@ impl RefxApp {
         // ★ เติม atlas กลับ (docs/04 §4) — ถ้าไม่ทำ ผู้ใช้จะเห็น board ว่างเปล่า
         //   หลัง driver อัปเดต ซึ่งแยกไม่ออกจาก "งานหาย" แล้วเขาจะปิดโปรแกรมทิ้ง
         //   ทำให้งานกู้ device ทั้งหมดเสียเปล่า
-        Self::refill_atlas(gfx);
+        Self::refill_atlas(gfx, &mut self.doc);
 
         Some(RedrawReason::SurfaceRecovery)
     }
@@ -3017,12 +3072,12 @@ impl RefxApp {
     /// ตอนขยาย 11→12 layer (docs/05 §2) การสร้างใหม่แล้วเติมกลับจาก RAM
     /// ทำให้ peak เหลือเท่าใบใหม่ใบเดียว และเราเก็บภาพย่อไว้ใน RAM อยู่แล้ว
     /// เพื่อเส้นทางกู้ device — โค้ดเติมกลับจึงเป็นตัวเดียวกันเป๊ะ
-    fn upload_thumb(gfx: &mut Gfx, pixels: &[u8]) -> Result<AtlasSlot, AtlasError> {
+    fn upload_thumb(gfx: &mut Gfx, doc: &mut Doc, pixels: &[u8]) -> Result<AtlasSlot, AtlasError> {
         match gfx.atlas.upload(gfx.render.queue(), pixels) {
             Err(AtlasError::NeedsResize { layers }) => {
                 gfx.atlas.resize(gfx.render.device(), layers)?;
                 // texture ใหม่ว่างเปล่า — ต้องเติมภาพเดิมกลับก่อนใส่ภาพใหม่
-                Self::refill_atlas(gfx);
+                Self::refill_atlas(gfx, doc);
                 gfx.atlas.upload(gfx.render.queue(), pixels)
             }
             other => other,
@@ -3048,24 +3103,24 @@ impl RefxApp {
             gfx.render.generation(),
             "working texture cache ยังเป็นของ device รุ่นเก่า — ลืมสร้างใหม่ตอนกู้ device"
         );
-        if gfx.board.is_empty() {
+        if self.doc.board.is_empty() {
             return;
         }
 
-        let zoom = gfx.camera.zoom();
+        let zoom = self.doc.camera.zoom();
         let viewport = gfx.canvas.size;
-        let centre = gfx.camera.center();
+        let centre = self.doc.camera.center();
         let mut requests: Vec<refx_asset::pool::Job> = Vec::new();
-        // เก็บไว้ก่อนแล้วค่อยแปลงเป็น quad หลังจบลูป — ระหว่างลูปยังยืม `gfx.board` อยู่
+        // เก็บไว้ก่อนแล้วค่อยแปลงเป็น quad หลังจบลูป — ระหว่างลูปยังยืม `self.doc.board` อยู่
         let mut working_hits: Vec<(WorkingKey, ItemId)> = Vec::new();
 
-        for (id, board_item) in gfx.board.items_in_z_order() {
+        for (id, board_item) in self.doc.board.items_in_z_order() {
             // ★ ชนิดของ item มาจาก `Board` เสมอ — เหตุผลเดียวกับใน `rebuild_quads`
             //   (ใบที่ relink ทำให้กลายเป็น `Missing` ยังมี `render_state` ค้างอยู่)
             if !matches!(board_item.kind, ItemKind::Image(_)) {
                 continue;
             }
-            let Some(item) = gfx.render_state.get(&id) else {
+            let Some(item) = self.doc.render_state.get(&id) else {
                 continue;
             };
             let canvas = &board_item.canvas;
@@ -3116,10 +3171,10 @@ impl RefxApp {
         // ★ quad ของภาพคมสร้างจาก `Board` เหมือนกัน — ไม่ได้ก๊อปมาจาก `quads`
         //   ที่อาจเป็นของเฟรมก่อน (แหล่งความจริงเดียวคือ `board`)
         for (key, id) in working_hits {
-            let Some(item) = gfx.board.item(id) else {
+            let Some(item) = self.doc.board.item(id) else {
                 continue;
             };
-            let Some(state) = gfx.render_state.get(&id) else {
+            let Some(state) = self.doc.render_state.get(&id) else {
                 continue;
             };
             if let Some(mut quad) = Self::quad_for(&item.canvas, state) {
@@ -3151,7 +3206,12 @@ impl RefxApp {
     /// ★ คืน `pick` ออกไปแทนที่จะยิงงานเอง เพราะฟังก์ชันนี้ยืมแค่ `gfx` ส่วน
     /// decode pool อยู่ที่ `self.assets` — และการคืนค่าออกไปทำให้ **ไม่มีสถานะ
     /// ค้างระหว่างเฟรม** ที่ต้องมีใครจำไปเก็บให้ถูกจังหวะ (`docs/08 §3.9` ข้อ 8)
-    fn apply_canvas_input(gfx: &mut Gfx, input: CanvasFrameInput, mode: Mode) -> CanvasOutcome {
+    fn apply_canvas_input(
+        gfx: &mut Gfx,
+        doc: &mut Doc,
+        input: CanvasFrameInput,
+        mode: Mode,
+    ) -> CanvasOutcome {
         let mut out = CanvasOutcome::default();
         let changed = &mut out.redraw;
         let rect = input.rect;
@@ -3159,7 +3219,7 @@ impl RefxApp {
             return out;
         }
         if mode == Mode::Arrange {
-            return Self::apply_arrange_input(gfx, input);
+            return Self::apply_arrange_input(gfx, doc, input);
         }
 
         // ---- กล้อง: ปุ่มกลางลาก + ล้อซูม ----
@@ -3170,7 +3230,7 @@ impl RefxApp {
         let ppp = gfx.egui_ctx.pixels_per_point();
         if input.pan_delta != egui::Vec2::ZERO {
             // ระยะลากเป็น point — กล้องคิดเป็น physical pixel
-            gfx.camera
+            doc.camera
                 .pan_by_screen_delta(Vec2::new(input.pan_delta.x, input.pan_delta.y) * ppp);
             *changed = true;
         }
@@ -3180,7 +3240,7 @@ impl RefxApp {
             // เลขชี้กำลังทำให้ซูมรู้สึกเท่ากันทุกระดับ (เหมือนเดิมก่อนย้าย)
             let factor = 1.1f32.powf(input.scroll / 50.0);
             let local = pointer - rect.min;
-            gfx.camera.zoom_at_screen(
+            doc.camera.zoom_at_screen(
                 Vec2::new(local.x, local.y) * ppp,
                 Vec2::new(rect.width(), rect.height()) * ppp,
                 factor,
@@ -3192,27 +3252,27 @@ impl RefxApp {
         let Some(pointer) = input.pointer else {
             return out;
         };
-        let scale = gfx.camera.zoom() / ppp;
+        let scale = doc.camera.zoom() / ppp;
         if scale <= 0.0 {
             return out;
         }
         let offset = pointer - rect.center();
-        let world = gfx.camera.center() + Vec2::new(offset.x, offset.y) / scale;
+        let world = doc.camera.center() + Vec2::new(offset.x, offset.y) / scale;
 
         // ★ ระยะทุกตัวคิดเป็น **พิกเซลบนจอ ÷ zoom** เสมอ เพื่อให้รู้สึกเท่ากันทุกระดับซูม
         //   handle ที่มีขนาดคงที่ใน world จะเล็กจนจับไม่โดนทันทีที่ซูมออก
         //   (และใหญ่จนกลืนทั้งภาพเมื่อซูมเข้า) — HANDOFF §2.4
-        let world_per_point = ppp / gfx.camera.zoom();
+        let world_per_point = ppp / doc.camera.zoom();
         let ctx = CanvasContext {
-            board: &gfx.board,
-            index: &gfx.index,
+            board: &doc.board,
+            index: &doc.index,
             drag_threshold: refx_core::interact::DEFAULT_DRAG_THRESHOLD_PX * world_per_point,
             handle_reach: refx_core::interact::DEFAULT_HANDLE_PX * world_per_point,
             rotate_reach: refx_core::interact::DEFAULT_ROTATE_PX * world_per_point,
             tool: gfx.tool,
             // ★ ระยะไกด์คิดเป็นพิกเซลบนจอเหมือนระยะอื่น ๆ ทั้งหมด
             snap_reach: GUIDE_SNAP_PX * world_per_point,
-            viewport: Self::visible_world(gfx),
+            viewport: Self::visible_world(gfx, doc),
         };
 
         // ★ ดับเบิลคลิกมาก่อน press/release ของรอบเดียวกัน — ไม่งั้นคลิกที่สองจะถูก
@@ -3246,32 +3306,32 @@ impl RefxApp {
         };
 
         // ตัวที่กำลังถูกลากคือชุดที่เลือกอยู่ **ก่อน** ส่ง event เข้าไป
-        let moved: Vec<ItemId> = gfx.selection.iter().collect();
-        let outcome = gfx.select_tool.handle(ctx, &mut gfx.selection, event);
-        gfx.rubber_band = outcome.rubber_band;
+        let moved: Vec<ItemId> = doc.selection.iter().collect();
+        let outcome = doc.select_tool.handle(ctx, &mut doc.selection, event);
+        doc.rubber_band = outcome.rubber_band;
         out.pick = outcome.pick;
         // ★ เส้นที่โผล่/หายต้องวาดใหม่ แม้ตำแหน่งภาพจะไม่เปลี่ยน
-        *changed |= gfx.guides != outcome.guides;
-        gfx.guides = outcome.guides;
+        *changed |= doc.guides != outcome.guides;
+        doc.guides = outcome.guides;
         *changed |= outcome.needs_redraw;
 
         let has_commands = !outcome.commands.is_empty();
         for command in outcome.commands {
-            if let Err(err) = gfx.history.apply(&mut gfx.board, command) {
+            if let Err(err) = doc.history.apply(&mut doc.board, command) {
                 tracing::error!(%err, "cannot apply a canvas edit");
             }
         }
         if outcome.seal {
             // ปล่อยเมาส์ = ปิดหน้าต่าง merge · การลากครั้งถัดไปเป็น undo ขั้นใหม่
-            gfx.history.seal();
+            doc.history.seal();
         }
 
         // ★ โน้ตที่เพิ่งวาง (P2-11) ต้องถูกเลือกทันที ไม่งั้นผู้ใช้ต้องคลิกซ้ำก่อนพิมพ์
         //   `insert_item` ต่อท้าย z-order เสมอ ตัวสุดท้ายจึงคือตัวที่เพิ่งเพิ่ม
         if outcome.select_added
-            && let Some(id) = gfx.board.z_order().last().copied()
+            && let Some(id) = doc.board.z_order().last().copied()
         {
-            gfx.selection.restore(vec![id], Some(id));
+            doc.selection.restore(vec![id], Some(id));
             *changed = true;
         }
 
@@ -3280,13 +3340,13 @@ impl RefxApp {
             //   กับตำแหน่ง **เก่า** แล้วคลิกไม่โดนภาพที่เพิ่งย้ายไป
             //   (เจอตอนเขียนเทสต์ใน refx-core — ที่นั่นก็ต้องทำเหมือนกันเป๊ะ)
             for id in moved {
-                if let Some(item) = gfx.board.item(id) {
-                    gfx.index.insert(id, &item.canvas);
+                if let Some(item) = doc.board.item(id) {
+                    doc.index.insert(id, &item.canvas);
                 }
             }
             // การแก้ครั้งใหม่ล้างสาย redo — ภาพที่คำสั่งในสายนั้นถือไว้ตายตรงนี้
-            Self::collect_forgotten(gfx);
-            Self::rebuild_quads(gfx);
+            Self::collect_forgotten(gfx, doc);
+            Self::rebuild_quads(gfx, doc);
             *changed = true;
         }
         out
@@ -3298,16 +3358,16 @@ impl RefxApp {
     ///
     /// ★★ คืน `redraw = true` **เฉพาะตอนตำแหน่งขยับจริง** — หมุนล้อค้างที่สุดขอบ
     /// ต้องไม่ทำให้โปรแกรมวาดใหม่ไปเรื่อย ๆ (I-1)
-    fn apply_arrange_input(gfx: &mut Gfx, input: CanvasFrameInput) -> CanvasOutcome {
+    fn apply_arrange_input(gfx: &mut Gfx, doc: &mut Doc, input: CanvasFrameInput) -> CanvasOutcome {
         let mut out = CanvasOutcome::default();
         // ระยะจาก egui เป็น point — แผ่นคิดเป็น physical pixel เหมือนกล้องของ Canvas
         let ppp = gfx.egui_ctx.pixels_per_point();
         if input.scroll.abs() > f32::EPSILON {
-            out.redraw |= gfx.arrange.scroll_by(input.scroll * ppp);
+            out.redraw |= doc.arrange.scroll_by(input.scroll * ppp);
         }
         // ปุ่มกลางลาก = เลื่อนแผ่น (ท่าเดียวกับ pan ของ Canvas ผู้ใช้จะลองท่านี้แน่ ๆ)
         if input.pan_delta.y.abs() > f32::EPSILON {
-            out.redraw |= gfx.arrange.scroll_by(input.pan_delta.y * ppp);
+            out.redraw |= doc.arrange.scroll_by(input.pan_delta.y * ppp);
         }
         out
     }
@@ -3326,7 +3386,7 @@ impl RefxApp {
     /// ราคาคือ decode หนึ่งครั้งต่อการจิ้มหนึ่งครั้ง ซึ่งรับได้เพราะเป็นการกระทำ
     /// ที่ผู้ใช้ตั้งใจทำทีละครั้ง (ไม่ใช่ทุกเฟรม — ดู `Tool::Picker` ใน `interact.rs`)
     fn request_colour(
-        gfx: &Gfx,
+        doc: &Doc,
         assets: Option<&Assets>,
         shell: &mut crate::shell::ShellState,
         request: refx_core::interact::PickRequest,
@@ -3340,7 +3400,7 @@ impl RefxApp {
         // ★ ต้องมี **ไฟล์** ให้กลับไปอ่าน — ภาพที่วางมาจาก clipboard ไม่มี
         //   (HANDOFF: ภาพจาก clipboard คมได้แค่ระดับ thumbnail จนกว่าจะถึง P4-5)
         //   ยอมบอกตรง ๆ ว่าอ่านไม่ได้ ดีกว่าแอบตอบด้วยสีที่เฉลี่ยมาจาก thumbnail
-        let path = gfx
+        let path = doc
             .board
             .item(request.id)
             .and_then(|item| match &item.kind {
@@ -3372,13 +3432,13 @@ impl RefxApp {
     }
 
     /// กรอบที่มองเห็นอยู่ในหน่วย world — ขอบเขตของการค้นหาไกด์ (P2-9)
-    fn visible_world(gfx: &Gfx) -> WorldRect {
+    fn visible_world(gfx: &Gfx, doc: &Doc) -> WorldRect {
         let size = gfx.canvas.size;
-        let zoom = gfx.camera.zoom();
+        let zoom = doc.camera.zoom();
         if !size.is_finite() || zoom <= 0.0 {
             return WorldRect::EMPTY;
         }
-        WorldRect::from_center_size(gfx.camera.center(), size / zoom)
+        WorldRect::from_center_size(doc.camera.center(), size / zoom)
     }
 
     /// ★★ ทำให้ "ใครอยู่บน GPU" ตรงกับ "ใครอยู่บน board" — เรียกหลังคำสั่งที่เพิ่ม/ลบ item
@@ -3390,14 +3450,13 @@ impl RefxApp {
     /// ตราบใดที่ยัง undo ได้ ภาพต้องกลับขึ้นจอได้โดย**ไม่ decode ใหม่**
     /// (ถ้าต้อง decode ใหม่ แล้วผู้ใช้ลบไฟล์ต้นทางไปแล้ว undo จะล้มถาวร = ผิด I-3)
     /// คนทิ้ง RAM คือ [`RefxApp::collect_forgotten`] ซึ่งฟัง `History` อีกที
-    fn sync_residency(gfx: &mut Gfx, ids: &[ItemId]) {
-        let Gfx {
-            atlas,
-            render,
+    fn sync_residency(gfx: &mut Gfx, doc: &mut Doc, ids: &[ItemId]) {
+        let Gfx { atlas, render, .. } = gfx;
+        let Doc {
             render_state,
             board,
             ..
-        } = gfx;
+        } = doc;
         for id in ids {
             let Some(state) = render_state.get_mut(id) else {
                 continue;
@@ -3431,17 +3490,17 @@ impl RefxApp {
     ///
     /// id ที่ถูกลืมแต่ **ยังอยู่บน board** ต้องไม่ถูกแตะ (เช่น `AddItems` ที่ถูกตัด
     /// ตามเพดานทั้งที่ภาพยังอยู่บนจอ) — ไม่งั้นภาพที่ผู้ใช้เห็นจะกลายเป็นสี่เหลี่ยมสี
-    fn collect_forgotten(gfx: &mut Gfx) {
-        let forgotten = gfx.history.take_forgotten();
+    fn collect_forgotten(gfx: &mut Gfx, doc: &mut Doc) {
+        let forgotten = doc.history.take_forgotten();
         if forgotten.is_empty() {
             return;
         }
         let mut dropped = 0usize;
         for id in forgotten {
-            if gfx.board.item(id).is_some() {
+            if doc.board.item(id).is_some() {
                 continue;
             }
-            if let Some(state) = gfx.render_state.remove(&id) {
+            if let Some(state) = doc.render_state.remove(&id) {
                 if let Some(slot) = state.slot {
                     gfx.atlas.free(slot);
                 }
@@ -3466,24 +3525,29 @@ impl RefxApp {
             return;
         };
         let lang = self.shell.lang;
-        let Some(command) = ApplyLayout::from_placed(&gfx.board, gfx.arrange.placed()) else {
+        let Some(command) = ApplyLayout::from_placed(&self.doc.board, self.doc.arrange.placed())
+        else {
             // ★ ไม่มีอะไรขยับ = บอกตรง ๆ ไม่ใช่เงียบ (ผู้ใช้กดแล้วต้องรู้ว่าเกิดอะไร)
             self.shell.status = text::t(lang, Key::NothingToApply).to_owned();
             return;
         };
         let moved = refx_core::command::Command::affected(&command);
-        if let Err(err) = gfx.history.apply(&mut gfx.board, Box::new(command)) {
+        if let Err(err) = self
+            .doc
+            .history
+            .apply(&mut self.doc.board, Box::new(command))
+        {
             tracing::error!(%err, "cannot arrange the images on the canvas");
             return;
         }
         // ★ index ต้องตามตำแหน่งใหม่ทันที ไม่งั้นคลิกครั้งถัดไป hit-test กับที่เก่า
         for id in &moved {
-            if let Some(item) = gfx.board.item(*id) {
-                gfx.index.insert(*id, &item.canvas);
+            if let Some(item) = self.doc.board.item(*id) {
+                self.doc.index.insert(*id, &item.canvas);
             }
         }
-        Self::collect_forgotten(gfx);
-        Self::rebuild_quads(gfx);
+        Self::collect_forgotten(gfx, &mut self.doc);
+        Self::rebuild_quads(gfx, &mut self.doc);
         // ★ พาผู้ใช้ไปดูผลด้วย — ปุ่มชื่อ "ส่งเข้า canvas" แล้วอยู่ที่เดิมคือ
         //   การกดที่ไม่มีอะไรเกิดขึ้นในสายตาเขา (ผลอยู่อีกโหมดหนึ่ง)
         self.shell.mode = Mode::Canvas;
@@ -3510,10 +3574,11 @@ impl RefxApp {
                 gfx.window.request_redraw();
             }
             AppearanceKey::FlipHorizontal => {
-                let changes: Vec<(ItemId, ItemCanvas)> = gfx
+                let changes: Vec<(ItemId, ItemCanvas)> = self
+                    .doc
                     .selection
                     .iter()
-                    .filter_map(|id| gfx.board.item(id).map(|item| (id, item.canvas)))
+                    .filter_map(|id| self.doc.board.item(id).map(|item| (id, item.canvas)))
                     .filter(|(_, canvas)| !canvas.locked)
                     .map(|(id, canvas)| {
                         let flip = match canvas.flip {
@@ -3534,14 +3599,18 @@ impl RefxApp {
                 let Ok(command) = SetFilter::new(changes) else {
                     return;
                 };
-                if let Err(err) = gfx.history.apply(&mut gfx.board, Box::new(command)) {
+                if let Err(err) = self
+                    .doc
+                    .history
+                    .apply(&mut self.doc.board, Box::new(command))
+                {
                     tracing::error!(%err, "cannot flip the selected images");
                     return;
                 }
                 // กดทีละครั้ง = คนละขั้นเสมอ ห้ามให้การกดถัดไปกลืนเข้าไป
-                gfx.history.seal();
-                Self::collect_forgotten(gfx);
-                Self::rebuild_quads(gfx);
+                self.doc.history.seal();
+                Self::collect_forgotten(gfx, &mut self.doc);
+                Self::rebuild_quads(gfx, &mut self.doc);
                 gfx.window.request_redraw();
             }
         }
@@ -3559,8 +3628,8 @@ impl RefxApp {
     fn apply_note_edit(&mut self) {
         let sealed = std::mem::take(&mut self.shell.note_sealed);
         let Some(wanted) = self.shell.note_edit.take() else {
-            if sealed && let Some(gfx) = self.gfx.as_mut() {
-                gfx.history.seal();
+            if sealed && self.gfx.is_some() {
+                self.doc.history.seal();
             }
             return;
         };
@@ -3569,33 +3638,34 @@ impl RefxApp {
         };
         // แก้ **ใบเดียว** เสมอ — ช่องข้อความแสดงของ item ตัวแรกในชุดที่เลือก
         // การเขียนข้อความเดียวกันลงทุกใบที่เลือกไว้ไม่ใช่สิ่งที่ใครคาดหวัง
-        let Some(id) = gfx.selection.iter().find(|id| {
+        let Some(id) = self.doc.selection.iter().find(|id| {
             matches!(
-                gfx.board.item(*id).map(|item| &item.kind),
+                self.doc.board.item(*id).map(|item| &item.kind),
                 Some(refx_core::board::ItemKind::Text(_))
             )
         }) else {
             return;
         };
-        let current = match gfx.board.item(id).map(|item| &item.kind) {
+        let current = match self.doc.board.item(id).map(|item| &item.kind) {
             Some(refx_core::board::ItemKind::Text(note)) => note.text.clone(),
             _ => return,
         };
         // ★ ไม่มีอะไรเปลี่ยน = ไม่สร้างคำสั่ง ไม่ขอเฟรม (I-1)
         if current == wanted {
             if sealed {
-                gfx.history.seal();
+                self.doc.history.seal();
             }
             return;
         }
-        if let Err(err) = gfx
+        if let Err(err) = self
+            .doc
             .history
-            .apply(&mut gfx.board, Box::new(EditText::new(id, wanted)))
+            .apply(&mut self.doc.board, Box::new(EditText::new(id, wanted)))
         {
             tracing::error!(%err, "cannot edit the note");
         }
         if sealed {
-            gfx.history.seal();
+            self.doc.history.seal();
         }
         gfx.window.request_redraw();
     }
@@ -3659,18 +3729,19 @@ impl RefxApp {
             return;
         };
         let unsaved = self.has_unsnapshotted_work();
-        let Some(gfx) = self.gfx.as_ref() else {
+        // ★ ต้องมีหน้าต่างแล้วเท่านั้น (เงื่อนไขเดิม) — เอกสารอยู่คนละที่กับ `Gfx` แล้ว
+        if self.gfx.is_none() {
             return;
-        };
+        }
         let now = std::time::Instant::now();
         if !self.autosaver.should_write(unsaved, now) {
             return;
         }
-        let revision = gfx.board.revision();
+        let revision = self.doc.board.revision();
 
         // ★ โคลน ณ จังหวะที่ตัดสิน ด้วยเหตุผลเดียวกับการบันทึกจริง —
         //   ผู้ใช้ต้องแก้งานต่อได้ระหว่างที่ snapshot กำลังเขียน
-        let board = gfx.board.clone();
+        let board = self.doc.board.clone();
         let session = self.session.clone();
         let (tx, rx) = crossbeam_channel::bounded(1);
         let spawned = std::thread::Builder::new()
@@ -3731,8 +3802,8 @@ impl RefxApp {
     /// `dirty` ตอบว่า "ยังไม่ได้ `Ctrl+S`" ซึ่งเป็นจริงค้างยาว ส่วนที่ autosave
     /// อยากรู้จริง ๆ คือ "มีอะไรที่ยังไม่ได้เก็บไหม" · ดู `snapshot_revision`
     fn has_unsnapshotted_work(&self) -> bool {
-        self.gfx.as_ref().is_some_and(|gfx| {
-            gfx.board.is_dirty() && self.snapshot_revision != Some(gfx.board.revision())
+        self.gfx.as_ref().is_some_and(|_| {
+            self.doc.board.is_dirty() && self.snapshot_revision != Some(self.doc.board.revision())
         })
     }
 
@@ -3886,8 +3957,8 @@ impl RefxApp {
                 //   `RecoveredNotSavedYet` อย่างเดียว ซึ่งเป็น **ข้อความชั่วคราว**
                 //   ที่ถูกรายงานความคืบหน้าของ decode เขียนทับใน ~3 ms —
                 //   ลูปเดิมเป๊ะ: กู้งานคืน → เห็นว่าสะอาด → ปิดโปรแกรม → **หายอีกรอบ**
-                if let Some(gfx) = self.gfx.as_mut() {
-                    gfx.history.mark_unsaved(&mut gfx.board);
+                if self.gfx.is_some() {
+                    self.doc.history.mark_unsaved(&mut self.doc.board);
                 }
                 // ★ ยังไม่ลบไฟล์เก่า — รอให้ snapshot ของ session นี้ลงดิสก์ก่อน
                 //   (ดู `adopted_recovery`) · ระหว่างนี้มีสำเนาอยู่หนึ่งชุดเสมอ
@@ -3945,8 +4016,8 @@ impl RefxApp {
                 //     ไม่เหมือนไฟล์บนดิสก์ตามนิยาม · ถ้าไม่ติด ตัวบ่งชี้ถาวรบนแท็บ
                 //     จะบอกว่าทุกอย่างอยู่ในไฟล์แล้ว แล้วผู้ใช้จะปิดโปรแกรมทิ้ง
                 //     อีกรอบ — วนกลับไปที่เดิมพอดี (`History::mark_unsaved`)
-                if let Some(gfx) = self.gfx.as_mut() {
-                    gfx.history.mark_unsaved(&mut gfx.board);
+                if self.gfx.is_some() {
+                    self.doc.history.mark_unsaved(&mut self.doc.board);
                 }
                 self.shell.status = text::t(self.shell.lang, Key::RecoveredIntoDocument).to_owned();
                 self.shell.status_warn = true;
@@ -4018,8 +4089,8 @@ impl RefxApp {
             RecoverChoice::Restore => {
                 let path = refx_io::autosave::kept_path(&doc);
                 self.adopt_board(kept.board, Some(doc));
-                if let Some(gfx) = self.gfx.as_mut() {
-                    gfx.history.mark_unsaved(&mut gfx.board);
+                if self.gfx.is_some() {
+                    self.doc.history.mark_unsaved(&mut self.doc.board);
                 }
                 // ★ ยังไม่ลบ — รอ snapshot ของ session นี้ลงดิสก์ก่อน (I-3)
                 self.adopted_kept = Some(path);
@@ -4088,7 +4159,7 @@ impl RefxApp {
         let open_board = self
             .gfx
             .as_ref()
-            .map(|gfx| refx_io::spool::hashes_of(&gfx.board))
+            .map(|_| refx_io::spool::hashes_of(&self.doc.board))
             .unwrap_or_default();
         let wake = self.assets.as_ref().map(|assets| assets.pool.wake_handle());
         let (tx, rx) = crossbeam_channel::bounded(1);
@@ -4298,26 +4369,26 @@ impl RefxApp {
         let Some(gfx) = self.gfx.as_mut() else {
             return;
         };
-        gfx.board = board;
-        gfx.history = History::default();
-        gfx.selection = Selection::new();
-        gfx.select_tool.cancel();
-        gfx.render_state.clear();
-        gfx.index = SpatialIndex::new(refx_core::spatial::DEFAULT_CELL_SIZE);
-        for (id, item) in gfx.board.items_in_z_order() {
-            gfx.index.insert(id, &item.canvas);
+        self.doc.board = board;
+        self.doc.history = History::default();
+        self.doc.selection = Selection::new();
+        self.doc.select_tool.cancel();
+        self.doc.render_state.clear();
+        self.doc.index = SpatialIndex::new(refx_core::spatial::DEFAULT_CELL_SIZE);
+        for (id, item) in self.doc.board.items_in_z_order() {
+            self.doc.index.insert(id, &item.canvas);
         }
-        gfx.rubber_band = None;
-        gfx.guides.clear();
-        gfx.arrange.invalidate();
-        Self::rebuild_quads(gfx);
+        self.doc.rubber_band = None;
+        self.doc.guides.clear();
+        self.doc.arrange.invalidate();
+        Self::rebuild_quads(gfx, &mut self.doc);
 
         // ★★ `doc_path`/นาฬิกา autosave ต้องเปลี่ยนพร้อมกันกับ board เสมอ —
         //    ถ้าตั้ง path ใหม่แต่ลืมรีเซ็ตนาฬิกา snapshot แรกของเอกสารใหม่จะ
         //    ถูกเลื่อนไปจนครบรอบของเอกสารเก่า
         // ★★ โหมดของเอกสารใหม่ **อ่านจากตารางของไฟล์นั้น** — ผู้เรียกเป็นคนเติม
         //    `doc_assets` มาก่อนเสมอ (ตารางว่างสำหรับงานที่กู้คืนมา ซึ่งยังไม่มีไฟล์)
-        let mode = mode_of_document(&gfx.board, &self.doc_assets);
+        let mode = mode_of_document(&self.doc.board, &self.doc_assets);
 
         self.doc_path = path;
         self.save_mode = mode;
@@ -4337,15 +4408,17 @@ impl RefxApp {
     /// ★ ผลที่กลับมาต้องไปเกาะ **item ที่มีอยู่แล้ว** ไม่ใช่สร้างใบใหม่ต่อท้าย
     /// (ซึ่งเป็นสิ่งที่เส้นทางลากไฟล์เข้ามาทำ) — คีย์ที่จับคู่คือ `relink_targets`
     fn request_thumbnails_for_board(&mut self) {
-        let Some(gfx) = self.gfx.as_ref() else {
+        // ★ ต้องมีหน้าต่างแล้วเท่านั้น (เงื่อนไขเดิม) — เอกสารอยู่คนละที่กับ `Gfx` แล้ว
+        if self.gfx.is_none() {
             return;
-        };
+        }
         if self.assets.is_none() || self.relink_scan.is_some() {
             return;
         }
         // ★★ ทุกใบที่เป็นภาพ **รวมทั้งใบที่บันทึกไว้ว่า `Missing`** — ไฟล์ที่หาย
         //    เมื่อวานอาจกลับมาแล้ววันนี้ (เสียบไดรฟ์คืน / ซิงค์เสร็จ)
-        let wanted: Vec<refx_core::relink::Wanted> = gfx
+        let wanted: Vec<refx_core::relink::Wanted> = self
+            .doc
             .board
             .items_in_z_order()
             .filter_map(|(id, item)| match &item.kind {
@@ -4477,8 +4550,8 @@ impl RefxApp {
         //   แล้ว `Ctrl+Z` ครั้งเดียวจะย้อนทั้งสองเรื่องพร้อมกัน ซึ่งผู้ใช้ไม่ได้สั่ง
         //   (เห็นจริงตอนยืนยัน P4-6 21 ส.ค. 2026: กด `Ctrl+Z` แล้วภาพไม่กลับไป
         //   เป็น `Missing` เพราะมันย้อนไปไกลกว่านั้นหนึ่งงวด)
-        if let Some(gfx) = self.gfx.as_mut() {
-            gfx.history.seal();
+        if self.gfx.is_some() {
+            self.doc.history.seal();
         }
         let mut jobs = Vec::new();
         let mut lost: Vec<(ItemId, ItemKind)> = Vec::new();
@@ -4583,14 +4656,18 @@ impl RefxApp {
         let Some(gfx) = self.gfx.as_mut() else {
             return;
         };
-        let Ok(command) = RelinkAssets::new(&gfx.board, targets) else {
+        let Ok(command) = RelinkAssets::new(&self.doc.board, targets) else {
             return; // ไม่มีอะไรเปลี่ยนจริง = ไม่ต้องมีขั้น undo
         };
-        if let Err(err) = gfx.history.apply(&mut gfx.board, Box::new(command)) {
+        if let Err(err) = self
+            .doc
+            .history
+            .apply(&mut self.doc.board, Box::new(command))
+        {
             tracing::error!(%err, "cannot relink the images");
             return;
         }
-        Self::rebuild_quads(gfx);
+        Self::rebuild_quads(gfx, &mut self.doc);
     }
 
     /// ★★★ ขั้นที่ 5 — ผู้ใช้กด "หาไฟล์เอง" บนภาพที่หาย
@@ -4605,7 +4682,7 @@ impl RefxApp {
         let name = self
             .gfx
             .as_ref()
-            .and_then(|gfx| gfx.board.item(id))
+            .and_then(|_| self.doc.board.item(id))
             .and_then(|item| match &item.kind {
                 ItemKind::Missing { original_path, .. } => {
                     Some(refx_asset::decode::file_label(original_path))
@@ -4624,9 +4701,10 @@ impl RefxApp {
 
     /// item ที่หาไฟล์ไม่เจอใบแรกในสิ่งที่เลือกอยู่
     fn first_missing_selected(&self) -> Option<ItemId> {
-        let gfx = self.gfx.as_ref()?;
-        gfx.selection.iter().find(|id| {
-            gfx.board
+        self.gfx.as_ref()?;
+        self.doc.selection.iter().find(|id| {
+            self.doc
+                .board
                 .item(*id)
                 .is_some_and(|item| matches!(item.kind, ItemKind::Missing { .. }))
         })
@@ -4676,11 +4754,13 @@ impl RefxApp {
         let Some(chosen) = self.relink_for.take() else {
             return;
         };
-        let Some(gfx) = self.gfx.as_ref() else {
+        // ★ ต้องมีหน้าต่างแล้วเท่านั้น (เงื่อนไขเดิม)
+        if self.gfx.is_none() {
             return;
-        };
+        }
         // ใบที่ยังหาไม่เจอทั้งหมด (รวมใบที่ผู้ใช้เพิ่งชี้ให้)
-        let missing: Vec<refx_core::relink::Wanted> = gfx
+        let missing: Vec<refx_core::relink::Wanted> = self
+            .doc
             .board
             .items_in_z_order()
             .filter_map(|(id, item)| match &item.kind {
@@ -4696,7 +4776,8 @@ impl RefxApp {
             .collect();
         // ★ ใบที่ผู้ใช้ชี้เอง — ใส่คีย์จริงของเอกสารไว้ เพื่อให้ `match_folder`
         //   ใช้จับใบอื่นที่เป็นภาพเดียวกันได้ด้วย
-        let chosen_want = gfx
+        let chosen_want = self
+            .doc
             .board
             .item(chosen)
             .map(|item| refx_core::relink::Wanted {
@@ -4880,11 +4961,12 @@ impl RefxApp {
     /// `plan_embeds` ถาม `locate_bytes` ซึ่งแตะดิสก์ทุกใบ (`is_file`) · board
     /// 3,000 ใบบนไดรฟ์เครือข่ายที่หลุด = หน้าต่างค้างเป็นสิบวินาทีถ้าทำบน UI (I-2)
     fn start_save(&mut self, path: &std::path::Path, mode: refx_io::packed::SaveMode) {
-        let Some(gfx) = self.gfx.as_ref() else {
+        // ★ ต้องมีหน้าต่างแล้วเท่านั้น (เงื่อนไขเดิม) — เอกสารอยู่คนละที่กับ `Gfx` แล้ว
+        if self.gfx.is_none() {
             return;
-        };
+        }
         // ★ โคลน ณ จังหวะที่ผู้ใช้สั่ง (ดูเหตุผลใน `apply_save_request`)
-        let board = gfx.board.clone();
+        let board = self.doc.board.clone();
         let path = path.to_path_buf();
         let spool_dir = self.spool_dir.clone();
         // ★★★ **ต้องปลุก UI ตอนเขียนเสร็จ** — แอปหลับสนิทระหว่างรอดิสก์ (I-1)
@@ -4978,8 +5060,8 @@ impl RefxApp {
                 // ★★ `mark_saved` คือสิ่งที่ทำให้ `dirty` กลับเป็น false — และมันต้อง
                 //    เกิด **หลังเขียนสำเร็จเท่านั้น** ไม่ใช่ตอนสั่ง ไม่งั้นผู้ใช้จะ
                 //    ปิดโปรแกรมโดยคิดว่างานถูกบันทึกแล้วทั้งที่ดิสก์เต็ม
-                if let Some(gfx) = self.gfx.as_mut() {
-                    gfx.history.mark_saved(&mut gfx.board);
+                if self.gfx.is_some() {
+                    self.doc.history.mark_saved(&mut self.doc.board);
                 }
                 let name = path
                     .file_name()
@@ -5032,7 +5114,7 @@ impl RefxApp {
         let Some(gfx) = self.gfx.as_mut() else {
             return;
         };
-        let targets: Vec<ItemId> = gfx.selection.iter().collect();
+        let targets: Vec<ItemId> = self.doc.selection.iter().collect();
         if targets.is_empty() {
             return;
         }
@@ -5047,7 +5129,7 @@ impl RefxApp {
         let Some(command) = command else {
             return;
         };
-        match gfx.history.apply(&mut gfx.board, command) {
+        match self.doc.history.apply(&mut self.doc.board, command) {
             Ok(()) => {}
             // ไม่มีอะไรเปลี่ยน — ไม่ใช่ error ที่ผู้ใช้ต้องเห็น
             Err(refx_core::command::CmdError::Empty) => return,
@@ -5057,7 +5139,7 @@ impl RefxApp {
             }
         }
         // ★ จัดกลุ่มหนึ่งครั้ง = undo หนึ่งขั้น — ปิดหน้าต่าง merge ทันที
-        gfx.history.seal();
+        self.doc.history.seal();
         gfx.window.request_redraw();
     }
 
@@ -5067,8 +5149,8 @@ impl RefxApp {
 
         let sealed = std::mem::take(&mut self.shell.group_sealed);
         let Some(request) = self.shell.group_request.take() else {
-            if sealed && let Some(gfx) = self.gfx.as_mut() {
-                gfx.history.seal();
+            if sealed && self.gfx.is_some() {
+                self.doc.history.seal();
             }
             return;
         };
@@ -5077,7 +5159,7 @@ impl RefxApp {
         };
         let (id, current) = match &request {
             PanelRequest::Rename(id, _) | PanelRequest::Collapsed(id, _) => {
-                let Some(group) = gfx.board.group(*id) else {
+                let Some(group) = self.doc.board.group(*id) else {
                     return; // กลุ่มหายไประหว่างเฟรม (undo) — ไม่มีอะไรให้แก้
                 };
                 (*id, group.clone())
@@ -5091,11 +5173,15 @@ impl RefxApp {
                 refx_core::command::SetGroup::set_collapsed(id, &current, collapsed)
             }
         };
-        if let Err(err) = gfx.history.apply(&mut gfx.board, Box::new(command)) {
+        if let Err(err) = self
+            .doc
+            .history
+            .apply(&mut self.doc.board, Box::new(command))
+        {
             tracing::error!(%err, "cannot edit the group");
         }
         if sealed {
-            gfx.history.seal();
+            self.doc.history.seal();
         }
         gfx.window.request_redraw();
     }
@@ -5113,15 +5199,15 @@ impl RefxApp {
 
         let sealed = std::mem::take(&mut self.shell.meta_sealed);
         let Some(request) = self.shell.meta_request.take() else {
-            if sealed && let Some(gfx) = self.gfx.as_mut() {
-                gfx.history.seal();
+            if sealed && self.gfx.is_some() {
+                self.doc.history.seal();
             }
             return;
         };
         let Some(gfx) = self.gfx.as_mut() else {
             return;
         };
-        let targets: Vec<ItemId> = gfx.selection.iter().collect();
+        let targets: Vec<ItemId> = self.doc.selection.iter().collect();
         if targets.is_empty() {
             return;
         }
@@ -5135,11 +5221,11 @@ impl RefxApp {
                 .ok()
                 .map(|cmd| Box::new(cmd) as Box<dyn refx_core::command::Command>),
             other => {
-                let (field, changes) = Self::meta_changes(gfx, &targets, &other);
+                let (field, changes) = Self::meta_changes(&self.doc, &targets, &other);
                 if changes.is_empty() {
                     // ★ ไม่มีอะไรเปลี่ยน = ไม่สร้างคำสั่ง ไม่ขอเฟรม (I-1)
                     if sealed {
-                        gfx.history.seal();
+                        self.doc.history.seal();
                     }
                     return;
                 }
@@ -5151,18 +5237,18 @@ impl RefxApp {
         let Some(command) = command else {
             return;
         };
-        if let Err(err) = gfx.history.apply(&mut gfx.board, command) {
+        if let Err(err) = self.doc.history.apply(&mut self.doc.board, command) {
             tracing::error!(%err, "cannot edit the item metadata");
         }
         if sealed {
-            gfx.history.seal();
+            self.doc.history.seal();
         }
         gfx.window.request_redraw();
     }
 
     /// ประกอบ `ItemMeta` ชุดใหม่ตามคำขอ — คืนเฉพาะตัวที่ **เปลี่ยนจริง**
     fn meta_changes(
-        gfx: &Gfx,
+        doc: &Doc,
         targets: &[ItemId],
         request: &crate::shell::MetaRequest,
     ) -> (refx_core::command::MetaField, Vec<(ItemId, ItemMeta)>) {
@@ -5179,7 +5265,7 @@ impl RefxApp {
         let changes = targets
             .iter()
             .filter_map(|id| {
-                let current = gfx.board.item(*id)?.meta.clone();
+                let current = doc.board.item(*id)?.meta.clone();
                 let mut next = current.clone();
                 match request {
                     MetaRequest::Rating(value) => next.rating = *value,
@@ -5201,8 +5287,8 @@ impl RefxApp {
         // ★ `take` — สิ่งที่ผู้ใช้ขอมีอายุหนึ่งเฟรม ถ้าปล่อยค้างไว้มันจะถูกเขียนซ้ำ
         //   ทุกเฟรมแล้วทับสิ่งที่คีย์ลัด (`H`) เพิ่งเปลี่ยน
         let Some(wanted) = self.shell.appearance_edit.take() else {
-            if sealed && let Some(gfx) = self.gfx.as_mut() {
-                gfx.history.seal();
+            if sealed && self.gfx.is_some() {
+                self.doc.history.seal();
             }
             return;
         };
@@ -5210,10 +5296,11 @@ impl RefxApp {
             return;
         };
 
-        let changes: Vec<(ItemId, ItemCanvas)> = gfx
+        let changes: Vec<(ItemId, ItemCanvas)> = self
+            .doc
             .selection
             .iter()
-            .filter_map(|id| gfx.board.item(id).map(|item| (id, item.canvas)))
+            .filter_map(|id| self.doc.board.item(id).map(|item| (id, item.canvas)))
             .filter(|(_, canvas)| !canvas.locked)
             .filter_map(|(id, canvas)| {
                 let next = ItemCanvas {
@@ -5236,22 +5323,26 @@ impl RefxApp {
 
         if changes.is_empty() {
             if sealed {
-                gfx.history.seal();
+                self.doc.history.seal();
             }
             return;
         }
         let Ok(command) = SetFilter::new(changes) else {
             return;
         };
-        if let Err(err) = gfx.history.apply(&mut gfx.board, Box::new(command)) {
+        if let Err(err) = self
+            .doc
+            .history
+            .apply(&mut self.doc.board, Box::new(command))
+        {
             tracing::error!(%err, "cannot change the appearance of the selection");
             return;
         }
         if sealed {
-            gfx.history.seal();
+            self.doc.history.seal();
         }
-        Self::collect_forgotten(gfx);
-        Self::rebuild_quads(gfx);
+        Self::collect_forgotten(gfx, &mut self.doc);
+        Self::rebuild_quads(gfx, &mut self.doc);
         gfx.window.request_redraw();
     }
 
@@ -5267,10 +5358,11 @@ impl RefxApp {
             return;
         };
         // ภาพที่ล็อกไว้ต้องไม่ขยับ — เหมือนทุกเครื่องมือที่แก้เรขาคณิต
-        let picked: Vec<(ItemId, ItemCanvas)> = gfx
+        let picked: Vec<(ItemId, ItemCanvas)> = self
+            .doc
             .selection
             .iter()
-            .filter_map(|id| gfx.board.item(id).map(|item| (id, item.canvas)))
+            .filter_map(|id| self.doc.board.item(id).map(|item| (id, item.canvas)))
             .filter(|(_, canvas)| !canvas.locked)
             .collect();
 
@@ -5288,20 +5380,24 @@ impl RefxApp {
         let Ok(command) = TransformItems::new(changes) else {
             return;
         };
-        if let Err(err) = gfx.history.apply(&mut gfx.board, Box::new(command)) {
+        if let Err(err) = self
+            .doc
+            .history
+            .apply(&mut self.doc.board, Box::new(command))
+        {
             tracing::error!(%err, "cannot arrange the selection");
             return;
         }
         // กดปุ่มหนึ่งครั้ง = ขั้นเดียวเสมอ ห้ามให้การกดถัดไปกลืนเข้าไป
-        gfx.history.seal();
+        self.doc.history.seal();
         // ★ index ต้องตามตำแหน่งใหม่ทันที ไม่งั้นคลิกครั้งถัดไปจะพลาด
         for id in moved {
-            if let Some(item) = gfx.board.item(id) {
-                gfx.index.insert(id, &item.canvas);
+            if let Some(item) = self.doc.board.item(id) {
+                self.doc.index.insert(id, &item.canvas);
             }
         }
-        Self::collect_forgotten(gfx);
-        Self::rebuild_quads(gfx);
+        Self::collect_forgotten(gfx, &mut self.doc);
+        Self::rebuild_quads(gfx, &mut self.doc);
         gfx.window.request_redraw();
     }
 
@@ -5310,8 +5406,9 @@ impl RefxApp {
         let Some(gfx) = self.gfx.as_mut() else {
             return;
         };
-        let selected: Vec<ItemId> = gfx.selection.iter().collect();
-        let Some(order) = refx_core::zorder::reordered(gfx.board.z_order(), &selected, movement)
+        let selected: Vec<ItemId> = self.doc.selection.iter().collect();
+        let Some(order) =
+            refx_core::zorder::reordered(self.doc.board.z_order(), &selected, movement)
         else {
             // ★ อยู่สุดขอบแล้ว / ไม่ได้เลือกอะไร — **ไม่สร้างคำสั่งและไม่ขอเฟรม** (I-1)
             //   ถ้าสร้าง undo stack จะเต็มไปด้วยขั้นที่กดแล้วไม่มีอะไรเกิดขึ้น
@@ -5320,13 +5417,17 @@ impl RefxApp {
         let Ok(command) = ReorderZ::new(order) else {
             return;
         };
-        if let Err(err) = gfx.history.apply(&mut gfx.board, Box::new(command)) {
+        if let Err(err) = self
+            .doc
+            .history
+            .apply(&mut self.doc.board, Box::new(command))
+        {
             tracing::error!(%err, "cannot reorder the z stack");
             return;
         }
         // เรขาคณิตไม่เปลี่ยน → `index` ไม่ต้องแตะ · `affected()` ว่าง → การเลือกอยู่เหมือนเดิม
-        Self::collect_forgotten(gfx);
-        Self::rebuild_quads(gfx);
+        Self::collect_forgotten(gfx, &mut self.doc);
+        Self::rebuild_quads(gfx, &mut self.doc);
         gfx.window.request_redraw();
     }
 
@@ -5340,10 +5441,16 @@ impl RefxApp {
         let Some(gfx) = self.gfx.as_mut() else {
             return;
         };
-        let targets: Vec<ItemId> = gfx
+        let targets: Vec<ItemId> = self
+            .doc
             .selection
             .iter()
-            .filter(|id| gfx.board.item(*id).is_some_and(|item| !item.canvas.locked))
+            .filter(|id| {
+                self.doc
+                    .board
+                    .item(*id)
+                    .is_some_and(|item| !item.canvas.locked)
+            })
             .collect();
         if targets.is_empty() {
             // ★ กดแล้วไม่มีอะไรเกิดขึ้น **ต้องบอก** ไม่ใช่เงียบ
@@ -5353,29 +5460,35 @@ impl RefxApp {
         let Ok(command) = RemoveItems::new(targets.clone()) else {
             return;
         };
-        if let Err(err) = gfx.history.apply(&mut gfx.board, Box::new(command)) {
+        if let Err(err) = self
+            .doc
+            .history
+            .apply(&mut self.doc.board, Box::new(command))
+        {
             tracing::error!(%err, "cannot delete the selected images");
             return;
         }
 
         for id in &targets {
-            gfx.index.remove(*id);
+            self.doc.index.remove(*id);
         }
         // ★ ของที่ถูกลบไปแล้วจะยังถูกเลือกอยู่ไม่ได้ — แต่ตัวที่ **รอด** (ล็อกไว้)
         //   ต้องยังถูกเลือกอยู่ ไม่งั้นผู้ใช้ที่เลือก 5 ใบแล้วลบ จะเสียการเลือก
         //   ของใบที่ล็อกไว้ไปด้วยทั้งที่มันไม่ได้ถูกแตะเลย
-        let survivors: Vec<ItemId> = gfx
+        let survivors: Vec<ItemId> = self
+            .doc
             .selection
             .iter()
             .filter(|id| !targets.contains(id))
             .collect();
-        gfx.selection
+        self.doc
+            .selection
             .restore(survivors.clone(), survivors.last().copied());
-        gfx.select_tool.cancel();
-        gfx.rubber_band = None;
-        Self::sync_residency(gfx, &targets);
-        Self::collect_forgotten(gfx);
-        Self::rebuild_quads(gfx);
+        self.doc.select_tool.cancel();
+        self.doc.rubber_band = None;
+        Self::sync_residency(gfx, &mut self.doc, &targets);
+        Self::collect_forgotten(gfx, &mut self.doc);
+        Self::rebuild_quads(gfx, &mut self.doc);
         tracing::info!(count = targets.len(), "deleted images from the board");
         gfx.window.request_redraw();
     }
@@ -5387,8 +5500,8 @@ impl RefxApp {
             return;
         };
         let outcome = match request {
-            HistoryRequest::Undo => gfx.history.undo(&mut gfx.board),
-            HistoryRequest::Redo => gfx.history.redo(&mut gfx.board),
+            HistoryRequest::Undo => self.doc.history.undo(&mut self.doc.board),
+            HistoryRequest::Redo => self.doc.history.redo(&mut self.doc.board),
         };
 
         let affected = match outcome {
@@ -5415,12 +5528,12 @@ impl RefxApp {
 
         // ★ ภาพที่เพิ่งกลับมา/เพิ่งหายไปต้องคืนหรือคืนช่อง atlas ตาม **ก่อน** สร้าง quad
         //   undo ของการลบเติมกลับจาก RAM ที่มีอยู่แล้ว — ไม่ decode ใหม่สักใบ
-        Self::sync_residency(gfx, &affected);
-        Self::collect_forgotten(gfx);
+        Self::sync_residency(gfx, &mut self.doc, &affected);
+        Self::collect_forgotten(gfx, &mut self.doc);
 
         // index กับ quad ต้องตามสถานะใหม่ของ board ทันที
-        gfx.index.rebuild(&gfx.board);
-        Self::rebuild_quads(gfx);
+        self.doc.index.rebuild(&self.doc.board);
+        Self::rebuild_quads(gfx, &mut self.doc);
 
         // ★ เลือกของที่เพิ่งเปลี่ยนให้ผู้ใช้ (docs/02 §2.9)
         //   การเลือกไม่ได้ถูก undo — มันตามผลลัพธ์ที่คำสั่งรายงานกลับมา
@@ -5435,20 +5548,22 @@ impl RefxApp {
         //    → แผงกลุ่มหายไปทั้งแผง เพราะไม่มีอะไรถูกเลือกอีกแล้ว
         //
         //    ตรรกะอยู่ใน `selection_after_history` เพื่อให้เทสต์ได้โดยไม่ต้องมีหน้าต่าง
-        let Some(live) = selection_after_history(&affected, |id| gfx.board.item(id).is_some())
+        let Some(live) = selection_after_history(&affected, |id| self.doc.board.item(id).is_some())
         else {
             // คำสั่งบอกว่าไม่ได้แตะ item ไหนเลย — การเลือกเดิมยังใช้ได้ตามเดิม
-            gfx.select_tool.cancel();
-            gfx.rubber_band = None;
+            self.doc.select_tool.cancel();
+            self.doc.rubber_band = None;
             gfx.window.request_redraw();
             return;
         };
-        gfx.selection.restore(live.clone(), live.last().copied());
+        self.doc
+            .selection
+            .restore(live.clone(), live.last().copied());
         // การลากที่ค้างอยู่ (ถ้ามี) ใช้ไม่ได้แล้วเพราะ board เปลี่ยนไปใต้มือ
-        gfx.select_tool.cancel();
-        gfx.rubber_band = None;
+        self.doc.select_tool.cancel();
+        self.doc.rubber_band = None;
 
-        Self::look_at_if_offscreen(gfx, &live);
+        Self::look_at_if_offscreen(gfx, &mut self.doc, &live);
         gfx.window.request_redraw();
     }
 
@@ -5464,10 +5579,10 @@ impl RefxApp {
     ///
     /// ไม่มี animation โดยตั้งใจ: I-1 บังคับว่า idle ต้อง 0% CPU การเลื่อนแบบ
     /// ค่อย ๆ ไถลต้องวาดต่อเนื่องหลายเฟรม ซึ่งแลกไม่คุ้มกับความสวยตรงนี้
-    fn look_at_if_offscreen(gfx: &mut Gfx, ids: &[ItemId]) {
+    fn look_at_if_offscreen(gfx: &mut Gfx, doc: &mut Doc, ids: &[ItemId]) {
         let mut bounds = WorldRect::EMPTY;
         for id in ids {
-            if let Some(item) = gfx.board.item(*id) {
+            if let Some(item) = doc.board.item(*id) {
                 bounds = bounds.union(item.canvas.world_bounds());
             }
         }
@@ -5476,12 +5591,12 @@ impl RefxApp {
             return;
         }
 
-        let zoom = gfx.camera.zoom();
+        let zoom = doc.camera.zoom();
         if zoom <= 0.0 {
             return;
         }
         let half = gfx.canvas.size * 0.5 / zoom;
-        let centre = gfx.camera.center();
+        let centre = doc.camera.center();
         let view = WorldRect {
             min: centre - half,
             max: centre + half,
@@ -5491,7 +5606,7 @@ impl RefxApp {
         }
 
         tracing::info!("moving the camera to show what the history change affected");
-        gfx.camera.set_center(bounds.center());
+        doc.camera.set_center(bounds.center());
     }
 
     /// แปลง item หนึ่งใบเป็น instance ที่ GPU วาดได้
@@ -5562,9 +5677,9 @@ impl RefxApp {
     ///
     /// ★ **ประตูเดียวที่เขียน `gfx.quads` ได้** — `quads` เป็นผลลัพธ์ ไม่ใช่แหล่งความจริง
     /// ลำดับ render = ลำดับใน `z_order` อยู่แล้ว จึงไม่ต้อง sort (docs/02 §2.1)
-    fn rebuild_quads(gfx: &mut Gfx) {
+    fn rebuild_quads(gfx: &mut Gfx, doc: &mut Doc) {
         gfx.quads.clear();
-        for (id, item) in gfx.board.items_in_z_order() {
+        for (id, item) in doc.board.items_in_z_order() {
             // ★★★ **`Board` เป็นคนบอกว่า item นี้เป็นภาพหรือไม่ ไม่ใช่ `render_state`**
             //
             //   `render_state` เป็น cache ที่อยู่ยาวกว่าสถานะของ item โดยตั้งใจ
@@ -5575,7 +5690,7 @@ impl RefxApp {
             if !matches!(item.kind, ItemKind::Image(_)) {
                 continue;
             }
-            if let Some(state) = gfx.render_state.get(&id)
+            if let Some(state) = doc.render_state.get(&id)
                 && let Some(quad) = Self::quad_for(&item.canvas, state)
             {
                 gfx.quads.push(quad);
@@ -5585,7 +5700,7 @@ impl RefxApp {
         //   (P3-4 จะเปลี่ยนไปเทียบ `board.revision` ตาม docs/03 §3)
         //   ★★ ไม่ใช่ตาข่ายเดียว: `ArrangeView::plan` เทียบจำนวน item เองด้วย
         //      เผื่อวันที่มีคนเพิ่มเส้นทางแก้ board แล้วไม่ผ่านที่นี่ (docs/08 §3.9 ข้อ 8)
-        gfx.arrange.invalidate();
+        doc.arrange.invalidate();
     }
 
     /// เตรียมแถบที่ Arrange ต้องวาดเฟรมนี้ (P3-3)
@@ -5597,15 +5712,15 @@ impl RefxApp {
     /// ★ ใช้ `quad_for` ตัวเดียวกับ Canvas โดยยัดเรขาคณิตของแผ่นลง `ItemCanvas`
     /// ชั่วคราว — ถ้าเขียนสูตรวาดขึ้นใหม่ที่นี่ วันหนึ่งสองทางจะเพี้ยนจากกัน
     /// (บทเรียนเดิมของ `flip` ที่ไม่ถึงทาง working texture — HANDOFF §2.7)
-    fn plan_arrange(gfx: &mut Gfx, ppp: f32) {
+    fn plan_arrange(gfx: &mut Gfx, doc: &mut Doc, ppp: f32) {
         let viewport = gfx.canvas.size;
         {
-            let board = &gfx.board;
-            let render_state = &gfx.render_state;
+            let board = &doc.board;
+            let render_state = &doc.render_state;
             // ★ สัดส่วนมาจาก **ภาพต้นฉบับ** ไม่ใช่จาก `ItemCanvas` — ผู้ใช้ที่ย่อ/ยืด
             //   ภาพบน canvas ไว้ต้องยังเห็นสัดส่วนจริงใน contact sheet
             //   · ไม่มี thumbnail (โน้ต) → ใช้กรอบของมันเอง
-            gfx.arrange.plan(board, viewport, ppp, |id| {
+            doc.arrange.plan(board, viewport, ppp, |id| {
                 render_state
                     .get(&id)
                     .map(|state| {
@@ -5620,11 +5735,11 @@ impl RefxApp {
         }
 
         gfx.arrange_quads.clear();
-        for placed in gfx.arrange.visible() {
-            let Some(item) = gfx.board.item(placed.id) else {
+        for placed in doc.arrange.visible() {
+            let Some(item) = doc.board.item(placed.id) else {
                 continue;
             };
-            let Some(state) = gfx.render_state.get(&placed.id) else {
+            let Some(state) = doc.render_state.get(&placed.id) else {
                 // โน้ตข้อความไม่มี pixel ให้วาด — มันเป็น item เต็มตัวบน canvas
                 // แต่ใน contact sheet ยังไม่มีรูปแบบของตัวเอง (รอ P3-7)
                 continue;
@@ -5651,8 +5766,8 @@ impl RefxApp {
     ///
     /// ระหว่างที่ยังเติมไม่ครบ item ที่เหลือถูกทำเป็น **placeholder สีเด่น**
     /// ไม่ใช่ช่องว่าง (docs/04 §4, §8) — ผู้ใช้ต้องเห็นว่า layout ยังอยู่ครบ
-    fn refill_atlas(gfx: &mut Gfx) {
-        if gfx.board.is_empty() {
+    fn refill_atlas(gfx: &mut Gfx, doc: &mut Doc) {
+        if doc.board.is_empty() {
             return;
         }
         let started = std::time::Instant::now();
@@ -5666,7 +5781,7 @@ impl RefxApp {
         //   ถ้าไม่ทำขั้นนี้ ภาพ **ทุกใบ** กลายเป็น placeholder หลังกู้ device
         //   (เจอจริง 29 ก.ค. 2026: restored=0 total=8) ซึ่งคือ "board ว่างเปล่า"
         //   ที่ docs/04 §4 สั่งห้ามไว้ตรง ๆ
-        let needed = refx_render::atlas::layers_needed(gfx.board.len());
+        let needed = refx_render::atlas::layers_needed(doc.board.len());
         if gfx.atlas.layers_allocated() < needed
             && let Err(err) = gfx.atlas.resize(gfx.render.device(), needed)
         {
@@ -5677,16 +5792,12 @@ impl RefxApp {
         // ★ ไล่ตามลำดับ z ของ board — `render_state` เป็นแผนที่ ไม่ใช่รายการคู่ขนาน
         //   แล้วเขียนผลลง `render_state` ไม่ใช่ลง `quads` โดยตรง
         //   (`quads` ถูกสร้างใหม่จาก board ทีหลัง — ดู `rebuild_quads`)
-        let order: Vec<ItemId> = gfx.board.z_order().to_vec();
+        let order: Vec<ItemId> = doc.board.z_order().to_vec();
         // ★ แยกการยืมทีละฟิลด์ **ห้าม clone pixel** — thumbnail ใบละ 64 KB
         //   ที่ 100 ภาพคือก๊อป 6.4 MB ทุกครั้งที่กู้ device (วัดแล้วช้าลง 30%)
         //   ทางที่ถูกคือ destructure ให้ atlas/render/render_state ยืมคนละฟิลด์กัน
-        let Gfx {
-            atlas,
-            render,
-            render_state,
-            ..
-        } = gfx;
+        let Gfx { atlas, render, .. } = gfx;
+        let Doc { render_state, .. } = doc;
         for id in order {
             let Some(state) = render_state.get_mut(&id) else {
                 continue;
@@ -5704,11 +5815,11 @@ impl RefxApp {
                 }
             }
         }
-        Self::rebuild_quads(gfx);
+        Self::rebuild_quads(gfx, doc);
 
         tracing::info!(
             restored,
-            total = gfx.board.len(),
+            total = doc.board.len(),
             ms = started.elapsed().as_secs_f64() * 1000.0,
             "refilled thumbnails into the new atlas"
         );
@@ -5780,22 +5891,11 @@ impl AppDelegate for RefxApp {
             device_generation,
             egui_wake: None,
             quads,
-            board: Board::default(),
-            history: History::default(),
-            index: SpatialIndex::new(refx_core::spatial::DEFAULT_CELL_SIZE),
-            render_state: std::collections::HashMap::new(),
-            selection: Selection::new(),
-            select_tool: SelectTool::new(),
             tool: Tool::default(),
-            rubber_band: None,
-            guides: Vec::new(),
             working,
             working_pending: std::collections::HashSet::new(),
             working_quads: Vec::new(),
-            arrange: crate::arrange::ArrangeView::new(),
             arrange_quads: Vec::new(),
-            // เริ่มที่กลาง world ของ demo เพื่อให้เห็นสี่เหลี่ยมทันทีที่เปิด
-            camera: Camera::new(Vec2::splat(2000.0), 0.25),
             canvas: CanvasRect::full(size.width, size.height),
             modifiers: ModifiersState::empty(),
         });
@@ -5973,11 +6073,11 @@ impl AppDelegate for RefxApp {
 
         // ---- UI pass ----
         let raw_input = gfx.egui_winit.take_egui_input(&gfx.window);
-        shell.item_count = gfx.board.len();
-        shell.zoom = gfx.camera.zoom();
+        shell.item_count = self.doc.board.len();
+        shell.zoom = self.doc.camera.zoom();
         // ★★★ สภาวะ "ยังไม่ถูกบันทึก" — เติมทุกเฟรมเหมือนค่าแสดงผลตัวอื่น
         //   (docs/03 §1: สภาวะที่คงอยู่ต้องมีตัวบ่งชี้ที่คงอยู่ ไม่ใช่ข้อความชั่วคราว)
-        shell.unsaved = gfx.board.is_dirty();
+        shell.unsaved = self.doc.board.is_dirty();
         shell.doc_name = doc_path.as_ref().and_then(|path| {
             path.file_name()
                 .map(|name| name.to_string_lossy().into_owned())
@@ -5986,12 +6086,14 @@ impl AppDelegate for RefxApp {
         //   `unsaved` · ตัวเลขนับจาก **ตารางของไฟล์จริง** ไม่ใช่จากธงที่จำไว้
         shell.storage = crate::shell::StorageView {
             packed: *save_mode == refx_io::packed::SaveMode::Packed,
-            images: gfx
+            images: self
+                .doc
                 .board
                 .items_in_z_order()
                 .filter(|(_, item)| matches!(item.kind, ItemKind::Image(_)))
                 .count(),
-            inside: gfx
+            inside: self
+                .doc
                 .board
                 .items_in_z_order()
                 .filter(|(_, item)| match &item.kind {
@@ -6005,10 +6107,11 @@ impl AppDelegate for RefxApp {
         shell.tool = gfx.tool;
         // ★ inspector อ่านค่าจากภาพ **ตัวแรกในชุดที่เลือก** (anchor ของการเลือก)
         //   เลือกหลายใบแล้วปรับ = ทุกใบได้ค่าเดียวกัน ซึ่งตรงกับที่ผู้ใช้เห็นบนสไลเดอร์
-        shell.appearance = gfx
+        shell.appearance = self
+            .doc
             .selection
             .iter()
-            .find_map(|id| gfx.board.item(id))
+            .find_map(|id| self.doc.board.item(id))
             .map(|item| crate::shell::Appearance {
                 opacity: item.canvas.opacity,
                 grayscale: item.canvas.filter.grayscale,
@@ -6019,20 +6122,22 @@ impl AppDelegate for RefxApp {
             });
         // ★ เนื้อความของโน้ต (P2-11) — **ค่าสำหรับแสดงเท่านั้น** เหมือน `appearance`
         //   เติมจาก item ตัวแรกในชุดที่เลือก และเฉพาะตอนที่มันเป็นโน้ตจริง ๆ
-        shell.note = gfx
+        shell.note = self
+            .doc
             .selection
             .iter()
-            .find_map(|id| gfx.board.item(id))
+            .find_map(|id| self.doc.board.item(id))
             .and_then(|item| match &item.kind {
                 refx_core::board::ItemKind::Text(note) => Some(note.text.clone()),
                 _ => None,
             });
         // ★ ข้อมูลฝั่ง Arrange ของ item ตัวแรกในชุดที่เลือก (P3-1) — **ค่าสำหรับแสดง**
         //   เหมือน `appearance`/`note`: ชั้น `app` เติมก่อนวาด แล้วอ่าน *คำขอ* กลับมา
-        shell.meta = gfx
+        shell.meta = self
+            .doc
             .selection
             .iter()
-            .find_map(|id| gfx.board.item(id))
+            .find_map(|id| self.doc.board.item(id))
             .map(|item| crate::shell::MetaView {
                 rating: item.meta.rating,
                 color_label: item.meta.color_label,
@@ -6043,7 +6148,7 @@ impl AppDelegate for RefxApp {
                     .meta
                     .tags
                     .iter()
-                    .filter_map(|tag| gfx.board.tags().name(*tag).map(str::to_owned))
+                    .filter_map(|tag| self.doc.board.tags().name(*tag).map(str::to_owned))
                     .collect(),
             });
         // ★★★ ภาพที่หาไฟล์ไม่เจอในสิ่งที่เลือกอยู่ (P4-6) — **ค่าสำหรับแสดง**
@@ -6051,8 +6156,8 @@ impl AppDelegate for RefxApp {
         shell.missing = {
             let mut count = 0usize;
             let mut file = String::new();
-            for id in gfx.selection.iter() {
-                if let Some(item) = gfx.board.item(id)
+            for id in self.doc.selection.iter() {
+                if let Some(item) = self.doc.board.item(id)
                     && let refx_core::board::ItemKind::Missing { original_path, .. } = &item.kind
                 {
                     if count == 0 {
@@ -6069,8 +6174,8 @@ impl AppDelegate for RefxApp {
         shell.group = {
             let mut seen: Option<Option<refx_core::arena::GroupId>> = None;
             let mut mixed = false;
-            for id in gfx.selection.iter() {
-                let Some(item) = gfx.board.item(id) else {
+            for id in self.doc.selection.iter() {
+                let Some(item) = self.doc.board.item(id) else {
                     continue;
                 };
                 match seen {
@@ -6087,7 +6192,7 @@ impl AppDelegate for RefxApp {
                 (false, None) => None,
                 (false, Some(None)) => Some(crate::shell::GroupView::Loose),
                 (false, Some(Some(group_id))) => {
-                    gfx.board.group(group_id).map_or(
+                    self.doc.board.group(group_id).map_or(
                         // id ที่ห้อยอยู่อ่านเป็น "ไม่มีกลุ่ม" — ห้ามโชว์ช่องเปลี่ยนชื่อ
                         // ของกลุ่มที่ไม่มีอยู่
                         Some(crate::shell::GroupView::Loose),
@@ -6096,7 +6201,7 @@ impl AppDelegate for RefxApp {
                                 id: group_id,
                                 name: group.name.clone(),
                                 collapsed: group.collapsed,
-                                members: gfx.board.group_members(group_id).count(),
+                                members: self.doc.board.group_members(group_id).count(),
                             })
                         },
                     )
@@ -6112,8 +6217,11 @@ impl AppDelegate for RefxApp {
         //     ถูกจังหวะ" คือกับดักที่ docs/08 §3.9 ข้อ 8 บันทึกไว้ (เคสจริง:
         //     `take_forgotten` ของ P2-6) · ราคาคือคัดลอก float ห้าตัว ไม่มี
         //     การจองหน่วยความจำ และ **ไม่ขอเฟรมเพิ่ม** จึงไม่แตะ I-1
-        gfx.board
-            .set_view(live_view(gfx.camera, gfx.arrange.camera(), shell.mode));
+        self.doc.board.set_view(live_view(
+            self.doc.camera,
+            self.doc.arrange.camera(),
+            shell.mode,
+        ));
         shell.vram_used = gfx.textures.budget().used();
         shell.working_used = gfx.working.used();
         shell.working_limit = gfx.working.limit();
@@ -6144,16 +6252,16 @@ impl AppDelegate for RefxApp {
         //   สิ่งที่ถูกเลือกได้ แล้วค่อยแก้สถานะหลัง `run_ui` จบ
         let egui_ctx = gfx.egui_ctx.clone();
         let full_output = {
-            let board = &gfx.board;
-            let selection = &gfx.selection;
-            let render_state = &gfx.render_state;
-            let camera = gfx.camera;
-            let rubber_band = gfx.rubber_band;
+            let board = &self.doc.board;
+            let selection = &self.doc.selection;
+            let render_state = &self.doc.render_state;
+            let camera = self.doc.camera;
+            let rubber_band = self.doc.rubber_band;
             let tool = gfx.tool;
-            let guides = gfx.guides.as_slice();
+            let guides = self.doc.guides.as_slice();
             // ★ ไม้บรรทัดมีเจ้าของเดียวคือ `SelectTool` — ที่นี่แค่ **อ่าน** ไปวาด
             //   และ shell ก็อ่านตัวเดียวกันไปแสดงบน status bar (ไม่มีสำเนาที่ต้องซิงค์)
-            let measure = gfx.select_tool.measurement();
+            let measure = self.doc.select_tool.measurement();
             shell.measured = measure;
             egui_ctx.run_ui(raw_input, |ui| {
                 canvas_points = crate::shell::draw_in_ui(ui, shell, |ui, mode| {
@@ -6178,14 +6286,15 @@ impl AppDelegate for RefxApp {
         };
         // ★ `shell.mode` ตอนนี้คือโหมดที่ **ช่องกลางเพิ่งวาดไปจริง ๆ** — toolbar
         //   ถูกวาดก่อนช่องกลางเสมอ ค่าจึงอัปเดตแล้วตั้งแต่ก่อน widget ทำงาน
-        let canvas_outcome = Self::apply_canvas_input(gfx, canvas_input, shell.mode);
+        let canvas_outcome = Self::apply_canvas_input(gfx, &mut self.doc, canvas_input, shell.mode);
         if canvas_outcome.redraw {
             gfx.window.request_redraw();
         }
         // ★ ผู้ใช้จิ้มขอสี — ไปอ่าน **ไฟล์ต้นฉบับบน worker** ไม่ใช่ thumbnail
         //   ที่อยู่ในมือแล้ว (ROADMAP P2-10) · ผลกลับมาทีหลังผ่าน `JobResult::Sampled`
         if let Some(request) = canvas_outcome.pick {
-            let asked = Self::request_colour(gfx, assets.as_ref(), shell, request, *pick_count);
+            let asked =
+                Self::request_colour(&self.doc, assets.as_ref(), shell, request, *pick_count);
             if let Some(hash) = asked {
                 *pick_count += 1;
                 *pick_in_flight = Some(hash);
@@ -6200,11 +6309,11 @@ impl AppDelegate for RefxApp {
             && gfx.tool != tool
         {
             gfx.tool = tool;
-            gfx.select_tool.cancel();
+            self.doc.select_tool.cancel();
             // เส้นวัดที่ค้างอยู่หลังกลับไปเครื่องมืออื่นอ่านว่า "มีอะไรค้าง"
             // ไม่ใช่ "นี่คือผลการวัดของฉัน"
-            gfx.select_tool.clear_measurement();
-            gfx.rubber_band = None;
+            self.doc.select_tool.clear_measurement();
+            self.doc.rubber_band = None;
         }
 
         let (width, height) = {
@@ -6223,21 +6332,22 @@ impl AppDelegate for RefxApp {
         if shell.mode == Mode::Arrange {
             // ★ การเรียง/กรองมีเจ้าของเดียวคือ widget บน toolbar — ที่นี่แค่รับมา
             //   แล้ว **เทียบก่อนเขียน** ตั้งค่าเดิมซ้ำจึงไม่ทำให้คำนวณใหม่ (I-1)
-            let mut changed = gfx
+            let mut changed = self
+                .doc
                 .arrange
                 .set_sort(shell.arrange_sort, shell.arrange_descending);
-            changed |= gfx.arrange.set_filter(shell.arrange_filter.clone());
+            changed |= self.doc.arrange.set_filter(shell.arrange_filter.clone());
             if changed {
                 // ★ ลำดับเปลี่ยนแล้วต้องเริ่มดูจากบนสุด ไม่งั้นผู้ใช้กดเรียงใหม่
                 //   แล้วยังค้างอยู่กลางแผ่นเดิม ซึ่งอ่านว่า "กดแล้วไม่มีอะไรเกิดขึ้น"
-                gfx.arrange.scroll_to_top();
+                self.doc.arrange.scroll_to_top();
                 gfx.window.request_redraw();
             }
-            Self::plan_arrange(gfx, full_output.pixels_per_point);
+            Self::plan_arrange(gfx, &mut self.doc, full_output.pixels_per_point);
             // ★ ตัวเลขบน status bar เป็นหลักฐานของเกณฑ์ "วาดจริง < 60"
             //   มันถูกวาดไปแล้วในเฟรมนี้ จึงต้องขอเฟรมอีกหนึ่งเฟรมเมื่อค่าเปลี่ยน
             //   — ลู่เข้าเสมอ (เฟรมถัดไปค่าตรงกันแล้วก็หยุด) จึงไม่ขัด I-1
-            let counts = gfx.arrange.counts();
+            let counts = self.doc.arrange.counts();
             if shell.arrange != counts {
                 shell.arrange = counts;
                 gfx.window.request_redraw();
@@ -6280,7 +6390,7 @@ impl AppDelegate for RefxApp {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(clear_colour(&gfx.board)),
+                        load: wgpu::LoadOp::Clear(clear_colour(&self.doc.board)),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -6304,9 +6414,9 @@ impl AppDelegate for RefxApp {
                 &gfx.quads
             };
             let camera = if arrange_mode {
-                gfx.arrange.camera()
+                self.doc.arrange.camera()
             } else {
-                gfx.camera
+                self.doc.camera
             };
             if !instances.is_empty() {
                 // ★ จำกัดการวาดไว้ในช่อง canvas เท่านั้น ไม่ให้ล้นไปใต้ panel
@@ -6621,9 +6731,9 @@ impl AppDelegate for RefxApp {
                 {
                     gfx.tool = tool;
                     // การกดค้างที่ยังอยู่เป็นของเครื่องมือเดิม ใช้ต่อไม่ได้
-                    gfx.select_tool.cancel();
-                    gfx.select_tool.clear_measurement();
-                    gfx.rubber_band = None;
+                    self.doc.select_tool.cancel();
+                    self.doc.select_tool.clear_measurement();
+                    self.doc.rubber_band = None;
                     needs_redraw = true;
                 }
             }
@@ -6647,7 +6757,7 @@ impl AppDelegate for RefxApp {
         if self.closing {
             return true;
         }
-        let dirty = self.gfx.as_ref().is_some_and(|gfx| gfx.board.is_dirty());
+        let dirty = self.gfx.as_ref().is_some_and(|_| self.doc.board.is_dirty());
         if !dirty {
             return true;
         }
