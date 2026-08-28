@@ -89,6 +89,37 @@ pub struct StorageView {
     pub has_file: bool,
 }
 
+/// ★★★ **แท็บหนึ่งใบบนแถบบนสุด** (P4-7c) — ค่าสำหรับ *แสดง* เท่านั้น
+///
+/// ชั้น `app` เติมทุกเฟรมจาก `Docs` · แท็บที่นี่ไม่มี `BoardId` ติดมาด้วยโดยตั้งใจ:
+/// widget รู้จักแค่ **ลำดับที่มันวาด** และรายงานกลับเป็นดัชนีของลำดับนั้น
+/// (`docs/08 §4` ข้อ 10 — widget ไม่ลงมือกับข้อมูลเอง) ส่วนการแปลงดัชนี → เอกสาร
+/// เกิดในเฟรมเดียวกันทันที จึงไม่มีช่วงที่ดัชนีเก่าค้างข้ามเฟรม
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TabView {
+    /// ชื่อไฟล์ — `None` = ยังไม่เคยบันทึกลงที่ไหน (ขึ้นเป็น "board ที่ยังไม่ได้ตั้งชื่อ")
+    pub title: Option<String>,
+    /// ★★★ **สภาวะ "ยังไม่ถูกบันทึก" ของแท็บใบนี้เอง**
+    ///
+    /// ต้องเห็นได้ของ *ทุก* ใบพร้อมกัน ไม่ใช่เฉพาะใบที่อยู่หน้าจอ — ผู้ใช้ที่เห็น
+    /// ดาวแค่ใบเดียวจะปิดโปรแกรมโดยเชื่อว่าอีกสามใบสะอาด (`docs/03 §1`)
+    pub unsaved: bool,
+}
+
+/// สิ่งที่ผู้ใช้แตะบนแถบแท็บในเฟรมนี้ (P4-7c)
+///
+/// เป็น **คำขอ** ไม่ใช่สถานะ ด้วยเหตุผลเดียวกับ `tool_request`: widget ไม่ปิด
+/// เอกสารเอง — การปิดแท็บที่ยังไม่บันทึกต้องผ่านคำถามของชั้น `app` ก่อนเสมอ
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabRequest {
+    /// สลับไปแท็บลำดับที่ระบุ
+    Select(usize),
+    /// ปิดแท็บลำดับที่ระบุ (ชั้น `app` ถามก่อนถ้ายังไม่บันทึก)
+    Close(usize),
+    /// board เปล่าใบใหม่
+    New,
+}
+
 /// ผู้ใช้ตอบอะไรกับ "จะบันทึกเป็นแบบไหน" (P4-5)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaveAsChoice {
@@ -381,22 +412,24 @@ pub struct ShellState {
     pub tag_input: String,
     /// ★ กลุ่มของสิ่งที่เลือกอยู่ (P3-7) — `None` = ไม่ได้เลือกอะไร
     pub group: Option<GroupView>,
+    /// ★★★ **แท็บทั้งหมดที่เปิดอยู่** (P4-7c) — ค่าสำหรับแสดง ชั้น `app` เติมทุกเฟรม
+    pub tabs: Vec<TabView>,
+    /// ดัชนีของแท็บที่ผู้ใช้กำลังดูอยู่ (อยู่ในช่วงของ `tabs` เสมอ)
+    pub active_tab: usize,
+    /// ★ สิ่งที่ผู้ใช้แตะบนแถบแท็บในเฟรมนี้ — `None` = ไม่ได้แตะ
+    pub tab_request: Option<TabRequest>,
     /// ★ กำลังถามว่าจะปิดยังไงทั้งที่ยังไม่ได้บันทึก (P4-2)
+    ///
+    /// ★★ ตั้งแต่ P4-7c ใช้ทั้งกับ "ปิดหน้าต่าง" และ "ปิดแท็บ" (`Ctrl+W`) —
+    /// [`Self::close_scope_tab`] บอกว่าคำถามที่ค้างอยู่เป็นเรื่องไหน
     pub close_prompt: bool,
+    /// ★ คำถามที่ค้างอยู่เป็นเรื่อง **ปิดแท็บ** ไม่ใช่ปิดทั้งหน้าต่าง
+    ///
+    /// สองเรื่องนี้มีปุ่มชุดเดียวกันเพราะเป็นคำถามชนิดเดียวกัน — แต่ **สิ่งที่หาย
+    /// ถ้าตอบผิดต่างกันมาก** หัวข้อจึงต้องพูดตรงกับเรื่องที่ถาม
+    pub close_scope_tab: bool,
     /// ผู้ใช้ตอบแล้วในเฟรมนี้ — `None` = ยังไม่ตอบ
     pub close_choice: Option<CloseChoice>,
-    /// ★★★ **สภาวะ "ยังไม่ถูกบันทึก"** — ตัวบ่งชี้ถาวรบนแท็บ (docs/03 §1)
-    ///
-    /// `true` = มีอะไรที่ยังไม่ลงไฟล์จริง (ไม่เคยบันทึกเลย หรือแก้หลังบันทึกล่าสุด)
-    /// · **ค่าสำหรับแสดงเท่านั้น** ชั้น `app` เติมทุกเฟรมจาก `board.is_dirty()`
-    ///
-    /// ★ ทำไมต้องถาวร: ข้อความชั่วคราวถูกเขียนทับได้ภายในไม่กี่มิลลิวินาที
-    /// (เกิดจริงกับ "กู้คืนแล้ว — กด Ctrl+S") แล้วผู้ใช้ก็ปิดโปรแกรมทิ้งอีกรอบ
-    pub unsaved: bool,
-    /// ชื่อไฟล์ที่กำลังแก้อยู่ — `None` = ยังไม่เคยบันทึกลงที่ไหน
-    ///
-    /// **ค่าสำหรับแสดงเท่านั้น** · แหล่งความจริงคือ `RefxApp::doc_path`
-    pub doc_name: Option<String>,
     /// ★★★ **สภาวะ: ภาพเก็บไว้ที่ไหน** (P4-5) — ดู [`StorageView`]
     ///
     /// **ค่าสำหรับแสดงเท่านั้น** ชั้น `app` เติมทุกเฟรม
@@ -493,6 +526,11 @@ impl Default for ShellState {
     fn default() -> Self {
         Self {
             mode: Mode::default(),
+            // ★ ว่างจนกว่าชั้น `app` จะเติมเฟรมแรก — `Docs` ไม่ว่างเสมอ
+            tabs: Vec::new(),
+            active_tab: 0,
+            tab_request: None,
+            close_scope_tab: false,
             appearance: None,
             appearance_edit: None,
             missing: None,
@@ -536,8 +574,6 @@ impl Default for ShellState {
             group: None,
             close_prompt: false,
             close_choice: None,
-            unsaved: false,
-            doc_name: None,
             storage: StorageView::default(),
             storage_request: None,
             save_as_prompt: false,
@@ -592,34 +628,50 @@ pub fn draw_in_ui(
             //   ★ จุดนี้ถูกเลือกเพราะมันคือ **ชื่อของเอกสาร** — ที่ที่คนมองหา
             //     คำตอบว่า "ฉันกำลังแก้ไฟล์ไหนอยู่" อยู่แล้วโดยสัญชาตญาณ
             //     และเป็นที่เดียวกับที่โปรแกรมแก้ไขทุกตัวใส่จุด/ดอกจันไว้
-            let title = state
-                .doc_name
-                .as_deref()
-                .unwrap_or_else(|| text::t(lang, Key::UntitledBoard));
-            let tab = if state.unsaved {
-                // ★ เครื่องหมายนำหน้า **ไม่ใช่สี** อย่างเดียว — คนตาบอดสีต้องอ่านออกด้วย
-                //   (สีถูกใช้เสริม ไม่ใช่ใช้แทน)
-                egui::RichText::new(format!("{UNSAVED_MARK} {title}")).color(WARN_COLOR)
-            } else {
-                egui::RichText::new(title.to_owned())
-            };
-            let hint = if state.unsaved {
-                text::t(lang, Key::UnsavedHint)
-            } else {
-                text::t(lang, Key::SavedHint)
-            };
-            // P4-7: หลาย board พร้อมกัน
-            let _ = ui.selectable_label(true, tab).on_hover_text(hint);
+            //
+            //   ★★★ P4-7c: ทุกแท็บมีดาวของตัวเอง — ผู้ใช้ที่เห็นดาวแค่ใบที่อยู่
+            //     หน้าจอจะปิดโปรแกรมโดยเชื่อว่าอีกสามใบสะอาด ซึ่งเป็นลูปเดิม
+            //     ที่ตัวบ่งชี้ถาวรมีไว้แก้พอดี
+            for (index, tab) in state.tabs.iter().enumerate() {
+                let title = tab
+                    .title
+                    .as_deref()
+                    .unwrap_or_else(|| text::t(lang, Key::UntitledBoard));
+                let label = if tab.unsaved {
+                    // ★ เครื่องหมายนำหน้า **ไม่ใช่สี** อย่างเดียว — คนตาบอดสีต้องอ่านออกด้วย
+                    //   (สีถูกใช้เสริม ไม่ใช่ใช้แทน)
+                    egui::RichText::new(format!("{UNSAVED_MARK} {title}")).color(WARN_COLOR)
+                } else {
+                    egui::RichText::new(title.to_owned())
+                };
+                let hint = if tab.unsaved {
+                    text::t(lang, Key::UnsavedHint)
+                } else {
+                    text::t(lang, Key::SavedHint)
+                };
+                if ui
+                    .selectable_label(index == state.active_tab, label)
+                    .on_hover_text(hint)
+                    .clicked()
+                {
+                    state.tab_request = Some(TabRequest::Select(index));
+                }
+                // ★ กากบาทของแท็บ — ทางเดียวกับ `Ctrl+W` เป๊ะ (ถามก่อนถ้ายังไม่บันทึก)
+                if ui
+                    .small_button("x")
+                    .on_hover_text(text::t(lang, Key::CloseTabHint))
+                    .clicked()
+                {
+                    state.tab_request = Some(TabRequest::Close(index));
+                }
+                ui.separator();
+            }
             if ui
                 .button("+")
                 .on_hover_text(text::t(lang, Key::NewBoardHint))
                 .clicked()
             {
-                state.status = text::fill(
-                    lang,
-                    Template::NotImplemented,
-                    &[("what", text::t(lang, Key::NewBoardHint)), ("when", "P4-7")],
-                );
+                state.tab_request = Some(TabRequest::New);
             }
         });
     });
@@ -631,8 +683,15 @@ pub fn draw_in_ui(
     if state.close_prompt {
         egui::Panel::top("refx-close-confirm").show_inside(ui, |ui| {
             ui.horizontal_wrapped(|ui| {
+                // ★ หัวข้อต้องพูดตรงกับ **ขอบเขต** ที่ถาม — ปุ่มชุดเดียวกันแต่
+                //   สิ่งที่หายถ้าตอบผิดต่างกัน (ปิดแท็บใบเดียว vs ปิดทั้งโปรแกรม)
+                let title = if state.close_scope_tab {
+                    Key::CloseTabTitle
+                } else {
+                    Key::CloseUnsavedTitle
+                };
                 ui.label(
-                    egui::RichText::new(text::t(lang, Key::CloseUnsavedTitle))
+                    egui::RichText::new(text::t(lang, title))
                         .strong()
                         .color(WARN_COLOR),
                 );
@@ -2001,13 +2060,19 @@ mod tests {
             //    (แตะธง `dirty` ของ `Board`) เหมือน `close_choice` เป๊ะ
             save_as_choice,
             storage_request,
+            // ★★★ ปุ่มบนแถบแท็บ (P4-7c) — **แรงที่สุดในรายการนี้**: `Close` เอา
+            //    เอกสารทั้งฉบับออกจากจอ · `New` เพิ่มเอกสารใหม่เข้ามา · ทั้งคู่
+            //    เปลี่ยนว่า "เอกสารที่ผู้ใช้กำลังแก้อยู่คือใบไหน" ซึ่งเป็นสิ่งที่
+            //    การสลับ *โหมด* ต้องไม่ทำเด็ดขาด (`docs/03 §4.3`)
+            tab_request,
 
             // ---- สถานะของ *มุมมอง* — เปลี่ยนได้ตามใจ ไม่แตะเอกสาร ----
             mode: _,
+            tabs: _,            // รายชื่อแท็บสำหรับแสดง — อ่านจาก `Docs` ไม่ได้เขียนกลับ
+            active_tab: _,      // ดัชนีที่แสดงว่าใบไหนถูกเน้น — คำขอสลับอยู่ที่ `tab_request`
+            close_scope_tab: _, // คำถามที่ค้างอยู่พูดถึงแท็บหรือทั้งหน้าต่าง
             close_prompt: _,    // บอกแค่ว่าแถบยืนยันโผล่อยู่ไหม ไม่ใช่คำขอแก้อะไร
             recover_prompt: _,  // เหมือนกัน — แค่ "มีอะไรค้างให้ถามไหม"
-            unsaved: _,         // ตัวบ่งชี้สภาวะ อ่านจาก board ไม่ได้เขียนกลับ
-            doc_name: _,        // ชื่อไฟล์สำหรับแสดงบนแท็บ
             save_as_prompt: _,  // แถบถามโหมดโผล่อยู่ไหม — ไม่ใช่คำขอแก้อะไร
             storage: _,         // ★ ตัวบ่งชี้สภาวะของ **ไฟล์** ไม่ใช่ของเอกสารในหน่วยความจำ
             appearance: _,      // ค่าสำหรับแสดงของ inspector
@@ -2059,6 +2124,7 @@ mod tests {
             || storage_request.is_some()
             || *arrange_apply
             || *relink_request
+            || tab_request.is_some()
     }
 
     /// ★★★ **ตัวบ่งชี้ "ยังไม่บันทึก" ต้องอยู่ตราบเท่าที่สภาวะยังอยู่** (docs/03 §1)
@@ -2075,8 +2141,12 @@ mod tests {
     fn the_unsaved_marker_survives_every_status_message_that_lands_on_top() {
         let ctx = egui::Context::default();
         let mut state = ShellState {
-            unsaved: true,
-            doc_name: None,
+            // ★ ตัวบ่งชี้ย้ายมาอยู่บน **แท็บของมันเอง** ตั้งแต่ P4-7c —
+            //   แหล่งความจริงคือ `Doc::board.is_dirty()` ของแต่ละใบ
+            tabs: vec![TabView {
+                title: None,
+                unsaved: true,
+            }],
             ..ShellState::default()
         };
 
@@ -2102,8 +2172,10 @@ mod tests {
 
         // ★ negative control — บันทึกแล้วจุดต้องหายไป ไม่ใช่ค้างอยู่ตลอดกาล
         //   (ตัวบ่งชี้ที่ไม่เคยดับก็ไร้ความหมายเท่ากับตัวที่ไม่เคยติด)
-        state.unsaved = false;
-        state.doc_name = Some("moodboard.refx".to_owned());
+        state.tabs = vec![TabView {
+            title: Some("moodboard.refx".to_owned()),
+            unsaved: false,
+        }];
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -2119,6 +2191,105 @@ mod tests {
         assert!(
             shown.contains("moodboard.refx"),
             "บันทึกแล้วต้องเห็นชื่อไฟล์ที่กำลังแก้อยู่ — ไม่งั้นผู้ใช้ไม่รู้ว่าแก้ไฟล์ไหน"
+        );
+    }
+
+    /// ★★★ **ทุกแท็บโชว์สภาวะของตัวเอง ไม่ใช่ของใบที่ผู้ใช้กำลังดู** (P4-7c)
+    ///
+    /// ผู้ใช้ที่เห็นดาวแค่ใบเดียวจะปิดโปรแกรมโดยเชื่อว่าอีกสามใบสะอาด ซึ่งเป็น
+    /// ลูปเดิมที่ตัวบ่งชี้ถาวรมีไว้แก้พอดี (`docs/03 §1`) — แค่ย้ายมาโผล่ตอนที่
+    /// มีหลายเอกสารพร้อมกัน
+    #[test]
+    fn every_tab_shows_its_own_unsaved_state() {
+        let ctx = egui::Context::default();
+        let mut state = ShellState {
+            tabs: vec![
+                TabView {
+                    title: Some("clean.refx".to_owned()),
+                    unsaved: false,
+                },
+                TabView {
+                    // ★ ใบที่ค้างอยู่คือใบที่ **ไม่ได้** ถูกเลือก
+                    title: Some("dirty.refx".to_owned()),
+                    unsaved: true,
+                },
+            ],
+            active_tab: 0,
+            ..ShellState::default()
+        };
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input.clone(), |ui| {
+            let _ = draw_in_ui(ui, &mut state, |_, _| {});
+        });
+        let shown = shell_text(&output);
+        assert!(shown.contains("clean.refx"), "แท็บที่บันทึกแล้วไม่ขึ้นบนจอ");
+        assert!(shown.contains("dirty.refx"), "แท็บที่ค้างอยู่ไม่ขึ้นบนจอ");
+        assert!(
+            shown.contains(&format!("{UNSAVED_MARK} dirty.refx")),
+            "แท็บที่ไม่ได้ถูกเลือกไม่มีตัวบ่งชี้ 'ยังไม่บันทึก' ของตัวเอง"
+        );
+        assert!(
+            !shown.contains(&format!("{UNSAVED_MARK} clean.refx")),
+            "แท็บที่บันทึกแล้วกลับมีดาว — ตัวบ่งชี้ที่ไม่เคยดับก็ไร้ความหมาย"
+        );
+
+        // ★ negative control ของ *ที่มา*: ธงอยู่ที่แท็บ ไม่ใช่ที่ตัวแปรรวม
+        state.tabs[1].unsaved = false;
+        let output = ctx.run_ui(input, |ui| {
+            let _ = draw_in_ui(ui, &mut state, |_, _| {});
+        });
+        assert!(
+            !shell_text(&output).contains(UNSAVED_MARK),
+            "ทุกใบสะอาดแล้วยังมีดาวค้าง — ประตูนี้ไม่ล้มเป็น"
+        );
+    }
+
+    /// ★★ ปุ่มบนแถบแท็บเป็น **คำขอ** ไม่ใช่การลงมือ (docs/08 §4 ข้อ 10)
+    ///
+    /// widget ปิดเอกสารเองไม่ได้ — การปิดแท็บที่ยังไม่บันทึกต้องผ่านคำถามของ
+    /// ชั้น `app` ก่อนเสมอ · ที่นี่พิสูจน์ว่ามันรายงาน **ดัชนีที่กดจริง**
+    #[test]
+    fn the_tab_strip_reports_which_tab_was_touched() {
+        let ctx = egui::Context::default();
+        let mut state = ShellState {
+            tabs: vec![
+                TabView {
+                    title: Some("a.refx".to_owned()),
+                    unsaved: false,
+                },
+                TabView {
+                    title: Some("b.refx".to_owned()),
+                    unsaved: false,
+                },
+            ],
+            active_tab: 0,
+            ..ShellState::default()
+        };
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let _ = ctx.run_ui(input, |ui| {
+            let _ = draw_in_ui(ui, &mut state, |_, _| {});
+        });
+        assert_eq!(
+            state.tab_request, None,
+            "แค่วาดเฉย ๆ แล้วมีคำขอโผล่มาเอง — แท็บจะสลับ/ปิดตัวเองทุกเฟรม"
+        );
+        // ★ และมันถูกนับเป็นช่องทางที่แตะเอกสารได้ (ปิดแท็บ = เอาเอกสารออกจากจอ)
+        state.tab_request = Some(TabRequest::Close(1));
+        assert!(
+            asks_to_touch_the_document(&state),
+            "ปุ่มปิดแท็บไม่ถูกนับเป็นช่องทางที่แตะเอกสาร"
         );
     }
 

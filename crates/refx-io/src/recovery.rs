@@ -227,7 +227,19 @@ pub struct Orphan {
     pub asked: bool,
 }
 
-/// ★ ไล่ดูโฟลเดอร์ recovery — **ใหม่สุดก่อน** · ไม่รวม session ปัจจุบัน
+/// ★ ไล่ดูโฟลเดอร์ recovery — **ใหม่สุดก่อน** · ไม่รวม session ที่ยังมีชีวิต
+///
+/// ★★★ **`live` คือ session ของ *ทุกแท็บ* ที่เปิดอยู่ ไม่ใช่ตัวเดียว** (P4-7c)
+///
+/// ก่อนมีแท็บ โปรเซสหนึ่งมี session เดียว พารามิเตอร์นี้จึงเคยเป็น
+/// `&SessionId` · พอแต่ละแท็บมี recovery slot ของตัวเอง (ไม่งั้นสองแท็บที่
+/// ยังไม่บันทึกจะเขียนทับ snapshot ของกันและกัน = งานหาย) การส่งเข้ามาแค่
+/// ตัวเดียวจะทำให้ **แท็บอื่นที่เปิดอยู่ถูกอ่านว่าเป็นงานกำพร้าจาก session
+/// ก่อน** แล้วผู้ใช้จะถูกชวนให้ "กู้คืน" งานที่อยู่ตรงหน้าเขาอยู่แล้ว —
+/// หรือแย่กว่านั้นคือกด "ทิ้งไป" แล้วลบ snapshot ของแท็บที่ยังทำงานอยู่
+///
+/// → รับเป็น **สไลซ์** เพื่อให้ผู้เรียกส่งไม่ครบไม่ได้โดยไม่ตั้งใจ
+/// (`docs/08 §3.9` ข้อ 8.1: API ที่ถูกได้ทางเดียวดีกว่า API ที่ต้องใช้ให้ถูก)
 ///
 /// ★★ **แตะดิสก์ ห้ามเรียกบน UI thread** (I-2) — ผู้เรียกต้องพามันไป worker
 ///
@@ -238,16 +250,18 @@ pub struct Orphan {
 /// ไฟล์ที่อ่านไม่ออก/ไม่ใช่ `.refx` ถูกข้ามเงียบ ๆ — **ไม่ใช่ error**
 /// (I-4: ทุกไฟล์คือ input ที่ไม่น่าไว้ใจ · ใครก็วางไฟล์อะไรไว้ตรงนั้นได้)
 #[must_use]
-pub fn scan(dir: &Path, current: &SessionId) -> Vec<Orphan> {
+pub fn scan(dir: &Path, live: &[SessionId]) -> Vec<Orphan> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new(); // ยังไม่เคยมีโฟลเดอร์ = ไม่มีอะไรค้าง
     };
-    let mine = snapshot_path(dir, current);
+    let mine: Vec<PathBuf> = live.iter().map(|id| snapshot_path(dir, id)).collect();
 
     let mut found: Vec<Orphan> = entries
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .filter(|path| path.extension().is_some_and(|ext| ext == SNAPSHOT_EXT) && *path != mine)
+        .filter(|path| {
+            path.extension().is_some_and(|ext| ext == SNAPSHOT_EXT) && !mine.contains(path)
+        })
         .filter_map(|path| {
             let meta = std::fs::metadata(&path).ok()?;
             if !meta.is_file() {
@@ -319,15 +333,18 @@ pub struct Pruned {
 ///
 /// ★ นับเฉพาะ snapshot ที่ **ไม่มีเจ้าของแล้ว** — ของ session ที่กำลังทำงานอยู่
 /// ไม่ถูกนับและไม่ถูกแตะ (มันยังถูกเขียนทับอยู่ทุกรอบ autosave)
+///
+/// ★★★ `live` = session ของ **ทุกแท็บที่เปิดอยู่** ด้วยเหตุผลเดียวกับ [`scan`]
+/// — ส่งไม่ครบเมื่อไหร่ เพดานจะลบ snapshot ของแท็บที่ยังทำงานอยู่
 pub fn prune(
     dir: &Path,
-    current: &SessionId,
+    live: &[SessionId],
     keep: usize,
     max_age: Duration,
     now: SystemTime,
 ) -> Pruned {
     let mut result = Pruned::default();
-    for (index, orphan) in scan(dir, current).into_iter().enumerate() {
+    for (index, orphan) in scan(dir, live).into_iter().enumerate() {
         let too_old = orphan
             .written_at
             .is_some_and(|at| now.duration_since(at).is_ok_and(|age| age > max_age));
@@ -418,6 +435,41 @@ mod tests {
         assert_ne!(snapshot_path(&dir, &ids[0]), snapshot_path(&dir, &ids[1]));
     }
 
+    /// ★★★ **แท็บที่เปิดอยู่ต้องไม่ถูกอ่านว่าเป็นงานกำพร้า** (P4-7c)
+    ///
+    /// สองแท็บที่ยังไม่เคยบันทึกมี recovery slot คนละไฟล์ · ถ้า [`scan`] รู้จัก
+    /// แค่ session เดียว อีกแท็บจะโผล่มาเป็น "งานค้างจากรอบก่อน" ทั้งที่มันอยู่
+    /// ตรงหน้าผู้ใช้ — แล้วปุ่ม *ทิ้งไป* จะลบ snapshot ของแท็บที่ยังทำงานอยู่
+    /// ซึ่งคือการทำงานหายด้วยกลไกที่สร้างมากันงานหายพอดี (I-3)
+    ///
+    /// ★ negative control อยู่ในตัว: ส่งไปแค่ตัวเดียวแล้วต้องเห็นอีกตัวเป็น orphan
+    #[test]
+    fn every_open_tab_is_excluded_not_just_one() {
+        let dir = temp_dir("live-tabs");
+        let tab_a = SessionId::new_unique();
+        let tab_b = SessionId::new_unique();
+        for id in [&tab_a, &tab_b] {
+            write_snapshot(&dir, id, &board_named("live", 2), rename_durable).unwrap();
+        }
+
+        assert!(
+            scan(&dir, &[tab_a.clone(), tab_b.clone()]).is_empty(),
+            "แท็บที่เปิดอยู่ถูกอ่านว่าเป็นงานกำพร้า"
+        );
+        // negative control — บอกไม่ครบแล้วต้องเห็นตัวที่ตกหล่นทันที
+        let missed = scan(&dir, std::slice::from_ref(&tab_a));
+        assert_eq!(missed.len(), 1, "ประตูนี้ไม่ล้มเป็น");
+        assert_eq!(missed[0].path, snapshot_path(&dir, &tab_b));
+
+        // ★ และเพดานต้องไม่แตะแท็บที่ยังมีชีวิตด้วยเหตุผลเดียวกัน
+        for id in [&tab_a, &tab_b] {
+            mark_asked(&snapshot_path(dir.as_path(), id));
+        }
+        let pruned = prune(&dir, &[tab_a, tab_b], 0, MAX_AGE, SystemTime::now());
+        assert_eq!(pruned.removed, 0, "เพดานลบ snapshot ของแท็บที่เปิดอยู่");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// รหัสต้องใช้เป็นชื่อไฟล์ได้ตรง ๆ — ไม่มีตัวคั่น path และไม่มีจุด
     ///
     /// ★ จุดสำคัญเป็นพิเศษ: `asked_marker` ใช้ `with_extension` ซึ่งจะกิน
@@ -457,7 +509,7 @@ mod tests {
 
         // เปิดโปรแกรมใหม่ = session ใหม่ ซึ่งไม่รู้อะไรเกี่ยวกับ session เก่าเลย
         let next = SessionId::new_unique();
-        let orphans = scan(&dir, &next);
+        let orphans = scan(&dir, std::slice::from_ref(&next));
         assert_eq!(orphans.len(), 1, "เปิดใหม่แล้วไม่เห็นงานที่ค้างอยู่");
         let back = load(&orphans[0].path, board_id()).expect("อ่าน snapshot ไม่ได้");
         assert_eq!(back, board, "กู้กลับมาแล้วไม่เท่าเดิม");
@@ -493,7 +545,7 @@ mod tests {
         let dir = temp_dir("self");
         let session = SessionId::new_unique();
         write_snapshot(&dir, &session, &board_named("mine", 2), rename_durable).unwrap();
-        assert!(scan(&dir, &session).is_empty());
+        assert!(scan(&dir, std::slice::from_ref(&session)).is_empty());
     }
 
     /// บันทึกลง path จริงสำเร็จ = ทิ้ง snapshot **พร้อมบริวารทั้งหมด**
@@ -521,7 +573,7 @@ mod tests {
         assert!(!snapshot.exists());
         assert!(!backup.exists(), "ของที่รุ่นเก่าทิ้งไว้ยังอยู่");
         assert!(!asked_marker(&snapshot).exists());
-        assert!(scan(&dir, &SessionId::new_unique()).is_empty());
+        assert!(scan(&dir, &[SessionId::new_unique()]).is_empty());
         discard(&dir, &session); // ทิ้งซ้ำต้องเงียบ ไม่ใช่ล้ม
     }
 
@@ -544,7 +596,7 @@ mod tests {
         assert!(load(&path, board_id()).is_none());
         // ★ แต่ยังต้อง **โผล่ในรายการ** — ผู้เรียกเป็นคนตัดสินว่าจะทำอะไรกับมัน
         //   การหายไปเงียบ ๆ แปลว่าไฟล์เสียจะค้างอยู่ตลอดกาลโดยไม่มีใครเก็บกวาด
-        assert_eq!(scan(&dir, &SessionId::new_unique()).len(), 1);
+        assert_eq!(scan(&dir, &[SessionId::new_unique()]).len(), 1);
     }
 
     /// ขยะที่ไม่ใช่ `.refx` ในโฟลเดอร์ต้องถูกข้าม ไม่ใช่ทำให้ทั้งการสแกนล้ม (I-4)
@@ -557,7 +609,7 @@ mod tests {
         std::fs::write(dir.join("no-extension"), b"...").unwrap();
         std::fs::create_dir_all(dir.join("weird.refx")).unwrap(); // โฟลเดอร์ที่ชื่อเหมือนไฟล์
 
-        let found = scan(&dir, &SessionId::new_unique());
+        let found = scan(&dir, &[SessionId::new_unique()]);
         assert_eq!(found.len(), 1, "สแกนได้ของที่ไม่ควรได้: {found:#?}");
         assert!(
             found[0]
@@ -573,7 +625,7 @@ mod tests {
     #[test]
     fn scanning_a_folder_that_does_not_exist_is_quiet() {
         let dir = temp_dir("missing").join("never-created");
-        assert!(scan(&dir, &SessionId::new_unique()).is_empty());
+        assert!(scan(&dir, &[SessionId::new_unique()]).is_empty());
     }
 
     /// ★ เขียนได้แม้โฟลเดอร์ถูกลบทิ้งระหว่างโปรแกรมเปิดค้างอยู่
@@ -602,11 +654,17 @@ mod tests {
         }
         let current = SessionId::new_unique();
 
-        let pruned = prune(&dir, &current, MAX_KEPT, MAX_AGE, SystemTime::now());
+        let pruned = prune(
+            &dir,
+            std::slice::from_ref(&current),
+            MAX_KEPT,
+            MAX_AGE,
+            SystemTime::now(),
+        );
 
         assert_eq!(pruned.removed, 0, "ลบไฟล์ที่ผู้ใช้ยังไม่เคยเห็น");
         assert_eq!(pruned.kept_because_unasked, 5);
-        assert_eq!(scan(&dir, &current).len(), 15);
+        assert_eq!(scan(&dir, std::slice::from_ref(&current)).len(), 15);
     }
 
     /// ★ negative control ของข้อบน — ไฟล์ที่ **เคยถามแล้ว** ต้องถูกเก็บกวาดจริง
@@ -622,11 +680,17 @@ mod tests {
         }
         let current = SessionId::new_unique();
 
-        let pruned = prune(&dir, &current, MAX_KEPT, MAX_AGE, SystemTime::now());
+        let pruned = prune(
+            &dir,
+            std::slice::from_ref(&current),
+            MAX_KEPT,
+            MAX_AGE,
+            SystemTime::now(),
+        );
 
         assert_eq!(pruned.removed, 5, "เพดานไม่ทำงาน");
         assert_eq!(pruned.kept_because_unasked, 0);
-        assert_eq!(scan(&dir, &current).len(), MAX_KEPT);
+        assert_eq!(scan(&dir, std::slice::from_ref(&current)).len(), MAX_KEPT);
     }
 
     /// ★ เก่ากว่า 30 วันก็ถูกเก็บกวาด ถึงจะยังไม่เกินจำนวนก็ตาม
@@ -641,7 +705,13 @@ mod tests {
 
         // ★ เดินนาฬิกาเอง ไม่ได้รอ 30 วันจริง (§3.9 ข้อ 5b)
         let in_40_days = SystemTime::now() + Duration::from_secs(40 * 24 * 60 * 60);
-        let pruned = prune(&dir, &current, MAX_KEPT, MAX_AGE, in_40_days);
+        let pruned = prune(
+            &dir,
+            std::slice::from_ref(&current),
+            MAX_KEPT,
+            MAX_AGE,
+            in_40_days,
+        );
 
         assert_eq!(pruned.removed, 1, "ไฟล์เก่าที่เคยถามแล้วต้องถูกลบ");
         assert_eq!(pruned.kept_because_unasked, 1);
@@ -663,7 +733,13 @@ mod tests {
         }
         let current = SessionId::new_unique();
 
-        let pruned = prune(&dir, &current, 2, MAX_AGE, SystemTime::now());
+        let pruned = prune(
+            &dir,
+            std::slice::from_ref(&current),
+            2,
+            MAX_AGE,
+            SystemTime::now(),
+        );
 
         assert_eq!(pruned.removed, 4);
         assert!(planted[5].exists() && planted[4].exists(), "ตัวใหม่สุดหายไป");
@@ -682,7 +758,7 @@ mod tests {
 
         let pruned = prune(
             &dir,
-            &SessionId::new_unique(),
+            &[SessionId::new_unique()],
             0,
             MAX_AGE,
             SystemTime::now(),
@@ -808,7 +884,7 @@ mod tests {
 
             // ---- เปิดโปรแกรมใหม่: session ใหม่ที่ไม่รู้อะไรเกี่ยวกับรอบก่อนเลย ----
             let next = SessionId::new_unique();
-            let orphans = scan(&dir, &next);
+            let orphans = scan(&dir, std::slice::from_ref(&next));
             let Some(orphan) = orphans.first() else {
                 nothing_yet += 1;
                 continue;

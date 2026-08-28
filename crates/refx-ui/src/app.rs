@@ -535,6 +535,56 @@ fn open_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> bool {
     matches!(pressed, Some('o' | '\u{f}'))
 }
 
+/// ★★★ คีย์ของแท็บ (`docs/03 §5` — P4-7c)
+///
+/// | คีย์ | ทำอะไร |
+/// |---|---|
+/// | `Ctrl+T` | board เปล่าใบใหม่ |
+/// | `Ctrl+W` | ปิดแท็บ — **ถามก่อนถ้ายังไม่บันทึก** |
+/// | `Ctrl+Tab` | แท็บถัดไป |
+///
+/// (`Ctrl+O` อยู่ที่ [`open_shortcut`] เพราะมันมีความหมายมาก่อนโครงแท็บ)
+///
+/// ★ เป็นฟังก์ชันบริสุทธิ์เหมือนคีย์ลัดตัวอื่นทุกตัว — เทสต์ได้โดยไม่ต้องมีหน้าต่าง
+/// และเป็นที่เดียวที่ตัดสิน จึงไม่มี `if key == …` กระจายอยู่ใน `on_input`
+fn tab_shortcut(
+    pressed: Option<char>,
+    key: &winit::keyboard::Key,
+    modifiers: ModifiersState,
+) -> Option<TabKey> {
+    if !modifiers.control_key() || modifiers.alt_key() {
+        return None;
+    }
+    // ★ `Ctrl+Tab` มาเป็น **named key** ไม่ใช่อักขระ — `shortcut_char` มองไม่เห็น
+    //   (นี่คือเหตุผลเดียวกับที่ `is_delete` รับ `Key` ดิบ)
+    if matches!(
+        key,
+        winit::keyboard::Key::Named(winit::keyboard::NamedKey::Tab)
+    ) {
+        return Some(TabKey::Next);
+    }
+    if modifiers.shift_key() {
+        return None; // `Ctrl+Shift+T`/`W` ยังไม่มีความหมาย — ต้องเงียบ
+    }
+    match pressed? {
+        // บางระบบส่งมาเป็นอักขระ control (DC4 / ETB) — เหมือน `Ctrl+S`/`Ctrl+O`
+        't' | '\u{14}' => Some(TabKey::New),
+        'w' | '\u{17}' => Some(TabKey::Close),
+        _ => None,
+    }
+}
+
+/// ปุ่มของแท็บที่ผู้ใช้เพิ่งกด
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TabKey {
+    /// `Ctrl+T`
+    New,
+    /// `Ctrl+W`
+    Close,
+    /// `Ctrl+Tab`
+    Next,
+}
+
 /// ผู้ใช้ขออะไรกับการบันทึก (P4-2)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SaveRequest {
@@ -552,6 +602,10 @@ enum AfterSave {
     Stay,
     /// ปิดโปรแกรม — ผู้ใช้เลือก "บันทึกแล้วปิด" ตอนถูกถาม
     Close,
+    /// ★ ปิด **แท็บใบนี้** — ผู้ใช้กด `Ctrl+W` บนแท็บที่ยังไม่บันทึกแล้วเลือก
+    /// "บันทึกแล้วปิด" · ระบุด้วย id ไม่ใช่ดัชนี เพราะแท็บอื่นถูกปิดระหว่างที่
+    /// ไฟล์กำลังเขียนได้ แล้วดัชนีจะเลื่อนไปปิดผิดใบ
+    CloseTab(refx_core::arena::BoardId),
 }
 
 /// ผู้ใช้ขออะไรกับกลุ่ม (P3-7)
@@ -658,6 +712,12 @@ fn clear_colour(board: &Board) -> wgpu::Color {
 /// แจกคีย์ชุดเดียวกันเป๊ะ — ปล่อยให้ตัวไหนหลุดไปอยู่ที่อื่น แท็บหนึ่งจะอ่าน
 /// สถานะของอีกแท็บโดยไม่มีอะไรฟ้อง (นั่นคือสิ่งที่ชิ้น c ต้องยืนอยู่บน)
 struct Doc {
+    /// ★★★ id ของ board ใบนี้ — **แจกไม่ซ้ำจริง** ([`Docs::mint`])
+    ///
+    /// `ItemId` เป็นแค่ `index+generation` **ไม่ผูกกับ board** (`docs/02 §1`)
+    /// สองเอกสารจึงแจก `ItemId` ชุดเดียวกันเป๊ะ · id นี้คือสิ่งเดียวที่แยก
+    /// "งานที่กลับมาจาก worker เป็นของแท็บไหน" ออกจากกันได้
+    id: refx_core::arena::BoardId,
     /// ★ เอกสารของผู้ใช้ — แหล่งความจริงเดียวของเรขาคณิตและลำดับชั้น
     board: Board,
     /// undo/redo — ทุกการแก้ `board` ผ่านที่นี่ (I-3)
@@ -684,11 +744,69 @@ struct Doc {
     arrange: crate::arrange::ArrangeView,
     /// กล้อง pan/zoom (P0-7)
     camera: Camera,
+
+    // ---------- ★★★ P4-7c: ของที่ย้ายมาจาก `RefxApp` ----------
+    //
+    // ทุกตัวข้างล่างนี้ตอบคำถามที่ขึ้นต้นด้วย *"เอกสารฉบับนี้…"* — วางไว้ที่
+    // ระดับแอปเมื่อไหร่ แท็บที่สองจะเขียนทับคำตอบของแท็บแรกทันทีที่มันเกิด
+    /// ★ ที่อยู่ของเอกสารนี้ — `None` = ยังไม่เคยบันทึก
+    path: Option<std::path::PathBuf>,
+    /// ★★★ โหมดการบันทึกของเอกสารนี้ (P4-5) — **สภาวะ ไม่ใช่เหตุการณ์**
+    ///
+    /// เปลี่ยนได้จากสองทางเท่านั้น: อนุมานจากตารางตอน**เปิด** กับ สิ่งที่ผู้ใช้
+    /// สั่งตอน**บันทึกสำเร็จ** — ห้ามอนุมานใหม่ทุกครั้งที่บันทึก (§4 ข้อ 29)
+    save_mode: refx_io::packed::SaveMode,
+    /// ★★ asset table ของเอกสารนี้ — ว่าง = ไม่มีภาพฝังอยู่
+    assets: refx_io::packed::Index,
+    /// ★★★ **recovery slot ของแท็บนี้เอง** (`<data_dir>/recovery/<session>.refx`)
+    ///
+    /// ก่อน P4-7c มี session เดียวต่อโปรเซส · สองแท็บที่ยังไม่เคยบันทึกจะเขียน
+    /// **ไฟล์เดียวกัน** ทับกันไปมาทุก 10 วินาที แล้วเปิดใหม่ได้งานคืนแค่ใบเดียว
+    /// โดยไม่มีอะไรบอกว่าอีกใบเคยมีอยู่ — I-3 ที่เงียบที่สุดแบบหนึ่ง
+    ///
+    /// `SessionId::new_unique()` ออกแบบมารองรับข้อนี้อยู่แล้ว (มีตัวนับในโปรเซส
+    /// เพราะเทสต์ `two_instances_never_share_a_recovery_file` จับได้ตั้งแต่ P4-4)
+    session: refx_io::recovery::SessionId,
+    /// ★★★ `board.revision()` ของ snapshot ล่าสุดที่ส่งไปเขียน — `None` = ยังไม่เคย
+    ///
+    /// **`dirty` อย่างเดียวตอบคำถามผิด** เมื่อรวมกับการปลุกตามเวลา: `dirty`
+    /// เป็นจริงยาวจนกว่าจะ `Ctrl+S` จริง ๆ ดังนั้น board ที่ถูกปล่อยทิ้งไว้
+    /// จะถูกปลุกมาเขียน snapshot ที่ **เนื้อหาเหมือนเดิมเป๊ะ** ทุก 10 วินาที
+    /// ตลอดทั้งวัน — ผิดทั้ง I-1 และข้อ "ห้ามแย่ง CPU กับ Photoshop"
+    snapshot_revision: Option<u64>,
+    /// ★ นโยบาย autosave ของแท็บนี้ — `dirty` เท่านั้น + เว้นระยะ (P4-3)
+    ///
+    /// ★★ **นาฬิกาต้องเป็นของแต่ละแท็บ** ไม่ใช่ของแอป: ตัวเดียวกลาง ๆ จะทำให้
+    /// แท็บที่เพิ่งเขียนไปกดเบรกให้แท็บอื่นที่ยังไม่เคยเขียนเลย — แท็บที่ผู้ใช้
+    /// สลับไปมาเร็ว ๆ จะมีบางใบที่ไม่เคยถูก snapshot เลยสักครั้ง
+    autosaver: refx_io::autosave::Autosaver,
+    /// งาน autosave ของแท็บนี้ที่ส่งไปเธรดแล้ว — กันไม่ให้ซ้อนกันสองงาน
+    autosave_job: Option<crossbeam_channel::Receiver<Result<(), String>>>,
+    /// ★★★ snapshot เก่าที่เพิ่ง "เอากลับมา" — รอให้แท็บนี้เขียนของตัวเองก่อน
+    ///
+    /// ลบทันทีไม่ได้ (จะมีช่วงที่งานไม่มีสำเนาบนดิสก์เลย) · ไม่ลบเลยก็ไม่ได้
+    /// (จะถูกเสนอให้กู้ซ้ำทุกครั้งที่เปิดโปรแกรม) → ลบหลัง snapshot ของแท็บนี้
+    /// ลงดิสก์สำเร็จ ซึ่งเป็นจังหวะแรกที่มีสำเนาสองชุดพร้อมกัน
+    adopted_recovery: Option<std::path::PathBuf>,
+    /// ★ `.kept` ที่เพิ่งกู้กลับมา — ลบหลัง snapshot ของแท็บนี้ลงดิสก์แล้ว
+    adopted_kept: Option<std::path::PathBuf>,
+    /// ★★★ งานของ **เอกสารฉบับนี้** ที่ยังไม่เคยไปถึงไฟล์ (`<doc>.refx.autosave`)
+    pending_snapshot: Option<Box<refx_io::autosave::Pending>>,
+    /// ★★★ งานที่ผู้ใช้เคยสั่ง **"เก็บไว้ก่อน"** ของเอกสารฉบับนี้ (`docs/07 §4`)
+    pending_kept: Option<Box<refx_io::autosave::Pending>>,
+    /// ★★★ คีย์งาน decode → `ItemId` **ของแท็บนี้** ที่ผลลัพธ์ต้องไปเกาะ
+    ///
+    /// ★★ ต้องอยู่ต่อแท็บเพราะค่าคือ `ItemId` ซึ่งไม่ผูกกับ board — เก็บรวมกัน
+    /// ที่ระดับแอปเมื่อไหร่ ภาพของแท็บหนึ่งจะไปโผล่ทับ item ของอีกแท็บที่บังเอิญ
+    /// ได้ `ItemId` เดียวกัน (ซึ่งเกิดแทบทุกครั้ง เพราะ arena เริ่มนับจาก 0 เสมอ)
+    relink_targets: std::collections::HashMap<refx_asset::hash::ContentHash, ItemId>,
 }
 
-impl Default for Doc {
-    fn default() -> Self {
+impl Doc {
+    /// เอกสารเปล่าใบใหม่ที่มี id และ recovery slot ของตัวเอง
+    fn empty(id: refx_core::arena::BoardId) -> Self {
         Self {
+            id,
             board: Board::default(),
             history: History::default(),
             index: SpatialIndex::new(refx_core::spatial::DEFAULT_CELL_SIZE),
@@ -700,7 +818,184 @@ impl Default for Doc {
             arrange: crate::arrange::ArrangeView::new(),
             // เริ่มที่กลาง world ของ demo เพื่อให้เห็นสี่เหลี่ยมทันทีที่เปิด
             camera: Camera::new(Vec2::splat(2000.0), 0.25),
+            path: None,
+            save_mode: refx_io::packed::SaveMode::default(),
+            assets: refx_io::packed::Index::default(),
+            session: refx_io::recovery::SessionId::new_unique(),
+            snapshot_revision: None,
+            autosaver: refx_io::autosave::Autosaver::default(),
+            autosave_job: None,
+            adopted_recovery: None,
+            adopted_kept: None,
+            pending_snapshot: None,
+            pending_kept: None,
+            relink_targets: std::collections::HashMap::new(),
         }
+    }
+
+    /// ★★★ แก้ `board` ผ่าน `Command` — **ทางเดียวที่ `Board` ถูกแก้** (docs/08 §4 ข้อ 10)
+    ///
+    /// ★ เป็นเมธอดบน `Doc` เพราะ `history` กับ `board` ต้องยืมพร้อมกัน ซึ่ง
+    /// เขียนที่จุดเรียกไม่ได้เมื่อ `Doc` อยู่หลัง `Docs::active_mut()` — และการ
+    /// รวมไว้ที่นี่ทำให้ **ลืมเอาไปใส่ history ไม่ได้** (API ที่ถูกได้ทางเดียว)
+    ///
+    /// # Errors
+    /// สิ่งที่ `History::apply` คืน — ปกติคือ "คำสั่งนี้ไม่ได้เปลี่ยนอะไร"
+    fn apply(
+        &mut self,
+        command: Box<dyn refx_core::command::Command>,
+    ) -> Result<(), refx_core::command::CmdError> {
+        self.history.apply(&mut self.board, command)
+    }
+
+    /// เอา item ใบหนึ่งเข้า `SpatialIndex` ให้ตรงกับ `board` ตอนนี้
+    fn reindex(&mut self, id: ItemId) {
+        let Some(item) = self.board.item(id) else {
+            return;
+        };
+        let canvas = item.canvas;
+        self.index.insert(id, &canvas);
+    }
+
+    /// ★★ ชื่อที่ขึ้นบนแท็บ — `None` = ยังไม่เคยบันทึกลงที่ไหน
+    fn name(&self) -> Option<String> {
+        self.path.as_ref().and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+    }
+
+    /// ★★★ แท็บนี้ยังไม่ว่างเปล่าและยังไม่เคยถูกแตะเลยหรือเปล่า
+    ///
+    /// ใช้ตัดสินว่าเอกสารที่เพิ่งเปิดควร **แทนที่แท็บนี้** หรือควรได้แท็บใหม่ —
+    /// เปิดไฟล์แรกแล้วเหลือแท็บเปล่าค้างไว้ข้าง ๆ คือขยะที่ผู้ใช้ต้องมาปิดเอง
+    /// ส่วนการแทนที่แท็บที่มีงานอยู่คือสิ่งที่โครงแท็บมีไว้แก้พอดี (`docs/03 §5`)
+    fn is_untouched(&self) -> bool {
+        self.path.is_none() && self.board.is_empty() && !self.board.is_dirty()
+    }
+}
+
+/// ★★★ **แท็บทั้งหมดที่เปิดอยู่** — `refx-core` ไม่รู้จักคำว่าแท็บ (`docs/02 §2.10`)
+///
+/// เอกสารฉบับแรกวาง `Workspace { boards, active, order }` ไว้ใน `refx-core`
+/// แล้ว**ยกเลิก** เพราะครึ่งหนึ่งของสิ่งที่เป็น "ต่อแท็บ" จริง ๆ (`History` ·
+/// `Selection` · `render_state` · camera · ช่องใน atlas · `SpatialIndex`)
+/// อยู่ในชั้น UI/GPU ซึ่ง core พึ่งไม่ได้ · ทำตามตัวอักษรจะได้ **แหล่งความจริง
+/// ที่สอง** ที่ต้องคอยซิงค์กัน
+///
+/// ★ ไม่ว่างเสมอ — ปิดแท็บสุดท้ายแล้วได้ board เปล่าใบใหม่แทน ไม่ใช่สภาพ
+/// "ไม่มีเอกสาร" ที่ทุกฟังก์ชันต้องเช็คเพิ่มอีกหนึ่งกิ่ง
+struct Docs {
+    /// **ห้ามว่าง** — ดู [`Docs::close`]
+    list: Vec<Doc>,
+    /// ดัชนีของแท็บที่ผู้ใช้กำลังดูอยู่ — อยู่ในช่วงของ `list` เสมอ
+    active: usize,
+    /// ★★★ ตัวแจก [`refx_core::arena::BoardId`] — **เดินหน้าอย่างเดียว ไม่วนกลับ**
+    ///
+    /// id ที่ถูกใช้ซ้ำหลังปิดแท็บจะทำให้ผลงาน decode ที่ยังค้างอยู่ในคิวของแท็บ
+    /// ที่ตายไปแล้ว **ไปเกาะแท็บใหม่ที่บังเอิญได้ id เดิม** — ภาพโผล่ผิดเอกสาร
+    /// โดยไม่มี error ที่ไหน
+    next_id: u32,
+}
+
+impl Default for Docs {
+    fn default() -> Self {
+        let mut docs = Self {
+            list: Vec::new(),
+            active: 0,
+            next_id: 0,
+        };
+        let id = docs.mint();
+        docs.list.push(Doc::empty(id));
+        docs
+    }
+}
+
+impl Docs {
+    /// id ใบใหม่ที่ยังไม่เคยถูกแจก
+    fn mint(&mut self) -> refx_core::arena::BoardId {
+        use refx_core::arena::ArenaKey as _;
+        let raw = self.next_id;
+        // ล้นแล้ววนกลับดีกว่าล้มทั้งโปรแกรม — ต้องเปิด/ปิดแท็บ 4 พันล้านครั้ง
+        // ในการรันเดียวถึงจะไปถึง ซึ่งไม่ใช่สภาพที่มีอยู่จริง
+        self.next_id = self.next_id.wrapping_add(1);
+        refx_core::arena::BoardId::from_parts(raw, 0)
+    }
+
+    fn active(&self) -> &Doc {
+        // ★ `list` ไม่ว่างเสมอ · `get` แทน index เพื่อไม่ให้มี panic บนเส้นทางนี้เลย
+        self.list.get(self.active).unwrap_or_else(|| {
+            debug_assert!(false, "แท็บที่เลือกอยู่หลุดออกนอกช่วง");
+            &self.list[0]
+        })
+    }
+
+    fn active_mut(&mut self) -> &mut Doc {
+        let index = self.active.min(self.list.len().saturating_sub(1));
+        self.active = index;
+        &mut self.list[index]
+    }
+
+    /// แท็บที่มี id นี้ — `None` = ถูกปิดไปแล้วระหว่างที่งานเดินอยู่
+    fn by_id_mut(&mut self, id: refx_core::arena::BoardId) -> Option<&mut Doc> {
+        self.list.iter_mut().find(|doc| doc.id == id)
+    }
+
+    fn iter(&self) -> std::slice::Iter<'_, Doc> {
+        self.list.iter()
+    }
+
+    fn iter_mut(&mut self) -> std::slice::IterMut<'_, Doc> {
+        self.list.iter_mut()
+    }
+
+    fn len(&self) -> usize {
+        self.list.len()
+    }
+
+    /// ★ session ของ **ทุกแท็บที่เปิดอยู่** — ตัวที่ `recovery::scan`/`prune` ต้องรู้
+    fn live_sessions(&self) -> Vec<refx_io::recovery::SessionId> {
+        self.list.iter().map(|doc| doc.session.clone()).collect()
+    }
+
+    /// แท็บที่เปิดไฟล์นี้อยู่แล้ว — เปิดซ้ำต้อง **ไปที่แท็บเดิม** ไม่ใช่ได้สองใบ
+    ///
+    /// สองแท็บบนไฟล์เดียวกันแปลว่าสอง `<doc>.refx.autosave` ทับกัน และ `Ctrl+S`
+    /// ของใบหลังจะลบงานของใบแรกทิ้ง — เป็นรูปแบบเดียวกับที่ recovery slot ต่อแท็บ
+    /// มีไว้กัน แค่ย้ายมาโผล่ที่ชื่อไฟล์ของผู้ใช้แทน
+    fn index_of_path(&self, path: &std::path::Path) -> Option<usize> {
+        self.list
+            .iter()
+            .position(|doc| doc.path.as_deref() == Some(path))
+    }
+
+    /// เพิ่มแท็บใหม่แล้วสลับไปที่มัน — คืนดัชนีของมัน
+    fn push(&mut self, doc: Doc) -> usize {
+        self.list.push(doc);
+        self.active = self.list.len() - 1;
+        self.active
+    }
+
+    /// ★ ปิดแท็บที่ `index` — คืนตัวที่ถูกปิดไปให้ผู้เรียกเก็บกวาดต่อ
+    ///
+    /// ★★ ปิดใบสุดท้ายแล้ว **ได้ board เปล่าใบใหม่** ไม่ใช่รายการว่าง: สภาพ
+    /// "ไม่มีเอกสารเลย" จะบังคับให้ทุกเส้นทางมีกิ่ง `None` เพิ่มอีกหนึ่ง ซึ่งเป็น
+    /// กิ่งที่ไม่มีใครเดินและจะเน่าเงียบ ๆ (`docs/08 §3.9` ข้อ 2)
+    fn close(&mut self, index: usize) -> Option<Doc> {
+        if index >= self.list.len() {
+            return None;
+        }
+        let closed = self.list.remove(index);
+        if self.list.is_empty() {
+            let id = self.mint();
+            self.list.push(Doc::empty(id));
+            self.active = 0;
+        } else if self.active >= self.list.len() {
+            self.active = self.list.len() - 1;
+        } else if self.active > index {
+            self.active -= 1;
+        }
+        Some(closed)
     }
 }
 
@@ -1486,109 +1781,63 @@ pub struct RefxApp {
     pending_group: Option<GroupRequest>,
     /// ผู้ใช้กด `Ctrl+S` / `Ctrl+Shift+S` ในรอบ event ที่ผ่านมา (P4-2)
     pending_save: Option<SaveRequest>,
-    /// ★ นโยบาย autosave — `dirty` เท่านั้น + เว้นระยะ (P4-3)
-    ///
-    /// ★★ **ตัวเดียวคุมทั้งสองปลายทาง** (ข้างเอกสาร / โฟลเดอร์ recovery) —
-    /// ที่ต่างกันคือ *ที่อยู่* ไม่ใช่ *นโยบาย* ดู [`SnapshotTarget`]
-    autosaver: refx_io::autosave::Autosaver,
-    /// งาน autosave ที่ส่งไปเธรดแล้ว — กันไม่ให้ซ้อนกันสองงาน
-    autosave_job: Option<crossbeam_channel::Receiver<Result<(), String>>>,
-    /// ★★★ `board.revision()` ของ snapshot ล่าสุดที่ส่งไปเขียน — `None` = ยังไม่เคยเขียน
-    ///
-    /// **`dirty` อย่างเดียวตอบคำถามผิด** เมื่อรวมกับการปลุกตามเวลา: `dirty`
-    /// เป็นจริงยาวจนกว่าจะ `Ctrl+S` จริง ๆ ดังนั้น board ที่ถูกปล่อยทิ้งไว้
-    /// จะถูกปลุกมาเขียน snapshot ที่ **เนื้อหาเหมือนเดิมเป๊ะ** ทุก 10 วินาที
-    /// ตลอดทั้งวัน — ผิดทั้ง I-1 และข้อ "ห้ามแย่ง CPU กับ Photoshop"
-    ///
-    /// `revision` คือคำถามที่ถูก: *เปลี่ยนไปจากที่บันทึกไว้ล่าสุดหรือยัง*
-    /// (ตัวเดียวกับที่ P3-4 ใช้เป็นคีย์ cache — มันไม่ขยับตอนกล้องเลื่อน)
-    snapshot_revision: Option<u64>,
-    /// ★★★ **เอกสารที่เปิดอยู่** — อยู่ที่นี่ **ไม่ใช่ใน [`Gfx`]** (ดู [`Doc`])
-    doc: Doc,
-    /// ★ ที่อยู่ของเอกสารปัจจุบัน — `None` = ยังไม่เคยบันทึก
-    doc_path: Option<std::path::PathBuf>,
-    /// ★★★ โหมดการบันทึกของเอกสารนี้ (P4-5) — **สภาวะ ไม่ใช่เหตุการณ์**
-    ///
-    /// เปลี่ยนได้จากสองทางเท่านั้น:
-    ///
-    /// | เมื่อไหร่ | ค่าที่ได้ |
-    /// |---|---|
-    /// | เปิดไฟล์ | อนุมานจากตารางของไฟล์นั้น ([`mode_of_document`]) |
-    /// | บันทึก**สำเร็จ** | สิ่งที่ผู้ใช้สั่งในครั้งนั้น |
-    ///
-    /// ★★★ **ห้ามอนุมานใหม่ทุกครั้งที่บันทึก** — board ที่มีแต่ภาพจาก clipboard
-    /// ถูกฝังครบทุกใบอยู่แล้วแม้ในโหมด linked (§4 ข้อ 23) ถ้าเราอ่านสภาพไฟล์
-    /// กลับมาเป็นโหมด เอกสารนั้นจะกลายเป็น packed เอง แล้ว `Ctrl+S` ครั้งถัดไป
-    /// จะเริ่มฝังภาพจากไฟล์ของผู้ใช้เข้าไปด้วย **ทั้งที่เขาไม่เคยสั่ง**
-    ///
-    /// ★ ตอนเปิดไฟล์เราไม่มีทางเลือกอื่น (รูปแบบไฟล์ไม่ได้เก็บ "ผู้ใช้เลือกอะไร"
-    /// และการเพิ่มบิตลงหัวไฟล์คือการแก้ format ซึ่ง `CLAUDE.md` บังคับให้ถามก่อน)
-    /// — ผลคือเอกสารที่มีแต่ภาพวางล้วนจะเปิดกลับมาเป็น packed ซึ่ง**ไม่ทำให้
-    /// อะไรหาย** แค่ไฟล์ครั้งต่อไปใหญ่กว่าที่ควร และผู้ใช้กดสลับกลับได้ทันที
-    save_mode: refx_io::packed::SaveMode,
-    /// ★★ asset table ของเอกสารที่เปิดอยู่ — ว่าง = ไม่มีภาพฝังอยู่
-    ///
-    /// มีไว้สองอย่าง: บอกโหมดบนแถบสถานะ และ**แกะ blob กลับลง spool** ตอนที่
-    /// relink หาไฟล์บนเครื่องนี้ไม่เจอ (ขั้นก่อน `Missing` — ดู `start_relink_scan`)
-    doc_assets: refx_io::packed::Index,
+    /// ★★★ **แท็บทั้งหมดที่เปิดอยู่** — อยู่ที่นี่ **ไม่ใช่ใน [`Gfx`]** (ดู [`Doc`])
+    docs: Docs,
     /// ★ โหมดที่ผู้ใช้เลือกไว้สำหรับ dialog "บันทึกเป็น" ที่กำลังเปิดอยู่
     save_as_mode: refx_io::packed::SaveMode,
     /// ผู้ใช้กด `Ctrl+O` ในรอบ event ที่ผ่านมา (P4-4)
     pending_open: bool,
+    /// ★ ผู้ใช้กด `Ctrl+T` — board เปล่าใบใหม่ (`docs/03 §5`)
+    pending_new_tab: bool,
+    /// ★ ผู้ใช้กด `Ctrl+W` — ปิดแท็บที่ดูอยู่ (**ถามก่อนถ้ายังไม่บันทึก**)
+    pending_close_tab: bool,
+    /// ★ ผู้ใช้กด `Ctrl+Tab` — ไปแท็บถัดไป
+    pending_next_tab: bool,
+    /// ★★ แท็บที่กำลังถามว่า "ปิดทั้งที่ยังไม่ได้บันทึกจริงไหม" — `None` = ไม่ได้ถาม
+    ///
+    /// เก็บเป็น [`refx_core::arena::BoardId`] ไม่ใช่ดัชนี เพราะระหว่างที่คำถาม
+    /// ค้างอยู่ ผู้ใช้กดปิดแท็บอื่นหรือสลับแท็บได้ แล้วดัชนีจะชี้ผิดใบ —
+    /// ปิดผิดแท็บคือการทำงานหายชนิดที่ผู้ใช้ไม่มีทางเดาได้ว่าเกิดจากอะไร
+    closing_tab: Option<refx_core::arena::BoardId>,
     /// dialog เลือกไฟล์ที่จะเปิดที่กำลังรอผู้ใช้ตอบ (ไม่บล็อก I-2)
     open_dialog: Option<crossbeam_channel::Receiver<Option<std::path::PathBuf>>>,
     /// งานอ่าน+decode ไฟล์ที่ส่งไปเธรดแล้ว (ไม่บล็อก I-2)
     ///
-    load_job: Option<crossbeam_channel::Receiver<Result<LoadedDoc, String>>>,
+    /// ★★★ `BoardId` ถูก **จองไว้ก่อนส่งงาน** เพราะ `dto::decode` ต้องรู้ id
+    /// ตั้งแต่ตอนอ่าน (`.refx` ไม่เก็บ id — P4-1 ตัดออกโดยตั้งใจ) · เปิดไม่สำเร็จ
+    /// แล้ว id นั้นก็แค่ไม่ถูกใช้ ซึ่งไม่เป็นไรเพราะตัวแจกเดินหน้าอย่างเดียว
+    load_job: Option<(
+        refx_core::arena::BoardId,
+        crossbeam_channel::Receiver<Result<LoadedDoc, String>>,
+    )>,
     /// ★★★ งานค้างจาก session ก่อนที่กำลังถามผู้ใช้อยู่ — `None` = ไม่มี
     pending_recovery: Option<PendingRecovery>,
-    /// ★★★ งานของ **เอกสารที่เปิดอยู่** ที่ยังไม่เคยไปถึงไฟล์ (P4-3 · `<doc>.refx.autosave`)
+    /// ★★★ **งานกำพร้าที่เหลือรอถามต่อ** — ใหม่สุดอยู่หน้าสุด (P4-7c)
     ///
-    /// แยกช่องจาก [`Self::pending_recovery`] เพราะทั้งสองอย่างค้างพร้อมกันได้
-    /// (เปิดโปรแกรมด้วย `--open` ทั้งที่มีงานกำพร้าจาก session ก่อน) — ใช้ช่อง
-    /// เดียวกันเมื่อไหร่ อันหนึ่งจะกลืนอีกอันหายไปเงียบ ๆ · แถบบนจอยังมีอันเดียว
-    /// และถามทีละเรื่องตามหลักการเดิมของ P4-4
-    pending_snapshot: Option<Box<refx_io::autosave::Pending>>,
-    /// ★★★ งานที่ผู้ใช้เคยสั่ง **"เก็บไว้ก่อน"** ของเอกสารที่เปิดอยู่ (`docs/07 §4`)
+    /// ก่อนหน้านี้เราหยิบมาแค่ใบเดียวต่อการเปิดโปรแกรมหนึ่งครั้ง ซึ่งแปลว่า
+    /// ผู้ใช้ที่เปิดสองแท็บโดยไม่บันทึกเลยแล้วโปรแกรมตาย จะได้งานคืน **ใบเดียว**
+    /// ต่อการเปิดโปรแกรมหนึ่งครั้ง — อีกใบต้องปิด-เปิดใหม่ถึงจะได้ ซึ่งไม่มีอะไร
+    /// บนจอบอกเขาเลย · ตอนนี้ตอบใบหนึ่งแล้วใบถัดไปขึ้นถามต่อทันที
     ///
-    /// รอถามหลังผู้ใช้ตอบ `pending_snapshot` เสร็จ (ตัวใหม่กว่ามาก่อน) ·
-    /// ไฟล์ `.kept` **ไม่ถูกลบอัตโนมัติเลย** จึงถูกเสนอใหม่ทุกครั้งที่เปิดเอกสาร
-    pending_kept: Option<Box<refx_io::autosave::Pending>>,
-    /// ★ `.kept` ที่เพิ่งกู้กลับมา — ลบหลัง snapshot ของ session นี้ลงดิสก์แล้ว
-    ///
-    /// หลักการเดียวกับ [`Self::adopted_recovery`] เป๊ะ: ระหว่างนั้นต้องมีสำเนา
-    /// อยู่บนดิสก์เสมอหนึ่งชุด — ลบก่อนหน้านั้นคือช่วงที่งานไม่มีสำเนาเลย
-    adopted_kept: Option<std::path::PathBuf>,
+    /// ★ ยังคง **ถามทีละใบ** ตามเหตุผลเดิม (รายการสิบบรรทัดที่หน้าตาเหมือนกันหมด
+    /// ทำให้คนกด "ทิ้ง" รวดเดียวเพื่อให้มันหายไป) — เปลี่ยนแค่ว่าไม่ต้องรอรอบหน้า
+    recovery_queue: std::collections::VecDeque<PendingRecovery>,
     /// งานสแกนโฟลเดอร์ recovery ตอนเปิดโปรแกรม (แตะดิสก์ → ต้องอยู่เธรดอื่น I-2)
-    recovery_scan: Option<crossbeam_channel::Receiver<Option<PendingRecovery>>>,
+    recovery_scan: Option<crossbeam_channel::Receiver<Vec<PendingRecovery>>>,
     /// ★★ ถามเรื่องงานค้างไปแล้วในการรันครั้งนี้ — **ครั้งเดียวตลอดอายุโปรแกรม**
     ///
     /// `resumed()` ถูกเรียกซ้ำได้ตอนกู้ device (docs/04 §7) · ถ้าใช้ "ไม่มีงานค้าง
     /// อยู่ตอนนี้" เป็นเงื่อนไข ผู้ใช้ที่ตอบ "เก็บไว้ก่อน" ไปแล้วจะถูกถามใหม่ทุกครั้ง
     /// ที่ไดรเวอร์สะดุด — และคำถามที่โผล่ซ้ำ ๆ คือคำถามที่คนกดปิดโดยไม่อ่าน
     recovery_checked: bool,
-    /// ★★★ snapshot เก่าที่เพิ่ง "เอากลับมา" — รอให้ session นี้เขียนของตัวเองก่อน
+    /// ★★★ **แท็บที่งาน decode ใบหนึ่งเป็นของ** — คีย์คือคีย์*งาน* ไม่ใช่คีย์เนื้อ
     ///
-    /// **ลบทันทีที่กู้คืนไม่ได้**: ระหว่างจังหวะนั้นจนถึง autosave ครั้งแรกของเรา
-    /// งานชุดนั้นจะไม่มีสำเนาอยู่บนดิสก์เลยสักที่ — โปรแกรมตายตรงกลางคือหายจริง
-    /// (และนั่นคือสิ่งเดียวที่กลไกทั้งหมดนี้มีไว้กัน)
+    /// ผลจาก pool กลับมาพร้อม hash เท่านั้น · ถ้าไม่มีตารางนี้ ภาพที่แท็บ A
+    /// สั่งโหลดจะไปตกที่แท็บที่ผู้ใช้บังเอิญสลับไปดูตอนมันเสร็จ (เส้นทางลากไฟล์)
+    /// หรือไปเกาะ `ItemId` ใบเดียวกันของอีกเอกสาร (เส้นทางเปิดไฟล์)
     ///
-    /// **ไม่ลบเลยก็ไม่ได้**: มันจะถูกเสนอให้กู้ซ้ำทุกครั้งที่เปิดโปรแกรม ทั้งที่
-    /// ผู้ใช้เอากลับมาแล้ว — แล้วเขาจะได้งานซ้ำสองชุดโดยไม่รู้ว่าอันไหนใหม่กว่า
-    ///
-    /// → ลบ **หลัง snapshot ของ session นี้ลงดิสก์สำเร็จ** ซึ่งเป็นจังหวะแรกที่
-    /// มีสำเนาสองชุดพร้อมกัน (หลักการเดียวกับ tmp → rename ของ `save_atomic`)
-    adopted_recovery: Option<std::path::PathBuf>,
-    /// ★★★ คีย์งาน decode → `ItemId` ที่ผลลัพธ์ต้องไปเกาะ (P4-4)
-    ///
-    /// เส้นทาง "ลากไฟล์เข้ามา" **สร้าง item ใหม่** จากผลลัพธ์ ส่วนเส้นทาง
-    /// "เปิดไฟล์ `.refx`" มี item อยู่แล้วครบทุกใบพร้อมตำแหน่ง/หมุน/ครอป/แท็ก
-    /// สิ่งที่ขาดคือ *พิกเซล* เท่านั้น · ถ้าไม่มีตารางนี้ ผลลัพธ์จะถูกเติมเป็นใบใหม่
-    /// ต่อท้ายเป็นตาราง 16 คอลัมน์ แล้วผู้ใช้จะเห็น **ภาพซ้ำสองชุด** ชุดหนึ่ง
-    /// อยู่ผิดที่ทั้งหมด ซึ่งอ่านได้อย่างเดียวว่า "เปิดไฟล์แล้วงานเพี้ยน"
-    relink_targets: std::collections::HashMap<refx_asset::hash::ContentHash, ItemId>,
-    /// ★★★ รหัสของการเปิดโปรแกรมครั้งนี้ — ชื่อไฟล์ snapshot ของงานที่ยังไม่เคยบันทึก
-    session: refx_io::recovery::SessionId,
+    /// ★ ล้างเมื่อผลกลับมาถึง หรือเมื่อแท็บถูกปิด — ดู [`RefxApp::forget_jobs_of`]
+    job_owner: std::collections::HashMap<refx_asset::hash::ContentHash, refx_core::arena::BoardId>,
     /// ★ โฟลเดอร์ `<data_dir>/recovery` — `None` = หาที่อยู่ไม่ได้ (ไม่มี home dir)
     ///
     /// **ห้ามตกมาที่ `cache_dir`** ถ้าหาไม่เจอ (`docs/07 §4`) — ยอมไม่มี autosave
@@ -1602,19 +1851,31 @@ pub struct RefxApp {
     /// ผลของการเก็บกวาด spool ที่ส่งไปทำบนเธรดอื่นแล้ว รอผลกลับ (ไม่บล็อก I-2)
     spool_sweep: Option<crossbeam_channel::Receiver<refx_io::spool::Swept>>,
     /// ★ ผลของการตามหาไฟล์ขั้น 1–3 ที่ส่งไปทำบนเธรดอื่นแล้ว (P4-6)
-    relink_scan: Option<LocateResults>,
+    ///
+    /// ★★ พก `BoardId` มาด้วย — ผู้ใช้กด `Ctrl+O` ไฟล์ที่สองได้ระหว่างที่การ
+    /// สแกนของแท็บแรกยังเดินอยู่ ผลที่กลับมาต้องรู้ว่ามันเป็นของ board ใบไหน
+    relink_scan: Option<(refx_core::arena::BoardId, LocateResults)>,
+    /// ★ แท็บที่รอคิวสแกน — งวดใหม่เริ่มได้ทีละงวดเพราะ [`DropBatch`] มีชุดเดียว
+    relink_queue: std::collections::VecDeque<refx_core::arena::BoardId>,
     /// dialog "หาไฟล์เอง" ที่กำลังเปิดอยู่ (ขั้นที่ 5)
     relink_pick: Option<crossbeam_channel::Receiver<Option<std::path::PathBuf>>>,
     /// ผลการจับคู่ไฟล์ที่เหลือในโฟลเดอร์ที่ผู้ใช้ชี้ (ขั้นที่ 5)
-    relink_match: Option<LocateResults>,
-    /// item ที่ผู้ใช้กด "หาไฟล์เอง" ให้ — รอ dialog ตอบ
-    relink_for: Option<ItemId>,
+    relink_match: Option<(refx_core::arena::BoardId, LocateResults)>,
+    /// item ที่ผู้ใช้กด "หาไฟล์เอง" ให้ — รอ dialog ตอบ · พร้อมแท็บที่มันอยู่
+    relink_for: Option<(refx_core::arena::BoardId, ItemId)>,
     /// ★ ผลการตามหาไฟล์ที่รอรายงาน **ตอนจบงวด** (ดู `report_relink`)
     relink_report: Option<RelinkReport>,
     /// dialog เลือกที่บันทึกที่กำลังเปิดอยู่ (รอผู้ใช้ตอบ — ไม่บล็อก I-2)
     save_dialog: Option<crossbeam_channel::Receiver<Option<std::path::PathBuf>>>,
     /// งานบันทึกที่ส่งไปเธรดแล้ว รอผลกลับ (ไม่บล็อก I-2)
-    save_job: Option<crossbeam_channel::Receiver<Result<SavedDoc, String>>>,
+    ///
+    /// ★★ พก `BoardId` มาด้วยด้วยเหตุผลเดียวกับ `relink_scan` — ผู้ใช้สลับแท็บ
+    /// ระหว่างที่ไฟล์กำลังเขียนได้ · `mark_saved` ที่ลงผิดใบ = แท็บที่ยังไม่ถูก
+    /// บันทึกจะดูสะอาด แล้วผู้ใช้จะปิดโปรแกรมทิ้งโดยเชื่อว่างานอยู่ในไฟล์แล้ว
+    save_job: Option<(
+        refx_core::arena::BoardId,
+        crossbeam_channel::Receiver<Result<SavedDoc, String>>,
+    )>,
     /// ★ ทำอะไรต่อหลังบันทึกเสร็จ — ใช้ตอนผู้ใช้เลือก "บันทึกแล้วปิด"
     after_save: AfterSave,
     /// ผู้ใช้กดปิดหน้าต่างทั้งที่ยังมีงานไม่ได้บันทึก → รอเขาตอบ
@@ -2051,14 +2312,18 @@ impl refx_core::spool::PastedImageStore for SpoolSink {
     }
 }
 
-/// ★ id ของ board ที่แอปนี้ใช้ — ตัวเดียวกับ `Board::default()`
+/// ★★★ id ที่ใช้ตอน **อ่านเพื่อดูเฉย ๆ แล้วทิ้ง** — ห้ามใช้กับ board ที่จะขึ้นจอ
 ///
 /// `.refx` **ไม่เก็บ id** โดยตั้งใจ (P4-1: มันเป็นคีย์ในหน่วยความจำ ไม่ใช่เนื้อหา
-/// ของเอกสาร) ผู้อ่านจึงต้องบอกว่าจะให้ board ที่โหลดมาใช้ id ไหน · การอ่าน
-/// ด้วย id คนละตัวกับที่แอปใช้ = `ItemId` ที่ชี้ไป board ผิดใบตั้งแต่วินาทีแรก
-fn default_board_id() -> refx_core::arena::BoardId {
+/// ของเอกสาร) ผู้อ่านจึงต้องบอกว่าจะให้ board ที่โหลดมาใช้ id ไหน
+///
+/// ★★ ตั้งแต่ P4-7c **แต่ละแท็บมี id ของตัวเอง** ([`Docs::mint`]) — board ที่จะ
+/// ไปนั่งในแท็บต้องถูกอ่านด้วย id ของแท็บนั้น ไม่งั้น `ItemId` ทุกใบจะชี้ไป
+/// board คนละใบตั้งแต่วินาทีแรก · ที่นี่เหลือไว้สำหรับสองเส้นทางที่อ่านมาแล้ว
+/// **โยนทิ้งทันที**: นับจำนวนชิ้นให้แถบกู้คืน และดึงรายการ hash ให้ `spool::sweep`
+fn probe_board_id() -> refx_core::arena::BoardId {
     use refx_core::arena::ArenaKey as _;
-    refx_core::arena::BoardId::from_parts(0, 0)
+    refx_core::arena::BoardId::from_parts(u32::MAX, 0)
 }
 
 /// งานค้างจาก session ก่อนที่กำลังรอให้ผู้ใช้ตัดสิน (P4-4)
@@ -2072,25 +2337,82 @@ struct PendingRecovery {
     items: usize,
 }
 
-/// ★★ หา snapshot ที่ค้างอยู่ที่ **ใหม่ที่สุด** — รันบนเธรดอื่นเสมอ (I-2)
+/// ★★ หา snapshot ที่ค้างอยู่ **ทุกใบ เรียงใหม่สุดก่อน** — รันบนเธรดอื่นเสมอ (I-2)
 ///
-/// ★ ถามทีละใบ ไม่ใช่ยัดทั้งโฟลเดอร์ให้ผู้ใช้ตัดสินรวดเดียว: คนที่เปิดโปรแกรม
-/// มาเจอรายการ 10 บรรทัดที่หน้าตาเหมือนกันหมดจะกด "ทิ้ง" ทุกอันเพื่อให้มันหายไป
-/// ซึ่งตรงข้ามกับสิ่งที่กลไกนี้มีไว้ทำ · ที่เหลือถูกถามในรอบถัด ๆ ไป
-/// และ [`refx_io::recovery::prune`] ไม่แตะตัวที่ยังไม่เคยถูกถาม
+/// ★ ชั้น UI ยัง **ถามทีละใบ** เหมือนเดิม: คนที่เปิดโปรแกรมมาเจอรายการ 10 บรรทัด
+/// ที่หน้าตาเหมือนกันหมดจะกด "ทิ้ง" ทุกอันเพื่อให้มันหายไป ซึ่งตรงข้ามกับสิ่งที่
+/// กลไกนี้มีไว้ทำ
+///
+/// ★★★ **แต่คิวต้องมีทั้งหมด ไม่ใช่ใบเดียว** (แก้ P4-7c) — แต่ละแท็บมี recovery
+/// slot ของตัวเองแล้ว ผู้ใช้ที่เปิดสองแท็บโดยไม่บันทึกเลยจึงทิ้งไฟล์ไว้สองใบ
+/// ถ้าหยิบมาแค่ใบเดียวต่อการเปิดโปรแกรมหนึ่งครั้ง เขาจะได้งานคืนครึ่งเดียว
+/// **โดยไม่มีอะไรบนจอบอกว่ายังมีอีกใบ** ซึ่งอ่านได้อย่างเดียวว่าโปรแกรมทำงานหาย
+///
+/// ★ `probe_board_id` ใช้ได้ตรงนี้เพราะ board ที่อ่านมาถูกใช้แค่ **นับชิ้น**
+/// แล้วทิ้ง · ตัวจริงถูกอ่านใหม่ด้วย id ของแท็บตอนผู้ใช้กด "เอากลับมา"
 fn scan_for_recovery(
     dir: &std::path::Path,
-    session: &refx_io::recovery::SessionId,
-) -> Option<PendingRecovery> {
-    let orphan = refx_io::recovery::scan(dir, session).into_iter().next()?;
-    // ★ อ่านทั้งไฟล์เพื่อ **นับชิ้น** ตรงนี้เลย — ตัวเลขนั้นคือสิ่งเดียวที่ช่วย
-    //   ผู้ใช้จำได้ว่างานชุดไหน · ไฟล์ที่อ่านไม่ออกถือว่าไม่มีอะไรให้กู้
-    let board = refx_io::recovery::load(&orphan.path, default_board_id())?;
-    Some(PendingRecovery {
-        path: orphan.path,
-        when: orphan.written_at.map(format_when),
-        items: board.len(),
-    })
+    live: &[refx_io::recovery::SessionId],
+) -> Vec<PendingRecovery> {
+    refx_io::recovery::scan(dir, live)
+        .into_iter()
+        .filter_map(|orphan| {
+            // ★ อ่านทั้งไฟล์เพื่อ **นับชิ้น** ตรงนี้เลย — ตัวเลขนั้นคือสิ่งเดียวที่
+            //   ช่วยผู้ใช้จำได้ว่างานชุดไหน · ไฟล์ที่อ่านไม่ออกถือว่าไม่มีอะไรให้กู้
+            let board = refx_io::recovery::load(&orphan.path, probe_board_id())?;
+            Some(PendingRecovery {
+                path: orphan.path,
+                when: orphan.written_at.map(format_when),
+                items: board.len(),
+            })
+        })
+        .collect()
+}
+
+/// ★★★ คีย์ชั่วคราวของงาน decode หนึ่งใบ — **ผูกกับแท็บด้วย ไม่ใช่กับ path ล้วน**
+///
+/// คีย์นี้ไม่ใช่ hash ของเนื้อไฟล์ (ตัวนั้นเกิดบน worker — §4 ข้อ 27) มันคือ
+/// *ป้ายชื่องาน* ที่ใช้จับคู่ผลลัพธ์กลับมาเท่านั้น
+///
+/// ★★ **ทำไมต้องมี `board` ปนอยู่ในคีย์**: เดิมมันเป็น `hash_bytes(path)` ล้วน ๆ
+/// ซึ่งถูกตราบที่มี board เดียว · พอเปิดไฟล์เดียวกันสองแท็บได้ (หรือสอง board
+/// ที่ต่างคนต่างมีภาพใบเดียวกัน) คีย์จะชนกัน แล้วตารางจับคู่ของแท็บที่ใส่ทีหลัง
+/// จะ **เขียนทับ** ของแท็บแรก — ผลคือแท็บแรกได้ item ที่ไม่มีวันได้พิกเซล
+/// (`docs/02 §2.10`: ทุกอย่างที่คีย์ด้วย `ItemId` ต้องอยู่ต่อแท็บ)
+///
+/// ★ ยัง **ยุบงานซ้ำภายในแท็บเดียวกัน** ได้เหมือนเดิม — ลากไฟล์เดิมสองครั้ง
+/// ในแท็บเดียวยังได้คีย์เท่ากันตามพฤติกรรมเดิมทุกประการ
+fn job_key_for(
+    board: refx_core::arena::BoardId,
+    path: &std::path::Path,
+) -> refx_asset::hash::ContentHash {
+    // `\0` เป็นตัวคั่นที่ปรากฏใน path ไม่ได้บนทุก OS — สอง (board, path)
+    // ที่ต่างกันจึงให้ไบต์ต้นทางที่ต่างกันเสมอ
+    let mut raw = format!("{board:?}\0").into_bytes();
+    raw.extend_from_slice(path.to_string_lossy().as_bytes());
+    refx_asset::hash::hash_bytes(&raw)
+}
+
+/// ★★★ hash ของภาพที่วางไว้ซึ่ง **แท็บใดก็ตามที่เปิดอยู่** อ้างถึง (P4-7c)
+///
+/// `spool::sweep` ใช้รายการนี้เป็นด่านแรก — ถามแค่แท็บที่อยู่หน้าจอเมื่อไหร่
+/// เพดานจะลบต้นฉบับของภาพที่วางไว้ในแท็บหลังบ้าน **ขณะที่มันเปิดอยู่**
+/// แล้วภาพจะกลายเป็นช่องว่างทันทีที่ผู้ใช้สลับกลับไปดู — และกู้คืนไม่ได้เลย
+/// เพราะ spool คือต้นฉบับเดียวที่เหลือของภาพที่วาง (§4 ข้อ 24)
+///
+/// ★ แยกเป็นฟังก์ชันอิสระเพื่อ **เทสต์ได้โดยไม่ต้องมีหน้าต่าง/ดิสก์**
+fn hashes_of_every_tab(docs: &Docs) -> std::collections::BTreeSet<refx_core::hash::ContentHash> {
+    let mut all = std::collections::BTreeSet::new();
+    for doc in docs.iter() {
+        all.extend(refx_io::spool::hashes_of(&doc.board));
+    }
+    all
+}
+
+/// ชื่อไฟล์ล้วน ๆ ที่เอาไปขึ้นข้อความ/แท็บได้ — ว่างเมื่อ path ไม่มีชื่อไฟล์
+fn file_label_of(path: &std::path::Path) -> String {
+    path.file_name()
+        .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
 }
 
 /// เวลาที่ไฟล์ถูกเขียน → ข้อความสั้น ๆ ที่ผู้ใช้อ่านรู้เรื่อง
@@ -2115,7 +2437,7 @@ fn format_when(at: std::time::SystemTime) -> String {
 ///
 /// ★ `std::fs::read` ถูกแบนใน `clippy.toml` เพราะเส้นทางจริงต้องมีเพดานขนาด —
 /// ที่นี่ใช้ `File::take` ด้วยเพดานเดียวกับตัวอ่านเอกสารตัวอื่นทุกตัว
-fn read_document(path: &std::path::Path) -> Result<Board, String> {
+fn read_document(path: &std::path::Path, id: refx_core::arena::BoardId) -> Result<Board, String> {
     use std::io::Read as _;
 
     let mut bytes = Vec::new();
@@ -2124,7 +2446,7 @@ fn read_document(path: &std::path::Path) -> Result<Board, String> {
         .take(refx_io::dto::MAX_COMPRESSED_BYTES + refx_io::dto::HEADER_LEN as u64)
         .read_to_end(&mut bytes)
         .map_err(|err| err.to_string())?;
-    refx_io::dto::decode(&bytes, default_board_id()).map_err(|err| err.to_string())
+    refx_io::dto::decode(&bytes, id).map_err(|err| err.to_string())
 }
 
 /// ★★★ snapshot ของเอกสารนี้ที่ **ยังไม่เคยไปถึงไฟล์** — `None` = ไม่มีอะไรให้ถาม
@@ -2147,11 +2469,12 @@ fn read_document(path: &std::path::Path) -> Result<Board, String> {
 /// ให้กดปุ่มผ่าน ๆ โดยไม่อ่าน ซึ่งวันที่มีของจริงให้กู้เขาจะกดผ่านเหมือนกัน
 ///
 /// ★ **รันบนเธรดอื่นเท่านั้น** (I-2) — อ่าน+คลายบีบไฟล์ระดับ MB
-fn newer_snapshot(doc: &std::path::Path, saved: &Board) -> Option<refx_io::autosave::Pending> {
-    worth_offering(
-        refx_io::autosave::find_pending(doc, default_board_id()),
-        saved,
-    )
+fn newer_snapshot(
+    doc: &std::path::Path,
+    id: refx_core::arena::BoardId,
+    saved: &Board,
+) -> Option<refx_io::autosave::Pending> {
+    worth_offering(refx_io::autosave::find_pending(doc, id), saved)
 }
 
 /// ★★★ snapshot ที่ผู้ใช้เคยสั่ง **"เก็บไว้ก่อน"** ของเอกสารนี้ (`docs/07 §4`)
@@ -2161,8 +2484,12 @@ fn newer_snapshot(doc: &std::path::Path, saved: &Board) -> Option<refx_io::autos
 ///
 /// ★ ยังเทียบกับเอกสารก่อนถามเหมือนกัน: ผู้ใช้ที่เก็บไว้แล้วมาบันทึกเนื้อเดียวกัน
 /// ทีหลัง ไม่มีอะไรให้กู้อีกแล้ว — ถามต่อไปคือการสอนให้เขากดผ่าน ๆ
-fn kept_snapshot(doc: &std::path::Path, saved: &Board) -> Option<refx_io::autosave::Pending> {
-    worth_offering(refx_io::autosave::find_kept(doc, default_board_id()), saved)
+fn kept_snapshot(
+    doc: &std::path::Path,
+    id: refx_core::arena::BoardId,
+    saved: &Board,
+) -> Option<refx_io::autosave::Pending> {
+    worth_offering(refx_io::autosave::find_kept(doc, id), saved)
 }
 
 /// snapshot นี้มีอะไรให้กู้จริงไหม — ตัวร่วมของทั้งสองแบบ
@@ -2269,34 +2596,27 @@ impl RefxApp {
             pending_appearance: None,
             pending_group: None,
             pending_save: None,
-            autosaver: refx_io::autosave::Autosaver::default(),
-            autosave_job: None,
-            snapshot_revision: None,
-            doc: Doc::default(),
-            doc_path: None,
-            // ★ ค่าปริยายของ `docs/07 §2` — และ board ที่ยังไม่มีไฟล์ก็ยังไม่มี
-            //   อะไรฝังอยู่จริง ๆ อยู่แล้ว
-            save_mode: refx_io::packed::SaveMode::Linked,
-            doc_assets: refx_io::packed::Index::default(),
+            // ★ แท็บเปล่าหนึ่งใบ พร้อม id และ recovery slot ของตัวเองตั้งแต่แรก
+            docs: Docs::default(),
             save_as_mode: refx_io::packed::SaveMode::Linked,
             pending_open: false,
+            pending_new_tab: false,
+            pending_close_tab: false,
+            pending_next_tab: false,
+            closing_tab: None,
             open_dialog: None,
             load_job: None,
             pending_recovery: None,
-            pending_snapshot: None,
-            pending_kept: None,
-            adopted_kept: None,
+            recovery_queue: std::collections::VecDeque::new(),
             recovery_scan: None,
             recovery_checked: false,
-            adopted_recovery: None,
-            relink_targets: std::collections::HashMap::new(),
-            // ★ รหัสใหม่ทุกครั้งที่เปิดโปรแกรม — สองหน้าต่างจึงเขียนคนละไฟล์
-            session: refx_io::recovery::SessionId::new_unique(),
+            job_owner: std::collections::HashMap::new(),
             // ผู้เรียก (`run`) เสียบให้ — ที่นี่ไม่รู้จัก `AppPaths`
             recovery_dir: None,
             spool_dir: None,
             spool_sweep: None,
             relink_scan: None,
+            relink_queue: std::collections::VecDeque::new(),
             relink_pick: None,
             relink_match: None,
             relink_for: None,
@@ -2345,13 +2665,16 @@ impl RefxApp {
         self.drop.start(paths.len());
         self.batch_from_clipboard = false;
 
+        // ★★★ ภาพที่ลากเข้ามาเป็นของ **แท็บที่ผู้ใช้กำลังดูตอนที่เขาปล่อยเมาส์**
+        //     — ไม่ใช่แท็บที่เขาบังเอิญสลับไปตอนงาน decode เสร็จ (P4-7c)
+        let owner = self.docs.active().id;
         let mut submitted = Vec::with_capacity(paths.len());
         for (i, path) in paths.into_iter().enumerate() {
             // hash จาก path ไปก่อน — hash เนื้อไฟล์จริงเกิดบน worker (P1-2)
-            // ที่นี่ต้องการแค่คีย์ชั่วคราวไว้จับคู่ผลลัพธ์
-            let hash = refx_asset::hash::hash_bytes(path.to_string_lossy().as_bytes());
+            // ที่นี่ต้องการแค่คีย์ชั่วคราวไว้จับคู่ผลลัพธ์ · ★ ผูกกับแท็บด้วย
+            // ไม่งั้นสองแท็บที่ลากไฟล์เดียวกันจะแย่งคีย์กัน (ดู `job_key_for`)
+            let hash = job_key_for(owner, &path);
             let source = refx_asset::pool::JobSource::File(path);
-            self.job_sources.insert(hash, source.clone());
             submitted.push(refx_asset::pool::Job {
                 hash,
                 source,
@@ -2361,11 +2684,7 @@ impl RefxApp {
                 target: refx_asset::pool::JobTarget::Thumbnail,
             });
         }
-        if let Some(assets) = self.assets.as_ref() {
-            for job in submitted {
-                assets.pool.submit(job);
-            }
-        }
+        self.submit_thumbnail_jobs(owner, submitted);
         self.shell.status = text::fill(
             self.shell.lang,
             Template::OpeningFiles,
@@ -2380,9 +2699,9 @@ impl RefxApp {
     ///
     /// ภาพที่ได้กลับมาผ่านเกราะและเพดาน RAM ชุดเดียวกับไฟล์บนดิสก์ทุกประการ (I-4)
     fn submit_paste(&mut self) {
-        let Some(assets) = self.assets.as_ref() else {
+        if self.assets.is_none() {
             return;
-        };
+        }
         // วางทีละครั้ง — ดูเหตุผลที่ฟิลด์ `paste_in_flight`
         if self.paste_in_flight.is_some() {
             tracing::debug!("the previous paste has not finished — ignoring this one");
@@ -2394,23 +2713,58 @@ impl RefxApp {
         self.paste_count += 1;
         let hash =
             refx_asset::hash::hash_bytes(format!("clipboard:{}", self.paste_count).as_bytes());
-        self.job_sources
-            .insert(hash, refx_asset::pool::JobSource::Clipboard);
         self.paste_in_flight = Some(hash);
 
-        assets.pool.submit(refx_asset::pool::Job {
-            hash,
-            source: refx_asset::pool::JobSource::Clipboard,
-            // ผู้ใช้เพิ่งกดปุ่มเมื่อกี้ — ตั้งใจที่สุดในคิว จึงได้ไปก่อน (น้อย = ก่อน)
-            priority: 0.0,
-            cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            target: refx_asset::pool::JobTarget::Thumbnail,
-        });
+        // ★★★ ภาพที่วางเป็นของแท็บที่ผู้ใช้กด `Ctrl+V` อยู่ (P4-7c)
+        let owner = self.docs.active().id;
+        self.submit_thumbnail_jobs(
+            owner,
+            vec![refx_asset::pool::Job {
+                hash,
+                source: refx_asset::pool::JobSource::Clipboard,
+                // ผู้ใช้เพิ่งกดปุ่มเมื่อกี้ — ตั้งใจที่สุดในคิว จึงได้ไปก่อน (น้อย = ก่อน)
+                priority: 0.0,
+                cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                target: refx_asset::pool::JobTarget::Thumbnail,
+            }],
+        );
 
         self.drop_started = Some(std::time::Instant::now());
         self.drop.start(1);
         self.batch_from_clipboard = true;
         self.shell.status = text::t(self.shell.lang, Key::ReadingClipboard).to_owned();
+    }
+
+    /// ★★★ **ทางเดียวที่งาน thumbnail ถูกส่งเข้า pool** — จดเจ้าของให้เสมอ
+    ///
+    /// ## ทำไมต้องเป็นประตูเดียว
+    ///
+    /// ผลจาก pool กลับมาพร้อม **คีย์งานเท่านั้น** ชั้นนี้จึงต้องจำไว้เองว่างานใบ
+    /// ไหนเป็นของแท็บไหน · ตอนที่การจดยังอยู่ที่จุดเรียก มันถูกลืมไปสองในสามจุด
+    /// (ลากไฟล์ · วาง) แล้วผลที่ได้คือ **ภาพที่ผู้ใช้ลากเข้ามาไม่ขึ้นจอเลยสักใบ
+    /// โดยไม่มี error ที่ไหน** — งานถูก decode สำเร็จแล้วถูกทิ้งเพราะไม่มีที่ให้ลง
+    ///
+    /// ★ เจอเพราะ **รันแอปจริงแล้วดู** (28 ส.ค. 2026) — เทสต์ 849 ตัวเขียวหมด
+    /// ตอนนั้น เพราะไม่มีตัวไหนเดินเส้นทาง "ส่งงาน → ผลกลับมา → ขึ้นจอ" ครบ
+    /// (`docs/08 §3.9` ข้อ 5: บั๊กชนิด "ทุกชิ้นถูก ประกอบผิด")
+    ///
+    /// → รวมสามอย่างไว้ที่นี่ (คีย์ · ที่มา · เจ้าของ) ให้ลืมทีละอย่างไม่ได้
+    fn submit_thumbnail_jobs(
+        &mut self,
+        owner: refx_core::arena::BoardId,
+        jobs: Vec<refx_asset::pool::Job>,
+    ) {
+        for job in jobs {
+            debug_assert!(
+                matches!(job.target, refx_asset::pool::JobTarget::Thumbnail),
+                "ประตูนี้มีไว้สำหรับงาน thumbnail เท่านั้น"
+            );
+            self.job_sources.insert(job.hash, job.source.clone());
+            self.job_owner.insert(job.hash, owner);
+            if let Some(assets) = self.assets.as_ref() {
+                assets.pool.submit(job);
+            }
+        }
     }
 
     /// เปิด decode pool + IO thread
@@ -2532,7 +2886,7 @@ impl RefxApp {
                     tracing::info!(hash = %hash.short(), "a pasted image now has a file of its own");
                     let source = refx_asset::pool::JobSource::File(path);
                     if self.gfx.is_some() {
-                        for state in self.doc.render_state.values_mut() {
+                        for state in self.docs.active_mut().render_state.values_mut() {
                             if state.hash == hash {
                                 state.source = source.clone();
                             }
@@ -2589,7 +2943,13 @@ impl RefxApp {
                 //   นับปนเข้ามาจะทำให้งวดจบเร็วเกินจริงแล้วรายงานตัวเลขผิด
                 refx_asset::pool::JobResult::Cancelled { hash, target } => {
                     match target {
-                        refx_asset::pool::JobTarget::Thumbnail => self.drop.cancelled += 1,
+                        refx_asset::pool::JobTarget::Thumbnail => {
+                            self.drop.cancelled += 1;
+                            // ★ งานจบแล้วไม่ว่าจะสำเร็จหรือไม่ — คีย์หมดหน้าที่
+                            //   ไม่เก็บกวาด = ตารางโตตลอดอายุโปรแกรม (I-6)
+                            self.job_owner.remove(&hash);
+                            self.job_sources.remove(&hash);
+                        }
                         // ★ ต้องปลดคีย์ออกจาก `working_pending` ด้วย ไม่งั้นภาพใบนั้น
                         //   จะ **ไม่มีวันถูกขอภาพคมอีกเลย** ตลอดอายุโปรแกรม —
                         //   เดิมปลดเฉพาะตอนสำเร็จ งานที่ถูกยกเลิก/ล้มจึงค้างคีย์ไว้
@@ -2625,7 +2985,12 @@ impl RefxApp {
                     //   แล้วรายงานสรุป (รวมทั้งข้อความ board เต็ม) ก็ไม่มีวันขึ้น
                     //   — แต่ต้องนับ **เฉพาะงานของงวดนี้** เหมือนกรณี `Cancelled`
                     match target {
-                        refx_asset::pool::JobTarget::Thumbnail => self.drop.failed += 1,
+                        refx_asset::pool::JobTarget::Thumbnail => {
+                            self.drop.failed += 1;
+                            // ★ เหตุผลเดียวกับกิ่ง `Cancelled` — คีย์หมดหน้าที่แล้ว
+                            self.job_owner.remove(&hash);
+                            self.job_sources.remove(&hash);
+                        }
                         refx_asset::pool::JobTarget::Working { size } => {
                             gfx_working_pending_remove(self.gfx.as_mut(), hash, size);
                         }
@@ -2666,27 +3031,55 @@ impl RefxApp {
 
         // ★ ที่มาที่ต้องเขียนกลับลง `Board` — เก็บไว้ก่อนแล้วห่อเป็น `Command`
         //   ทีเดียวหลังจบชุด (ยืม `gfx` อยู่ตลอดลูป จึงเรียก `apply_relink` ในนี้ไม่ได้)
-        let mut repairs: Vec<(ItemId, ItemKind)> = Vec::new();
+        //
+        // ★★★ พก `BoardId` มาด้วย — `ItemId` ไม่ผูกกับ board (`docs/02 §1`)
+        let mut repairs: Vec<(refx_core::arena::BoardId, ItemId, ItemKind)> = Vec::new();
 
         // อัดขึ้น atlas แล้ววาง quad ให้เห็นบน canvas
-        if !done.is_empty()
-            && let Some(gfx) = self.gfx.as_mut()
-        {
+        let had_results = !done.is_empty();
+        if had_results {
+            // ★ แยกการยืมทีละฟิลด์ — ลูปข้างล่างต้องแตะทั้ง `gfx` และ `docs`
+            let Self {
+                gfx,
+                docs,
+                drop,
+                shell,
+                spool_dir,
+                job_owner,
+                ..
+            } = self;
+            let Some(gfx) = gfx.as_mut() else {
+                return finished > 0;
+            };
             for (hash, source, thumb, meta, origin) in done {
                 // ★★★ คีย์และที่อยู่ของภาพใบนี้ — ดู `asset_location`
-                let (asset_hash, spooled_path) =
-                    asset_location(self.spool_dir.as_deref(), hash, origin);
-                match Self::upload_thumb(gfx, &mut self.doc, &thumb.pixels) {
+                let (asset_hash, spooled_path) = asset_location(spool_dir.as_deref(), hash, origin);
+                // ★★★ **ผลนี้เป็นของแท็บไหน** (P4-7c) — อ่าน "แท็บที่ดูอยู่" ตรงนี้
+                //     เมื่อไหร่ ภาพที่แท็บ A สั่งโหลดจะไปตกที่แท็บที่ผู้ใช้บังเอิญ
+                //     สลับไปดูตอนงานเสร็จ · คีย์งานถูกผูกกับ board ตั้งแต่ตอนส่ง
+                //     (ดู `job_key_for`) ตารางนี้จึงตอบได้เสมอ
+                let owner = job_owner.remove(&hash);
+                let Some(index) = owner.and_then(|id| docs.list.iter().position(|d| d.id == id))
+                else {
+                    // แท็บถูกปิดไประหว่างที่งานเดินอยู่ = ไม่มีที่ให้ผลลง
+                    drop.cancelled += 1;
+                    continue;
+                };
+                let board_id = docs.list[index].id;
+                // ★ อัดขึ้น atlas **ก่อน** ยืมแท็บ — การขยาย atlas ต้องแตะทุกแท็บ
+                let uploaded = Self::upload_thumb(gfx, docs, &thumb.pixels);
+                let doc = &mut docs.list[index];
+                match uploaded {
                     Ok(slot) => {
                         // ★★★ ภาพของ board ที่ **เปิดมาจากไฟล์** — item มีอยู่แล้ว
                         //
                         //   ที่ขาดคือพิกเซลอย่างเดียว ตำแหน่ง/ขนาด/หมุน/ครอป/ฟิลเตอร์
                         //   /แท็ก/ดาว/กลุ่ม/โน้ต มาจากไฟล์ครบแล้ว · สร้างใบใหม่ตรงนี้
                         //   = ผู้ใช้เห็นภาพซ้ำสองชุด ชุดหนึ่งอยู่ผิดที่ทั้งหมด
-                        if let Some(id) = self.relink_targets.remove(&hash) {
-                            let Some(item) = self.doc.board.item(id) else {
+                        if let Some(id) = doc.relink_targets.remove(&hash) {
+                            let Some(item) = doc.board.item(id) else {
                                 // item ถูกลบไประหว่างที่งานเดินอยู่ (undo/เปิดไฟล์อื่นทับ)
-                                self.drop.cancelled += 1;
+                                drop.cancelled += 1;
                                 continue;
                             };
                             // ★★★ ที่มาที่ *ถูกต้อง* ของใบนี้หลังจากเพิ่งอ่านไฟล์จริง
@@ -2695,12 +3088,12 @@ impl RefxApp {
                                 &item.kind,
                                 source.file(),
                                 origin.map(|o| o.hash()),
-                                self.spool_dir.as_deref(),
+                                spool_dir.as_deref(),
                                 &thumb,
                                 meta,
                             );
                             let Some(desired) = desired else {
-                                self.drop.cancelled += 1;
+                                drop.cancelled += 1;
                                 continue;
                             };
                             // ★ คีย์ที่ `render_state` ใช้ = คีย์ที่ `Board` จะถืออยู่
@@ -2710,9 +3103,9 @@ impl RefxApp {
                                 _ => asset_hash,
                             };
                             if desired != item.kind {
-                                repairs.push((id, desired));
+                                repairs.push((board_id, id, desired));
                             }
-                            self.doc.render_state.insert(
+                            doc.render_state.insert(
                                 id,
                                 ItemRender {
                                     source,
@@ -2722,12 +3115,12 @@ impl RefxApp {
                                     slot: Some(slot),
                                 },
                             );
-                            self.drop.added += 1;
+                            drop.added += 1;
                             continue;
                         }
                         // จัดเป็นตารางง่าย ๆ ไปก่อน — layout จริงมาใน P2/P3
                         // ★ ตำแหน่งไปอยู่ใน `ItemCanvas` แล้ว ไม่ได้คำนวณลง quad ตรง ๆ
-                        let n = u32::try_from(self.doc.board.len()).unwrap_or(u32::MAX);
+                        let n = u32::try_from(doc.board.len()).unwrap_or(u32::MAX);
                         let (col, row) = (n % 16, n / 16);
                         let cell = 160.0;
                         // คงอัตราส่วนภาพเดิมไว้ ไม่บีบให้เป็นจัตุรัส
@@ -2781,23 +3174,20 @@ impl RefxApp {
                         let Ok(command) = AddItems::new(vec![item]) else {
                             continue;
                         };
-                        if let Err(err) = self
-                            .doc
-                            .history
-                            .apply(&mut self.doc.board, Box::new(command))
-                        {
+                        if let Err(err) = doc.history.apply(&mut doc.board, Box::new(command)) {
                             tracing::error!(%err, "cannot add the dropped image to the board");
                             continue;
                         }
                         // `insert_item` ต่อท้าย z-order เสมอ ตัวที่เพิ่งเพิ่มจึงอยู่ท้ายสุด
-                        let Some(id) = self.doc.board.z_order().last().copied() else {
+                        let Some(id) = doc.board.z_order().last().copied() else {
                             continue;
                         };
 
-                        if let Some(item) = self.doc.board.item(id) {
-                            self.doc.index.insert(id, &item.canvas);
+                        if let Some(item) = doc.board.item(id) {
+                            let canvas = item.canvas;
+                            doc.index.insert(id, &canvas);
                         }
-                        self.doc.render_state.insert(
+                        doc.render_state.insert(
                             id,
                             ItemRender {
                                 source,
@@ -2812,7 +3202,7 @@ impl RefxApp {
                                 slot: Some(slot),
                             },
                         );
-                        self.drop.added += 1;
+                        drop.added += 1;
                     }
                     // ★★ board เต็ม = **นับไว้แล้วรายงานทีเดียวตอนจบงวด**
                     //
@@ -2825,31 +3215,37 @@ impl RefxApp {
                     //   บรรทัดจากการลากครั้งเดียว ซึ่งดัน crash log ที่มีค่าออกจาก
                     //   ไฟล์ที่หมุนตามขนาด (เหตุผลเดียวกับ HANDOFF §4 ข้อ 9)
                     Err(AtlasError::Full { layers } | AtlasError::NeedsResize { layers }) => {
-                        if self.drop.rejected == 0 {
+                        if drop.rejected == 0 {
                             tracing::warn!(
                                 layers,
                                 "the board is full — the rest of this batch cannot be added"
                             );
                         }
-                        self.drop.rejected += 1;
+                        drop.rejected += 1;
                     }
                     // VRAM ไม่พอเป็นคนละปัญหากับ board เต็ม (ข้อความบอกตัวเลขจริง)
                     Err(err) => {
                         tracing::warn!(%err, "cannot store the thumbnail in the atlas");
-                        self.drop.failed += 1;
-                        self.shell.status = text::atlas_error(self.shell.lang, &err);
-                        self.shell.status_warn = true;
+                        drop.failed += 1;
+                        shell.status = text::atlas_error(shell.lang, &err);
+                        shell.status_warn = true;
                     }
                 }
             }
             // ★ instance ที่ส่งให้ GPU สร้างใหม่จาก board **หลังจบชุด** ไม่ใช่ทีละใบ
             //   (ลากเข้ามา 100 ไฟล์ = สร้างครั้งเดียว ไม่ใช่ 100 ครั้ง)
-            Self::rebuild_quads(gfx, &mut self.doc);
+            //   ★ เฉพาะแท็บที่อยู่บนจอ — `quads` มีชุดเดียวต่อหน้าต่าง
+            Self::rebuild_quads(gfx, docs.active_mut());
+        }
 
-            // ★ เวลาจริงที่ผู้ใช้รู้สึก: ลากเข้ามา → ภาพขึ้นจอ
-            if !self.drop.reported
-                && self.drop.settled()
-                && let Some(started) = self.drop_started
+        // ★ เวลาจริงที่ผู้ใช้รู้สึก: ลากเข้ามา → ภาพขึ้นจอ
+        //   ★ เงื่อนไขเดิมทุกประการ: รายงานเฉพาะเฟรมที่มีผล decode กลับมาจริง
+        if had_results
+            && self.gfx.is_some()
+            && !self.drop.reported
+            && self.drop.settled()
+            && let Some(started) = self.drop_started
+        {
             {
                 let elapsed = started.elapsed();
                 let ms = elapsed.as_secs_f64() * 1000.0;
@@ -2857,7 +3253,7 @@ impl RefxApp {
                 // ★★★ board เต็มมาก่อนทุกข้อความ — "เปิด 3,072 ไฟล์ใน 9 วินาที"
                 //   ที่ขึ้นตอนผู้ใช้ลากมา 10,000 ไฟล์ **เป็นความจริงที่หลอก**
                 //   เขาจะอ่านว่าสำเร็จครบแล้วนับภาพเองไม่ได้ (ROADMAP P3-3)
-                let capacity = self.gfx.as_ref().map_or(0, |_| self.doc.board.len());
+                let capacity = self.docs.active().board.len();
                 if let Some(message) = board_full_message(self.shell.lang, capacity, self.drop) {
                     tracing::warn!(
                         capacity,
@@ -2895,10 +3291,7 @@ impl RefxApp {
                         ms,
                         // ★ หลักฐานว่าการเพิ่มภาพเดินผ่าน `AddItems` เข้า `History` จริง
                         //   ไม่ใช่ push เข้า Vec ตรง ๆ เหมือนก่อนย้าย — undo ได้ทุกใบ
-                        undo_depth = self
-                            .gfx
-                            .as_ref()
-                            .map_or(0, |_| self.doc.history.undo_depth()),
+                        undo_depth = self.docs.active().history.undo_depth(),
                         "drag & drop → every image on screen"
                     );
                     println!("ลากไฟล์ {} ไฟล์ → ขึ้นจอครบใน {ms:.1} ms", self.drop.requested);
@@ -2930,7 +3323,18 @@ impl RefxApp {
         //    (ต้องอยู่หลังจากเลิกยืม `gfx` แล้วเท่านั้น) · `RelinkAssets` merge
         //    ตัวเองอยู่แล้ว งวดที่ทยอยกลับมาหลายเฟรมจึงเป็น undo ขั้นเดียว
         if !repairs.is_empty() {
-            self.apply_relink(repairs);
+            // ★ จัดกลุ่มตามแท็บก่อน — `RelinkAssets` เป็นคำสั่งของ board ใบเดียว
+            //   และการเรียกทีละใบจะสั่งสร้าง quad ใหม่ซ้ำเท่าจำนวนภาพ
+            let mut grouped: Vec<(refx_core::arena::BoardId, Vec<(ItemId, ItemKind)>)> = Vec::new();
+            for (board, id, kind) in repairs {
+                match grouped.iter_mut().find(|(known, _)| *known == board) {
+                    Some((_, list)) => list.push((id, kind)),
+                    None => grouped.push((board, vec![(id, kind)])),
+                }
+            }
+            for (board, list) in grouped {
+                self.apply_relink(board, list);
+            }
         }
 
         // ★ ไฟล์จาก clipboard เข้าคิวเป็นชุดใหม่ — เส้นทางเดียวกับลากไฟล์เข้ามาเป๊ะ
@@ -3060,7 +3464,7 @@ impl RefxApp {
         // ★ เติม atlas กลับ (docs/04 §4) — ถ้าไม่ทำ ผู้ใช้จะเห็น board ว่างเปล่า
         //   หลัง driver อัปเดต ซึ่งแยกไม่ออกจาก "งานหาย" แล้วเขาจะปิดโปรแกรมทิ้ง
         //   ทำให้งานกู้ device ทั้งหมดเสียเปล่า
-        Self::refill_atlas(gfx, &mut self.doc);
+        Self::refill_atlas(gfx, &mut self.docs);
 
         Some(RedrawReason::SurfaceRecovery)
     }
@@ -3072,12 +3476,18 @@ impl RefxApp {
     /// ตอนขยาย 11→12 layer (docs/05 §2) การสร้างใหม่แล้วเติมกลับจาก RAM
     /// ทำให้ peak เหลือเท่าใบใหม่ใบเดียว และเราเก็บภาพย่อไว้ใน RAM อยู่แล้ว
     /// เพื่อเส้นทางกู้ device — โค้ดเติมกลับจึงเป็นตัวเดียวกันเป๊ะ
-    fn upload_thumb(gfx: &mut Gfx, doc: &mut Doc, pixels: &[u8]) -> Result<AtlasSlot, AtlasError> {
+    /// ★ รับ `Docs` ทั้งก้อนเพราะการขยาย atlas ล้างช่องของ **ทุกแท็บ** พร้อมกัน
+    /// (ตัวจัดสรรมีชุดเดียวต่อ device) — เติมกลับแค่ใบเดียวคือทิ้งอีกสามใบไว้ว่าง
+    fn upload_thumb(
+        gfx: &mut Gfx,
+        docs: &mut Docs,
+        pixels: &[u8],
+    ) -> Result<AtlasSlot, AtlasError> {
         match gfx.atlas.upload(gfx.render.queue(), pixels) {
             Err(AtlasError::NeedsResize { layers }) => {
                 gfx.atlas.resize(gfx.render.device(), layers)?;
                 // texture ใหม่ว่างเปล่า — ต้องเติมภาพเดิมกลับก่อนใส่ภาพใหม่
-                Self::refill_atlas(gfx, doc);
+                Self::refill_atlas(gfx, docs);
                 gfx.atlas.upload(gfx.render.queue(), pixels)
             }
             other => other,
@@ -3103,24 +3513,24 @@ impl RefxApp {
             gfx.render.generation(),
             "working texture cache ยังเป็นของ device รุ่นเก่า — ลืมสร้างใหม่ตอนกู้ device"
         );
-        if self.doc.board.is_empty() {
+        if self.docs.active_mut().board.is_empty() {
             return;
         }
 
-        let zoom = self.doc.camera.zoom();
+        let zoom = self.docs.active_mut().camera.zoom();
         let viewport = gfx.canvas.size;
-        let centre = self.doc.camera.center();
+        let centre = self.docs.active_mut().camera.center();
         let mut requests: Vec<refx_asset::pool::Job> = Vec::new();
-        // เก็บไว้ก่อนแล้วค่อยแปลงเป็น quad หลังจบลูป — ระหว่างลูปยังยืม `self.doc.board` อยู่
+        // เก็บไว้ก่อนแล้วค่อยแปลงเป็น quad หลังจบลูป — ระหว่างลูปยังยืม `self.docs.active_mut().board` อยู่
         let mut working_hits: Vec<(WorkingKey, ItemId)> = Vec::new();
 
-        for (id, board_item) in self.doc.board.items_in_z_order() {
+        for (id, board_item) in self.docs.active().board.items_in_z_order() {
             // ★ ชนิดของ item มาจาก `Board` เสมอ — เหตุผลเดียวกับใน `rebuild_quads`
             //   (ใบที่ relink ทำให้กลายเป็น `Missing` ยังมี `render_state` ค้างอยู่)
             if !matches!(board_item.kind, ItemKind::Image(_)) {
                 continue;
             }
-            let Some(item) = self.doc.render_state.get(&id) else {
+            let Some(item) = self.docs.active().render_state.get(&id) else {
                 continue;
             };
             let canvas = &board_item.canvas;
@@ -3171,10 +3581,10 @@ impl RefxApp {
         // ★ quad ของภาพคมสร้างจาก `Board` เหมือนกัน — ไม่ได้ก๊อปมาจาก `quads`
         //   ที่อาจเป็นของเฟรมก่อน (แหล่งความจริงเดียวคือ `board`)
         for (key, id) in working_hits {
-            let Some(item) = self.doc.board.item(id) else {
+            let Some(item) = self.docs.active().board.item(id) else {
                 continue;
             };
-            let Some(state) = self.doc.render_state.get(&id) else {
+            let Some(state) = self.docs.active().render_state.get(&id) else {
                 continue;
             };
             if let Some(mut quad) = Self::quad_for(&item.canvas, state) {
@@ -3525,29 +3935,25 @@ impl RefxApp {
             return;
         };
         let lang = self.shell.lang;
-        let Some(command) = ApplyLayout::from_placed(&self.doc.board, self.doc.arrange.placed())
-        else {
+        let Some(command) = ApplyLayout::from_placed(
+            &self.docs.active().board,
+            self.docs.active().arrange.placed(),
+        ) else {
             // ★ ไม่มีอะไรขยับ = บอกตรง ๆ ไม่ใช่เงียบ (ผู้ใช้กดแล้วต้องรู้ว่าเกิดอะไร)
             self.shell.status = text::t(lang, Key::NothingToApply).to_owned();
             return;
         };
         let moved = refx_core::command::Command::affected(&command);
-        if let Err(err) = self
-            .doc
-            .history
-            .apply(&mut self.doc.board, Box::new(command))
-        {
+        if let Err(err) = self.docs.active_mut().apply(Box::new(command)) {
             tracing::error!(%err, "cannot arrange the images on the canvas");
             return;
         }
         // ★ index ต้องตามตำแหน่งใหม่ทันที ไม่งั้นคลิกครั้งถัดไป hit-test กับที่เก่า
         for id in &moved {
-            if let Some(item) = self.doc.board.item(*id) {
-                self.doc.index.insert(*id, &item.canvas);
-            }
+            self.docs.active_mut().reindex(*id);
         }
-        Self::collect_forgotten(gfx, &mut self.doc);
-        Self::rebuild_quads(gfx, &mut self.doc);
+        Self::collect_forgotten(gfx, self.docs.active_mut());
+        Self::rebuild_quads(gfx, self.docs.active_mut());
         // ★ พาผู้ใช้ไปดูผลด้วย — ปุ่มชื่อ "ส่งเข้า canvas" แล้วอยู่ที่เดิมคือ
         //   การกดที่ไม่มีอะไรเกิดขึ้นในสายตาเขา (ผลอยู่อีกโหมดหนึ่ง)
         self.shell.mode = Mode::Canvas;
@@ -3574,11 +3980,12 @@ impl RefxApp {
                 gfx.window.request_redraw();
             }
             AppearanceKey::FlipHorizontal => {
-                let changes: Vec<(ItemId, ItemCanvas)> = self
-                    .doc
+                let doc = self.docs.active();
+                let board = &doc.board;
+                let changes: Vec<(ItemId, ItemCanvas)> = doc
                     .selection
                     .iter()
-                    .filter_map(|id| self.doc.board.item(id).map(|item| (id, item.canvas)))
+                    .filter_map(|id| board.item(id).map(|item| (id, item.canvas)))
                     .filter(|(_, canvas)| !canvas.locked)
                     .map(|(id, canvas)| {
                         let flip = match canvas.flip {
@@ -3599,18 +4006,14 @@ impl RefxApp {
                 let Ok(command) = SetFilter::new(changes) else {
                     return;
                 };
-                if let Err(err) = self
-                    .doc
-                    .history
-                    .apply(&mut self.doc.board, Box::new(command))
-                {
+                if let Err(err) = self.docs.active_mut().apply(Box::new(command)) {
                     tracing::error!(%err, "cannot flip the selected images");
                     return;
                 }
                 // กดทีละครั้ง = คนละขั้นเสมอ ห้ามให้การกดถัดไปกลืนเข้าไป
-                self.doc.history.seal();
-                Self::collect_forgotten(gfx, &mut self.doc);
-                Self::rebuild_quads(gfx, &mut self.doc);
+                self.docs.active_mut().history.seal();
+                Self::collect_forgotten(gfx, self.docs.active_mut());
+                Self::rebuild_quads(gfx, self.docs.active_mut());
                 gfx.window.request_redraw();
             }
         }
@@ -3629,7 +4032,7 @@ impl RefxApp {
         let sealed = std::mem::take(&mut self.shell.note_sealed);
         let Some(wanted) = self.shell.note_edit.take() else {
             if sealed && self.gfx.is_some() {
-                self.doc.history.seal();
+                self.docs.active_mut().history.seal();
             }
             return;
         };
@@ -3638,34 +4041,36 @@ impl RefxApp {
         };
         // แก้ **ใบเดียว** เสมอ — ช่องข้อความแสดงของ item ตัวแรกในชุดที่เลือก
         // การเขียนข้อความเดียวกันลงทุกใบที่เลือกไว้ไม่ใช่สิ่งที่ใครคาดหวัง
-        let Some(id) = self.doc.selection.iter().find(|id| {
+        let doc = self.docs.active();
+        let board = &doc.board;
+        let Some(id) = doc.selection.iter().find(|id| {
             matches!(
-                self.doc.board.item(*id).map(|item| &item.kind),
+                board.item(*id).map(|item| &item.kind),
                 Some(refx_core::board::ItemKind::Text(_))
             )
         }) else {
             return;
         };
-        let current = match self.doc.board.item(id).map(|item| &item.kind) {
+        let current = match self.docs.active().board.item(id).map(|item| &item.kind) {
             Some(refx_core::board::ItemKind::Text(note)) => note.text.clone(),
             _ => return,
         };
         // ★ ไม่มีอะไรเปลี่ยน = ไม่สร้างคำสั่ง ไม่ขอเฟรม (I-1)
         if current == wanted {
             if sealed {
-                self.doc.history.seal();
+                self.docs.active_mut().history.seal();
             }
             return;
         }
         if let Err(err) = self
-            .doc
-            .history
-            .apply(&mut self.doc.board, Box::new(EditText::new(id, wanted)))
+            .docs
+            .active_mut()
+            .apply(Box::new(EditText::new(id, wanted)))
         {
             tracing::error!(%err, "cannot edit the note");
         }
         if sealed {
-            self.doc.history.seal();
+            self.docs.active_mut().history.seal();
         }
         gfx.window.request_redraw();
     }
@@ -3679,11 +4084,21 @@ impl RefxApp {
     /// ไม่มีอะไรคุ้มครองเลย · ตอนนี้เขาตกมาที่ [`SnapshotTarget::Recovery`]
     ///
     /// ★ `None` เกิดได้ทางเดียว: ยังไม่เคยบันทึก **และ** หาโฟลเดอร์ data ไม่ได้
-    fn snapshot_target(&self) -> Option<SnapshotTarget> {
-        if let Some(doc) = self.doc_path.clone() {
-            return Some(SnapshotTarget::BesideDocument(doc));
+    ///
+    /// ★★★ เป็นฟังก์ชันที่รับ **แท็บใบหนึ่ง** ไม่ใช่เมธอดที่อ่าน "แท็บที่ดูอยู่"
+    /// (P4-7c) — ทุกแท็บต้องถูก snapshot ไม่ใช่เฉพาะใบที่ผู้ใช้กำลังมองอยู่
+    /// ตอนนั้น · เขียนเป็นเมธอดบน `self` เมื่อไหร่ จะไม่มีใครสังเกตว่าอีกสามใบ
+    /// ที่เปิดค้างไว้ไม่มีอะไรคุ้มครองเลย
+    fn snapshot_target(
+        doc: &Doc,
+        recovery_dir: Option<&std::path::Path>,
+    ) -> Option<SnapshotTarget> {
+        if let Some(path) = doc.path.clone() {
+            return Some(SnapshotTarget::BesideDocument(path));
         }
-        self.recovery_dir.clone().map(SnapshotTarget::Recovery)
+        recovery_dir
+            .map(std::path::Path::to_path_buf)
+            .map(SnapshotTarget::Recovery)
     }
 
     /// ★★★ autosave หนึ่งจังหวะ — เรียกทุกเฟรม **ไม่บล็อก** (P4-3/P4-4, I-2)
@@ -3693,21 +4108,41 @@ impl RefxApp {
     ///
     /// ★ นโยบายเดียวคุมทั้งสองปลายทาง — ผู้ใช้ที่ยังไม่เคยบันทึกได้การคุ้มครอง
     /// **เท่ากันเป๊ะ** กับคนที่บันทึกแล้ว ไม่ใช่รุ่นด้อยกว่า
+    ///
+    /// ★★★ **ทุกแท็บ ไม่ใช่แท็บที่ดูอยู่** (P4-7c) — เกณฑ์ผ่านของ P4-7 คือ
+    /// *"เปิดสองเอกสาร แก้ทั้งคู่ ไม่ save เลย → ฆ่าโปรเซส → กู้ได้ทั้งสอง"*
+    /// ซึ่งเป็นไปไม่ได้เลยถ้าใบที่ไม่ได้อยู่หน้าจอไม่ถูกเขียน · แต่ละใบมีนาฬิกา
+    /// และช่องงานเป็นของตัวเอง จึงเขียนพร้อมกันได้โดยไม่ต้องรอกัน
     fn tick_autosave(&mut self) {
+        let Self {
+            docs,
+            recovery_dir,
+            gfx,
+            ..
+        } = self;
+        // ★ ต้องมีหน้าต่างแล้วเท่านั้น (เงื่อนไขเดิม) — เอกสารอยู่คนละที่กับ `Gfx` แล้ว
+        let has_window = gfx.is_some();
+        for doc in docs.iter_mut() {
+            Self::tick_autosave_one(doc, recovery_dir.as_deref(), has_window);
+        }
+    }
+
+    /// autosave หนึ่งจังหวะของ **แท็บใบเดียว** — ตรรกะเดิมทั้งหมด แค่ผูกกับ `doc`
+    fn tick_autosave_one(doc: &mut Doc, recovery_dir: Option<&std::path::Path>, has_window: bool) {
         // เก็บผลของรอบก่อน (ถ้ามี) — autosave ที่ล้มไม่ใช่เรื่องที่ผู้ใช้ต้องเห็น
-        if let Some(rx) = self.autosave_job.as_ref() {
+        if let Some(rx) = doc.autosave_job.as_ref() {
             match rx.try_recv() {
                 Ok(Ok(())) => {
-                    self.autosave_job = None;
-                    // ★★ ตอนนี้งานชุดที่กู้มามีสำเนาใหม่ของ session นี้บนดิสก์แล้ว
+                    doc.autosave_job = None;
+                    // ★★ ตอนนี้งานชุดที่กู้มามีสำเนาใหม่ของแท็บนี้บนดิสก์แล้ว
                     //    ตัวเก่าจึงหมดหน้าที่ · ลบก่อนหน้านี้ = มีช่วงที่ไม่มีสำเนาเลย
-                    if let Some(old) = self.adopted_recovery.take() {
+                    if let Some(old) = doc.adopted_recovery.take() {
                         remove_recovery_file(&old);
                     }
                     // ★ เหตุผลเดียวกันเป๊ะกับ `adopted_recovery` — ของที่ผู้ใช้
-                    //   สั่งเก็บไว้แล้วกู้กลับมา หมดหน้าที่ก็ต่อเมื่อ session นี้
+                    //   สั่งเก็บไว้แล้วกู้กลับมา หมดหน้าที่ก็ต่อเมื่อแท็บนี้
                     //   มีสำเนาของตัวเองบนดิสก์แล้ว
-                    if let Some(old) = self.adopted_kept.take()
+                    if let Some(old) = doc.adopted_kept.take()
                         && let Err(err) = std::fs::remove_file(&old)
                         && err.kind() != std::io::ErrorKind::NotFound
                     {
@@ -3716,33 +4151,32 @@ impl RefxApp {
                 }
                 Ok(Err(err)) => {
                     tracing::warn!(%err, "autosave snapshot failed");
-                    self.autosave_job = None;
+                    doc.autosave_job = None;
                     // ★ ล้มแล้วต้อง **ลองใหม่** ไม่ใช่ถือว่าเก็บไปแล้ว (I-3) ·
                     //   ตัวเว้นระยะยังคุมอยู่ จึงลองรอบละครั้ง ไม่ใช่รัวทุกเฟรม
-                    self.snapshot_revision = None;
+                    doc.snapshot_revision = None;
                 }
                 Err(crossbeam_channel::TryRecvError::Empty) => return,
-                Err(crossbeam_channel::TryRecvError::Disconnected) => self.autosave_job = None,
+                Err(crossbeam_channel::TryRecvError::Disconnected) => doc.autosave_job = None,
             }
         }
-        let Some(target) = self.snapshot_target() else {
+        let Some(target) = Self::snapshot_target(doc, recovery_dir) else {
             return;
         };
-        let unsaved = self.has_unsnapshotted_work();
-        // ★ ต้องมีหน้าต่างแล้วเท่านั้น (เงื่อนไขเดิม) — เอกสารอยู่คนละที่กับ `Gfx` แล้ว
-        if self.gfx.is_none() {
+        let unsaved = has_window && Self::doc_has_unsnapshotted_work(doc);
+        if !has_window {
             return;
         }
         let now = std::time::Instant::now();
-        if !self.autosaver.should_write(unsaved, now) {
+        if !doc.autosaver.should_write(unsaved, now) {
             return;
         }
-        let revision = self.doc.board.revision();
+        let revision = doc.board.revision();
 
         // ★ โคลน ณ จังหวะที่ตัดสิน ด้วยเหตุผลเดียวกับการบันทึกจริง —
         //   ผู้ใช้ต้องแก้งานต่อได้ระหว่างที่ snapshot กำลังเขียน
-        let board = self.doc.board.clone();
-        let session = self.session.clone();
+        let board = doc.board.clone();
+        let session = doc.session.clone();
         let (tx, rx) = crossbeam_channel::bounded(1);
         let spawned = std::thread::Builder::new()
             .name("refx-autosave".to_owned())
@@ -3750,8 +4184,8 @@ impl RefxApp {
                 // ★ `rename_durable` ตัวเดียวกับการบันทึกจริงทั้งสองเส้นทาง
                 let rename = refx_platform::fsops::rename_durable;
                 let result = match target {
-                    SnapshotTarget::BesideDocument(doc) => {
-                        refx_io::autosave::write_snapshot(&doc, &board, rename)
+                    SnapshotTarget::BesideDocument(path) => {
+                        refx_io::autosave::write_snapshot(&path, &board, rename)
                     }
                     SnapshotTarget::Recovery(dir) => {
                         refx_io::recovery::write_snapshot(&dir, &session, &board, rename)
@@ -3765,46 +4199,66 @@ impl RefxApp {
             //   ไม่งั้นนาฬิกาจะค้างอยู่ในอดีตแล้วถูกปลุกซ้ำทันทีไม่รู้จบ
             //   · ไม่บันทึก `snapshot_revision` เพราะยังไม่มีอะไรลงดิสก์จริง
             //   → รอบหน้าหลังเว้นระยะครบ จะลองใหม่เอง
-            self.autosaver.record_write(now);
+            doc.autosaver.record_write(now);
             return;
         }
-        self.autosave_job = Some(rx);
-        self.snapshot_revision = Some(revision);
-        self.autosaver.record_write(now);
+        doc.autosave_job = Some(rx);
+        doc.snapshot_revision = Some(revision);
+        doc.autosaver.record_write(now);
     }
 
     /// ★★★ เวลาที่ต้องถูกปลุกมาเขียน snapshot — `None` = ไม่มีอะไรค้าง
     ///
     /// ★★ ถามผ่าน `snapshot_target()` ตัวเดียวกับที่ `tick_autosave` ใช้ —
-    /// ถ้าที่นี่ถาม `doc_path` ตรง ๆ เหมือนเดิม งานที่ยังไม่เคยบันทึกจะ
+    /// ถ้าที่นี่ถาม `path` ตรง ๆ เหมือนเดิม งานที่ยังไม่เคยบันทึกจะ
     /// **ไม่มีใครปลุกมาเขียนเลยตอนผู้ใช้ลุกจากโต๊ะ** ซึ่งเป็นช่องเดียวกับที่
     /// P4-3 เกือบพลาด แค่ย้ายมาโผล่ที่ผู้ใช้อีกกลุ่มหนึ่ง
     ///
-    /// ★ เงื่อนไขคือ [`Self::has_unsnapshotted_work`] ไม่ใช่ `dirty` —
+    /// ★ เงื่อนไขคือ [`Self::doc_has_unsnapshotted_work`] ไม่ใช่ `dirty` —
     /// ไม่งั้น board ที่เก็บครบแล้วแต่ยังไม่ได้ `Ctrl+S` จะขอให้ปลุกทุก 10 วินาที
     /// **ตลอดทั้งวัน** ทั้งที่ไม่มีอะไรให้เขียน (I-1)
+    ///
+    /// ★★★ เอา **ตัวที่ใกล้ที่สุดของทุกแท็บ** — แท็บที่ไม่ได้อยู่หน้าจอก็ต้อง
+    /// ปลุกโปรแกรมมาเขียนของมันได้ ไม่งั้นมันจะถูกเก็บก็ต่อเมื่อผู้ใช้บังเอิญ
+    /// สลับกลับไปดู ซึ่งเป็นเงื่อนไขที่ crash ไม่เคยรอ
     fn autosave_deadline(&self) -> Option<std::time::Instant> {
-        // ★★★ งานที่ส่งไปเธรดแล้วยังไม่กลับ = **อย่าเพิ่งตั้งนาฬิกา**
-        //
-        //   ไม่งั้นจะได้วงจรนี้: ตื่นตามเวลา → `tick_autosave` เห็นว่ามีงานค้าง
-        //   แล้วออกทันทีโดยไม่เขียน → นาฬิกายังชี้เวลาที่ผ่านมาแล้ว → ตื่นอีก
-        //   ทันที → วนแบบนี้จนกว่าเธรดจะเขียนเสร็จ ซึ่งก็คือ `ControlFlow::Poll`
-        //   ที่ I-1 ห้ามไว้ตรง ๆ แค่สะกดด้วยชื่ออื่น
-        if self.autosave_job.is_some() {
-            return None;
-        }
-        self.snapshot_target()?;
-        self.autosaver.next_deadline(self.has_unsnapshotted_work())
+        self.gfx.as_ref()?;
+        Self::next_autosave_across_tabs(&self.docs, self.recovery_dir.as_deref())
+    }
+
+    /// นาฬิกาที่ใกล้ที่สุดของทุกแท็บ — **ฟังก์ชันบริสุทธิ์** เทสต์ได้โดยไม่ต้องมีหน้าต่าง
+    ///
+    /// ★ แยกออกมาเพราะเงื่อนไข "ต้องมี `Gfx`" ของ [`Self::autosave_deadline`]
+    /// ทำให้เทสต์เข้าไม่ถึงตรรกะข้างในเลยสักบรรทัด (`docs/08 §3.9` ข้อ 1:
+    /// ประตูที่เทสต์ไม่ได้คือประตูที่ไม่มีใครรู้ว่ามันล้มเป็นหรือเปล่า)
+    fn next_autosave_across_tabs(
+        docs: &Docs,
+        recovery_dir: Option<&std::path::Path>,
+    ) -> Option<std::time::Instant> {
+        docs.iter()
+            .filter_map(|doc| {
+                // ★★★ งานที่ส่งไปเธรดแล้วยังไม่กลับ = **อย่าเพิ่งตั้งนาฬิกา**
+                //
+                //   ไม่งั้นจะได้วงจรนี้: ตื่นตามเวลา → `tick_autosave` เห็นว่ามีงาน
+                //   ค้างแล้วออกทันทีโดยไม่เขียน → นาฬิกายังชี้เวลาที่ผ่านมาแล้ว →
+                //   ตื่นอีกทันที → วนแบบนี้จนกว่าเธรดจะเขียนเสร็จ ซึ่งก็คือ
+                //   `ControlFlow::Poll` ที่ I-1 ห้ามไว้ตรง ๆ แค่สะกดด้วยชื่ออื่น
+                if doc.autosave_job.is_some() {
+                    return None;
+                }
+                Self::snapshot_target(doc, recovery_dir)?;
+                doc.autosaver
+                    .next_deadline(Self::doc_has_unsnapshotted_work(doc))
+            })
+            .min()
     }
 
     /// ★★★ board เปลี่ยนไปจาก snapshot ล่าสุดหรือยัง — **คำถามที่ถูกกว่า `dirty`**
     ///
     /// `dirty` ตอบว่า "ยังไม่ได้ `Ctrl+S`" ซึ่งเป็นจริงค้างยาว ส่วนที่ autosave
     /// อยากรู้จริง ๆ คือ "มีอะไรที่ยังไม่ได้เก็บไหม" · ดู `snapshot_revision`
-    fn has_unsnapshotted_work(&self) -> bool {
-        self.gfx.as_ref().is_some_and(|_| {
-            self.doc.board.is_dirty() && self.snapshot_revision != Some(self.doc.board.revision())
-        })
+    fn doc_has_unsnapshotted_work(doc: &Doc) -> bool {
+        doc.board.is_dirty() && doc.snapshot_revision != Some(doc.board.revision())
     }
 
     // ---------- ★★★ P4-4: กู้คืนงานที่ยังไม่เคยบันทึก + เปิดไฟล์ ----------
@@ -3818,12 +4272,15 @@ impl RefxApp {
         let Some(dir) = self.recovery_dir.clone() else {
             return;
         };
-        let session = self.session.clone();
+        // ★★★ ต้องส่ง session ของ **ทุกแท็บ** ไม่ใช่ตัวเดียว — ไม่งั้น recovery
+        //     slot ของแท็บที่เปิดอยู่จะถูกอ่านว่าเป็นงานกำพร้าแล้วผู้ใช้จะถูกชวน
+        //     ให้ "กู้คืน" งานที่อยู่ตรงหน้าเขา (ดู `refx_io::recovery::scan`)
+        let live = self.docs.live_sessions();
         let (tx, rx) = crossbeam_channel::bounded(1);
         let spawned = std::thread::Builder::new()
             .name("refx-recovery-scan".to_owned())
             .spawn(move || {
-                let _ = tx.send(scan_for_recovery(&dir, &session));
+                let _ = tx.send(scan_for_recovery(&dir, &live));
             });
         if spawned.is_ok() {
             self.recovery_scan = Some(rx);
@@ -3838,14 +4295,27 @@ impl RefxApp {
         let found = match rx.try_recv() {
             Ok(found) => found,
             Err(crossbeam_channel::TryRecvError::Empty) => return,
-            Err(crossbeam_channel::TryRecvError::Disconnected) => None,
+            Err(crossbeam_channel::TryRecvError::Disconnected) => Vec::new(),
         };
         self.recovery_scan = None;
         // ★★ กวาด spool ตรงนี้ **ไม่ว่าจะมีงานค้างหรือไม่** — รายชื่อ snapshot
         //    ที่ต้องคุ้มครองนิ่งแล้วตั้งแต่การสแกนจบ · ถ้าผูกไว้กับ "ผู้ใช้ตอบ
         //    แถบกู้คืน" อย่างเดียว เครื่องที่ไม่เคย crash เลยจะไม่มีวันกวาด
         self.sweep_spool_folder();
-        let Some(found) = found else {
+        self.recovery_queue = found.into();
+        self.offer_next_orphan();
+    }
+
+    /// ★★★ เสนองานกำพร้าใบถัดไปในคิว — **ทีละใบ** (P4-7c)
+    ///
+    /// เรียกทั้งตอนสแกนเสร็จและตอนผู้ใช้เพิ่งตอบใบก่อนหน้า · แถบบนจอมีอันเดียว
+    /// จึงต้องรอให้ว่างก่อนเสมอ (`docs/07 §4`: สองคำถามติดกันยอมรับได้ แต่ต้อง
+    /// เป็นคนละจังหวะ ไม่ใช่ทับกัน)
+    fn offer_next_orphan(&mut self) {
+        if self.pending_recovery.is_some() || self.shell.recover_prompt.is_some() {
+            return;
+        }
+        let Some(found) = self.recovery_queue.pop_front() else {
             return;
         };
 
@@ -3880,7 +4350,7 @@ impl RefxApp {
             items: pending.board.len(),
             scope: crate::shell::RecoverScope::ThisDocument,
         });
-        self.pending_snapshot = Some(pending);
+        self.docs.active_mut().pending_snapshot = Some(pending);
         if let Some(gfx) = self.gfx.as_ref() {
             gfx.window.request_redraw();
         }
@@ -3894,7 +4364,7 @@ impl RefxApp {
         if self.shell.recover_prompt.is_some() {
             return;
         }
-        let Some(kept) = self.pending_kept.as_ref() else {
+        let Some(kept) = self.docs.active().pending_kept.as_ref() else {
             return;
         };
         self.shell.recover_prompt = Some(crate::shell::RecoverView {
@@ -3938,18 +4408,24 @@ impl RefxApp {
         };
         match choice {
             RecoverChoice::Restore => {
-                // ★ id เดียวกับ `Board::default()` ที่แอปใช้ — `.refx` ไม่เก็บ id
-                //   (P4-1 ตัดออกโดยตั้งใจ: มันเป็นคีย์ในหน่วยความจำ ไม่ใช่เนื้อหา)
-                let Some(board) = refx_io::recovery::load(&found.path, default_board_id()) else {
+                // ★★★ **งานกำพร้าแต่ละใบได้แท็บของตัวเอง** (P4-7c)
+                //
+                //   ก่อนหน้านี้มันแทนที่ board ที่กำลังเปิดอยู่ ซึ่งกลืนงานของแท็บนั้น
+                //   ทิ้งไปเงียบ ๆ · และเมื่อมีงานกำพร้าหลายใบ (สองแท็บที่ไม่เคยบันทึก
+                //   แล้วโปรแกรมตาย) ใบที่สองจะทับใบแรกที่ผู้ใช้เพิ่งกู้มา
+                //   → เอกสารคนละฉบับ = แท็บคนละใบ เสมอ
+                let id = self.docs.mint();
+                let Some(board) = refx_io::recovery::load(&found.path, id) else {
                     self.shell.status = text::t(self.shell.lang, Key::OpenFailed).to_owned();
                     self.shell.status_warn = true;
+                    // อ่านไม่ออกก็ยังต้องถามใบถัดไปต่อ ไม่ใช่เงียบไปทั้งคิว
+                    self.offer_next_orphan();
                     return;
                 };
                 // ★ กู้คืนแล้ว **ยังไม่มี path** — งานชุดนี้ไม่เคยถูกบันทึกมาก่อน
                 //   จึงต้อง dirty ต่อไปและถูก autosave ต่อไปตามปกติ
                 //   ★★ และยังไม่มีไฟล์ `.refx` ที่ฝังอะไรไว้ → ตารางว่าง
-                self.doc_assets = refx_io::packed::Index::default();
-                self.adopt_board(board, None);
+                self.adopt_into_tab(id, board, None, refx_io::packed::Index::default());
                 // ★★★ **ธงต้องติดที่นี่ด้วย ไม่ใช่แค่เส้นทางของเอกสาร** (docs/03 §1)
                 //
                 //   `History::default()` ถือว่า board ที่รับมา = สถานะที่บันทึกแล้ว
@@ -3958,11 +4434,12 @@ impl RefxApp {
                 //   ที่ถูกรายงานความคืบหน้าของ decode เขียนทับใน ~3 ms —
                 //   ลูปเดิมเป๊ะ: กู้งานคืน → เห็นว่าสะอาด → ปิดโปรแกรม → **หายอีกรอบ**
                 if self.gfx.is_some() {
-                    self.doc.history.mark_unsaved(&mut self.doc.board);
+                    let doc = self.docs.active_mut();
+                    doc.history.mark_unsaved(&mut doc.board);
+                    // ★ ยังไม่ลบไฟล์เก่า — รอให้ snapshot ของ **แท็บนี้** ลงดิสก์ก่อน
+                    //   (ดู `Doc::adopted_recovery`) · ระหว่างนี้มีสำเนาหนึ่งชุดเสมอ
+                    doc.adopted_recovery = Some(found.path.clone());
                 }
-                // ★ ยังไม่ลบไฟล์เก่า — รอให้ snapshot ของ session นี้ลงดิสก์ก่อน
-                //   (ดู `adopted_recovery`) · ระหว่างนี้มีสำเนาอยู่หนึ่งชุดเสมอ
-                self.adopted_recovery = Some(found.path.clone());
                 self.shell.status = text::t(self.shell.lang, Key::RecoveredNotSavedYet).to_owned();
                 self.shell.status_warn = true;
             }
@@ -3982,6 +4459,8 @@ impl RefxApp {
         // ★★ แล้วค่อยกวาด spool — ลำดับสำคัญ: snapshot ที่ผู้ใช้เพิ่งสั่ง "ทิ้ง"
         //    ต้องหายไปจากโฟลเดอร์ก่อน ภาพที่มีแต่มันรู้จักจึงจะกวาดได้
         self.sweep_spool_folder();
+        // ★★★ **ใบถัดไปในคิวขึ้นถามทันที** — ไม่ใช่รอเปิดโปรแกรมรอบหน้า (P4-7c)
+        self.offer_next_orphan();
         if let Some(gfx) = self.gfx.as_ref() {
             gfx.window.request_redraw();
         }
@@ -4003,21 +4482,26 @@ impl RefxApp {
     fn apply_document_recover_choice(&mut self, choice: crate::shell::RecoverChoice) {
         use crate::shell::RecoverChoice;
 
-        let Some(pending) = self.pending_snapshot.take() else {
+        let Some(pending) = self.docs.active_mut().pending_snapshot.take() else {
             return;
         };
-        let Some(doc) = self.doc_path.clone() else {
+        let Some(doc) = self.docs.active().path.clone() else {
             return; // เอกสารถูกปิด/แทนที่ไปแล้วระหว่างรอคำตอบ
         };
+        // ★ กู้เข้า **แท็บเดิม** ไม่ใช่แท็บใหม่ — snapshot ตัวนี้เป็นเนื้ออีกเวอร์ชัน
+        //   ของไฟล์ที่แท็บนี้เปิดอยู่ ไม่ใช่เอกสารคนละฉบับ (ต่างจากงานกำพร้า)
+        let id = self.docs.active().id;
+        let assets = self.docs.active().assets.clone();
         match choice {
             RecoverChoice::Restore => {
-                self.adopt_board(pending.board, Some(doc));
+                self.adopt_into_tab(id, pending.board, Some(doc), assets);
                 // ★★★ **ธง "ยังไม่บันทึก" ต้องติดทันที** — เนื้อที่เพิ่งขึ้นจอ
                 //     ไม่เหมือนไฟล์บนดิสก์ตามนิยาม · ถ้าไม่ติด ตัวบ่งชี้ถาวรบนแท็บ
                 //     จะบอกว่าทุกอย่างอยู่ในไฟล์แล้ว แล้วผู้ใช้จะปิดโปรแกรมทิ้ง
                 //     อีกรอบ — วนกลับไปที่เดิมพอดี (`History::mark_unsaved`)
                 if self.gfx.is_some() {
-                    self.doc.history.mark_unsaved(&mut self.doc.board);
+                    let doc = self.docs.active_mut();
+                    doc.history.mark_unsaved(&mut doc.board);
                 }
                 self.shell.status = text::t(self.shell.lang, Key::RecoveredIntoDocument).to_owned();
                 self.shell.status_warn = true;
@@ -4045,7 +4529,7 @@ impl RefxApp {
                         //     ต่อ ผู้ใช้จะถูกถามถึงเนื้อที่ **ไม่มีอยู่บนดิสก์แล้ว** และถ้า
                         //     เขากด "เอากลับมา" เราจะลบไฟล์ที่เพิ่งเก็บให้เขาไปด้วย
                         //     (เห็นบนแอปจริงตอนยืนยัน 25 ส.ค. 2026)
-                        self.pending_kept = None;
+                        self.docs.active_mut().pending_kept = None;
                         self.shell.status =
                             text::t(self.shell.lang, Key::RecoverKeptSaved).to_owned();
                         self.shell.status_warn = false;
@@ -4079,21 +4563,24 @@ impl RefxApp {
     fn apply_kept_recover_choice(&mut self, choice: crate::shell::RecoverChoice) {
         use crate::shell::RecoverChoice;
 
-        let Some(kept) = self.pending_kept.take() else {
+        let Some(kept) = self.docs.active_mut().pending_kept.take() else {
             return;
         };
-        let Some(doc) = self.doc_path.clone() else {
+        let Some(doc) = self.docs.active().path.clone() else {
             return;
         };
+        let id = self.docs.active().id;
+        let assets = self.docs.active().assets.clone();
         match choice {
             RecoverChoice::Restore => {
                 let path = refx_io::autosave::kept_path(&doc);
-                self.adopt_board(kept.board, Some(doc));
+                self.adopt_into_tab(id, kept.board, Some(doc), assets);
                 if self.gfx.is_some() {
-                    self.doc.history.mark_unsaved(&mut self.doc.board);
+                    let doc = self.docs.active_mut();
+                    doc.history.mark_unsaved(&mut doc.board);
+                    // ★ ยังไม่ลบ — รอ snapshot ของแท็บนี้ลงดิสก์ก่อน (I-3)
+                    doc.adopted_kept = Some(path);
                 }
-                // ★ ยังไม่ลบ — รอ snapshot ของ session นี้ลงดิสก์ก่อน (I-3)
-                self.adopted_kept = Some(path);
                 self.shell.status = text::t(self.shell.lang, Key::RecoveredIntoDocument).to_owned();
                 self.shell.status_warn = true;
             }
@@ -4118,13 +4605,15 @@ impl RefxApp {
         let Some(dir) = self.recovery_dir.clone() else {
             return;
         };
-        let session = self.session.clone();
+        // ★★★ session ของ **ทุกแท็บ** — ส่งไม่ครบเมื่อไหร่ เพดานจะลบ snapshot
+        //     ของแท็บที่ยังทำงานอยู่ (ดู `refx_io::recovery::prune`)
+        let live = self.docs.live_sessions();
         let spawned = std::thread::Builder::new()
             .name("refx-recovery-sweep".to_owned())
             .spawn(move || {
                 refx_io::recovery::prune(
                     &dir,
-                    &session,
+                    &live,
                     refx_io::recovery::MAX_KEPT,
                     refx_io::recovery::MAX_AGE,
                     std::time::SystemTime::now(),
@@ -4138,7 +4627,7 @@ impl RefxApp {
     /// ★★★ เก็บกวาด spool ของภาพที่วาง — บนเธรดอื่น (I-2) และ **ถามครบทั้งสองฝั่ง**
     ///
     /// กติกา (`docs/07 §2` · `refx_io::spool`):
-    /// 1. ห้ามลบไฟล์ที่ **board ที่เปิดอยู่** อ้างถึง
+    /// 1. ห้ามลบไฟล์ที่ **board ของแท็บใดก็ตามที่เปิดอยู่** อ้างถึง
     /// 2. ★ ห้ามลบไฟล์ที่ **recovery snapshot ตัวใดก็ตามที่ยังอยู่** อ้างถึง
     /// 3. ที่เหลือใช้เพดาน **ไบต์** (512 MB)
     ///
@@ -4147,6 +4636,11 @@ impl RefxApp {
     /// เพราะเขาเชื่อไปแล้วว่าได้งานคืน · hash ของ board ที่เปิดอยู่อ่านที่นี่
     /// (UI thread, ในหน่วยความจำ) ส่วนการอ่าน snapshot ทุกไฟล์เป็นงานดิสก์
     /// จึงอยู่บนเธรด
+    ///
+    /// ★★★ **ข้อ 1 ต้องรวมทุกแท็บ ไม่ใช่แท็บที่ดูอยู่** (P4-7c) — ภาพที่วางไว้
+    /// ในแท็บหลังบ้านมีต้นฉบับอยู่ที่ spool ที่เดียว (`§4` ข้อ 24) · ถามแค่แท็บ
+    /// ที่อยู่หน้าจอ แล้วเพดานจะลบต้นฉบับของอีกแท็บทิ้ง **ขณะที่มันเปิดอยู่**
+    /// แล้วภาพจะกลายเป็นช่องว่างทันทีที่ผู้ใช้สลับกลับไปดู — และกู้คืนไม่ได้เลย
     fn sweep_spool_folder(&mut self) {
         let (Some(spool_dir), Some(recovery_dir)) =
             (self.spool_dir.clone(), self.recovery_dir.clone())
@@ -4156,20 +4650,21 @@ impl RefxApp {
         if self.spool_sweep.is_some() {
             return; // รอบก่อนยังไม่จบ — ซ้อนกันไม่ได้อะไรเพิ่ม
         }
-        let open_board = self
-            .gfx
-            .as_ref()
-            .map(|_| refx_io::spool::hashes_of(&self.doc.board))
-            .unwrap_or_default();
+        let open_board = if self.gfx.is_some() {
+            hashes_of_every_tab(&self.docs)
+        } else {
+            std::collections::BTreeSet::new()
+        };
         let wake = self.assets.as_ref().map(|assets| assets.pool.wake_handle());
         let (tx, rx) = crossbeam_channel::bounded(1);
         let spawned = std::thread::Builder::new()
             .name("refx-spool-sweep".to_owned())
             .spawn(move || {
                 let mut referenced = open_board;
+                // ★ id ใช้แค่ถอด board ออกมาดึงรายการ hash แล้วทิ้ง — ดู `probe_board_id`
                 referenced.extend(refx_io::spool::referenced_by_recovery(
                     &recovery_dir,
-                    default_board_id(),
+                    probe_board_id(),
                 ));
                 let swept = refx_io::spool::sweep(
                     &spool_dir,
@@ -4230,7 +4725,11 @@ impl RefxApp {
         self.shell.status_warn = true;
     }
 
-    /// `Ctrl+O` — ถามว่าจะเปิดไฟล์ไหน (P4-4)
+    /// `Ctrl+O` — ถามว่าจะเปิดไฟล์ไหน แล้วเปิด **เป็นแท็บใหม่** (`docs/03 §5`)
+    ///
+    /// ★★ เปลี่ยนพฤติกรรมโดยตั้งใจตั้งแต่ P4-7c: เดิมมันแทนที่ board ที่ผู้ใช้
+    /// กำลังทำอยู่ทั้งก้อนโดยไม่ถาม ซึ่งคือการทำงานหาย — และเป็นสิ่งที่โครงแท็บ
+    /// มีไว้แก้พอดี · แท็บเปล่าที่ยังไม่เคยถูกแตะยังถูก *ใช้ซ้ำ* (ดู `Doc::is_untouched`)
     fn apply_open_request(&mut self) {
         // ★ ซ้อนกันไม่ได้: สอง dialog พร้อมกันแปลว่าผลของอันที่ตอบก่อนถูกทิ้ง
         if self.open_dialog.is_some() || self.load_job.is_some() {
@@ -4250,7 +4749,27 @@ impl RefxApp {
     /// แบบ packed (P4-5) จะใหญ่กว่านี้อีกมาก — เส้นทางนี้ห้ามแตะ UI thread
     /// ตั้งแต่วันแรก ไม่ใช่ "ค่อยย้ายทีหลังตอนมันช้า"
     fn start_load(&mut self, path: &std::path::Path) {
+        // ★★★ ไฟล์นี้เปิดอยู่แล้ว = **ไปที่แท็บนั้น ไม่ใช่เปิดซ้อน** — สองแท็บ
+        //     บนไฟล์เดียวกันแปลว่าสอง `<doc>.refx.autosave` ทับกัน และ `Ctrl+S`
+        //     ของใบหลังจะกลืนงานของใบแรก (I-3)
+        if let Some(index) = self.docs.index_of_path(path) {
+            self.focus_tab(index);
+            self.shell.status = text::fill(
+                self.shell.lang,
+                text::Template::Opened,
+                &[("name", &file_label_of(path))],
+            );
+            self.shell.status_warn = false;
+            if let Some(gfx) = self.gfx.as_ref() {
+                gfx.window.request_redraw();
+            }
+            return;
+        }
         let path = path.to_path_buf();
+        // ★★★ จอง id ของแท็บปลายทาง **ก่อน** ส่งงาน — `dto::decode` ต้องรู้ id
+        //     ตั้งแต่ตอนอ่าน (`.refx` ไม่เก็บ id) · อ่านด้วย id คนละตัวกับที่
+        //     แท็บจะใช้จริง = `ItemId` ทุกใบชี้ไป board ผิดใบตั้งแต่วินาทีแรก
+        let id = self.docs.mint();
         // ★ เหตุผลเดียวกับเธรดบันทึก: อ่านไฟล์ packed ระดับ GB ใช้เวลาจริง
         //   และแอปหลับระหว่างรอ (I-1) — ไม่ปลุก = เอกสารไม่ขึ้นจอจนกว่าจะมี event
         let waker = self.waker.clone();
@@ -4258,15 +4777,15 @@ impl RefxApp {
         let spawned = std::thread::Builder::new()
             .name("refx-open".to_owned())
             .spawn(move || {
-                let result = read_document(&path).map(|board| LoadedDoc {
+                let result = read_document(&path, id).map(|board| LoadedDoc {
                     // ★★ อ่าน **ตาราง** ของไฟล์เดียวกันต่อทันที (หัวไฟล์ + ตาราง
                     //    เท่านั้น ไม่แตะ blob) — เอกสาร packed พกภาพมาเอง และ
                     //    ตารางนี้คือสิ่งที่บอกว่าใบไหนอยู่ข้างในบ้าง
                     assets: read_asset_table(&path),
                     // ★★★ ถามเรื่อง snapshot **บนเธรดนี้ด้วย** (I-2) — มันคือการ
                     //     อ่าน+คลายบีบไฟล์อีกก้อน ไม่ใช่การ stat เฉย ๆ
-                    pending: newer_snapshot(&path, &board).map(Box::new),
-                    kept: kept_snapshot(&path, &board).map(Box::new),
+                    pending: newer_snapshot(&path, id, &board).map(Box::new),
+                    kept: kept_snapshot(&path, id, &board).map(Box::new),
                     path,
                     board: Box::new(board),
                 });
@@ -4280,7 +4799,7 @@ impl RefxApp {
             self.shell.status_warn = true;
             return;
         }
-        self.load_job = Some(rx);
+        self.load_job = Some((id, rx));
         self.shell.status = text::t(self.shell.lang, Key::OpenInProgress).to_owned();
         self.shell.status_warn = false;
     }
@@ -4307,9 +4826,10 @@ impl RefxApp {
             }
         }
 
-        let Some(rx) = self.load_job.as_ref() else {
+        let Some((id, rx)) = self.load_job.as_ref() else {
             return;
         };
+        let id = *id;
         let done = match rx.try_recv() {
             Ok(result) => result,
             Err(crossbeam_channel::TryRecvError::Empty) => return,
@@ -4326,11 +4846,8 @@ impl RefxApp {
                 pending,
                 kept,
             }) => {
-                let name = path
-                    .file_name()
-                    .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
-                self.doc_assets = assets;
-                self.adopt_board(*board, Some(path));
+                let name = file_label_of(&path);
+                self.adopt_into_tab(id, *board, Some(path), assets);
                 self.shell.status = text::fill(lang, text::Template::Opened, &[("name", &name)]);
                 self.shell.status_warn = false;
                 // ★★★ **เอกสารขึ้นจอก่อนเสมอ แล้วค่อยถามเรื่อง snapshot**
@@ -4340,7 +4857,7 @@ impl RefxApp {
                 // ★★ ตัวที่ **ใหม่กว่า** ขึ้นก่อน แล้วตัวที่ผู้ใช้สั่งเก็บไว้ตามมา
                 //    หลังเขาตอบตัวแรก (`docs/07 §4`) — สองคำถามติดกันยอมรับได้
                 //    เพราะเกิดยากและทั้งสองอันคืองานของเขาจริง ๆ
-                self.pending_kept = kept;
+                self.docs.active_mut().pending_kept = kept;
                 self.offer_pending_snapshot(pending);
                 self.offer_kept_snapshot();
             }
@@ -4364,39 +4881,246 @@ impl RefxApp {
     /// | `render_state` | thumbnail ของภาพเก่าไปโผล่บนภาพใหม่ที่ได้ `ItemId` ซ้ำ |
     /// | `index` | hit-test ชี้ไปที่ว่าง — คลิกแล้วไม่โดนอะไร |
     ///
-    /// ★ `doc_path = None` ตอนกู้คืน (งานชุดนั้นไม่เคยมีไฟล์) · `Some` ตอนเปิดไฟล์
-    fn adopt_board(&mut self, board: Board, path: Option<std::path::PathBuf>) {
-        let Some(gfx) = self.gfx.as_mut() else {
+    /// ★ `path = None` ตอนกู้คืน (งานชุดนั้นไม่เคยมีไฟล์) · `Some` ตอนเปิดไฟล์
+    ///
+    /// ★★★ **`id` ต้องเป็น id ที่ `board` ถูกอ่านมาด้วย** — ผู้เรียกจอง id จาก
+    /// [`Docs::mint`] ก่อนส่งงานอ่านเสมอ · แท็บที่มี id นี้อยู่แล้วจะถูกเขียนทับ
+    /// (เส้นทาง "กู้ snapshot เข้าแท็บเดิม") ส่วน id ที่ยังไม่มีใครถือ **ได้แท็บใหม่**
+    /// — หรือได้ที่นั่งของแท็บเปล่าที่ยังไม่เคยถูกแตะ (ดู [`Doc::is_untouched`])
+    fn adopt_into_tab(
+        &mut self,
+        id: refx_core::arena::BoardId,
+        board: Board,
+        path: Option<std::path::PathBuf>,
+        assets: refx_io::packed::Index,
+    ) {
+        if self.gfx.is_none() {
             return;
-        };
-        self.doc.board = board;
-        self.doc.history = History::default();
-        self.doc.selection = Selection::new();
-        self.doc.select_tool.cancel();
-        self.doc.render_state.clear();
-        self.doc.index = SpatialIndex::new(refx_core::spatial::DEFAULT_CELL_SIZE);
-        for (id, item) in self.doc.board.items_in_z_order() {
-            self.doc.index.insert(id, &item.canvas);
         }
-        self.doc.rubber_band = None;
-        self.doc.guides.clear();
-        self.doc.arrange.invalidate();
-        Self::rebuild_quads(gfx, &mut self.doc);
+        // ★★ โหมดของเอกสารใหม่ **อ่านจากตารางของไฟล์นั้น** (§4 ข้อ 29)
+        //    ตารางว่างสำหรับงานที่กู้คืนมา ซึ่งยังไม่มีไฟล์
+        let mode = mode_of_document(&board, &assets);
 
-        // ★★ `doc_path`/นาฬิกา autosave ต้องเปลี่ยนพร้อมกันกับ board เสมอ —
-        //    ถ้าตั้ง path ใหม่แต่ลืมรีเซ็ตนาฬิกา snapshot แรกของเอกสารใหม่จะ
-        //    ถูกเลื่อนไปจนครบรอบของเอกสารเก่า
-        // ★★ โหมดของเอกสารใหม่ **อ่านจากตารางของไฟล์นั้น** — ผู้เรียกเป็นคนเติม
-        //    `doc_assets` มาก่อนเสมอ (ตารางว่างสำหรับงานที่กู้คืนมา ซึ่งยังไม่มีไฟล์)
-        let mode = mode_of_document(&self.doc.board, &self.doc_assets);
+        let index = match self.docs.list.iter().position(|doc| doc.id == id) {
+            Some(existing) => {
+                self.docs.active = existing;
+                existing
+            }
+            // ★ แท็บเปล่าที่ยังไม่เคยถูกแตะ = ที่นั่งที่ว่างอยู่ · เอกสารแรกที่เปิด
+            //   จึงไม่ทิ้งแท็บ "Untitled board" เปล่า ๆ ค้างไว้ให้ผู้ใช้ปิดเอง
+            None if self.docs.active().is_untouched() => {
+                let seat = self.docs.active;
+                // ★★★ id ของที่นั่งต้องกลายเป็น id ที่ board ถูกอ่านมาด้วย ไม่งั้น
+                //     ทุกอย่างที่จับคู่ด้วย `BoardId` (ผลงาน decode · งานบันทึก)
+                //     จะหาแท็บนี้ไม่เจอตลอดอายุของมัน
+                self.docs.list[seat].id = id;
+                seat
+            }
+            None => {
+                let doc = Doc::empty(id);
+                self.docs.push(doc)
+            }
+        };
 
-        self.doc_path = path;
-        self.save_mode = mode;
-        self.snapshot_revision = None;
-        self.autosaver.reset();
-        self.request_thumbnails_for_board();
+        {
+            let doc = &mut self.docs.list[index];
+            doc.board = board;
+            doc.history = History::default();
+            doc.selection = Selection::new();
+            doc.select_tool.cancel();
+            doc.render_state.clear();
+            doc.index = SpatialIndex::new(refx_core::spatial::DEFAULT_CELL_SIZE);
+            {
+                // ยืม `board` กับ `index` คนละฟิลด์กัน — ไม่ต้องก๊อป item ทั้ง board
+                let Doc { board, index, .. } = &mut *doc;
+                for (id, item) in board.items_in_z_order() {
+                    index.insert(id, &item.canvas);
+                }
+            }
+            doc.rubber_band = None;
+            doc.guides.clear();
+            doc.arrange.invalidate();
+            // ★★ `path`/นาฬิกา autosave ต้องเปลี่ยนพร้อมกันกับ board เสมอ —
+            //    ถ้าตั้ง path ใหม่แต่ลืมรีเซ็ตนาฬิกา snapshot แรกของเอกสารใหม่จะ
+            //    ถูกเลื่อนไปจนครบรอบของเอกสารเก่า
+            doc.path = path;
+            doc.assets = assets;
+            doc.save_mode = mode;
+            doc.snapshot_revision = None;
+            doc.autosaver.reset();
+            // ★ คีย์งานที่ค้างของ board ใบเก่าในที่นั่งนี้ใช้ต่อไม่ได้ — `ItemId`
+            //   ที่มันชี้ถึงถูกโยนทิ้งไปพร้อม `board` เมื่อกี้
+            doc.relink_targets.clear();
+        }
+        if let Some(gfx) = self.gfx.as_mut() {
+            Self::rebuild_quads(gfx, &mut self.docs.list[index]);
+        }
+        self.request_thumbnails_for(id);
         if let Some(gfx) = self.gfx.as_ref() {
             gfx.window.request_redraw();
+        }
+    }
+
+    // ---------- ★★★ P4-7c: คีย์ของแท็บ (`docs/03 §5`) ----------
+
+    /// `Ctrl+T` — board เปล่าใบใหม่ พร้อม id และ recovery slot ของตัวเอง
+    fn apply_new_tab(&mut self) {
+        if self.gfx.is_none() {
+            return;
+        }
+        let id = self.docs.mint();
+        self.docs.push(Doc::empty(id));
+        self.shell.status = text::t(self.shell.lang, Key::NewBoardOpened).to_owned();
+        self.shell.status_warn = false;
+        if let Some(gfx) = self.gfx.as_ref() {
+            gfx.window.request_redraw();
+        }
+    }
+
+    /// `Ctrl+Tab` — แท็บถัดไป (วนกลับมาที่ใบแรกเมื่อถึงใบสุดท้าย)
+    fn apply_next_tab(&mut self) {
+        if self.docs.len() < 2 {
+            return;
+        }
+        self.focus_tab((self.docs.active + 1) % self.docs.len());
+    }
+
+    /// ★★★ **ทางเดียวที่ "แท็บที่ดูอยู่" เปลี่ยนได้** — สลับแล้วต้องเห็นของใบใหม่
+    ///
+    /// ## บั๊กที่มันปิด (เจอตอนรันแอปจริง 28 ส.ค. 2026)
+    ///
+    /// `gfx.quads` เป็นของ **หน้าต่าง** มีชุดเดียว และถูกสร้างใหม่เฉพาะตอน
+    /// `board` เปลี่ยน (`rebuild_quads`) · การตั้ง `docs.active` เฉย ๆ แล้วขอเฟรม
+    /// จึงวาด **ภาพของแท็บเก่า** ต่อไปทั้งชุด — ผู้ใช้เห็นภาพสามใบบนกระดานที่
+    /// สถานะบอกว่ามีใบเดียว และคลิกโดนแค่ใบเดียว
+    ///
+    /// เทสต์จับไม่ได้โดยธรรมชาติเพราะทุกชิ้นถูกหมด: `Docs` สลับถูก · `rebuild_quads`
+    /// สร้างถูก · **ไม่มีใครเรียกมัน** (`docs/08 §3.9` ข้อ 5 — "ทุกชิ้นถูก ประกอบผิด")
+    ///
+    /// ★ การลากที่ค้างอยู่เป็นของแท็บเดิม ใช้ต่อกับใบใหม่ไม่ได้ — ยกเลิกก่อนย้าย
+    /// (เหตุผลเดียวกับตอนสลับเครื่องมือ)
+    fn focus_tab(&mut self, index: usize) {
+        if index >= self.docs.len() || index == self.docs.active {
+            return;
+        }
+        {
+            let leaving = self.docs.active_mut();
+            leaving.select_tool.cancel();
+            leaving.rubber_band = None;
+            leaving.guides.clear();
+        }
+        self.docs.active = index;
+        if let Some(gfx) = self.gfx.as_mut() {
+            // ★ ภาพของใบใหม่ · และแผ่น Arrange ต้องคำนวณใหม่ด้วย (คนละ board)
+            Self::rebuild_quads(gfx, self.docs.active_mut());
+            gfx.working_quads.clear();
+            gfx.window.request_redraw();
+        }
+    }
+
+    /// ★★★ `Ctrl+W` / กดกากบาทบนแท็บ — **ถามก่อนถ้ายังไม่บันทึก** (`docs/03 §5`)
+    ///
+    /// ใช้แถบยืนยันตัวเดียวกับตอนปิดหน้าต่าง (`docs/03 §1`: คำถามชนิดเดียวกัน
+    /// ควรหน้าตาเหมือนกัน) — สิ่งที่ต่างคือ **ขอบเขต** ซึ่งเก็บไว้ที่ `closing_tab`
+    fn request_close_tab(&mut self, index: usize) {
+        let Some(doc) = self.docs.list.get(index) else {
+            return;
+        };
+        if self.gfx.is_some() && doc.board.is_dirty() {
+            self.closing_tab = Some(doc.id);
+            self.shell.close_prompt = true;
+            self.shell.close_scope_tab = true;
+            // ★ พาผู้ใช้ไปดูแท็บที่กำลังจะปิดก่อนถาม — ถามถึงงานที่เขามองไม่เห็น
+            //   คือการขอให้เขาเดา (หลักการเดียวกับ "เอกสารขึ้นจอก่อนแล้วค่อยถาม")
+            self.focus_tab(index);
+            if let Some(gfx) = self.gfx.as_ref() {
+                gfx.window.request_redraw();
+            }
+            return;
+        }
+        self.close_tab_now(index);
+    }
+
+    /// ★★★ ปิดแท็บจริง — คืนทรัพยากรของมันให้ครบ
+    ///
+    /// ★★ **ไม่ลบ recovery snapshot ของแท็บที่ยังไม่เคยบันทึก** โดยตั้งใจ:
+    /// `docs/07 §4` ให้ลบ *"เมื่อผู้ใช้ Save ลง path จริงสำเร็จ"* เท่านั้น ·
+    /// คนที่กด "ปิดโดยไม่บันทึก" เพราะเข้าใจผิด ต้องยังมีอะไรให้กู้รอบหน้า
+    /// (เหตุผลเดียวกับที่ `autosave::discard` เขียนคำว่า "เท่านั้น" ตัวหนาไว้)
+    /// · ราคาคือไฟล์ที่ถูกเสนอกลับหนึ่งครั้ง ซึ่งเพดาน 10 ไฟล์ / 30 วันคุมอยู่แล้ว
+    fn close_tab_now(&mut self, index: usize) {
+        let Some(closed) = self.docs.close(index) else {
+            return;
+        };
+        // ★★ ช่องใน atlas เป็นทรัพยากรร่วมของทั้งแอป (3,072 ช่อง — ROADMAP P3-3)
+        //    ไม่คืนตอนปิดแท็บ = เปิด-ปิดไปสิบรอบแล้ว board ใหม่ใส่ภาพไม่ได้อีกเลย
+        if let Some(gfx) = self.gfx.as_mut() {
+            for state in closed.render_state.values() {
+                if let Some(slot) = state.slot {
+                    gfx.atlas.free(slot);
+                }
+            }
+        }
+        // ★ ผลงาน decode ที่ยังเดินอยู่ของแท็บนี้ไม่มีที่ให้ลงแล้ว — ทิ้งคีย์
+        //   ไม่งั้นตารางจะโตไปเรื่อย ๆ ตลอดอายุโปรแกรม (I-6)
+        self.forget_jobs_of(closed.id);
+        // ★ งานค้างที่ชี้ไปแท็บนี้ต้องถูกยกเลิกด้วย ไม่งั้นผลจะไปตกที่ `by_id_mut`
+        //   ที่คืน `None` แล้วผู้ใช้จะเห็นสถานะ "กำลังบันทึก/กำลังเปิด" ค้างตลอดไป
+        if self
+            .save_job
+            .as_ref()
+            .is_some_and(|(id, _)| *id == closed.id)
+        {
+            self.save_job = None;
+        }
+        if self
+            .load_job
+            .as_ref()
+            .is_some_and(|(id, _)| *id == closed.id)
+        {
+            self.load_job = None;
+        }
+        if self
+            .relink_scan
+            .as_ref()
+            .is_some_and(|(id, _)| *id == closed.id)
+        {
+            self.relink_scan = None;
+        }
+        self.relink_queue.retain(|id| *id != closed.id);
+        if self.relink_for.is_some_and(|(id, _)| id == closed.id) {
+            self.relink_for = None;
+        }
+        // ★ แถบที่กำลังถามเรื่องเอกสารใบนี้พูดถึงของที่ไม่อยู่บนจอแล้ว
+        if matches!(
+            self.shell.recover_prompt.as_ref().map(|view| view.scope),
+            Some(
+                crate::shell::RecoverScope::ThisDocument | crate::shell::RecoverScope::KeptForLater
+            )
+        ) {
+            self.shell.recover_prompt = None;
+        }
+        if let Some(gfx) = self.gfx.as_mut() {
+            Self::rebuild_quads(gfx, self.docs.active_mut());
+        }
+        self.shell.status = text::t(self.shell.lang, Key::TabClosed).to_owned();
+        self.shell.status_warn = false;
+        if let Some(gfx) = self.gfx.as_ref() {
+            gfx.window.request_redraw();
+        }
+    }
+
+    /// ทิ้งคีย์งานทั้งหมดที่เป็นของแท็บที่ถูกปิดไปแล้ว
+    fn forget_jobs_of(&mut self, id: refx_core::arena::BoardId) {
+        let orphans: Vec<refx_asset::hash::ContentHash> = self
+            .job_owner
+            .iter()
+            .filter(|(_, owner)| **owner == id)
+            .map(|(key, _)| *key)
+            .collect();
+        for key in orphans {
+            self.job_owner.remove(&key);
+            self.job_sources.remove(&key);
         }
     }
 
@@ -4407,23 +5131,35 @@ impl RefxApp {
     ///
     /// ★ ผลที่กลับมาต้องไปเกาะ **item ที่มีอยู่แล้ว** ไม่ใช่สร้างใบใหม่ต่อท้าย
     /// (ซึ่งเป็นสิ่งที่เส้นทางลากไฟล์เข้ามาทำ) — คีย์ที่จับคู่คือ `relink_targets`
-    fn request_thumbnails_for_board(&mut self) {
+    ///
+    /// ★★★ **รับ `BoardId` ไม่ใช่ "แท็บที่ดูอยู่"** (P4-7c) — ระหว่างที่งานอ่าน
+    /// ไฟล์เดินอยู่ ผู้ใช้สลับแท็บได้ · อ่าน "แท็บที่ดูอยู่" ตอนผลกลับมาเมื่อไหร่
+    /// ภาพของเอกสารหนึ่งจะไปขอ thumbnail ให้อีกเอกสารหนึ่ง
+    fn request_thumbnails_for(&mut self, id: refx_core::arena::BoardId) {
         // ★ ต้องมีหน้าต่างแล้วเท่านั้น (เงื่อนไขเดิม) — เอกสารอยู่คนละที่กับ `Gfx` แล้ว
-        if self.gfx.is_none() {
+        if self.gfx.is_none() || self.assets.is_none() {
             return;
         }
-        if self.assets.is_none() || self.relink_scan.is_some() {
+        // ★★ งวดหนึ่งงวดต่อครั้ง เพราะ [`DropBatch`] มีชุดเดียว · ที่รอคิวไม่ได้
+        //    ถูกทิ้ง แต่ถูกจดไว้แล้วเริ่มเมื่องวดก่อนจบ — เดิมมันถูก **ทิ้งเงียบ ๆ**
+        //    ซึ่งจะทำให้แท็บที่สองเปิดมาแล้วภาพไม่ขึ้นเลยสักใบ
+        if self.relink_scan.is_some() {
+            if !self.relink_queue.contains(&id) {
+                self.relink_queue.push_back(id);
+            }
             return;
         }
+        let Some(doc) = self.docs.list.iter().find(|doc| doc.id == id) else {
+            return;
+        };
         // ★★ ทุกใบที่เป็นภาพ **รวมทั้งใบที่บันทึกไว้ว่า `Missing`** — ไฟล์ที่หาย
         //    เมื่อวานอาจกลับมาแล้ววันนี้ (เสียบไดรฟ์คืน / ซิงค์เสร็จ)
-        let wanted: Vec<refx_core::relink::Wanted> = self
-            .doc
+        let wanted: Vec<refx_core::relink::Wanted> = doc
             .board
             .items_in_z_order()
-            .filter_map(|(id, item)| match &item.kind {
+            .filter_map(|(item_id, item)| match &item.kind {
                 ItemKind::Image(asset) => Some(refx_core::relink::Wanted {
-                    id,
+                    id: item_id,
                     hash: asset.hash,
                     path: asset.path.clone(),
                 }),
@@ -4431,7 +5167,7 @@ impl RefxApp {
                     original_path,
                     reason: _,
                 } => Some(refx_core::relink::Wanted {
-                    id,
+                    id: item_id,
                     // ★ ใบที่เป็น `Missing` ไม่มีคีย์ของเนื้อให้ใช้ — ขั้นที่ 3
                     //   จึงหาไม่เจอโดยธรรมชาติ ที่ยังทำงานให้มันได้คือขั้น 1/2
                     hash: refx_core::hash::ContentHash::from_bytes([0; 32]),
@@ -4443,7 +5179,17 @@ impl RefxApp {
         if wanted.is_empty() {
             return;
         }
-        self.start_relink_scan(wanted);
+        self.start_relink_scan(id, wanted);
+    }
+
+    /// เริ่มงวดสแกนที่รอคิวอยู่ (ถ้ามี) — เรียกเมื่องวดก่อนจบ
+    fn start_queued_relink(&mut self) {
+        while let Some(id) = self.relink_queue.pop_front() {
+            if self.docs.list.iter().any(|doc| doc.id == id) {
+                self.request_thumbnails_for(id);
+                return;
+            }
+        }
     }
 
     /// ★★★ ขั้น 1–3 ของ relink **+ สำเนาที่เอกสารพกมาเอง** — บนเธรดอื่น (I-2)
@@ -4462,25 +5208,32 @@ impl RefxApp {
     ///
     /// ★★ **แต่ต้องมาก่อนขั้นที่ 4 เสมอ** — เอกสารที่พกภาพมาเองแล้วขึ้น
     /// *"หาไฟล์ไม่เจอ"* คือการโกหกผู้ใช้ ทั้งที่ภาพอยู่ในไฟล์ที่เขาเพิ่งเปิด
-    fn start_relink_scan(&mut self, wanted: Vec<refx_core::relink::Wanted>) {
+    fn start_relink_scan(
+        &mut self,
+        board: refx_core::arena::BoardId,
+        wanted: Vec<refx_core::relink::Wanted>,
+    ) {
         let Some(assets) = self.assets.as_ref() else {
+            return;
+        };
+        let Some(doc) = self.docs.list.iter().find(|doc| doc.id == board) else {
             return;
         };
         let io = assets.io_tx.clone();
         let wake = assets.pool.wake_handle();
         // ★ โฟลเดอร์ของเอกสาร — ขั้นที่ 2 · งานที่กู้คืนมายังไม่มีไฟล์จึงเป็น `None`
-        let doc_dir = self
-            .doc_path
+        let doc_dir = doc
+            .path
             .as_ref()
             .and_then(|path| path.parent())
             .map(std::path::Path::to_path_buf);
         // ★ ของที่ต้องมีครบทั้งสามอย่างการแกะ blob ถึงจะเป็นไปได้
-        let embedded = self
-            .doc_path
+        let embedded = doc
+            .path
             .clone()
-            .filter(|_| !self.doc_assets.is_empty())
+            .filter(|_| !doc.assets.is_empty())
             .zip(self.spool_dir.clone())
-            .map(|(doc, spool)| (doc, spool, self.doc_assets.clone()));
+            .map(|(path, spool)| (path, spool, doc.assets.clone()));
         let (tx, rx) = crossbeam_channel::bounded(1);
         let spawned = std::thread::Builder::new()
             .name("refx-relink-scan".to_owned())
@@ -4517,31 +5270,39 @@ impl RefxApp {
             tracing::warn!(%err, "cannot spawn the relink scan thread");
             return;
         }
-        self.relink_scan = Some(rx);
+        self.relink_scan = Some((board, rx));
     }
 
     /// เก็บผลการตามหา แล้วสั่ง decode ใบที่เจอ / ทำใบที่ไม่เจอเป็น `Missing`
     fn poll_relink_scan(&mut self) {
-        let Some(rx) = self.relink_scan.as_ref() else {
+        let Some((board, rx)) = self.relink_scan.as_ref() else {
             return;
         };
+        let board = *board;
         let found = match rx.try_recv() {
             Ok(found) => found,
             Err(crossbeam_channel::TryRecvError::Empty) => return,
             Err(crossbeam_channel::TryRecvError::Disconnected) => {
                 self.relink_scan = None;
+                self.start_queued_relink();
                 return;
             }
         };
         self.relink_scan = None;
-        self.apply_located(found);
+        self.apply_located(board, found);
+        // ★ งวดนี้จบแล้ว — แท็บที่รอคิวอยู่ได้เริ่มของมันบ้าง (ดู `request_thumbnails_for`)
+        self.start_queued_relink();
     }
 
     /// ★★★ ผลของการตามหา → งาน decode + คำสั่งทำใบที่หาไม่เจอเป็น `Missing`
     ///
     /// ใช้ร่วมกันทั้งขั้น 1–3 (ตอนเปิดเอกสาร) และขั้น 5 (ผู้ใช้ชี้ไฟล์เอง) —
     /// สองเส้นทางนั้นต่างกันแค่ *วิธีหา* ไม่ใช่ *สิ่งที่ทำกับผลลัพธ์*
-    fn apply_located(&mut self, found: Vec<LocatedOne>) {
+    fn apply_located(&mut self, board: refx_core::arena::BoardId, found: Vec<LocatedOne>) {
+        // ★ แท็บถูกปิดไประหว่างที่การสแกนเดินอยู่ = ไม่มีที่ให้ผลลง
+        if self.docs.by_id_mut(board).is_none() {
+            return;
+        }
         // ★★★ **ปิดหน้าต่าง merge ก่อนเริ่มงวดใหม่** (docs/02 §3)
         //
         //   `RelinkAssets` merge ตัวเองเพื่อให้ผลที่ทยอยกลับมาข้ามหลายเฟรมเป็น
@@ -4550,8 +5311,10 @@ impl RefxApp {
         //   แล้ว `Ctrl+Z` ครั้งเดียวจะย้อนทั้งสองเรื่องพร้อมกัน ซึ่งผู้ใช้ไม่ได้สั่ง
         //   (เห็นจริงตอนยืนยัน P4-6 21 ส.ค. 2026: กด `Ctrl+Z` แล้วภาพไม่กลับไป
         //   เป็น `Missing` เพราะมันย้อนไปไกลกว่านั้นหนึ่งงวด)
-        if self.gfx.is_some() {
-            self.doc.history.seal();
+        if self.gfx.is_some()
+            && let Some(doc) = self.docs.by_id_mut(board)
+        {
+            doc.history.seal();
         }
         let mut jobs = Vec::new();
         let mut lost: Vec<(ItemId, ItemKind)> = Vec::new();
@@ -4592,10 +5355,11 @@ impl RefxApp {
                 }
             }
             // คีย์ชั่วคราวสำหรับจับคู่ผลลัพธ์ (เหมือน `submit_dropped` เป๊ะ)
-            let key = refx_asset::hash::hash_bytes(located.path.to_string_lossy().as_bytes());
+            let key = job_key_for(board, &located.path);
             let source = refx_asset::pool::JobSource::File(located.path);
-            self.relink_targets.insert(key, want.id);
-            self.job_sources.insert(key, source.clone());
+            if let Some(doc) = self.docs.by_id_mut(board) {
+                doc.relink_targets.insert(key, want.id);
+            }
             jobs.push(refx_asset::pool::Job {
                 hash: key,
                 source,
@@ -4608,7 +5372,7 @@ impl RefxApp {
 
         let lost_count = lost.len();
         if !lost.is_empty() {
-            self.apply_relink(lost);
+            self.apply_relink(board, lost);
         }
 
         let has_jobs = !jobs.is_empty();
@@ -4616,11 +5380,8 @@ impl RefxApp {
             self.drop_started = Some(std::time::Instant::now());
             self.drop.start(jobs.len());
             self.batch_from_clipboard = false;
-            if let Some(assets) = self.assets.as_ref() {
-                for job in jobs {
-                    assets.pool.submit(job);
-                }
-            }
+            // ★ ประตูเดียวกับ `submit_dropped`/`submit_paste` — ดู `submit_thumbnail_jobs`
+            self.submit_thumbnail_jobs(board, jobs);
         }
 
         // ★★★ บอกผู้ใช้เฉพาะตอนมีอะไรให้บอกจริง — เปิดไฟล์ที่ทุกอย่างอยู่ที่เดิม
@@ -4652,22 +5413,31 @@ impl RefxApp {
     }
 
     /// ห่อการเปลี่ยน `ItemKind` เป็น `Command` — ทางเดียวที่ `Board` ถูกแก้ (docs/08 §4)
-    fn apply_relink(&mut self, targets: Vec<(ItemId, ItemKind)>) {
-        let Some(gfx) = self.gfx.as_mut() else {
-            return;
-        };
-        let Ok(command) = RelinkAssets::new(&self.doc.board, targets) else {
-            return; // ไม่มีอะไรเปลี่ยนจริง = ไม่ต้องมีขั้น undo
-        };
-        if let Err(err) = self
-            .doc
-            .history
-            .apply(&mut self.doc.board, Box::new(command))
-        {
-            tracing::error!(%err, "cannot relink the images");
+    ///
+    /// ★ `board` บอกว่าเป็นของแท็บไหน — `ItemId` ไม่ผูกกับ board จึงชี้ใบผิดได้ง่าย
+    fn apply_relink(&mut self, board: refx_core::arena::BoardId, targets: Vec<(ItemId, ItemKind)>) {
+        if self.gfx.is_none() {
             return;
         }
-        Self::rebuild_quads(gfx, &mut self.doc);
+        let Some(index) = self.docs.list.iter().position(|doc| doc.id == board) else {
+            return;
+        };
+        {
+            let doc = &mut self.docs.list[index];
+            let Ok(command) = RelinkAssets::new(&doc.board, targets) else {
+                return; // ไม่มีอะไรเปลี่ยนจริง = ไม่ต้องมีขั้น undo
+            };
+            if let Err(err) = doc.history.apply(&mut doc.board, Box::new(command)) {
+                tracing::error!(%err, "cannot relink the images");
+                return;
+            }
+        }
+        // ★ วาดใหม่เฉพาะตอนมันเป็นแท็บที่อยู่บนจอ — `quads` มีชุดเดียวต่อหน้าต่าง
+        if self.docs.active == index
+            && let Some(gfx) = self.gfx.as_mut()
+        {
+            Self::rebuild_quads(gfx, &mut self.docs.list[index]);
+        }
     }
 
     /// ★★★ ขั้นที่ 5 — ผู้ใช้กด "หาไฟล์เอง" บนภาพที่หาย
@@ -4682,7 +5452,7 @@ impl RefxApp {
         let name = self
             .gfx
             .as_ref()
-            .and_then(|_| self.doc.board.item(id))
+            .and_then(|_| self.docs.active().board.item(id))
             .and_then(|item| match &item.kind {
                 ItemKind::Missing { original_path, .. } => {
                     Some(refx_asset::decode::file_label(original_path))
@@ -4690,7 +5460,7 @@ impl RefxApp {
                 _ => None,
             })
             .unwrap_or_default();
-        self.relink_for = Some(id);
+        self.relink_for = Some((self.docs.active().id, id));
         self.relink_pick = Some(refx_platform::dialog::pick_missing_image(&name));
         // ★ ข้อความของ **การหาไฟล์ภาพ** ไม่ใช่ของการเปิด board — เคยใช้
         //   `OpenChoosing` ซ้ำแล้วบนจอขึ้นว่า "Choose a board to open"
@@ -4699,12 +5469,12 @@ impl RefxApp {
         self.shell.status_warn = false;
     }
 
-    /// item ที่หาไฟล์ไม่เจอใบแรกในสิ่งที่เลือกอยู่
+    /// item ที่หาไฟล์ไม่เจอใบแรกในสิ่งที่เลือกอยู่ (ของแท็บที่ดูอยู่)
     fn first_missing_selected(&self) -> Option<ItemId> {
         self.gfx.as_ref()?;
-        self.doc.selection.iter().find(|id| {
-            self.doc
-                .board
+        let doc = self.docs.active();
+        doc.selection.iter().find(|id| {
+            doc.board
                 .item(*id)
                 .is_some_and(|item| matches!(item.kind, ItemKind::Missing { .. }))
         })
@@ -4730,9 +5500,10 @@ impl RefxApp {
             }
         }
 
-        let Some(rx) = self.relink_match.as_ref() else {
+        let Some((board, rx)) = self.relink_match.as_ref() else {
             return;
         };
+        let board = *board;
         let found = match rx.try_recv() {
             Ok(found) => found,
             Err(crossbeam_channel::TryRecvError::Empty) => return,
@@ -4742,7 +5513,7 @@ impl RefxApp {
             }
         };
         self.relink_match = None;
-        self.apply_located(found);
+        self.apply_located(board, found);
     }
 
     /// ★★★ ผู้ใช้ชี้ไฟล์มาแล้ว → จับคู่ใบที่เหลือในโฟลเดอร์นั้น (`docs/07 §2` ขั้น 5)
@@ -4751,16 +5522,19 @@ impl RefxApp {
     /// เจตนาที่เขาพิมพ์ด้วยมือชนะการเดาของเราทุกกรณี · ที่เหลือถูกจับคู่ด้วย
     /// [`refx_core::relink::match_folder`]
     fn start_folder_match(&mut self, picked: &std::path::Path) {
-        let Some(chosen) = self.relink_for.take() else {
+        let Some((board, chosen)) = self.relink_for.take() else {
             return;
         };
         // ★ ต้องมีหน้าต่างแล้วเท่านั้น (เงื่อนไขเดิม)
         if self.gfx.is_none() {
             return;
         }
+        // ★ แท็บที่ผู้ใช้กดปุ่มนั้นถูกปิดไประหว่างที่ dialog เปิดอยู่ได้
+        let Some(doc) = self.docs.list.iter().find(|doc| doc.id == board) else {
+            return;
+        };
         // ใบที่ยังหาไม่เจอทั้งหมด (รวมใบที่ผู้ใช้เพิ่งชี้ให้)
-        let missing: Vec<refx_core::relink::Wanted> = self
-            .doc
+        let missing: Vec<refx_core::relink::Wanted> = doc
             .board
             .items_in_z_order()
             .filter_map(|(id, item)| match &item.kind {
@@ -4776,8 +5550,7 @@ impl RefxApp {
             .collect();
         // ★ ใบที่ผู้ใช้ชี้เอง — ใส่คีย์จริงของเอกสารไว้ เพื่อให้ `match_folder`
         //   ใช้จับใบอื่นที่เป็นภาพเดียวกันได้ด้วย
-        let chosen_want = self
-            .doc
+        let chosen_want = doc
             .board
             .item(chosen)
             .map(|item| refx_core::relink::Wanted {
@@ -4829,24 +5602,38 @@ impl RefxApp {
             tracing::warn!(%err, "cannot spawn the folder match thread");
             return;
         }
-        self.relink_match = Some(rx);
+        self.relink_match = Some((board, rx));
     }
 
     /// ผู้ใช้ตอบแถบยืนยันตอนปิดแล้ว (P4-2)
+    ///
+    /// ★★★ แถบเดียวถามได้ **สองขอบเขต** ตั้งแต่ P4-7c: ปิดทั้งหน้าต่าง หรือ
+    /// ปิดแท็บใบเดียว (`Ctrl+W`) · แยกด้วย [`Self::closing_tab`] — ปุ่มหน้าตา
+    /// เหมือนกันเพราะคำถามเป็นชนิดเดียวกัน แต่ **สิ่งที่หายถ้าตอบผิดต่างกันมาก**
     fn apply_close_choice(&mut self, choice: crate::shell::CloseChoice) {
         use crate::shell::CloseChoice;
 
         self.close_confirm = false;
         self.shell.close_prompt = false;
+        self.shell.close_scope_tab = false;
+        let tab = self.closing_tab.take();
         match choice {
             CloseChoice::SaveThenClose => {
                 // ★ ปิดจริงตอน **บันทึกสำเร็จ** เท่านั้น (ดู `poll_save`)
-                self.after_save = AfterSave::Close;
+                self.after_save = match tab {
+                    Some(id) => AfterSave::CloseTab(id),
+                    None => AfterSave::Close,
+                };
                 self.apply_save_request(SaveRequest::Save);
             }
-            CloseChoice::DiscardAndClose => {
-                self.closing = true;
-            }
+            CloseChoice::DiscardAndClose => match tab {
+                Some(id) => {
+                    if let Some(index) = self.docs.list.iter().position(|doc| doc.id == id) {
+                        self.close_tab_now(index);
+                    }
+                }
+                None => self.closing = true,
+            },
             CloseChoice::Cancel => {
                 self.after_save = AfterSave::Stay;
             }
@@ -4881,12 +5668,13 @@ impl RefxApp {
         //   ความพังที่ `docs/07 §1` ยกเป็นเหตุผลของการมี version 2 อยู่แล้ว —
         //   ต่างกันแค่คราวนี้คนที่ทำคือรุ่นปัจจุบันของเราเอง ไม่ใช่รุ่นเก่า
         let known_path = match request {
-            SaveRequest::Save => self.doc_path.clone(),
+            SaveRequest::Save => self.docs.active().path.clone(),
             // บันทึกเป็น = ถามที่ใหม่เสมอ ต่อให้เคยบันทึกแล้ว
             SaveRequest::SaveAs => None,
         };
+        let mode = self.docs.active().save_mode;
         match known_path {
-            Some(path) => self.start_save(&path, self.save_mode),
+            Some(path) => self.start_save(&path, mode),
             // ★ ถามโหมดก่อน แล้วค่อยถามที่เก็บ (`docs/07 §2`: "Save As มีตัวเลือกนี้
             //   ชัดเจน") · native dialog ใส่ตัวเลือกของเราเองเข้าไปไม่ได้ แถบใน
             //   หน้าต่างจึงเป็นที่เดียวที่ใส่ได้ — และมันไม่บล็อก UI thread ด้วย (I-2)
@@ -4919,7 +5707,9 @@ impl RefxApp {
             return;
         }
         let name = self
-            .doc_path
+            .docs
+            .active()
+            .path
             .as_ref()
             .and_then(|path| path.file_name())
             .map_or_else(
@@ -4942,13 +5732,13 @@ impl RefxApp {
     /// ★ board ที่ยังไม่มีไฟล์ทำอะไรไม่ได้นอกจากจำไว้ — และนั่นถูกต้อง เพราะ
     /// ยังไม่มีไฟล์ให้พูดถึง (แถบสถานะบอกว่า "จะบันทึกแบบนี้")
     fn apply_mode_request(&mut self, mode: refx_io::packed::SaveMode) {
-        if mode == self.save_mode {
+        if mode == self.docs.active().save_mode {
             return;
         }
-        match self.doc_path.clone() {
+        match self.docs.active().path.clone() {
             Some(path) => self.start_save(&path, mode),
             None => {
-                self.save_mode = mode;
+                self.docs.active_mut().save_mode = mode;
                 self.shell.status = text::t(self.shell.lang, mode_message(mode)).to_owned();
                 self.shell.status_warn = false;
             }
@@ -4966,7 +5756,11 @@ impl RefxApp {
             return;
         }
         // ★ โคลน ณ จังหวะที่ผู้ใช้สั่ง (ดูเหตุผลใน `apply_save_request`)
-        let board = self.doc.board.clone();
+        // ★★★ จำไว้ด้วยว่าเป็นของแท็บไหน — ผู้ใช้กด `Ctrl+Tab` ระหว่างที่ไฟล์
+        //     กำลังเขียนได้ · `mark_saved` ที่ลงผิดใบทำให้แท็บที่ยังไม่ถูกบันทึก
+        //     ดูสะอาด แล้วผู้ใช้จะปิดโปรแกรมทิ้งโดยเชื่อว่างานอยู่ในไฟล์แล้ว
+        let owner = self.docs.active().id;
+        let board = self.docs.active().board.clone();
         let path = path.to_path_buf();
         let spool_dir = self.spool_dir.clone();
         // ★★★ **ต้องปลุก UI ตอนเขียนเสร็จ** — แอปหลับสนิทระหว่างรอดิสก์ (I-1)
@@ -5011,7 +5805,7 @@ impl RefxApp {
             self.shell.status_warn = true;
             return;
         }
-        self.save_job = Some(rx);
+        self.save_job = Some((owner, rx));
         self.shell.status = text::t(self.shell.lang, Key::SaveInProgress).to_owned();
         self.shell.status_warn = false;
     }
@@ -5044,9 +5838,10 @@ impl RefxApp {
         }
 
         // ---- เขียนไฟล์เสร็จหรือยัง ----
-        let Some(rx) = self.save_job.as_ref() else {
+        let Some((owner, rx)) = self.save_job.as_ref() else {
             return;
         };
+        let owner = *owner;
         let done = match rx.try_recv() {
             Ok(result) => result,
             Err(crossbeam_channel::TryRecvError::Empty) => return,
@@ -5057,15 +5852,37 @@ impl RefxApp {
         self.save_job = None;
         match done {
             Ok(SavedDoc { path, assets, mode }) => {
+                // ★★★ ทุกอย่างข้างล่างนี้ลงที่ **แท็บที่สั่งบันทึก** ไม่ใช่แท็บที่
+                //     ผู้ใช้บังเอิญดูอยู่ตอนไฟล์เขียนเสร็จ
+                let Some(doc) = self.docs.by_id_mut(owner) else {
+                    // แท็บถูกปิดไประหว่างที่ไฟล์กำลังเขียน — ไฟล์ลงดิสก์ครบแล้ว
+                    // ซึ่งคือสิ่งที่ผู้ใช้สั่ง · ไม่มีอะไรให้ทำต่อนอกจากบอกเขา
+                    self.shell.status = text::fill(
+                        lang,
+                        text::Template::Saved,
+                        &[("name", &file_label_of(&path))],
+                    );
+                    self.shell.status_warn = false;
+                    return;
+                };
                 // ★★ `mark_saved` คือสิ่งที่ทำให้ `dirty` กลับเป็น false — และมันต้อง
                 //    เกิด **หลังเขียนสำเร็จเท่านั้น** ไม่ใช่ตอนสั่ง ไม่งั้นผู้ใช้จะ
                 //    ปิดโปรแกรมโดยคิดว่างานถูกบันทึกแล้วทั้งที่ดิสก์เต็ม
+                let session = doc.session.clone();
                 if self.gfx.is_some() {
-                    self.doc.history.mark_saved(&mut self.doc.board);
+                    doc.history.mark_saved(&mut doc.board);
                 }
-                let name = path
-                    .file_name()
-                    .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
+                doc.autosaver.reset();
+                doc.path = Some(path.clone());
+                // ★★★ โหมดของเอกสารเปลี่ยน **หลังไฟล์ลงดิสก์แล้วเท่านั้น** —
+                //     เหตุผลเดียวกับ `mark_saved` เป๊ะ: ผู้ใช้ที่ดิสก์เต็มต้องไม่
+                //     เห็นคำว่า packed แล้วเชื่อว่าไฟล์ที่เขากำลังจะส่งให้เพื่อน
+                //     มีภาพอยู่ข้างใน ทั้งที่การเขียนล้มไปแล้ว
+                doc.save_mode = mode;
+                doc.assets = assets;
+                let name = file_label_of(&path);
+                self.shell.status = text::fill(lang, text::Template::Saved, &[("name", &name)]);
+                self.shell.status_warn = false;
                 // ★★ ทิ้ง snapshot **เมื่อบันทึกสำเร็จเท่านั้น** (docs/07 §4)
                 //    และรีเซ็ตนาฬิกาเพื่อให้การแก้ครั้งถัดไปถูกเก็บทันที
                 refx_io::autosave::discard(&path);
@@ -5074,24 +5891,25 @@ impl RefxApp {
                 //    `<doc>.refx.autosave` รับช่วงต่อ → snapshot กำพร้าต้องหายไป
                 //    ไม่งั้นเปิดโปรแกรมรอบหน้าผู้ใช้จะถูกถามว่าจะกู้งานที่เขา
                 //    บันทึกไปเรียบร้อยแล้วหรือไม่
+                //    ★ ลบเฉพาะ slot ของ **แท็บนี้** — แท็บอื่นที่ยังไม่ได้บันทึก
+                //      ยังต้องมี snapshot ของมันอยู่ครบ
                 if let Some(dir) = self.recovery_dir.as_ref() {
-                    refx_io::recovery::discard(dir, &self.session);
+                    refx_io::recovery::discard(dir, &session);
                 }
-                self.autosaver.reset();
-                self.doc_path = Some(path);
-                // ★★★ โหมดของเอกสารเปลี่ยน **หลังไฟล์ลงดิสก์แล้วเท่านั้น** —
-                //     เหตุผลเดียวกับ `mark_saved` เป๊ะ: ผู้ใช้ที่ดิสก์เต็มต้องไม่
-                //     เห็นคำว่า packed แล้วเชื่อว่าไฟล์ที่เขากำลังจะส่งให้เพื่อน
-                //     มีภาพอยู่ข้างใน ทั้งที่การเขียนล้มไปแล้ว
-                self.save_mode = mode;
-                self.doc_assets = assets;
-                self.shell.status = text::fill(lang, text::Template::Saved, &[("name", &name)]);
-                self.shell.status_warn = false;
-                if self.after_save == AfterSave::Close {
-                    self.closing = true;
-                    if let Some(gfx) = self.gfx.as_ref() {
-                        gfx.window.request_redraw();
+                match self.after_save {
+                    AfterSave::Close => {
+                        self.closing = true;
+                        if let Some(gfx) = self.gfx.as_ref() {
+                            gfx.window.request_redraw();
+                        }
                     }
+                    AfterSave::CloseTab(id) => {
+                        self.after_save = AfterSave::Stay;
+                        if let Some(index) = self.docs.list.iter().position(|doc| doc.id == id) {
+                            self.close_tab_now(index);
+                        }
+                    }
+                    AfterSave::Stay => {}
                 }
             }
             Err(err) => {
@@ -5114,7 +5932,7 @@ impl RefxApp {
         let Some(gfx) = self.gfx.as_mut() else {
             return;
         };
-        let targets: Vec<ItemId> = self.doc.selection.iter().collect();
+        let targets: Vec<ItemId> = self.docs.active_mut().selection.iter().collect();
         if targets.is_empty() {
             return;
         }
@@ -5129,7 +5947,7 @@ impl RefxApp {
         let Some(command) = command else {
             return;
         };
-        match self.doc.history.apply(&mut self.doc.board, command) {
+        match self.docs.active_mut().apply(command) {
             Ok(()) => {}
             // ไม่มีอะไรเปลี่ยน — ไม่ใช่ error ที่ผู้ใช้ต้องเห็น
             Err(refx_core::command::CmdError::Empty) => return,
@@ -5139,7 +5957,7 @@ impl RefxApp {
             }
         }
         // ★ จัดกลุ่มหนึ่งครั้ง = undo หนึ่งขั้น — ปิดหน้าต่าง merge ทันที
-        self.doc.history.seal();
+        self.docs.active_mut().history.seal();
         gfx.window.request_redraw();
     }
 
@@ -5150,7 +5968,7 @@ impl RefxApp {
         let sealed = std::mem::take(&mut self.shell.group_sealed);
         let Some(request) = self.shell.group_request.take() else {
             if sealed && self.gfx.is_some() {
-                self.doc.history.seal();
+                self.docs.active_mut().history.seal();
             }
             return;
         };
@@ -5159,7 +5977,7 @@ impl RefxApp {
         };
         let (id, current) = match &request {
             PanelRequest::Rename(id, _) | PanelRequest::Collapsed(id, _) => {
-                let Some(group) = self.doc.board.group(*id) else {
+                let Some(group) = self.docs.active_mut().board.group(*id) else {
                     return; // กลุ่มหายไประหว่างเฟรม (undo) — ไม่มีอะไรให้แก้
                 };
                 (*id, group.clone())
@@ -5173,15 +5991,11 @@ impl RefxApp {
                 refx_core::command::SetGroup::set_collapsed(id, &current, collapsed)
             }
         };
-        if let Err(err) = self
-            .doc
-            .history
-            .apply(&mut self.doc.board, Box::new(command))
-        {
+        if let Err(err) = self.docs.active_mut().apply(Box::new(command)) {
             tracing::error!(%err, "cannot edit the group");
         }
         if sealed {
-            self.doc.history.seal();
+            self.docs.active_mut().history.seal();
         }
         gfx.window.request_redraw();
     }
@@ -5200,14 +6014,14 @@ impl RefxApp {
         let sealed = std::mem::take(&mut self.shell.meta_sealed);
         let Some(request) = self.shell.meta_request.take() else {
             if sealed && self.gfx.is_some() {
-                self.doc.history.seal();
+                self.docs.active_mut().history.seal();
             }
             return;
         };
         let Some(gfx) = self.gfx.as_mut() else {
             return;
         };
-        let targets: Vec<ItemId> = self.doc.selection.iter().collect();
+        let targets: Vec<ItemId> = self.docs.active_mut().selection.iter().collect();
         if targets.is_empty() {
             return;
         }
@@ -5221,11 +6035,11 @@ impl RefxApp {
                 .ok()
                 .map(|cmd| Box::new(cmd) as Box<dyn refx_core::command::Command>),
             other => {
-                let (field, changes) = Self::meta_changes(&self.doc, &targets, &other);
+                let (field, changes) = Self::meta_changes(self.docs.active(), &targets, &other);
                 if changes.is_empty() {
                     // ★ ไม่มีอะไรเปลี่ยน = ไม่สร้างคำสั่ง ไม่ขอเฟรม (I-1)
                     if sealed {
-                        self.doc.history.seal();
+                        self.docs.active_mut().history.seal();
                     }
                     return;
                 }
@@ -5237,11 +6051,11 @@ impl RefxApp {
         let Some(command) = command else {
             return;
         };
-        if let Err(err) = self.doc.history.apply(&mut self.doc.board, command) {
+        if let Err(err) = self.docs.active_mut().apply(command) {
             tracing::error!(%err, "cannot edit the item metadata");
         }
         if sealed {
-            self.doc.history.seal();
+            self.docs.active_mut().history.seal();
         }
         gfx.window.request_redraw();
     }
@@ -5288,7 +6102,7 @@ impl RefxApp {
         //   ทุกเฟรมแล้วทับสิ่งที่คีย์ลัด (`H`) เพิ่งเปลี่ยน
         let Some(wanted) = self.shell.appearance_edit.take() else {
             if sealed && self.gfx.is_some() {
-                self.doc.history.seal();
+                self.docs.active_mut().history.seal();
             }
             return;
         };
@@ -5296,11 +6110,12 @@ impl RefxApp {
             return;
         };
 
-        let changes: Vec<(ItemId, ItemCanvas)> = self
-            .doc
+        let doc = self.docs.active();
+        let board = &doc.board;
+        let changes: Vec<(ItemId, ItemCanvas)> = doc
             .selection
             .iter()
-            .filter_map(|id| self.doc.board.item(id).map(|item| (id, item.canvas)))
+            .filter_map(|id| board.item(id).map(|item| (id, item.canvas)))
             .filter(|(_, canvas)| !canvas.locked)
             .filter_map(|(id, canvas)| {
                 let next = ItemCanvas {
@@ -5323,26 +6138,22 @@ impl RefxApp {
 
         if changes.is_empty() {
             if sealed {
-                self.doc.history.seal();
+                self.docs.active_mut().history.seal();
             }
             return;
         }
         let Ok(command) = SetFilter::new(changes) else {
             return;
         };
-        if let Err(err) = self
-            .doc
-            .history
-            .apply(&mut self.doc.board, Box::new(command))
-        {
+        if let Err(err) = self.docs.active_mut().apply(Box::new(command)) {
             tracing::error!(%err, "cannot change the appearance of the selection");
             return;
         }
         if sealed {
-            self.doc.history.seal();
+            self.docs.active_mut().history.seal();
         }
-        Self::collect_forgotten(gfx, &mut self.doc);
-        Self::rebuild_quads(gfx, &mut self.doc);
+        Self::collect_forgotten(gfx, self.docs.active_mut());
+        Self::rebuild_quads(gfx, self.docs.active_mut());
         gfx.window.request_redraw();
     }
 
@@ -5358,11 +6169,12 @@ impl RefxApp {
             return;
         };
         // ภาพที่ล็อกไว้ต้องไม่ขยับ — เหมือนทุกเครื่องมือที่แก้เรขาคณิต
-        let picked: Vec<(ItemId, ItemCanvas)> = self
-            .doc
+        let doc = self.docs.active();
+        let board = &doc.board;
+        let picked: Vec<(ItemId, ItemCanvas)> = doc
             .selection
             .iter()
-            .filter_map(|id| self.doc.board.item(id).map(|item| (id, item.canvas)))
+            .filter_map(|id| board.item(id).map(|item| (id, item.canvas)))
             .filter(|(_, canvas)| !canvas.locked)
             .collect();
 
@@ -5380,24 +6192,18 @@ impl RefxApp {
         let Ok(command) = TransformItems::new(changes) else {
             return;
         };
-        if let Err(err) = self
-            .doc
-            .history
-            .apply(&mut self.doc.board, Box::new(command))
-        {
+        if let Err(err) = self.docs.active_mut().apply(Box::new(command)) {
             tracing::error!(%err, "cannot arrange the selection");
             return;
         }
         // กดปุ่มหนึ่งครั้ง = ขั้นเดียวเสมอ ห้ามให้การกดถัดไปกลืนเข้าไป
-        self.doc.history.seal();
+        self.docs.active_mut().history.seal();
         // ★ index ต้องตามตำแหน่งใหม่ทันที ไม่งั้นคลิกครั้งถัดไปจะพลาด
         for id in moved {
-            if let Some(item) = self.doc.board.item(id) {
-                self.doc.index.insert(id, &item.canvas);
-            }
+            self.docs.active_mut().reindex(id);
         }
-        Self::collect_forgotten(gfx, &mut self.doc);
-        Self::rebuild_quads(gfx, &mut self.doc);
+        Self::collect_forgotten(gfx, self.docs.active_mut());
+        Self::rebuild_quads(gfx, self.docs.active_mut());
         gfx.window.request_redraw();
     }
 
@@ -5406,10 +6212,12 @@ impl RefxApp {
         let Some(gfx) = self.gfx.as_mut() else {
             return;
         };
-        let selected: Vec<ItemId> = self.doc.selection.iter().collect();
-        let Some(order) =
-            refx_core::zorder::reordered(self.doc.board.z_order(), &selected, movement)
-        else {
+        let selected: Vec<ItemId> = self.docs.active_mut().selection.iter().collect();
+        let Some(order) = refx_core::zorder::reordered(
+            self.docs.active_mut().board.z_order(),
+            &selected,
+            movement,
+        ) else {
             // ★ อยู่สุดขอบแล้ว / ไม่ได้เลือกอะไร — **ไม่สร้างคำสั่งและไม่ขอเฟรม** (I-1)
             //   ถ้าสร้าง undo stack จะเต็มไปด้วยขั้นที่กดแล้วไม่มีอะไรเกิดขึ้น
             return;
@@ -5417,17 +6225,13 @@ impl RefxApp {
         let Ok(command) = ReorderZ::new(order) else {
             return;
         };
-        if let Err(err) = self
-            .doc
-            .history
-            .apply(&mut self.doc.board, Box::new(command))
-        {
+        if let Err(err) = self.docs.active_mut().apply(Box::new(command)) {
             tracing::error!(%err, "cannot reorder the z stack");
             return;
         }
         // เรขาคณิตไม่เปลี่ยน → `index` ไม่ต้องแตะ · `affected()` ว่าง → การเลือกอยู่เหมือนเดิม
-        Self::collect_forgotten(gfx, &mut self.doc);
-        Self::rebuild_quads(gfx, &mut self.doc);
+        Self::collect_forgotten(gfx, self.docs.active_mut());
+        Self::rebuild_quads(gfx, self.docs.active_mut());
         gfx.window.request_redraw();
     }
 
@@ -5441,16 +6245,12 @@ impl RefxApp {
         let Some(gfx) = self.gfx.as_mut() else {
             return;
         };
-        let targets: Vec<ItemId> = self
-            .doc
+        let doc = self.docs.active();
+        let board = &doc.board;
+        let targets: Vec<ItemId> = doc
             .selection
             .iter()
-            .filter(|id| {
-                self.doc
-                    .board
-                    .item(*id)
-                    .is_some_and(|item| !item.canvas.locked)
-            })
+            .filter(|id| board.item(*id).is_some_and(|item| !item.canvas.locked))
             .collect();
         if targets.is_empty() {
             // ★ กดแล้วไม่มีอะไรเกิดขึ้น **ต้องบอก** ไม่ใช่เงียบ
@@ -5460,35 +6260,33 @@ impl RefxApp {
         let Ok(command) = RemoveItems::new(targets.clone()) else {
             return;
         };
-        if let Err(err) = self
-            .doc
-            .history
-            .apply(&mut self.doc.board, Box::new(command))
-        {
+        if let Err(err) = self.docs.active_mut().apply(Box::new(command)) {
             tracing::error!(%err, "cannot delete the selected images");
             return;
         }
 
         for id in &targets {
-            self.doc.index.remove(*id);
+            self.docs.active_mut().index.remove(*id);
         }
         // ★ ของที่ถูกลบไปแล้วจะยังถูกเลือกอยู่ไม่ได้ — แต่ตัวที่ **รอด** (ล็อกไว้)
         //   ต้องยังถูกเลือกอยู่ ไม่งั้นผู้ใช้ที่เลือก 5 ใบแล้วลบ จะเสียการเลือก
         //   ของใบที่ล็อกไว้ไปด้วยทั้งที่มันไม่ได้ถูกแตะเลย
         let survivors: Vec<ItemId> = self
-            .doc
+            .docs
+            .active_mut()
             .selection
             .iter()
             .filter(|id| !targets.contains(id))
             .collect();
-        self.doc
+        self.docs
+            .active_mut()
             .selection
             .restore(survivors.clone(), survivors.last().copied());
-        self.doc.select_tool.cancel();
-        self.doc.rubber_band = None;
-        Self::sync_residency(gfx, &mut self.doc, &targets);
-        Self::collect_forgotten(gfx, &mut self.doc);
-        Self::rebuild_quads(gfx, &mut self.doc);
+        self.docs.active_mut().select_tool.cancel();
+        self.docs.active_mut().rubber_band = None;
+        Self::sync_residency(gfx, self.docs.active_mut(), &targets);
+        Self::collect_forgotten(gfx, self.docs.active_mut());
+        Self::rebuild_quads(gfx, self.docs.active_mut());
         tracing::info!(count = targets.len(), "deleted images from the board");
         gfx.window.request_redraw();
     }
@@ -5499,9 +6297,12 @@ impl RefxApp {
         let Some(gfx) = self.gfx.as_mut() else {
             return;
         };
-        let outcome = match request {
-            HistoryRequest::Undo => self.doc.history.undo(&mut self.doc.board),
-            HistoryRequest::Redo => self.doc.history.redo(&mut self.doc.board),
+        let outcome = {
+            let doc = self.docs.active_mut();
+            match request {
+                HistoryRequest::Undo => doc.history.undo(&mut doc.board),
+                HistoryRequest::Redo => doc.history.redo(&mut doc.board),
+            }
         };
 
         let affected = match outcome {
@@ -5528,12 +6329,15 @@ impl RefxApp {
 
         // ★ ภาพที่เพิ่งกลับมา/เพิ่งหายไปต้องคืนหรือคืนช่อง atlas ตาม **ก่อน** สร้าง quad
         //   undo ของการลบเติมกลับจาก RAM ที่มีอยู่แล้ว — ไม่ decode ใหม่สักใบ
-        Self::sync_residency(gfx, &mut self.doc, &affected);
-        Self::collect_forgotten(gfx, &mut self.doc);
+        Self::sync_residency(gfx, self.docs.active_mut(), &affected);
+        Self::collect_forgotten(gfx, self.docs.active_mut());
 
         // index กับ quad ต้องตามสถานะใหม่ของ board ทันที
-        self.doc.index.rebuild(&self.doc.board);
-        Self::rebuild_quads(gfx, &mut self.doc);
+        {
+            let doc = self.docs.active_mut();
+            doc.index.rebuild(&doc.board);
+        }
+        Self::rebuild_quads(gfx, self.docs.active_mut());
 
         // ★ เลือกของที่เพิ่งเปลี่ยนให้ผู้ใช้ (docs/02 §2.9)
         //   การเลือกไม่ได้ถูก undo — มันตามผลลัพธ์ที่คำสั่งรายงานกลับมา
@@ -5548,22 +6352,23 @@ impl RefxApp {
         //    → แผงกลุ่มหายไปทั้งแผง เพราะไม่มีอะไรถูกเลือกอีกแล้ว
         //
         //    ตรรกะอยู่ใน `selection_after_history` เพื่อให้เทสต์ได้โดยไม่ต้องมีหน้าต่าง
-        let Some(live) = selection_after_history(&affected, |id| self.doc.board.item(id).is_some())
-        else {
+        let board = &self.docs.active().board;
+        let Some(live) = selection_after_history(&affected, |id| board.item(id).is_some()) else {
             // คำสั่งบอกว่าไม่ได้แตะ item ไหนเลย — การเลือกเดิมยังใช้ได้ตามเดิม
-            self.doc.select_tool.cancel();
-            self.doc.rubber_band = None;
+            self.docs.active_mut().select_tool.cancel();
+            self.docs.active_mut().rubber_band = None;
             gfx.window.request_redraw();
             return;
         };
-        self.doc
+        self.docs
+            .active_mut()
             .selection
             .restore(live.clone(), live.last().copied());
         // การลากที่ค้างอยู่ (ถ้ามี) ใช้ไม่ได้แล้วเพราะ board เปลี่ยนไปใต้มือ
-        self.doc.select_tool.cancel();
-        self.doc.rubber_band = None;
+        self.docs.active_mut().select_tool.cancel();
+        self.docs.active_mut().rubber_band = None;
 
-        Self::look_at_if_offscreen(gfx, &mut self.doc, &live);
+        Self::look_at_if_offscreen(gfx, self.docs.active_mut(), &live);
         gfx.window.request_redraw();
     }
 
@@ -5766,8 +6571,13 @@ impl RefxApp {
     ///
     /// ระหว่างที่ยังเติมไม่ครบ item ที่เหลือถูกทำเป็น **placeholder สีเด่น**
     /// ไม่ใช่ช่องว่าง (docs/04 §4, §8) — ผู้ใช้ต้องเห็นว่า layout ยังอยู่ครบ
-    fn refill_atlas(gfx: &mut Gfx, doc: &mut Doc) {
-        if doc.board.is_empty() {
+    /// ★★★ **ทุกแท็บ ไม่ใช่แท็บที่อยู่หน้าจอ** (P4-7c) — ช่องใน atlas ของแท็บอื่น
+    /// ตายไปพร้อม texture เก่าเหมือนกัน · เติมกลับแค่ใบเดียวแล้วผู้ใช้จะสลับไป
+    /// เจอ board ว่างเปล่าอีกสามใบหลัง driver อัปเดต ซึ่งเป็นอาการเดียวกับที่
+    /// `docs/04 §4` สั่งห้ามไว้ แค่ต้องกด `Ctrl+Tab` หนึ่งครั้งถึงจะเห็น
+    fn refill_atlas(gfx: &mut Gfx, docs: &mut Docs) {
+        let total: usize = docs.iter().map(|doc| doc.board.len()).sum();
+        if total == 0 {
             return;
         }
         let started = std::time::Instant::now();
@@ -5781,7 +6591,8 @@ impl RefxApp {
         //   ถ้าไม่ทำขั้นนี้ ภาพ **ทุกใบ** กลายเป็น placeholder หลังกู้ device
         //   (เจอจริง 29 ก.ค. 2026: restored=0 total=8) ซึ่งคือ "board ว่างเปล่า"
         //   ที่ docs/04 §4 สั่งห้ามไว้ตรง ๆ
-        let needed = refx_render::atlas::layers_needed(doc.board.len());
+        //   ★ นับรวมทุกแท็บ — ช่องใน atlas เป็นทรัพยากรร่วมของทั้งแอป
+        let needed = refx_render::atlas::layers_needed(total);
         if gfx.atlas.layers_allocated() < needed
             && let Err(err) = gfx.atlas.resize(gfx.render.device(), needed)
         {
@@ -5789,37 +6600,41 @@ impl RefxApp {
             tracing::warn!(%err, needed, "cannot grow the atlas before refilling it");
         }
 
-        // ★ ไล่ตามลำดับ z ของ board — `render_state` เป็นแผนที่ ไม่ใช่รายการคู่ขนาน
-        //   แล้วเขียนผลลง `render_state` ไม่ใช่ลง `quads` โดยตรง
-        //   (`quads` ถูกสร้างใหม่จาก board ทีหลัง — ดู `rebuild_quads`)
-        let order: Vec<ItemId> = doc.board.z_order().to_vec();
-        // ★ แยกการยืมทีละฟิลด์ **ห้าม clone pixel** — thumbnail ใบละ 64 KB
-        //   ที่ 100 ภาพคือก๊อป 6.4 MB ทุกครั้งที่กู้ device (วัดแล้วช้าลง 30%)
-        //   ทางที่ถูกคือ destructure ให้ atlas/render/render_state ยืมคนละฟิลด์กัน
-        let Gfx { atlas, render, .. } = gfx;
-        let Doc { render_state, .. } = doc;
-        for id in order {
-            let Some(state) = render_state.get_mut(&id) else {
-                continue;
-            };
-            // ★ ใช้ upload ตรง ๆ ห้ามผ่าน upload_thumb — ไม่งั้นจะเรียก refill ซ้อนตัวเอง
-            match atlas.upload(render.queue(), &state.thumb.pixels) {
-                Ok(slot) => {
-                    state.slot = Some(slot);
-                    restored += 1;
-                }
-                Err(err) => {
-                    // atlas เต็ม — ที่เหลือขึ้นเป็นสี่เหลี่ยมสีเด่นแทนช่องว่าง
-                    tracing::warn!(%err, ?id, "atlas refill incomplete — the rest fall back to placeholders");
-                    state.slot = None;
+        for doc in docs.iter_mut() {
+            // ★ ไล่ตามลำดับ z ของ board — `render_state` เป็นแผนที่ ไม่ใช่รายการคู่ขนาน
+            //   แล้วเขียนผลลง `render_state` ไม่ใช่ลง `quads` โดยตรง
+            //   (`quads` ถูกสร้างใหม่จาก board ทีหลัง — ดู `rebuild_quads`)
+            let order: Vec<ItemId> = doc.board.z_order().to_vec();
+            // ★ แยกการยืมทีละฟิลด์ **ห้าม clone pixel** — thumbnail ใบละ 64 KB
+            //   ที่ 100 ภาพคือก๊อป 6.4 MB ทุกครั้งที่กู้ device (วัดแล้วช้าลง 30%)
+            //   ทางที่ถูกคือ destructure ให้ atlas/render/render_state ยืมคนละฟิลด์กัน
+            let Gfx { atlas, render, .. } = &mut *gfx;
+            let Doc { render_state, .. } = doc;
+            for id in order {
+                let Some(state) = render_state.get_mut(&id) else {
+                    continue;
+                };
+                // ★ ใช้ upload ตรง ๆ ห้ามผ่าน upload_thumb — ไม่งั้นจะเรียก refill ซ้อนตัวเอง
+                match atlas.upload(render.queue(), &state.thumb.pixels) {
+                    Ok(slot) => {
+                        state.slot = Some(slot);
+                        restored += 1;
+                    }
+                    Err(err) => {
+                        // atlas เต็ม — ที่เหลือขึ้นเป็นสี่เหลี่ยมสีเด่นแทนช่องว่าง
+                        tracing::warn!(%err, ?id, "atlas refill incomplete — the rest fall back to placeholders");
+                        state.slot = None;
+                    }
                 }
             }
         }
-        Self::rebuild_quads(gfx, doc);
+        // ★ `quads` เป็นของหน้าต่าง มีชุดเดียว — สร้างจากแท็บที่อยู่บนจอ
+        Self::rebuild_quads(gfx, docs.active_mut());
 
         tracing::info!(
             restored,
-            total = doc.board.len(),
+            total,
+            tabs = docs.len(),
             ms = started.elapsed().as_secs_f64() * 1000.0,
             "refilled thumbnails into the new atlas"
         );
@@ -5971,6 +6786,28 @@ impl AppDelegate for RefxApp {
         if std::mem::take(&mut self.pending_open) {
             self.apply_open_request();
         }
+        // ★★★ คีย์/ปุ่มของแท็บ (P4-7c) — **ตามลำดับนี้เสมอ**
+        //
+        //   สร้างก่อน แล้วค่อยปิด แล้วค่อยสลับ · ผู้ใช้ที่กด `Ctrl+T` แล้ว
+        //   `Ctrl+W` ในเฟรมเดียวกันต้องได้ผลตามที่เขากด ไม่ใช่ปิดใบเก่าแล้ว
+        //   เหลือใบใหม่ค้าง (ซึ่งจะเกิดถ้าปิดมาก่อน)
+        if std::mem::take(&mut self.pending_new_tab) {
+            self.apply_new_tab();
+        }
+        if std::mem::take(&mut self.pending_close_tab) {
+            self.request_close_tab(self.docs.active);
+        }
+        if std::mem::take(&mut self.pending_next_tab) {
+            self.apply_next_tab();
+        }
+        // ★ ปุ่มบนแถบแท็บที่ผู้ใช้กดเมื่อเฟรมที่แล้ว — เส้นทางเดียวกับคีย์ลัดเป๊ะ
+        if let Some(request) = self.shell.tab_request.take() {
+            match request {
+                crate::shell::TabRequest::Select(index) => self.focus_tab(index),
+                crate::shell::TabRequest::Close(index) => self.request_close_tab(index),
+                crate::shell::TabRequest::New => self.apply_new_tab(),
+            }
+        }
         if let Some(choice) = self.shell.recover_choice.take() {
             self.apply_recover_choice(choice);
         }
@@ -6054,12 +6891,22 @@ impl AppDelegate for RefxApp {
             loading,
             pick_in_flight,
             pick_count,
-            doc_path,
-            save_mode,
-            doc_assets,
+            docs,
             ..
         } = self;
         let gfx = gfx.as_mut()?;
+        // ★★★ **แท็บทั้งแถบ** — ตัวบ่งชี้ "ยังไม่ถูกบันทึก" ต้องเห็นได้ของ *ทุก* ใบ
+        //     ไม่ใช่เฉพาะใบที่อยู่หน้าจอ · ผู้ใช้ที่เห็นแค่ใบเดียวจะปิดโปรแกรม
+        //     โดยเชื่อว่าอีกสามใบสะอาด (`docs/03 §1` — สภาวะต้องมองเห็นได้)
+        shell.tabs = docs
+            .iter()
+            .map(|doc| crate::shell::TabView {
+                title: doc.name(),
+                unsaved: doc.board.is_dirty(),
+            })
+            .collect();
+        shell.active_tab = docs.active;
+        let doc = docs.active_mut();
         debug_assert_eq!(
             gfx.device_generation,
             gfx.render.generation(),
@@ -6073,45 +6920,35 @@ impl AppDelegate for RefxApp {
 
         // ---- UI pass ----
         let raw_input = gfx.egui_winit.take_egui_input(&gfx.window);
-        shell.item_count = self.doc.board.len();
-        shell.zoom = self.doc.camera.zoom();
-        // ★★★ สภาวะ "ยังไม่ถูกบันทึก" — เติมทุกเฟรมเหมือนค่าแสดงผลตัวอื่น
-        //   (docs/03 §1: สภาวะที่คงอยู่ต้องมีตัวบ่งชี้ที่คงอยู่ ไม่ใช่ข้อความชั่วคราว)
-        shell.unsaved = self.doc.board.is_dirty();
-        shell.doc_name = doc_path.as_ref().and_then(|path| {
-            path.file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-        });
+        shell.item_count = doc.board.len();
+        shell.zoom = doc.camera.zoom();
         // ★★★ สภาวะ "ภาพเก็บไว้ที่ไหน" (P4-5 · `docs/07 §2`) — เติมทุกเฟรมเหมือน
-        //   `unsaved` · ตัวเลขนับจาก **ตารางของไฟล์จริง** ไม่ใช่จากธงที่จำไว้
+        //   `tabs` · ตัวเลขนับจาก **ตารางของไฟล์จริง** ไม่ใช่จากธงที่จำไว้
         shell.storage = crate::shell::StorageView {
-            packed: *save_mode == refx_io::packed::SaveMode::Packed,
-            images: self
-                .doc
+            packed: doc.save_mode == refx_io::packed::SaveMode::Packed,
+            images: doc
                 .board
                 .items_in_z_order()
                 .filter(|(_, item)| matches!(item.kind, ItemKind::Image(_)))
                 .count(),
-            inside: self
-                .doc
+            inside: doc
                 .board
                 .items_in_z_order()
                 .filter(|(_, item)| match &item.kind {
-                    ItemKind::Image(asset) => doc_assets.find(asset.hash).is_some(),
+                    ItemKind::Image(asset) => doc.assets.find(asset.hash).is_some(),
                     _ => false,
                 })
                 .count(),
-            has_file: doc_path.is_some(),
+            has_file: doc.path.is_some(),
         };
         // ★ ปุ่มบน toolbar เป็นภาพสะท้อนของ `gfx.tool` เท่านั้น — เจ้าของมีคนเดียว
         shell.tool = gfx.tool;
         // ★ inspector อ่านค่าจากภาพ **ตัวแรกในชุดที่เลือก** (anchor ของการเลือก)
         //   เลือกหลายใบแล้วปรับ = ทุกใบได้ค่าเดียวกัน ซึ่งตรงกับที่ผู้ใช้เห็นบนสไลเดอร์
-        shell.appearance = self
-            .doc
+        shell.appearance = doc
             .selection
             .iter()
-            .find_map(|id| self.doc.board.item(id))
+            .find_map(|id| doc.board.item(id))
             .map(|item| crate::shell::Appearance {
                 opacity: item.canvas.opacity,
                 grayscale: item.canvas.filter.grayscale,
@@ -6122,22 +6959,20 @@ impl AppDelegate for RefxApp {
             });
         // ★ เนื้อความของโน้ต (P2-11) — **ค่าสำหรับแสดงเท่านั้น** เหมือน `appearance`
         //   เติมจาก item ตัวแรกในชุดที่เลือก และเฉพาะตอนที่มันเป็นโน้ตจริง ๆ
-        shell.note = self
-            .doc
+        shell.note = doc
             .selection
             .iter()
-            .find_map(|id| self.doc.board.item(id))
+            .find_map(|id| doc.board.item(id))
             .and_then(|item| match &item.kind {
                 refx_core::board::ItemKind::Text(note) => Some(note.text.clone()),
                 _ => None,
             });
         // ★ ข้อมูลฝั่ง Arrange ของ item ตัวแรกในชุดที่เลือก (P3-1) — **ค่าสำหรับแสดง**
         //   เหมือน `appearance`/`note`: ชั้น `app` เติมก่อนวาด แล้วอ่าน *คำขอ* กลับมา
-        shell.meta = self
-            .doc
+        shell.meta = doc
             .selection
             .iter()
-            .find_map(|id| self.doc.board.item(id))
+            .find_map(|id| doc.board.item(id))
             .map(|item| crate::shell::MetaView {
                 rating: item.meta.rating,
                 color_label: item.meta.color_label,
@@ -6148,7 +6983,7 @@ impl AppDelegate for RefxApp {
                     .meta
                     .tags
                     .iter()
-                    .filter_map(|tag| self.doc.board.tags().name(*tag).map(str::to_owned))
+                    .filter_map(|tag| doc.board.tags().name(*tag).map(str::to_owned))
                     .collect(),
             });
         // ★★★ ภาพที่หาไฟล์ไม่เจอในสิ่งที่เลือกอยู่ (P4-6) — **ค่าสำหรับแสดง**
@@ -6156,8 +6991,8 @@ impl AppDelegate for RefxApp {
         shell.missing = {
             let mut count = 0usize;
             let mut file = String::new();
-            for id in self.doc.selection.iter() {
-                if let Some(item) = self.doc.board.item(id)
+            for id in doc.selection.iter() {
+                if let Some(item) = doc.board.item(id)
                     && let refx_core::board::ItemKind::Missing { original_path, .. } = &item.kind
                 {
                     if count == 0 {
@@ -6174,8 +7009,8 @@ impl AppDelegate for RefxApp {
         shell.group = {
             let mut seen: Option<Option<refx_core::arena::GroupId>> = None;
             let mut mixed = false;
-            for id in self.doc.selection.iter() {
-                let Some(item) = self.doc.board.item(id) else {
+            for id in doc.selection.iter() {
+                let Some(item) = doc.board.item(id) else {
                     continue;
                 };
                 match seen {
@@ -6192,7 +7027,7 @@ impl AppDelegate for RefxApp {
                 (false, None) => None,
                 (false, Some(None)) => Some(crate::shell::GroupView::Loose),
                 (false, Some(Some(group_id))) => {
-                    self.doc.board.group(group_id).map_or(
+                    doc.board.group(group_id).map_or(
                         // id ที่ห้อยอยู่อ่านเป็น "ไม่มีกลุ่ม" — ห้ามโชว์ช่องเปลี่ยนชื่อ
                         // ของกลุ่มที่ไม่มีอยู่
                         Some(crate::shell::GroupView::Loose),
@@ -6201,7 +7036,7 @@ impl AppDelegate for RefxApp {
                                 id: group_id,
                                 name: group.name.clone(),
                                 collapsed: group.collapsed,
-                                members: self.doc.board.group_members(group_id).count(),
+                                members: doc.board.group_members(group_id).count(),
                             })
                         },
                     )
@@ -6217,11 +7052,8 @@ impl AppDelegate for RefxApp {
         //     ถูกจังหวะ" คือกับดักที่ docs/08 §3.9 ข้อ 8 บันทึกไว้ (เคสจริง:
         //     `take_forgotten` ของ P2-6) · ราคาคือคัดลอก float ห้าตัว ไม่มี
         //     การจองหน่วยความจำ และ **ไม่ขอเฟรมเพิ่ม** จึงไม่แตะ I-1
-        self.doc.board.set_view(live_view(
-            self.doc.camera,
-            self.doc.arrange.camera(),
-            shell.mode,
-        ));
+        doc.board
+            .set_view(live_view(doc.camera, doc.arrange.camera(), shell.mode));
         shell.vram_used = gfx.textures.budget().used();
         shell.working_used = gfx.working.used();
         shell.working_limit = gfx.working.limit();
@@ -6252,16 +7084,16 @@ impl AppDelegate for RefxApp {
         //   สิ่งที่ถูกเลือกได้ แล้วค่อยแก้สถานะหลัง `run_ui` จบ
         let egui_ctx = gfx.egui_ctx.clone();
         let full_output = {
-            let board = &self.doc.board;
-            let selection = &self.doc.selection;
-            let render_state = &self.doc.render_state;
-            let camera = self.doc.camera;
-            let rubber_band = self.doc.rubber_band;
+            let board = &doc.board;
+            let selection = &doc.selection;
+            let render_state = &doc.render_state;
+            let camera = doc.camera;
+            let rubber_band = doc.rubber_band;
             let tool = gfx.tool;
-            let guides = self.doc.guides.as_slice();
+            let guides = doc.guides.as_slice();
             // ★ ไม้บรรทัดมีเจ้าของเดียวคือ `SelectTool` — ที่นี่แค่ **อ่าน** ไปวาด
             //   และ shell ก็อ่านตัวเดียวกันไปแสดงบน status bar (ไม่มีสำเนาที่ต้องซิงค์)
-            let measure = self.doc.select_tool.measurement();
+            let measure = doc.select_tool.measurement();
             shell.measured = measure;
             egui_ctx.run_ui(raw_input, |ui| {
                 canvas_points = crate::shell::draw_in_ui(ui, shell, |ui, mode| {
@@ -6286,15 +7118,14 @@ impl AppDelegate for RefxApp {
         };
         // ★ `shell.mode` ตอนนี้คือโหมดที่ **ช่องกลางเพิ่งวาดไปจริง ๆ** — toolbar
         //   ถูกวาดก่อนช่องกลางเสมอ ค่าจึงอัปเดตแล้วตั้งแต่ก่อน widget ทำงาน
-        let canvas_outcome = Self::apply_canvas_input(gfx, &mut self.doc, canvas_input, shell.mode);
+        let canvas_outcome = Self::apply_canvas_input(gfx, doc, canvas_input, shell.mode);
         if canvas_outcome.redraw {
             gfx.window.request_redraw();
         }
         // ★ ผู้ใช้จิ้มขอสี — ไปอ่าน **ไฟล์ต้นฉบับบน worker** ไม่ใช่ thumbnail
         //   ที่อยู่ในมือแล้ว (ROADMAP P2-10) · ผลกลับมาทีหลังผ่าน `JobResult::Sampled`
         if let Some(request) = canvas_outcome.pick {
-            let asked =
-                Self::request_colour(&self.doc, assets.as_ref(), shell, request, *pick_count);
+            let asked = Self::request_colour(doc, assets.as_ref(), shell, request, *pick_count);
             if let Some(hash) = asked {
                 *pick_count += 1;
                 *pick_in_flight = Some(hash);
@@ -6309,11 +7140,11 @@ impl AppDelegate for RefxApp {
             && gfx.tool != tool
         {
             gfx.tool = tool;
-            self.doc.select_tool.cancel();
+            doc.select_tool.cancel();
             // เส้นวัดที่ค้างอยู่หลังกลับไปเครื่องมืออื่นอ่านว่า "มีอะไรค้าง"
             // ไม่ใช่ "นี่คือผลการวัดของฉัน"
-            self.doc.select_tool.clear_measurement();
-            self.doc.rubber_band = None;
+            doc.select_tool.clear_measurement();
+            doc.rubber_band = None;
         }
 
         let (width, height) = {
@@ -6332,22 +7163,21 @@ impl AppDelegate for RefxApp {
         if shell.mode == Mode::Arrange {
             // ★ การเรียง/กรองมีเจ้าของเดียวคือ widget บน toolbar — ที่นี่แค่รับมา
             //   แล้ว **เทียบก่อนเขียน** ตั้งค่าเดิมซ้ำจึงไม่ทำให้คำนวณใหม่ (I-1)
-            let mut changed = self
-                .doc
+            let mut changed = doc
                 .arrange
                 .set_sort(shell.arrange_sort, shell.arrange_descending);
-            changed |= self.doc.arrange.set_filter(shell.arrange_filter.clone());
+            changed |= doc.arrange.set_filter(shell.arrange_filter.clone());
             if changed {
                 // ★ ลำดับเปลี่ยนแล้วต้องเริ่มดูจากบนสุด ไม่งั้นผู้ใช้กดเรียงใหม่
                 //   แล้วยังค้างอยู่กลางแผ่นเดิม ซึ่งอ่านว่า "กดแล้วไม่มีอะไรเกิดขึ้น"
-                self.doc.arrange.scroll_to_top();
+                doc.arrange.scroll_to_top();
                 gfx.window.request_redraw();
             }
-            Self::plan_arrange(gfx, &mut self.doc, full_output.pixels_per_point);
+            Self::plan_arrange(gfx, doc, full_output.pixels_per_point);
             // ★ ตัวเลขบน status bar เป็นหลักฐานของเกณฑ์ "วาดจริง < 60"
             //   มันถูกวาดไปแล้วในเฟรมนี้ จึงต้องขอเฟรมอีกหนึ่งเฟรมเมื่อค่าเปลี่ยน
             //   — ลู่เข้าเสมอ (เฟรมถัดไปค่าตรงกันแล้วก็หยุด) จึงไม่ขัด I-1
-            let counts = self.doc.arrange.counts();
+            let counts = doc.arrange.counts();
             if shell.arrange != counts {
                 shell.arrange = counts;
                 gfx.window.request_redraw();
@@ -6390,7 +7220,7 @@ impl AppDelegate for RefxApp {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(clear_colour(&self.doc.board)),
+                        load: wgpu::LoadOp::Clear(clear_colour(&doc.board)),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -6414,9 +7244,9 @@ impl AppDelegate for RefxApp {
                 &gfx.quads
             };
             let camera = if arrange_mode {
-                self.doc.arrange.camera()
+                doc.arrange.camera()
             } else {
-                self.doc.camera
+                doc.camera
             };
             if !instances.is_empty() {
                 // ★ จำกัดการวาดไว้ในช่อง canvas เท่านั้น ไม่ให้ล้นไปใต้ panel
@@ -6714,6 +7544,20 @@ impl AppDelegate for RefxApp {
                     self.pending_open = true;
                     needs_redraw = true;
                 }
+                // ★★★ คีย์ของแท็บ (P4-7c · `docs/03 §5`) — **ห้ามซ้ำตอนกดค้าง**
+                //     ทั้งสามตัว: `Ctrl+T` ค้าง = แท็บเปล่าสิบใบ · `Ctrl+W` ค้าง =
+                //     ปิดทุกแท็บรวดเดียว ซึ่งคือการทำงานหายจากการกดผิดครั้งเดียว
+                if event.state.is_pressed()
+                    && !event.repeat
+                    && let Some(which) = tab_shortcut(pressed, &event.logical_key, gfx.modifiers)
+                {
+                    match which {
+                        TabKey::New => self.pending_new_tab = true,
+                        TabKey::Close => self.pending_close_tab = true,
+                        TabKey::Next => self.pending_next_tab = true,
+                    }
+                    needs_redraw = true;
+                }
                 // ★ จัดกลุ่ม / แยกกลุ่ม (P3-7) — **ห้ามซ้ำตอนกดค้าง** เหมือน Delete
                 //   กดค้างหนึ่งวินาที = สร้างกลุ่มใหม่ทับกันหลายสิบชั้นใน undo stack
                 //   ทั้งที่ผู้ใช้ตั้งใจกดครั้งเดียว
@@ -6731,9 +7575,9 @@ impl AppDelegate for RefxApp {
                 {
                     gfx.tool = tool;
                     // การกดค้างที่ยังอยู่เป็นของเครื่องมือเดิม ใช้ต่อไม่ได้
-                    self.doc.select_tool.cancel();
-                    self.doc.select_tool.clear_measurement();
-                    self.doc.rubber_band = None;
+                    self.docs.active_mut().select_tool.cancel();
+                    self.docs.active_mut().select_tool.clear_measurement();
+                    self.docs.active_mut().rubber_band = None;
                     needs_redraw = true;
                 }
             }
@@ -6757,12 +7601,22 @@ impl AppDelegate for RefxApp {
         if self.closing {
             return true;
         }
-        let dirty = self.gfx.as_ref().is_some_and(|_| self.doc.board.is_dirty());
-        if !dirty {
+        // ★★★ **ถามถ้ามีแท็บ *ใบใดก็ตาม* ที่ยังไม่บันทึก** (P4-7c) — ถามแค่ใบที่
+        //     อยู่หน้าจอ แล้วผู้ใช้ที่ทำงานค้างไว้ในอีกสามแท็บจะปิดโปรแกรมไปเฉย ๆ
+        //     โดยไม่มีอะไรเตือน · ★ พาเขาไปที่ใบแรกที่ค้างด้วย ไม่งั้นคำถามจะ
+        //     พูดถึงงานที่เขามองไม่เห็น
+        let unsaved = self
+            .docs
+            .iter()
+            .position(|doc| doc.board.is_dirty())
+            .filter(|_| self.gfx.is_some());
+        let Some(index) = unsaved else {
             return true;
-        }
+        };
+        self.focus_tab(index);
         self.close_confirm = true;
         self.shell.close_prompt = true;
+        self.shell.close_scope_tab = false;
         if let Some(gfx) = self.gfx.as_ref() {
             gfx.window.request_redraw();
         }
@@ -8345,7 +9199,7 @@ mod tests {
     fn board_pointing_at(hash: refx_core::hash::ContentHash, path: &std::path::Path) -> Board {
         use refx_core::board::{BoardParts, ItemParts};
         Board::load(
-            default_board_id(),
+            probe_board_id(),
             BoardParts {
                 name: "pasted".to_owned(),
                 items: vec![ItemParts {
@@ -8704,7 +9558,7 @@ mod tests {
         let board = {
             use refx_core::board::{BoardParts, ItemParts};
             Board::load(
-                default_board_id(),
+                probe_board_id(),
                 BoardParts {
                     name: "b".to_owned(),
                     items: vec![
@@ -8757,7 +9611,7 @@ mod tests {
         let doc = dir.join("work.refx");
 
         let mut board = Board::load(
-            default_board_id(),
+            probe_board_id(),
             BoardParts {
                 name: "board".to_owned(),
                 items: vec![ItemParts {
@@ -8799,7 +9653,7 @@ mod tests {
         history.mark_saved(&mut board);
 
         refx_io::save::save_atomic(&doc, &board, refx_platform::fsops::rename_durable).unwrap();
-        let back = read_document(&doc).expect("เปิดไฟล์ที่เพิ่งบันทึกไม่ได้");
+        let back = read_document(&doc, probe_board_id()).expect("เปิดไฟล์ที่เพิ่งบันทึกไม่ได้");
 
         assert_eq!(back, board, "บันทึกทับแล้วไม่เท่าเดิม");
         let (_, item) = back.items_in_z_order().next().expect("item หายไปทั้งใบ");
@@ -8829,9 +9683,9 @@ mod tests {
     fn work_that_was_never_saved_still_has_somewhere_to_autosave() {
         let mut app = RefxApp::new(AppArgs::default());
         app.recovery_dir = Some(std::path::PathBuf::from("/data/RefX/recovery"));
-        assert_eq!(app.doc_path, None, "เคสนี้คือ 'ยังไม่เคยบันทึก'");
+        assert_eq!(app.docs.active().path, None, "เคสนี้คือ 'ยังไม่เคยบันทึก'");
 
-        match app.snapshot_target() {
+        match RefxApp::snapshot_target(app.docs.active(), app.recovery_dir.as_deref()) {
             Some(SnapshotTarget::Recovery(dir)) => {
                 assert_eq!(dir, std::path::PathBuf::from("/data/RefX/recovery"));
             }
@@ -8844,9 +9698,9 @@ mod tests {
     fn once_the_document_has_a_path_the_snapshot_moves_next_to_it() {
         let mut app = RefxApp::new(AppArgs::default());
         app.recovery_dir = Some(std::path::PathBuf::from("/data/RefX/recovery"));
-        app.doc_path = Some(std::path::PathBuf::from("/work/moodboard.refx"));
+        app.docs.active_mut().path = Some(std::path::PathBuf::from("/work/moodboard.refx"));
 
-        match app.snapshot_target() {
+        match RefxApp::snapshot_target(app.docs.active(), app.recovery_dir.as_deref()) {
             Some(SnapshotTarget::BesideDocument(doc)) => {
                 assert_eq!(doc, std::path::PathBuf::from("/work/moodboard.refx"));
             }
@@ -8865,7 +9719,7 @@ mod tests {
         let app = RefxApp::new(AppArgs::default());
         assert_eq!(app.recovery_dir, None, "ค่าเริ่มต้นต้องว่าง รอ `run` เสียบให้");
         assert_eq!(
-            app.snapshot_target(),
+            RefxApp::snapshot_target(app.docs.active(), app.recovery_dir.as_deref()),
             None,
             "ไม่มีที่อยู่แล้วยังเลือกที่ลงเอง — ที่ที่มันเลือกคือที่ที่ไม่มีใครตรวจ"
         );
@@ -8884,12 +9738,12 @@ mod tests {
 
         // ไม่มี `gfx` = ไม่มี board ให้ถาม → ต้องไม่ตั้งนาฬิกา
         assert_eq!(app.autosave_deadline(), None);
-        assert!(!app.has_unsnapshotted_work());
+        assert!(!RefxApp::doc_has_unsnapshotted_work(app.docs.active()));
 
         // ★ งานที่ส่งไปเธรดแล้วยังไม่กลับ ต้องไม่ตั้งนาฬิกาเช่นกัน —
         //   ตื่นมาแล้วทำอะไรไม่ได้ = ตั้งเวลาในอดีตซ้ำ = `Poll` ที่ I-1 ห้าม
         let (_tx, rx) = crossbeam_channel::bounded::<Result<(), String>>(1);
-        app.autosave_job = Some(rx);
+        app.docs.active_mut().autosave_job = Some(rx);
         assert_eq!(app.autosave_deadline(), None, "มีงานค้างแล้วยังตั้งนาฬิกา");
     }
 
@@ -8938,7 +9792,10 @@ mod tests {
         assert!(app.shell.recover_prompt.is_none(), "แถบต้องหายไปหลังตอบ");
         // ★ และต้องถูกถามใหม่ได้รอบหน้า — ไฟล์ยังอยู่ให้ `scan` เจอ
         let next = refx_io::recovery::SessionId::new_unique();
-        assert_eq!(refx_io::recovery::scan(&dir, &next).len(), 1);
+        assert_eq!(
+            refx_io::recovery::scan(&dir, std::slice::from_ref(&next)).len(),
+            1
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -9010,20 +9867,20 @@ mod tests {
         let mut app = RefxApp::new(AppArgs::default());
         app.recovery_dir = Some(dir.clone());
         // จำลองสภาพหลังกด "เอากลับมา": ตัวเก่าถูกจอง ยังไม่ถูกลบ
-        app.adopted_recovery = Some(old.clone());
+        app.docs.active_mut().adopted_recovery = Some(old.clone());
         assert!(old.exists(), "ห้ามลบก่อนที่ของเราจะลงดิสก์");
 
         // ★ จำลอง "งาน autosave ของเราสำเร็จ" ผ่านช่องเดิมที่ production ใช้จริง
         let (tx, rx) = crossbeam_channel::bounded(1);
         tx.send(Ok(())).unwrap();
-        app.autosave_job = Some(rx);
+        app.docs.active_mut().autosave_job = Some(rx);
         app.tick_autosave();
 
         assert!(
             !old.exists(),
             "snapshot เก่ายังอยู่ — ผู้ใช้จะถูกถามให้กู้งานเดิมซ้ำทุกครั้งที่เปิดโปรแกรม"
         );
-        assert_eq!(app.adopted_recovery, None);
+        assert_eq!(app.docs.active().adopted_recovery, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -9122,7 +9979,7 @@ mod tests {
             }))
         };
         let saved = refx_core::board::Board::load(
-            default_board_id(),
+            probe_board_id(),
             BoardParts {
                 name: "moodboard".to_owned(),
                 groups: vec![Group {
@@ -9150,7 +10007,7 @@ mod tests {
         );
 
         refx_io::save::save_atomic(&doc, &saved, refx_platform::fsops::rename_durable).unwrap();
-        let back = read_document(&doc).expect("เปิดไฟล์ที่เพิ่งบันทึกไม่ได้");
+        let back = read_document(&doc, probe_board_id()).expect("เปิดไฟล์ที่เพิ่งบันทึกไม่ได้");
 
         // ★ เทียบทั้งก้อนก่อน — จับฟิลด์ที่ยังไม่มีใครนึกถึงได้ด้วย
         assert_eq!(back, saved, "เปิดกลับมาแล้วไม่เท่าเดิม");
@@ -9195,7 +10052,598 @@ mod tests {
     fn two_instances_never_share_a_recovery_file() {
         let a = RefxApp::new(AppArgs::default());
         let b = RefxApp::new(AppArgs::default());
-        assert_ne!(a.session, b.session, "สองหน้าต่างได้รหัส session เดียวกัน");
+        assert_ne!(
+            a.docs.active().session,
+            b.docs.active().session,
+            "สองหน้าต่างได้รหัส session เดียวกัน"
+        );
+    }
+
+    // ---------- ★★★ P4-7c: `Docs` + แท็บ + recovery slot ต่อแท็บ ----------
+
+    /// ★★★ **สองแท็บที่ยังไม่เคยบันทึก ต้องเขียนคนละไฟล์** — หัวใจของ P4-7c
+    ///
+    /// ก่อนหน้านี้ `<session>.refx` มีไฟล์เดียวต่อโปรเซส · สองแท็บที่ยังไม่ได้
+    /// `Ctrl+S` จะเขียนทับกันไปมาทุก 10 วินาที แล้วเปิดโปรแกรมใหม่ได้งานคืน
+    /// **ใบเดียว** โดยไม่มีอะไรบอกว่าอีกใบเคยมีอยู่ — I-3 ที่เงียบที่สุดแบบหนึ่ง
+    ///
+    /// ★ เดินผ่าน [`RefxApp::tick_autosave_one`] **ตัวที่โปรแกรมใช้จริง** ไม่ใช่
+    /// ตรรกะที่เขียนเลียนแบบ (`docs/08 §3.9` ข้อ 9) — เธรดที่มันสร้างถูกรอด้วย
+    /// การ poll ช่องผลลัพธ์ ไม่ใช่ด้วยการ sleep (ข้อ 5b: ห้าม assert เวลานาฬิกา)
+    #[test]
+    fn two_unsaved_tabs_never_share_a_recovery_slot() {
+        let dir = temp_dir_named("two-tabs");
+        let mut docs = Docs::default();
+        let second = docs.mint();
+        docs.push(Doc::empty(second));
+        assert_ne!(
+            docs.list[0].session, docs.list[1].session,
+            "สองแท็บได้ recovery slot ไฟล์เดียวกัน — งานของใบหนึ่งจะหายเงียบ ๆ"
+        );
+
+        // ทั้งสองใบมีงานที่ยังไม่ได้เก็บ
+        for doc in docs.iter_mut() {
+            add_note(doc, "งานที่ยังไม่เคยบันทึก");
+            assert!(RefxApp::doc_has_unsnapshotted_work(doc));
+        }
+        for doc in docs.iter_mut() {
+            RefxApp::tick_autosave_one(doc, Some(dir.as_path()), true);
+        }
+        // รอเธรดเขียนจบทั้งสองใบ — ผ่านช่องเดิมที่ `tick_autosave` ใช้เก็บผล
+        for doc in docs.iter_mut() {
+            let rx = doc.autosave_job.take().expect("ไม่ได้ส่งงานเขียนเลย");
+            rx.recv().expect("เธรด autosave ตาย").expect("เขียนไม่สำเร็จ");
+        }
+
+        let written: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+            .expect("ไม่มีโฟลเดอร์ recovery")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "refx"))
+            .collect();
+        assert_eq!(
+            written.len(),
+            2,
+            "สองแท็บที่ไม่เคยบันทึกเขียน snapshot ได้ {} ไฟล์ — อีกใบหายไป",
+            written.len()
+        );
+        for doc in docs.iter() {
+            let mine = refx_io::recovery::snapshot_path(&dir, &doc.session);
+            assert!(mine.exists(), "แท็บนี้ไม่มี snapshot ของตัวเอง");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ★★★ **negative control ของข้อบน** — session ร่วมกันแล้วต้องเหลือไฟล์เดียว
+    ///
+    /// ถ้าไม่มีข้อนี้ เทสต์ข้างบนจะเขียวได้ด้วยเหตุผลอื่น (เช่นเขียนไม่สำเร็จ
+    /// ทั้งคู่แล้วบังเอิญนับได้ 2 จากไฟล์อื่น) · ที่นี่พิสูจน์ว่า **ตัวแยกจริง ๆ
+    /// คือ `Doc::session`** ไม่ใช่อย่างอื่น (`docs/08 §3.9` ข้อ 1)
+    #[test]
+    fn sharing_one_session_is_what_loses_the_other_tab() {
+        let dir = temp_dir_named("shared-session");
+        let mut docs = Docs::default();
+        let second = docs.mint();
+        docs.push(Doc::empty(second));
+        // จำลองดีไซน์เดิม: ทั้งสองแท็บถือ session เดียวกัน
+        let shared = docs.list[0].session.clone();
+        docs.list[1].session = shared;
+
+        for doc in docs.iter_mut() {
+            add_note(doc, "งานที่ยังไม่เคยบันทึก");
+            RefxApp::tick_autosave_one(doc, Some(dir.as_path()), true);
+        }
+        for doc in docs.iter_mut() {
+            if let Some(rx) = doc.autosave_job.take() {
+                let _ = rx.recv();
+            }
+        }
+        let count = std::fs::read_dir(&dir)
+            .expect("ไม่มีโฟลเดอร์ recovery")
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "refx"))
+            .count();
+        assert_eq!(count, 1, "session ร่วมกันแล้วยังได้สองไฟล์ — ประตูนี้ไม่ล้มเป็น");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ★★★ **แท็บหลังบ้านต้องปลุกโปรแกรมมาเขียนของมันได้** (I-3 + I-1)
+    ///
+    /// นาฬิกา autosave ต้องเป็นของ *ทุกแท็บ* ไม่ใช่ของใบที่อยู่หน้าจอ — ไม่งั้น
+    /// แท็บที่ผู้ใช้สลับออกไปจะถูกเก็บก็ต่อเมื่อเขาบังเอิญสลับกลับมา ซึ่งเป็น
+    /// เงื่อนไขที่ crash ไม่เคยรอ
+    ///
+    /// ★ และ **ต้องเงียบเมื่อทุกใบเก็บครบแล้ว** — นาฬิกาที่ดังตลอดคือ `Poll`
+    /// ที่สะกดด้วยชื่ออื่น (I-1)
+    #[test]
+    fn a_background_tab_still_asks_to_be_woken() {
+        let dir = std::path::PathBuf::from("/data/RefX/recovery");
+        let mut docs = Docs::default();
+        let second = docs.mint();
+        docs.push(Doc::empty(second));
+
+        assert_eq!(
+            RefxApp::next_autosave_across_tabs(&docs, Some(dir.as_path())),
+            None,
+            "ไม่มีอะไรแก้เลยแต่ยังขอให้ปลุก"
+        );
+
+        // แก้เฉพาะใบที่ **ไม่ได้** อยู่หน้าจอ
+        docs.active = 1;
+        add_note(&mut docs.list[0], "งานของแท็บหลังบ้าน");
+        assert!(
+            RefxApp::next_autosave_across_tabs(&docs, Some(dir.as_path())).is_some(),
+            "แท็บที่ไม่ได้อยู่หน้าจอไม่มีใครปลุกมาเขียนให้เลย"
+        );
+
+        // เก็บครบแล้ว = เงียบสนิทอีกครั้ง (I-1)
+        docs.list[0].snapshot_revision = Some(docs.list[0].board.revision());
+        assert_eq!(
+            RefxApp::next_autosave_across_tabs(&docs, Some(dir.as_path())),
+            None,
+            "เก็บครบแล้วยังขอให้ปลุกทุก 10 วินาทีตลอดทั้งวัน"
+        );
+    }
+
+    /// ★★★ **`BoardId` ต้องแจกไม่ซ้ำจริง** (`docs/02 §2.10`)
+    ///
+    /// `ItemId` เป็นแค่ `index+generation` **ไม่ผูกกับ board** — สอง arena
+    /// เริ่มนับจาก 0 เหมือนกันเป๊ะ · id ของ board จึงเป็นสิ่งเดียวที่แยก
+    /// "ผลงานนี้เป็นของแท็บไหน" ออกจากกันได้ · **ปิดแล้วห้ามใช้ id ซ้ำ** ด้วย:
+    /// งาน decode ที่ยังค้างอยู่ของแท็บที่ตายไปจะไปเกาะแท็บใหม่ทันที
+    #[test]
+    fn every_tab_gets_an_id_that_is_never_handed_out_twice() {
+        let mut docs = Docs::default();
+        let mut seen = vec![docs.active().id];
+        for _ in 0..8 {
+            let id = docs.mint();
+            docs.push(Doc::empty(id));
+            seen.push(id);
+        }
+        // ปิดทิ้งจนเหลือใบเดียว แล้วเปิดใหม่ — id ต้องไม่วนกลับมาซ้ำของเดิม
+        while docs.len() > 1 {
+            docs.close(0);
+        }
+        for _ in 0..4 {
+            let id = docs.mint();
+            docs.push(Doc::empty(id));
+            seen.push(id);
+        }
+        let unique: std::collections::HashSet<_> = seen.iter().collect();
+        assert_eq!(unique.len(), seen.len(), "แจก BoardId ซ้ำ — {seen:?}");
+        // ★ และ `ItemId` ของสอง board **ซ้ำกันจริง** ซึ่งคือเหตุผลที่ id ต้องมี
+        let mut a = Doc::empty(seen[0]);
+        let mut b = Doc::empty(seen[1]);
+        add_note(&mut a, "ก");
+        add_note(&mut b, "ข");
+        assert_eq!(
+            a.board.z_order().first(),
+            b.board.z_order().first(),
+            "สอง board แจก ItemId คนละชุด — สมมติฐานของทั้ง P4-7c เปลี่ยนไปแล้ว"
+        );
+    }
+
+    /// ★★★ **สองแท็บที่เปิดไฟล์เดียวกันต้องได้คีย์งานคนละใบ** (`job_key_for`)
+    ///
+    /// คีย์เดิมเป็น `hash_bytes(path)` ล้วน ๆ ซึ่งถูกตราบที่มี board เดียว ·
+    /// พอสอง board อ้างถึงภาพใบเดียวกัน ตารางจับคู่ของใบที่ใส่ทีหลังจะ
+    /// **เขียนทับ** ของใบแรก → แท็บแรกได้ item ที่ไม่มีวันได้พิกเซล
+    #[test]
+    fn two_tabs_wanting_the_same_file_do_not_collide() {
+        use refx_core::arena::ArenaKey as _;
+        let a = refx_core::arena::BoardId::from_parts(1, 0);
+        let b = refx_core::arena::BoardId::from_parts(2, 0);
+        let path = std::path::Path::new("/work/ref/sky.png");
+
+        assert_ne!(
+            job_key_for(a, path),
+            job_key_for(b, path),
+            "สองแท็บที่ขอไฟล์เดียวกันได้คีย์งานเท่ากัน — ใบหนึ่งจะไม่มีวันได้ภาพ"
+        );
+        // ★ negative control ของ *ดีไซน์เดิม* — คีย์จาก path ล้วนชนกันเสมอ
+        assert_eq!(
+            refx_asset::hash::hash_bytes(path.to_string_lossy().as_bytes()),
+            refx_asset::hash::hash_bytes(path.to_string_lossy().as_bytes()),
+            "คีย์จาก path ล้วนไม่ได้ชนกัน — สมมติฐานของเทสต์นี้ผิด"
+        );
+        // ★★ แต่ **ภายในแท็บเดียวกันต้องยังยุบงานซ้ำได้เหมือนเดิม**
+        assert_eq!(
+            job_key_for(a, path),
+            job_key_for(a, path),
+            "คีย์ของแท็บเดียวกันไม่เสถียร — ลากไฟล์เดิมสองครั้งจะได้สองงาน"
+        );
+        assert_ne!(
+            job_key_for(a, path),
+            job_key_for(a, std::path::Path::new("/work/ref/sea.png")),
+            "คนละไฟล์ในแท็บเดียวกันได้คีย์เท่ากัน"
+        );
+    }
+
+    /// ★★★ **spool ต้องคุ้มครองภาพของ *ทุก* แท็บ** (§4 ข้อ 24)
+    ///
+    /// ภาพที่วางไว้ในแท็บหลังบ้านมีต้นฉบับอยู่ที่ spool ที่เดียว · ถามแค่แท็บที่
+    /// อยู่หน้าจอแล้วเพดานจะลบมันทิ้ง **ขณะที่แท็บนั้นยังเปิดอยู่** แล้วภาพจะ
+    /// กลายเป็นช่องว่างทันทีที่ผู้ใช้สลับกลับไปดู และกู้คืนไม่ได้เลย
+    #[test]
+    fn the_spool_sweep_asks_every_tab_not_just_the_visible_one() {
+        let front = content_hash(1);
+        let back = content_hash(2);
+        let mut docs = Docs::default();
+        docs.list[0].board = board_pointing_at(front, std::path::Path::new("/spool/a.png"));
+        let id = docs.mint();
+        let mut hidden = Doc::empty(id);
+        hidden.board = board_pointing_at(back, std::path::Path::new("/spool/b.png"));
+        docs.push(hidden);
+        docs.active = 0; // ★ ใบหลังบ้านคือใบที่ **ไม่ได้** อยู่หน้าจอ
+
+        let protected = hashes_of_every_tab(&docs);
+        assert!(protected.contains(&front), "ภาพของแท็บหน้าจอไม่ถูกคุ้มครอง");
+        assert!(
+            protected.contains(&back),
+            "ภาพของแท็บหลังบ้านไม่ถูกคุ้มครอง — เพดานจะลบต้นฉบับเดียวที่เหลือทิ้ง"
+        );
+        // ★ negative control: ถามแค่ใบที่อยู่หน้าจอแล้วอีกใบหลุดทันที
+        let visible_only = refx_io::spool::hashes_of(&docs.active().board);
+        assert!(!visible_only.contains(&back), "ประตูนี้ไม่ล้มเป็น");
+    }
+
+    /// ★★★ **`Docs` ห้ามว่าง** — ปิดใบสุดท้ายแล้วได้ board เปล่าใบใหม่
+    ///
+    /// สภาพ "ไม่มีเอกสารเลย" จะบังคับให้ทุกเส้นทางมีกิ่ง `None` เพิ่มอีกหนึ่ง
+    /// ซึ่งเป็นกิ่งที่ไม่มีใครเดินและจะเน่าเงียบ ๆ (`docs/08 §3.9` ข้อ 2)
+    #[test]
+    fn closing_the_last_tab_leaves_an_empty_board_not_nothing() {
+        let mut docs = Docs::default();
+        let first = docs.active().id;
+        docs.close(0);
+        assert_eq!(docs.len(), 1, "ปิดใบสุดท้ายแล้วเหลือรายการว่าง");
+        assert_ne!(docs.active().id, first, "ใบใหม่ได้ id ของใบที่ปิดไปแล้ว");
+        assert!(docs.active().board.is_empty());
+        assert!(docs.active().path.is_none());
+    }
+
+    /// ★★★ สลับแท็บแล้ว **การลากที่ค้างอยู่ของใบเดิมต้องถูกยกเลิก**
+    ///
+    /// การลากที่เริ่มบนแท็บหนึ่งใช้ต่อกับอีกแท็บไม่ได้ — `ItemId` ที่มันถืออยู่
+    /// ชี้ไป board คนละใบ (`docs/02 §2.10`) · เหตุผลเดียวกับตอนสลับเครื่องมือ
+    ///
+    /// ★ **สิ่งที่เทสต์นี้คุมไม่ได้คือการวาดใหม่** — `gfx.quads` ต้องมีหน้าต่างจริง
+    /// · นั่นคือช่องที่บั๊ก 28 ส.ค. 2026 เดินผ่าน (สลับแท็บแล้วยังเห็นภาพของใบเดิม)
+    /// และมันถูกจับได้ด้วย **ภาพหน้าจอ** เท่านั้น — ยืนยันด้วยมือ 28 ส.ค. 2026
+    #[test]
+    fn switching_tabs_drops_the_drag_that_belonged_to_the_old_one() {
+        let mut app = RefxApp::new(AppArgs::default());
+        let id = app.docs.mint();
+        app.docs.push(Doc::empty(id));
+        app.docs.active = 0;
+        // จำลองการลากที่ค้างอยู่บนใบแรก
+        app.docs.list[0].rubber_band = Some(WorldRect::from_center_size(Vec2::ZERO, Vec2::ONE));
+        app.docs.list[0].guides.push(refx_core::align::Guide {
+            vertical: true,
+            at: 1.0,
+            from: 0.0,
+            to: 1.0,
+        });
+
+        app.focus_tab(1);
+
+        assert_eq!(app.docs.active, 1, "สลับแท็บไม่สำเร็จ");
+        assert!(
+            app.docs.list[0].rubber_band.is_none(),
+            "กรอบลากของแท็บเดิมยังค้างอยู่ — มันจะถูกวาดทับกระดานใบใหม่"
+        );
+        assert!(app.docs.list[0].guides.is_empty(), "ไกด์ของแท็บเดิมยังค้างอยู่");
+
+        // ★ สลับไปที่ใบเดิมซ้ำ = ไม่มีอะไรเกิดขึ้น (ไม่สั่งวาดใหม่ฟรี ๆ — I-1)
+        app.focus_tab(1);
+        assert_eq!(app.docs.active, 1);
+        // ★ ดัชนีนอกช่วงต้องเงียบ ไม่ใช่พาไปแท็บมั่ว
+        app.focus_tab(99);
+        assert_eq!(app.docs.active, 1, "ดัชนีนอกช่วงพาผู้ใช้ไปแท็บอื่น");
+    }
+
+    /// ★ ปิดแท็บกลาง ๆ แล้ว "แท็บที่ดูอยู่" ต้องไม่กระโดดไปคนละใบ
+    #[test]
+    fn closing_a_tab_keeps_pointing_at_the_same_document() {
+        let mut docs = Docs::default();
+        for _ in 0..2 {
+            let id = docs.mint();
+            docs.push(Doc::empty(id));
+        }
+        docs.active = 2;
+        let watching = docs.active().id;
+        docs.close(0); // ปิดใบก่อนหน้า
+        assert_eq!(
+            docs.active().id,
+            watching,
+            "ปิดแท็บอื่นแล้วผู้ใช้ถูกพาไปดูเอกสารคนละฉบับ"
+        );
+        docs.close(docs.active); // ปิดใบที่ดูอยู่ (เป็นใบสุดท้ายพอดี)
+        assert_ne!(docs.active().id, watching);
+    }
+
+    /// ★★★ **`Ctrl+W` บนแท็บที่ยังไม่บันทึกต้อง *ถามก่อน*** (`docs/03 §5`)
+    ///
+    /// ปิดไปเลยคือการทำงานหายด้วยการกดผิดปุ่มเดียว ซึ่งเป็นสิ่งเดียวกับที่แถบ
+    /// ยืนยันตอนปิดหน้าต่างมีไว้กัน — แค่ย้ายมาโผล่ที่ขอบเขตเล็กกว่า
+    #[test]
+    fn closing_a_dirty_tab_asks_before_it_closes_anything() {
+        let mut app = RefxApp::new(AppArgs::default());
+        let id = app.docs.mint();
+        app.docs.push(Doc::empty(id));
+        add_note(app.docs.active_mut(), "งานที่ยังไม่ได้บันทึก");
+        assert!(app.docs.active().board.is_dirty());
+
+        // ★ ไม่มี `Gfx` ในเทสต์ — เส้นทางถามผูกกับ `gfx.is_some()` เหมือนของจริง
+        //   จึงตรวจ **ตัวตัดสิน** ตรง ๆ แทนการเรียกผ่านหน้าต่างที่สร้างไม่ได้
+        let dirty = app.docs.active().board.is_dirty();
+        assert!(dirty, "สมมติฐานของเทสต์ผิด");
+
+        // ตอบ "ปิดโดยไม่บันทึก" แล้วถึงจะหายไปจริง
+        app.closing_tab = Some(app.docs.active().id);
+        app.shell.close_prompt = true;
+        app.shell.close_scope_tab = true;
+        let before = app.docs.len();
+        app.apply_close_choice(crate::shell::CloseChoice::DiscardAndClose);
+        assert_eq!(app.docs.len(), before - 1, "ตอบว่าปิดแล้วแท็บยังอยู่");
+        assert!(!app.shell.close_prompt, "แถบยืนยันค้างอยู่หลังตอบ");
+        assert!(!app.shell.close_scope_tab);
+
+        // ★ negative control — "ทำงานต่อ" ต้องไม่ปิดอะไรเลย
+        let id = app.docs.mint();
+        app.docs.push(Doc::empty(id));
+        add_note(app.docs.active_mut(), "อีกใบ");
+        app.closing_tab = Some(app.docs.active().id);
+        app.shell.close_prompt = true;
+        let before = app.docs.len();
+        app.apply_close_choice(crate::shell::CloseChoice::Cancel);
+        assert_eq!(app.docs.len(), before, "กด 'ทำงานต่อ' แล้วแท็บหายไป");
+    }
+
+    /// ★★★ **ปิดหน้าต่างต้องถามถ้ามีแท็บ *ใบใดก็ตาม* ที่ยังไม่บันทึก**
+    ///
+    /// ถามแค่ใบที่อยู่หน้าจอ แล้วผู้ใช้ที่ทำงานค้างไว้ในอีกสามแท็บจะปิดโปรแกรม
+    /// ไปเฉย ๆ โดยไม่มีอะไรเตือน — ซึ่งคือลูปเดิมที่ P4-2 มีไว้กันพอดี
+    #[test]
+    fn a_dirty_tab_behind_the_visible_one_still_blocks_the_close() {
+        let mut docs = Docs::default();
+        let id = docs.mint();
+        docs.push(Doc::empty(id));
+        add_note(&mut docs.list[0], "งานของแท็บหลังบ้าน");
+        docs.active = 1; // ผู้ใช้กำลังดูใบที่สะอาด
+
+        assert!(
+            !docs.active().board.is_dirty(),
+            "สมมติฐานของเทสต์ผิด — ใบที่ดูอยู่ต้องสะอาด"
+        );
+        assert_eq!(
+            docs.iter().position(|doc| doc.board.is_dirty()),
+            Some(0),
+            "ไม่เห็นงานค้างของแท็บหลังบ้าน — ปิดโปรแกรมแล้วมันหายไปเงียบ ๆ"
+        );
+    }
+
+    /// ★★★ คีย์ของแท็บครบตาม `docs/03 §5` — และ **เงียบเมื่อยังไม่มีความหมาย**
+    ///
+    /// ★★ ยิงด้วย layout ไทยด้วย (HANDOFF §2.12): matcher ที่ดูแต่ logical key
+    /// ทำให้คีย์ลัด**ทุกตัว**ใช้ไม่ได้บน layout ไทยมาตั้งแต่ P2-4
+    #[test]
+    fn the_tab_keys_do_what_the_spec_says_and_nothing_else() {
+        let ctrl = ModifiersState::CONTROL;
+        let tab_key = winit::keyboard::Key::Named(winit::keyboard::NamedKey::Tab);
+        let plain = key("t");
+
+        assert_eq!(tab_shortcut(Some('t'), &plain, ctrl), Some(TabKey::New));
+        assert_eq!(tab_shortcut(Some('w'), &plain, ctrl), Some(TabKey::Close));
+        assert_eq!(tab_shortcut(None, &tab_key, ctrl), Some(TabKey::Next));
+        // บางระบบส่งมาเป็นอักขระ control — เหมือน `Ctrl+S`/`Ctrl+O`
+        assert_eq!(
+            tab_shortcut(Some('\u{14}'), &plain, ctrl),
+            Some(TabKey::New)
+        );
+        assert_eq!(
+            tab_shortcut(Some('\u{17}'), &plain, ctrl),
+            Some(TabKey::Close)
+        );
+
+        // ★ ไม่กด Ctrl = ตัวอักษรธรรมดา (ผู้ใช้กำลังพิมพ์)
+        assert_eq!(
+            tab_shortcut(Some('t'), &plain, ModifiersState::empty()),
+            None
+        );
+        // ★ ปุ่มที่ยังไม่มีความหมายต้องเงียบ ไม่ใช่ทำอะไรที่ผู้ใช้ไม่ได้ขอ
+        assert_eq!(
+            tab_shortcut(Some('t'), &plain, ctrl | ModifiersState::SHIFT),
+            None
+        );
+        assert_eq!(
+            tab_shortcut(Some('w'), &plain, ctrl | ModifiersState::ALT),
+            None
+        );
+        assert_eq!(tab_shortcut(Some('q'), &plain, ctrl), None);
+
+        // ★★ layout ไทย: ปุ่ม `T` ส่ง `ะ` มา · `W` ส่ง `ไ` — physical key ต้องช่วยไว้
+        assert_eq!(
+            tab_shortcut(
+                pressed_thai("ะ", winit::keyboard::KeyCode::KeyT),
+                &key("ะ"),
+                ctrl
+            ),
+            Some(TabKey::New),
+            "กด Ctrl+T บน layout ไทยไม่ได้"
+        );
+        assert_eq!(
+            tab_shortcut(
+                pressed_thai("ไ", winit::keyboard::KeyCode::KeyW),
+                &key("ไ"),
+                ctrl
+            ),
+            Some(TabKey::Close),
+            "กด Ctrl+W บน layout ไทยไม่ได้"
+        );
+    }
+
+    /// ★ `Ctrl+T`/`Ctrl+W` ต้องไม่ไปชนคีย์ลัดที่มีอยู่แล้ว
+    #[test]
+    fn the_tab_keys_do_not_steal_any_existing_shortcut() {
+        let ctrl = ModifiersState::CONTROL;
+        let plain = key("t");
+        for taken in ['s', 'o', 'z', 'y', 'v', 'a', 'g'] {
+            assert_eq!(
+                tab_shortcut(Some(taken), &key(&taken.to_string()), ctrl),
+                None,
+                "Ctrl+{taken} ถูกแท็บแย่งไป"
+            );
+        }
+        // และทางกลับกัน — `Ctrl+T`/`Ctrl+W` ต้องไม่ไปติดของคนอื่น
+        assert!(!open_shortcut(Some('t'), ctrl));
+        assert!(!open_shortcut(Some('w'), ctrl));
+        assert_eq!(save_shortcut(Some('t'), ctrl), None);
+        assert_eq!(save_shortcut(Some('w'), ctrl), None);
+        assert_eq!(history_shortcut(Some('t'), ctrl), None);
+        let _ = plain;
+    }
+
+    /// ★★ เอกสารที่เปิดแล้ว **ไปที่แท็บเดิม ไม่ใช่เปิดซ้อน**
+    ///
+    /// สองแท็บบนไฟล์เดียวกันแปลว่าสอง `<doc>.refx.autosave` ทับกัน และ `Ctrl+S`
+    /// ของใบหลังจะกลืนงานของใบแรก — รูปแบบเดียวกับ recovery slot ที่ P4-7c แก้
+    #[test]
+    fn opening_a_file_that_is_already_open_goes_to_its_tab() {
+        let mut docs = Docs::default();
+        let path = std::path::Path::new("/work/moodboard.refx");
+        docs.list[0].path = Some(path.to_path_buf());
+        let id = docs.mint();
+        docs.push(Doc::empty(id));
+        assert_eq!(docs.active, 1);
+
+        assert_eq!(docs.index_of_path(path), Some(0));
+        assert_eq!(
+            docs.index_of_path(std::path::Path::new("/work/other.refx")),
+            None
+        );
+    }
+
+    /// ★★ แท็บเปล่าที่ยังไม่เคยถูกแตะคือ "ที่นั่งว่าง" — เปิดไฟล์แรกไม่ทิ้งขยะไว้
+    #[test]
+    fn the_first_document_reuses_the_empty_tab_instead_of_leaving_it_behind() {
+        let mut docs = Docs::default();
+        assert!(docs.active().is_untouched(), "แท็บแรกต้องนับว่ายังไม่ถูกแตะ");
+
+        add_note(docs.active_mut(), "ผู้ใช้เริ่มทำงานแล้ว");
+        assert!(
+            !docs.active().is_untouched(),
+            "แท็บที่มีงานอยู่ถูกอ่านว่าว่าง — เปิดไฟล์ทับแล้วงานหาย"
+        );
+
+        let mut with_path = Doc::empty(docs.mint());
+        with_path.path = Some(std::path::PathBuf::from("/work/a.refx"));
+        assert!(!with_path.is_untouched(), "เอกสารที่มีไฟล์อยู่แล้วถูกอ่านว่าว่าง");
+    }
+
+    /// ★★★ **ทุกงาน thumbnail ที่ถูกส่ง ต้องมีเจ้าของจดไว้เสมอ**
+    ///
+    /// นี่คือประตูที่บั๊กจริงเดินผ่านเมื่อ 28 ส.ค. 2026: การจดเจ้าของอยู่ที่จุดเรียก
+    /// แล้วสองในสามจุดลืมจด · ผลคือ **ภาพที่ลากเข้ามาไม่ขึ้นจอเลยสักใบ** —
+    /// งานถูก decode สำเร็จแล้วถูกทิ้งเพราะ `drain_decode_results` หาแท็บปลายทาง
+    /// ไม่เจอ · เทสต์ 849 ตัวเขียวหมดตอนนั้น เจอเพราะรันแอปจริงแล้วดู
+    ///
+    /// ★ ตอนนี้ทั้งสามเส้นทาง (ลากไฟล์ · วาง · relink) ผ่าน
+    /// [`RefxApp::submit_thumbnail_jobs`] ประตูเดียว — ที่นี่ยิงประตูนั้นตรง ๆ
+    #[test]
+    fn every_thumbnail_job_remembers_which_tab_asked_for_it() {
+        let mut app = RefxApp::new(AppArgs::default());
+        let owner = app.docs.active().id;
+        let key = job_key_for(owner, std::path::Path::new("/work/a.png"));
+        app.submit_thumbnail_jobs(
+            owner,
+            vec![refx_asset::pool::Job {
+                hash: key,
+                source: refx_asset::pool::JobSource::File("/work/a.png".into()),
+                priority: 0.0,
+                cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                target: refx_asset::pool::JobTarget::Thumbnail,
+            }],
+        );
+        assert_eq!(
+            app.job_owner.get(&key),
+            Some(&owner),
+            "ส่งงานแล้วไม่ได้จดว่าเป็นของแท็บไหน — ผลที่กลับมาจะไม่มีที่ให้ลง"
+        );
+        assert!(
+            app.job_sources.contains_key(&key),
+            "ส่งงานแล้วไม่ได้จดที่มา — ภาพใบนี้จะขอภาพคมตอนซูมไม่ได้ตลอดกาล"
+        );
+
+        // ★★ เส้นทางค้นหาที่ `drain_decode_results` เดินจริง ต้องหาแท็บเจอ
+        let found = app
+            .job_owner
+            .get(&key)
+            .and_then(|id| app.docs.list.iter().position(|doc| doc.id == *id));
+        assert_eq!(found, Some(0), "จดเจ้าของแล้วแต่ยังหาแท็บปลายทางไม่เจอ");
+
+        // ★ negative control — คีย์ที่ไม่มีเจ้าของคือคีย์ที่ผลลัพธ์ถูกทิ้ง
+        //   (นี่คืออาการของบั๊กจริงเป๊ะ ๆ)
+        let orphan = job_key_for(owner, std::path::Path::new("/work/never-submitted.png"));
+        assert!(
+            !app.job_owner.contains_key(&orphan),
+            "คีย์ที่ไม่เคยถูกส่งกลับมีเจ้าของ — ประตูนี้ไม่ล้มเป็น"
+        );
+    }
+
+    /// ★ ปิดแท็บแล้ว **คีย์งานที่ค้างอยู่ของมันต้องถูกทิ้ง** (I-6)
+    ///
+    /// ผลของงานที่ยังเดินอยู่ไม่มีที่ให้ลงแล้ว · ไม่เก็บกวาดคือตารางที่โต
+    /// ตลอดอายุโปรแกรมทุกครั้งที่ผู้ใช้เปิด-ปิดแท็บ
+    #[test]
+    fn closing_a_tab_forgets_the_work_that_was_still_running_for_it() {
+        let mut app = RefxApp::new(AppArgs::default());
+        let doomed = app.docs.mint();
+        app.docs.push(Doc::empty(doomed));
+        let survivor = app.docs.list[0].id;
+
+        let mine = job_key_for(doomed, std::path::Path::new("/work/a.png"));
+        let theirs = job_key_for(survivor, std::path::Path::new("/work/b.png"));
+        for (key, owner) in [(mine, doomed), (theirs, survivor)] {
+            app.submit_thumbnail_jobs(
+                owner,
+                vec![refx_asset::pool::Job {
+                    hash: key,
+                    source: refx_asset::pool::JobSource::File("/work/x.png".into()),
+                    priority: 0.0,
+                    cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    target: refx_asset::pool::JobTarget::Thumbnail,
+                }],
+            );
+        }
+
+        app.close_tab_now(1);
+        assert!(!app.job_owner.contains_key(&mine), "คีย์ของแท็บที่ปิดไปยังค้างอยู่");
+        assert!(
+            app.job_owner.contains_key(&theirs),
+            "ปิดแท็บหนึ่งแล้วกวาดคีย์ของอีกแท็บไปด้วย — ภาพของมันจะไม่มีวันขึ้น"
+        );
+    }
+
+    /// โฟลเดอร์ชั่วคราวของเทสต์ — ชื่อแยกตามเธรดเหมือนตัวอื่นในไฟล์นี้
+    fn temp_dir_named(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "refx-tabs-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("สร้างโฟลเดอร์ทดสอบไม่ได้");
+        dir
+    }
+
+    /// เติมโน้ตหนึ่งใบผ่าน `Command` — ทางเดียวกับที่ของจริงแก้ `Board`
+    fn add_note(doc: &mut Doc, text: &str) {
+        let item = Item::new(ItemKind::Text(refx_core::board::TextNote {
+            text: text.to_owned(),
+        }));
+        let command = AddItems::new(vec![item]).expect("สร้างคำสั่งไม่ได้");
+        doc.apply(Box::new(command)).expect("คำสั่งล้ม");
     }
 
     /// ★★ `JobSource` คือ **ประตูของ working texture** — ไม่มีไฟล์ = ไม่ขอภาพคม
@@ -9448,7 +10896,7 @@ two"
         use refx_io::packed::SaveMode;
 
         let board = Board::load(
-            default_board_id(),
+            probe_board_id(),
             BoardParts {
                 name: "mixed".to_owned(),
                 items: vec![
@@ -9565,7 +11013,7 @@ two"
         assert!(!a.exists() && !b.exists());
 
         // ---- เปิดกลับมา ----
-        let back = read_document(&doc).expect("เปิดไฟล์ packed ไม่ได้");
+        let back = read_document(&doc, probe_board_id()).expect("เปิดไฟล์ packed ไม่ได้");
         let index = read_asset_table(&doc);
         assert_eq!(back, board, "เนื้อเอกสารไม่เท่าเดิม");
         assert_eq!(
@@ -9621,7 +11069,7 @@ two"
 
         let root = spool_temp_dir("still-v1");
         let doc = root.join("empty.refx");
-        let board = Board::new(default_board_id(), "empty".to_owned());
+        let board = Board::new(probe_board_id(), "empty".to_owned());
 
         for mode in [SaveMode::Linked, SaveMode::Packed] {
             let embeds =
@@ -9722,7 +11170,7 @@ two"
         use refx_core::board::{BoardParts, ItemParts};
 
         let board = Board::load(
-            default_board_id(),
+            probe_board_id(),
             BoardParts {
                 name: "work".to_owned(),
                 items: (0..items)
@@ -9754,7 +11202,7 @@ two"
 
         // ยังไม่มี snapshot = ไม่มีอะไรให้ถาม
         assert!(
-            newer_snapshot(&doc, &saved).is_none(),
+            newer_snapshot(&doc, probe_board_id(), &saved).is_none(),
             "ถามทั้งที่ไม่มี snapshot อยู่เลย"
         );
 
@@ -9772,7 +11220,7 @@ two"
         refx_io::autosave::write_snapshot(&doc, &newer, refx_platform::fsops::rename_durable)
             .unwrap();
 
-        let pending = newer_snapshot(&doc, &saved).expect("งานที่ค้างอยู่ถูกเมิน");
+        let pending = newer_snapshot(&doc, probe_board_id(), &saved).expect("งานที่ค้างอยู่ถูกเมิน");
         // ★ เทียบ **เนื้อ** ไม่ใช่ทั้งก้อน — snapshot ที่อ่านกลับมาย่อมมีธง `dirty`
         //   ดับเสมอ (DTO ไม่เก็บธงนั้น) ส่วนตัวที่อยู่ในมือตอนเขียนยัง dirty อยู่
         assert_ne!(pending.board, saved, "สิ่งที่เสนอกลับคือไฟล์เดิม ไม่ใช่งานที่ค้าง");
@@ -9811,12 +11259,12 @@ two"
         refx_io::autosave::write_snapshot(&doc, &saved, refx_platform::fsops::rename_durable)
             .unwrap();
         assert!(
-            refx_io::autosave::find_pending(&doc, default_board_id()).is_some(),
+            refx_io::autosave::find_pending(&doc, probe_board_id()).is_some(),
             "เทสต์นี้ต้องมี snapshot อยู่จริงถึงจะพิสูจน์อะไรได้"
         );
 
         assert!(
-            newer_snapshot(&doc, &saved).is_none(),
+            newer_snapshot(&doc, probe_board_id(), &saved).is_none(),
             "ถามผู้ใช้ทั้งที่ snapshot เหมือนไฟล์ทุกอย่าง"
         );
 

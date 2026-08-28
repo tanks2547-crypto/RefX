@@ -72,6 +72,14 @@ pub enum Key {
     UntitledBoard,
     /// tooltip ของปุ่มเปิด board ใหม่
     NewBoardHint,
+    /// ★ เปิด board เปล่าใบใหม่แล้ว (`Ctrl+T` — P4-7c)
+    NewBoardOpened,
+    /// ★ ปิดแท็บไปแล้ว (`Ctrl+W` — P4-7c)
+    TabClosed,
+    /// tooltip ของกากบาทบนแท็บ
+    CloseTabHint,
+    /// ★★ หัวข้อคำถาม "ปิดแท็บทั้งที่ยังไม่ได้บันทึก" (P4-7c)
+    CloseTabTitle,
     /// หัวข้อ panel ซ้าย
     Library,
     /// คำอธิบายในช่อง library ที่ยังว่าง
@@ -325,7 +333,11 @@ fn en(key: Key) -> &'static str {
         Key::Ready => "Ready",
         Key::RunningWithoutCache => "Running without a thumbnail cache",
         Key::UntitledBoard => "Untitled board",
-        Key::NewBoardHint => "New board (P4-7)",
+        Key::NewBoardHint => "New board (Ctrl+T)",
+        Key::NewBoardOpened => "New board - Ctrl+W closes it, Ctrl+Tab switches",
+        Key::TabClosed => "Board closed",
+        Key::CloseTabHint => "Close this board (Ctrl+W)",
+        Key::CloseTabTitle => "This board has unsaved changes",
         Key::Library => "Library",
         Key::LibraryPlaceholder => "Image folders appear here",
         Key::LibraryDropHint => "Drag images in, or press Ctrl+V",
@@ -476,7 +488,11 @@ fn th(key: Key) -> Option<&'static str> {
         Key::Ready => "พร้อมใช้งาน",
         Key::RunningWithoutCache => "ใช้งานได้ แต่ไม่มี cache ภาพย่อ",
         Key::UntitledBoard => "board ที่ยังไม่ได้ตั้งชื่อ",
-        Key::NewBoardHint => "เปิด board ใหม่ (P4-7)",
+        Key::NewBoardHint => "เปิด board ใหม่ (Ctrl+T)",
+        Key::NewBoardOpened => "board ใหม่ — Ctrl+W ปิด · Ctrl+Tab สลับ",
+        Key::TabClosed => "ปิด board แล้ว",
+        Key::CloseTabHint => "ปิด board นี้ (Ctrl+W)",
+        Key::CloseTabTitle => "กระดานนี้มีการแก้ที่ยังไม่ได้บันทึก",
         Key::Library => "คลังภาพ",
         Key::LibraryPlaceholder => "โฟลเดอร์ภาพจะมาอยู่ตรงนี้",
         Key::LibraryDropHint => "ลากไฟล์ภาพเข้ามา หรือกด Ctrl+V",
@@ -1099,6 +1115,10 @@ mod tests {
         Key::RunningWithoutCache,
         Key::UntitledBoard,
         Key::NewBoardHint,
+        Key::NewBoardOpened,
+        Key::TabClosed,
+        Key::CloseTabHint,
+        Key::CloseTabTitle,
         Key::Library,
         Key::LibraryPlaceholder,
         Key::LibraryDropHint,
