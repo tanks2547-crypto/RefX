@@ -12,3 +12,7 @@ refx-io.workspace  = true
 refx-core.workspace = true
 refx-asset.workspace = true   # ใช้ image crate ผ่าน re-export สำหรับ gen-testdata
 image.workspace     = true
+# `dump-refx` คำนวณ crc32 ของ document เองเพื่อเทียบกับที่หัวไฟล์ประกาศ —
+# ตัวถอดรหัสปกติปฏิเสธไฟล์ไปตั้งแต่ด่านนั้น จึงบอกไม่ได้ว่าค่าที่ได้จริงคืออะไร
+crc32fast.workspace = true
+glam.workspace      = true    # เทสต์สร้าง Board ตัวอย่าง (UVec2 / Vec2)

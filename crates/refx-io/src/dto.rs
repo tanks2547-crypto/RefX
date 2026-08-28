@@ -154,14 +154,24 @@ pub enum SaveError {
 // ---------------------------------------------------------------------------
 
 /// สิ่งที่อ่านได้จาก **หัวไฟล์อย่างเดียว** โดยไม่แตะ document เลย
+///
+/// ★★ `flags` / `doc_len` / `doc_crc` อยู่ในนี้เพราะ **หัวไฟล์มีรูปร่างเดียวกัน
+/// ทุกเวอร์ชันตลอดไป** (`docs/07 §1`) — ทุกคนที่อยากรู้ค่าพวกนี้จึงควรถามที่นี่
+/// ที่เดียว แทนที่จะไปไล่ดัชนีไบต์เอง ซึ่งเป็นความรู้ที่ drift ได้เงียบ ๆ
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileInfo {
     /// เวอร์ชัน format ที่อยู่ในไฟล์
     pub version: u16,
+    /// flags ดิบทั้งคำ — bit ที่รุ่นนี้ไม่รู้จักก็ยังเห็นได้ (P4-8 ใช้)
+    pub flags: u16,
     /// ฝังไฟล์ภาพไว้ด้วยหรือไม่ (P4-5)
     pub packed: bool,
     /// ★ รุ่นนี้ **เขียนทับไฟล์นี้ได้ไหม** — `false` = ไฟล์จากรุ่นใหม่กว่า
     pub writable: bool,
+    /// ความยาวของ document ที่หัวไฟล์ **ประกาศไว้** — มาจากไฟล์จึงโกหกได้ (I-4)
+    pub doc_len: u64,
+    /// crc32 ของ document ที่หัวไฟล์ **ประกาศไว้**
+    pub doc_crc: u32,
 }
 
 /// อ่านหัวไฟล์อย่างเดียว — ถูกที่สุดและปลอดภัยที่สุด
@@ -182,8 +192,13 @@ pub fn inspect(bytes: &[u8]) -> Result<FileInfo, OpenError> {
     let flags = u16::from_le_bytes([bytes[6], bytes[7]]);
     Ok(FileInfo {
         version,
+        flags,
         packed: flags & FLAG_PACKED != 0,
         writable: version <= FORMAT_VERSION,
+        doc_len: u64::from_le_bytes([
+            bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+        ]),
+        doc_crc: u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]),
     })
 }
 
@@ -274,10 +289,8 @@ pub fn decode(bytes: &[u8], id: BoardId) -> Result<Board, OpenError> {
         });
     }
 
-    let declared = u64::from_le_bytes([
-        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
-    ]);
-    let crc = u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]);
+    let declared = info.doc_len;
+    let crc = info.doc_crc;
 
     if declared > MAX_COMPRESSED_BYTES {
         return Err(OpenError::TooLarge { size: declared });
@@ -298,11 +311,33 @@ pub fn decode(bytes: &[u8], id: BoardId) -> Result<Board, OpenError> {
         return Err(OpenError::Corrupt);
     }
 
+    Ok(Board::load(id, decode_document(body)?.into_parts()))
+}
+
+/// ★★★ คลายบีบ + อ่าน **DTO ดิบ** จากเนื้อ document — **ไม่ตรวจหัวไฟล์ ไม่ตรวจ CRC**
+///
+/// ★★ **ห้ามใช้ตัวนี้เปิดงานของผู้ใช้** — ทางเดียวที่ถูกคือ [`decode`] ซึ่งเป็น
+/// ตัวที่ตรวจ magic / เวอร์ชัน / ความยาว / checksum ให้ครบก่อน · ที่นี่ทำแค่
+/// สองขั้นสุดท้าย (zstd แบบมีเพดาน → postcard) และยังคงกันการจอง RAM
+/// ตามตัวเลขในไฟล์ไว้เท่าเดิม (I-4)
+///
+/// มีอยู่เพื่อ **`xtask dump-refx` (P4-8)** ตัวเดียว: หน้าที่ของเครื่องมือนั้นคือ
+/// อ่านไฟล์ที่ **พังแล้ว** ให้ได้มากที่สุด — ไฟล์ที่ checksum ไม่ตรงหนึ่งบิต
+/// ยังมีโครงงานของผู้ใช้อยู่ครบและควรถูกกู้ออกมาดู แต่ [`decode`] ปฏิเสธไป
+/// ตั้งแต่ด่าน checksum ตามที่มันควรทำ
+///
+/// ★ เขียนแยกเป็นฟังก์ชันสาธารณะแทนที่จะให้ `xtask` ประกอบ zstd+postcard เอง
+/// เพราะสองเส้นทางที่คลายไฟล์เดียวกันคนละที่จะ **drift** แล้ววันหนึ่ง
+/// เครื่องมือ debug จะรายงานเนื้อที่ต่างจากสิ่งที่โปรแกรมจริงอ่านได้
+///
+/// # Errors
+/// [`OpenError::TooLarge`] เมื่อคลายแล้วเกินเพดาน · [`OpenError::Malformed`]
+/// เมื่อ zstd หรือ postcard ปฏิเสธ
+pub fn decode_document(body: &[u8]) -> Result<v1::DocumentDto, OpenError> {
     // ★★ คลายบีบแบบมีเพดาน — `decode_all` ไม่มีเพดานในตัวเอง จึงต้องอ่านผ่าน
     //    `take()` แล้วเช็คว่าอ่านจนหมดจริงไหม (อ่านได้เต็มเพดาน = ยังมีต่อ = เกิน)
     let raw = decompress_bounded(body)?;
-    let document: v1::DocumentDto = postcard::from_bytes(&raw).map_err(|_| OpenError::Malformed)?;
-    Ok(Board::load(id, document.into_parts()))
+    postcard::from_bytes(&raw).map_err(|_| OpenError::Malformed)
 }
 
 /// คลาย zstd โดยมีเพดาน — กัน zip bomb (I-4)
@@ -741,6 +776,24 @@ mod tests {
 
     fn board_id() -> BoardId {
         BoardId::from_parts(0, 0)
+    }
+
+    /// board ตัวอย่างที่ **ไม่ใช่ค่าปริยาย** — ใช้กับเทสต์ที่ต้องแยกให้ออกว่า
+    /// สิ่งที่อ่านกลับมาเป็นของจริงหรือเป็นค่าเริ่มต้นที่บังเอิญเท่ากัน
+    fn sample_board() -> Board {
+        let mut item = Item::new(ItemKind::Text(TextNote {
+            text: "โน้ต".to_owned(),
+        }));
+        item.meta.rating = 4;
+        item.canvas.pos = glam::Vec2::new(12.5, -34.0);
+        Board::load(
+            board_id(),
+            BoardParts {
+                name: "ตัวอย่าง".to_owned(),
+                items: vec![ItemParts { item, group: None }],
+                ..BoardParts::default()
+            },
+        )
     }
 
     // ---------- ตัวสร้าง board แบบสุ่ม ----------
@@ -1381,5 +1434,68 @@ mod tests {
             .collect();
         assert_eq!(order, vec!["bottom", "middle", "top"]);
         assert!(back.z_order_is_consistent());
+    }
+
+    // ---------- ★ `decode_document` — ตัวที่ `xtask dump-refx` ใช้ (P4-8) ----------
+
+    /// ★★★ **เครื่องมือ debug ต้องอ่านด้วยตัวถอดรหัสตัวเดียวกับโปรแกรมจริง**
+    ///
+    /// ถ้า `xtask` ประกอบ zstd+postcard เอง สองเส้นทางจะ drift แล้ววันหนึ่ง
+    /// dump จะรายงานเนื้อที่ **ต่างจากสิ่งที่ผู้ใช้เปิดได้จริง** ซึ่งแย่กว่าไม่มี
+    /// เครื่องมือเลย เพราะเราจะไล่บั๊กตามหลักฐานที่ผิด
+    #[test]
+    fn the_debug_decoder_reads_exactly_what_the_real_one_reads() {
+        let board = sample_board();
+        let bytes = encode(&board).unwrap();
+        let document = decode_document(&bytes[HEADER_LEN..]).unwrap();
+        assert_eq!(
+            Board::load(board_id(), document.into_parts()),
+            decode(&bytes, board_id()).unwrap(),
+            "สองเส้นทางอ่านไฟล์เดียวกันแล้วได้คนละผล"
+        );
+    }
+
+    /// ★★★ **ไฟล์ที่ checksum ไม่ตรง — `decode` ต้องปฏิเสธ แต่ dump ต้องอ่านได้**
+    ///
+    /// นี่คือเหตุผลทั้งหมดที่ [`decode_document`] มีอยู่ (ROADMAP P4-8: เครื่องมือ
+    /// ต้องทำงานกับ **ไฟล์ที่พัง**) · ผู้ใช้ที่ส่งไฟล์เปิดไม่ขึ้นมาให้เรา ยังมี
+    /// โครงงานของเขาอยู่ครบในไฟล์นั้น
+    ///
+    /// ★ ไบต์ที่พลิกอยู่ใน **หัวไฟล์ ไม่ใช่ในเนื้อ document** — เนื้อจึงยังดีทุกไบต์
+    /// และผลลัพธ์ที่ dump ได้คือของจริง ไม่ใช่ของที่เดาเอา (docs/08 §3.9 ข้อ 1b:
+    /// input ต้องถูกต้องทุกอย่างยกเว้นสิ่งที่กำลังทดสอบ)
+    #[test]
+    fn a_file_whose_checksum_is_wrong_still_dumps_its_document() {
+        let board = sample_board();
+        let mut bytes = encode(&board).unwrap();
+        bytes[16] ^= 0xFF; // พลิก `doc_crc` ที่หัวไฟล์ — เนื้อ document ไม่ถูกแตะ
+
+        assert_eq!(
+            decode(&bytes, board_id()),
+            Err(OpenError::Corrupt),
+            "ทางที่ผู้ใช้เปิดงานต้องยังปฏิเสธไฟล์ที่ checksum ไม่ตรง"
+        );
+        let document = decode_document(&bytes[HEADER_LEN..]).expect("dump ต้องยังอ่านได้");
+        assert_eq!(Board::load(board_id(), document.into_parts()), board);
+    }
+
+    /// ★★ เพดานกัน zip bomb **ยังบังคับอยู่บนเส้นทางของ dump ด้วย** (I-4)
+    ///
+    /// คู่กับ `a_compression_bomb_is_refused_by_the_ceiling` ซึ่งยิงทาง [`decode`]
+    /// — เครื่องมือ debug รับไฟล์ที่ **ตั้งใจโจมตี** เหมือนกัน และการข้าม
+    /// checksum ไม่ได้แปลว่าข้ามเพดานไปด้วย · ประตูใหม่ทุกบานต้องมีด่านครบเอง
+    #[test]
+    fn the_debug_decoder_still_refuses_a_zip_bomb() {
+        let bomb =
+            zstd::encode_all(vec![0u8; MAX_DOCUMENT_BYTES + 4096].as_slice(), ZSTD_LEVEL).unwrap();
+        assert!(
+            bomb.len() < 1 << 20,
+            "ตัวอย่างต้องบีบได้เล็กจริง ไม่งั้นไม่ได้ทดสอบสิ่งที่ตั้งใจ (ได้ {} ไบต์)",
+            bomb.len()
+        );
+        assert!(matches!(
+            decode_document(&bomb),
+            Err(OpenError::TooLarge { .. })
+        ));
     }
 }

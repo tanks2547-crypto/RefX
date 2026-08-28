@@ -4656,6 +4656,8 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "crc32fast",
+ "glam",
  "image",
  "refx-asset",
  "refx-core",
