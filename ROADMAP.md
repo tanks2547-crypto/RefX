@@ -148,6 +148,27 @@ cargo run --features force-device-lost -p refx-app -- --force-device-lost-after-
 | P4-8 | `xtask dump-refx` (binary → JSON) | debug ไฟล์ผู้ใช้ได้จริง |
 | P4-9 | Fuzz targets ทั้ง 4 ตัว + รันใน CI | รัน 15 นาที/target ไม่เจอ crash |
 
+> ### ★ target ที่สี่คือ `fuzz_packed` ไม่ใช่ `fuzz_journal` (แก้ 27 ส.ค. 2026)
+>
+> `fuzz_journal` เล็งไปที่ `refx-io::journal` ซึ่ง **จะไม่มีวันถูกเขียน** —
+> P4-3 เปลี่ยนจาก command journal เป็น snapshot ไปแล้ว (`docs/07 §4`)
+>
+> **`fuzz_packed` → `packed::read_index` + `extract` + `spool::unpack`**
+>
+> เป็น parser ไบนารีตัวเดียวที่เหลือซึ่งยังไม่มี fuzz แตะเลย และเป็นตัวที่อ่าน
+> `count`/`offset`/`len` **จากไฟล์** แล้ว seek/จองตามนั้น — คือสิ่งที่ I-4 มีไว้กันพอดี
+>
+> ★ ที่ทำให้ช่องนี้ใหญ่กว่าที่คิด: `fuzz_document` เขียน `flags = 0` เสมอ
+> **ไม่มี input ไหนเคยตั้ง packed bit เลย** → `dto::decode` ไม่เคยแตะ asset table
+> และตอนนี้ `xtask dump-refx` (P4-8) ก็ขับเส้นทางนี้ด้วย
+>
+> **ข้อกำหนดเพิ่ม:**
+> - corpus เริ่มต้นต้องมี **ไฟล์ packed ที่ถูกต้องจริง** ไม่งั้น fuzzer จะเสียเวลา
+>   เด้งอยู่ที่ด่าน magic/version แล้วไม่มีวันถึง parser (กฎข้อ 1b — checksum บังหน้าด่าน)
+> - ★ ต้อง assert ว่า **ไบต์ในไฟล์มีอิทธิพลต่อ *ที่อยู่* ที่ `unpack` เขียนไม่ได้เลย**
+>   ชื่อไฟล์ใน spool มาจาก hash ที่เราคำนวณเอง — ถ้าวันใดมีใครเปลี่ยนให้อ่านชื่อจากไฟล์
+>   จะกลายเป็น path traversal ทันที · fuzz ต้องเป็นตัวที่จับข้อนั้น
+
 ---
 
 ## P5 — Hardening & Polish (สัปดาห์ 12–13)

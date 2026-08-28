@@ -428,12 +428,29 @@ pub fn read_index<R: Read + Seek>(source: &mut R, file_len: u64) -> Result<Index
     let table_at = (HEADER_LEN as u64)
         .checked_add(doc_len)
         .ok_or(OpenError::Malformed)?;
+    // ★★★ **ตารางเริ่มหลังท้ายไฟล์ไม่ได้** — `doc_len` มาจากไฟล์จึงโกหกได้ (I-4)
+    //
+    // ด่านนี้ปิดสองเรื่องพร้อมกัน และเรื่องที่สองคือบั๊กจริงที่ `fuzz_packed`
+    // จับได้ใน 60 วินาทีแรกที่มันเคยรัน (P4-9): `doc_len` ที่เกือบเต็ม `u64`
+    // ทำให้ `table_at + TABLE_HEADER_LEN` ที่ใช้ *ประกอบข้อความ error*
+    // **ล้นแล้ว panic** — คือตายในจังหวะที่กำลังจะบอกผู้ใช้ว่าไฟล์เขาผิดตรงไหน
+    // (`dto::decode` มีเพดาน `MAX_COMPRESSED_BYTES` กันไว้ตั้งแต่ต้น แต่
+    //  `read_index` ไม่เคยมี — มันคำนวณ `table_at` จากตัวเลขดิบเลย)
+    let table_end = table_at
+        .checked_add(TABLE_HEADER_LEN as u64)
+        .ok_or(OpenError::Malformed)?;
+    if table_end > file_len {
+        return Err(OpenError::Truncated {
+            declared: table_end,
+            actual: file_len,
+        });
+    }
     let mut table_header = [0u8; TABLE_HEADER_LEN];
     source
         .seek(SeekFrom::Start(table_at))
         .and_then(|_| source.read_exact(&mut table_header))
         .map_err(|_| OpenError::Truncated {
-            declared: table_at + TABLE_HEADER_LEN as u64,
+            declared: table_end,
             actual: file_len,
         })?;
     let count = u32::from_le_bytes([
@@ -460,7 +477,9 @@ pub fn read_index<R: Read + Seek>(source: &mut R, file_len: u64) -> Result<Index
     source
         .read_exact(&mut table)
         .map_err(|_| OpenError::Truncated {
-            declared: table_at + TABLE_HEADER_LEN as u64 + table_bytes as u64,
+            // ★ saturating เพราะนี่เป็นแค่ *ข้อความ* บอกผู้ใช้ — การล้นเลขตอน
+            //   ประกอบคำอธิบายความผิดพลาด ไม่ควรเป็นความผิดพลาดที่ร้ายแรงกว่าเดิม
+            declared: table_end.saturating_add(table_bytes as u64),
             actual: file_len,
         })?;
     if crc32fast::hash(&table) != table_crc {
@@ -1058,6 +1077,64 @@ mod tests {
         ));
         // ★ แต่ **เอกสารยังอ่านได้** — งานของผู้ใช้ไม่ได้หายไปด้วย
         assert!(dto::decode(&bytes, board_id()).is_ok());
+    }
+
+    /// ★★★ **`doc_len` ที่เกือบเต็ม `u64` ต้องไม่ทำให้ตัวอ่าน panic**
+    ///
+    /// ★ บั๊กจริงที่ `fuzz_packed` จับได้ **ใน 60 วินาทีแรกที่ target นั้นเคยรัน**
+    /// (P4-9) — `table_at + TABLE_HEADER_LEN` ที่ใช้ประกอบ *ข้อความ error*
+    /// ล้นแล้ว panic · คือตายในจังหวะที่กำลังจะบอกผู้ใช้ว่าไฟล์เขาผิดตรงไหน
+    /// ซึ่งเป็น I-4 + I-7 พร้อมกัน และ `xtask dump-refx` (P4-8) เดินเส้นนี้ด้วย
+    ///
+    /// ★★ เทสต์นี้อยู่ในชุดปกติ ไม่ใช่แค่ใน fuzz เพราะ fuzz รัน จ/พ/ศ
+    /// ส่วนอันนี้รันทุกครั้งที่ `cargo test` — บั๊กที่เคยหลุดมาแล้วต้องมีตาข่าย
+    /// ที่ถี่กว่าเดิม ไม่ใช่ตาข่ายเดิมที่หวังว่าจะเจออีก
+    #[test]
+    fn a_doc_len_near_the_end_of_u64_does_not_overflow_the_error_message() {
+        let mut bytes = dto::encode(&Board::default()).unwrap();
+        bytes[4..6].copy_from_slice(&PACKED_VERSION.to_le_bytes());
+        bytes[6..8].copy_from_slice(&dto::FLAG_PACKED.to_le_bytes());
+        // ★★ ค่านี้ถูกเลือกอย่างเจาะจง ไม่ใช่ "เลขใหญ่ ๆ": `HEADER_LEN + doc_len`
+        //    ต้อง **ไม่ล้น** (ไม่งั้นตกที่ด่านแรกแล้วไม่เคยไปถึงบั๊ก) แต่ผลลัพธ์
+        //    ต้องเป็น `u64::MAX` พอดี เพื่อให้การบวก `TABLE_HEADER_LEN` ต่อจากนั้นล้น
+        //    · รุ่นแรกของเทสต์นี้ใช้ `u64::MAX - 4` ซึ่งล้นตั้งแต่ด่านแรก แล้ว
+        //    **เขียวโดยพิสูจน์คนละเรื่องกับชื่อของมัน** — negative control จับได้
+        let doc_len = u64::MAX - HEADER_LEN as u64;
+        bytes[8..16].copy_from_slice(&doc_len.to_le_bytes());
+        assert_eq!(
+            (HEADER_LEN as u64).checked_add(doc_len),
+            Some(u64::MAX),
+            "ตัวอย่างต้องพาไปถึงจุดที่บวกแล้วล้ม ไม่ใช่ตกที่ด่านก่อนหน้า"
+        );
+
+        let len = bytes.len() as u64;
+        let mut source = std::io::Cursor::new(bytes);
+        assert!(
+            matches!(
+                read_index(&mut source, len),
+                Err(OpenError::Truncated { .. } | OpenError::Malformed)
+            ),
+            "ต้องคืน Err ไม่ใช่ panic"
+        );
+    }
+
+    /// ★ negative control ของข้อบน — `doc_len` ที่ชี้เลยท้ายไฟล์ไป **นิดเดียว**
+    /// ก็ต้องถูกปฏิเสธเหมือนกัน ไม่ใช่ถูกจับได้เฉพาะตอนเลขล้น
+    #[test]
+    fn a_table_that_starts_past_the_end_of_the_file_is_refused() {
+        let mut bytes = dto::encode(&Board::default()).unwrap();
+        bytes[4..6].copy_from_slice(&PACKED_VERSION.to_le_bytes());
+        bytes[6..8].copy_from_slice(&dto::FLAG_PACKED.to_le_bytes());
+        let len = bytes.len() as u64;
+        // ตารางจะเริ่มที่ท้ายไฟล์พอดี → ไม่มีที่ให้หัวตาราง 8 ไบต์
+        bytes[8..16].copy_from_slice(&(len - HEADER_LEN as u64).to_le_bytes());
+
+        let mut source = std::io::Cursor::new(bytes);
+        let err = read_index(&mut source, len).unwrap_err();
+        assert!(
+            matches!(err, OpenError::Truncated { .. }),
+            "ต้องบอกว่าถูกตัด ไม่ใช่ {err}"
+        );
     }
 
     /// ★★ `count` ที่โกหกเป็นเลขมหาศาลต้องไม่พาไปจอง RAM ก้อนใหญ่

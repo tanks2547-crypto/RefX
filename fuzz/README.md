@@ -14,23 +14,40 @@
 
 ## สถานะ target
 
-| target | ยิงอะไร | สถานะ |
+| target | ยิงอะไร | ต่อเมื่อ |
 |---|---|---|
-| `fuzz_decode` | `probe_dimensions` · `read_orientation` · `decode_guarded` | ✅ ต่อแล้ว |
-| `fuzz_document` | `refx_io::dto` | ⛔ โค้ดยังไม่มี — **ไม่ลงทะเบียนเป็น `[[bin]]`** |
-| `fuzz_journal` | `refx_io::journal` | ⛔ โค้ดยังไม่มี |
-| `fuzz_layout` | `refx_core::layout` | ⛔ โค้ดยังไม่มี |
+| `fuzz_decode` | `probe_dimensions` · `read_orientation` · `decode_guarded` | P1-1 |
+| `fuzz_layout` | `refx_core::layout` ทั้งห้าตัว | P3-2 |
+| `fuzz_document` | `refx_io::dto` — หัวไฟล์ · zstd · postcard | P4-1 |
+| `fuzz_packed` | `packed::read_index` · `extract` · ที่อยู่ที่ `spool` จะเขียน | **P4-9** |
 
-target ที่ยังไม่ต่อ **จงใจถอดออกจาก `Cargo.toml` และ matrix** เพื่อให้ CI ข้าม
-อย่างชัดเจน แทนที่จะรันแล้วเขียวแบบว่างเปล่า
+**ครบทั้งสี่แล้ว ทุกตัวยิงโค้ดจริง** (P4-9)
 
-**เมื่อโค้ดที่มันควรยิงมีจริงแล้ว ต้องทำสามอย่างพร้อมกัน:**
+### ★ `fuzz_journal` ถูกถอดทิ้ง ไม่ใช่ยังไม่ได้ทำ (P4-9)
+
+มันเล็งไปที่ `refx_io::journal` ซึ่ง **จะไม่มีวันถูกเขียน** — P4-3 เปลี่ยนจาก
+command journal เป็น snapshot ไปแล้ว (`docs/07 §4`) · target ที่รอโมดูลซึ่ง
+จะไม่มีวันเกิด คือ target ที่ไม่มีวันได้ทำงาน และเป็นช่องว่างที่ *ดูเหมือน*
+มีคนวางแผนไว้แล้ว ซึ่งหลอกให้ไม่มีใครกลับมามอง
+
+`fuzz_packed` มาแทนเพราะมันคือ **parser ไบนารีตัวเดียวที่เหลือซึ่งไม่เคยถูก
+fuzz แตะเลย** — และช่องนี้ใหญ่กว่าที่คิดเพราะ `fuzz_document::wrap()` เขียน
+`flags = 0` เสมอ **ไม่มี input ไหนเคยตั้งบิต packed เลยสักครั้ง**
+(รายละเอียดใน `ROADMAP P4-9` และหัวไฟล์ `fuzz_targets/fuzz_packed.rs`)
+
+> ★ มันจับบั๊กจริงได้ใน **60 วินาทีแรกที่มันเคยรัน**: `doc_len` ที่เกือบเต็ม
+> `u64` ทำให้ `read_index` **panic ตอนกำลังประกอบข้อความ error** ·
+> เทสต์ถาวรที่กันไม่ให้กลับมาคือ
+> `packed::tests::a_doc_len_near_the_end_of_u64_does_not_overflow_the_error_message`
+
+**เพิ่ม target ใหม่ ต้องทำสามอย่างพร้อมกัน:**
 
 1. ต่อ `fuzz_target!` ให้เรียกโค้ดนั้น
-2. ลงทะเบียน `[[bin]]` กลับใน `fuzz/Cargo.toml`
-3. ใส่ชื่อ target กลับใน matrix ของ `.github/workflows/fuzz.yml`
+2. ลงทะเบียน `[[bin]]` ใน `fuzz/Cargo.toml`
+3. ใส่ชื่อ target ใน matrix ของ `.github/workflows/fuzz.yml`
 
-job `unwired-targets` จะ **ล้ม** ถ้าโมดูลปลายทางมีโค้ดแล้วแต่ target ยังไม่ถูกต่อ
+job `unwired-targets` จะ **ล้มทั้งสองทิศ** — โมดูลมีโค้ดแต่ target ยังไม่ต่อ
+หรือ target ต่อแล้วแต่ไม่มีโค้ดให้ยิง
 
 ## corpus
 
@@ -38,7 +55,22 @@ job `unwired-targets` จะ **ล้ม** ถ้าโมดูลปลาย�
   (decompression bomb, ไฟล์ถูกตัด, .exe ที่ตั้งชื่อเป็น .png, JPEG ที่มี EXIF จริง)
 - `fuzz/corpus/<target>/` — ของที่ fuzzer งอกเอง **อยู่ใน `.gitignore`** (เป็นพันไฟล์)
 
-สร้าง seed ใหม่: `python fuzz/seeds/make_seeds.py` (รันจากรากโปรเจกต์)
+สร้าง seed ใหม่ (รันจากรากโปรเจกต์):
+
+| target | คำสั่ง | ทำไมคนละทาง |
+|---|---|---|
+| `fuzz_decode` | `python fuzz/seeds/make_seeds.py` | PNG/JPEG เป็น **รูปแบบของคนอื่น** เขียนขึ้นเองได้ |
+| `fuzz_packed` | `cargo xtask gen-fuzz-seeds` | ★ `.refx` เป็น **รูปแบบของเราเอง** — seed ต้องออกจาก `packed::write_packed` ตัวจริง |
+
+> ★★ ห้ามเขียนตัวประกอบไบต์ `.refx` ตัวที่สองขึ้นมาในภาษาอื่น · `docs/08 §3.9`
+> ห้ามไว้ตรง ๆ: *สิ่งที่เขียนเลียนแบบจะสะท้อนความเข้าใจของคนเขียน ไม่ใช่
+> พฤติกรรมของของจริง* · seed ที่ผิดไปหนึ่งช่องจะถูกปฏิเสธตั้งแต่ด่านแรกทุกใบ
+> = corpus ที่ดูเหมือนมี แต่ไม่เคยพา fuzzer ไปถึง parser เลย
+
+seed ของ `fuzz_packed` มีทั้ง **ไฟล์ที่ดี** (linked · packed 0/1/3 asset) และ
+**ไฟล์ที่ถูกประกอบมาอย่างตั้งใจ** (`packed_offset_past_eof.refx` — `table_crc`
+ถูกต้องแต่ entry ชี้เลยท้ายไฟล์) · ตัวหลังคือตัวที่ fuzzer แทบไม่มีวันสุ่มเจอเอง
+เพราะมันต้องผ่าน checksum ก่อนถึงจะไปถึงด่านขอบเขต (`docs/08 §3.9` ข้อ 1b)
 
 ## รันในเครื่อง
 

@@ -278,7 +278,7 @@ fn read_assets<R: Read + Seek>(
     match packed::read_index(src, file_bytes) {
         Ok(index) => assets.entries = index.entries().to_vec(),
         Err(err) => {
-            assets.error = Some(err.to_string());
+            assets.error = Some(table_error(&err));
             return assets;
         }
     }
@@ -291,6 +291,28 @@ fn read_assets<R: Read + Seek>(
             .collect();
     }
     assets
+}
+
+/// ★★ แปลง [`OpenError`] ให้เป็นข้อความที่พูดถึง **ตาราง** ไม่ใช่ **เอกสาร**
+///
+/// `OpenError` ถูกใช้ร่วมกันทั้งสองเส้นทาง ข้อความของมันจึงเขียนจากมุมของเอกสาร
+/// (`Malformed` → *"document is malformed"*) · พิมพ์ตรง ๆ ตรงนี้จะได้บรรทัดที่
+/// อ่านว่า *"asset table อ่านไม่ได้: document is malformed"* ซึ่ง **ขัดกับสิ่งที่
+/// เครื่องมือนี้มีไว้แยกพอดี** (`docs/07 §1`: เอกสารเสีย = งานหาย · ตารางเสีย =
+/// ขาดแต่ภาพ) — เจอตอนไล่ดู seed ของ `fuzz_packed` ทีละใบ
+fn table_error(err: &OpenError) -> String {
+    match err {
+        OpenError::Corrupt => "checksum ของตารางไม่ตรง (table_crc)".to_owned(),
+        OpenError::Malformed => "entry ในตารางชี้นอกขอบเขตไฟล์ หรือหัวตารางอ่านไม่ออก".to_owned(),
+        OpenError::Truncated { declared, actual } => {
+            format!("ตารางถูกตัด (ต้องยาวถึงไบต์ที่ {declared} แต่ไฟล์มี {actual})")
+        }
+        OpenError::TooLarge { size } => {
+            format!("ตารางประกาศขนาดเกินเพดาน ({size})")
+        }
+        // ที่เหลือเป็นเรื่องของหัวไฟล์ ซึ่งรายงานไปแล้วในส่วน `header`
+        other => other.to_string(),
+    }
 }
 
 /// สตรีม blob หนึ่งก้อนผ่าน crc โดย **ทิ้งไบต์ทันที** — ไม่มีอะไรค้างใน RAM
@@ -947,6 +969,14 @@ mod tests {
         assert!(text.contains("เอกสารอ่านได้ครบ แต่ asset table เสีย"), "{text}");
         assert!(text.contains("โครงงานยังอยู่ทั้งหมด ขาดแต่ภาพ"), "{text}");
         assert!(text.contains("asset table อ่านไม่ได้"), "{text}");
+        // ★ และข้อความของตาราง **ต้องไม่พูดถึง "document"** — `OpenError` ถูกใช้
+        //   ร่วมกันสองเส้นทาง ข้อความดิบของมันเขียนจากมุมของเอกสาร การพิมพ์ตรง ๆ
+        //   จะได้ "asset table อ่านไม่ได้: document is malformed" ซึ่งลบล้าง
+        //   ความแตกต่างที่เทสต์ตัวนี้ทั้งตัวมีไว้รักษา (เกิดขึ้นจริง เจอตอนไล่ดู seed)
+        assert!(
+            !text.contains("asset table อ่านไม่ได้: document"),
+            "ข้อความของตารางไปยืมคำของเอกสารมาใช้:\n{text}"
+        );
         // ★ document ต้องยังออกมาครบ พร้อม crc ที่ผ่าน — นี่คือครึ่งที่แยกสองเรื่องออกจากกัน
         assert!(text.contains("\"crc_ok\": true"), "{text}");
         assert!(text.contains("\"name\": \"งานของผู้ใช้\""), "{text}");

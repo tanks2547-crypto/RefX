@@ -1,12 +1,14 @@
 //! งาน build/dev — เรียกด้วย `cargo xtask <cmd>`
 //!
 //!   gen-testdata   สร้าง dataset 1000 ภาพสำหรับ benchmark
+//!   gen-fuzz-seeds สร้าง corpus ตั้งต้นของ fuzz_packed         (P4-9)
 //!   dump-refx      แปลง .refx (binary) เป็น JSON เพื่อ debug  (P4-8)
 //!   bench          รัน benchmark ทั้งชุดแล้วเทียบกับเพดานใน docs/08
 //!   package        สร้าง installer / portable zip
 
 mod dump;
 mod json;
+mod seeds;
 
 /// สร้าง dataset สำหรับ benchmark (P5-1 บางส่วน)
 ///
@@ -115,13 +117,15 @@ fn main() -> anyhow::Result<()> {
     let cmd = std::env::args().nth(1).unwrap_or_default();
     match cmd.as_str() {
         "gen-testdata" => gen_testdata(),
+        "gen-fuzz-seeds" => seeds::gen_fuzz_seeds(),
         "dump-refx" => dump_refx(),
         "bench" => todo!("P5-1"),
         "package" => todo!("P5-6"),
         other => {
             eprintln!(
                 "ไม่รู้จักคำสั่ง: {other:?}\n\
-                 คำสั่งที่มี: gen-testdata · dump-refx · bench (P5-1) · package (P5-6)"
+                 คำสั่งที่มี: gen-testdata · gen-fuzz-seeds · dump-refx · \
+                 bench (P5-1) · package (P5-6)"
             );
             Ok(())
         }

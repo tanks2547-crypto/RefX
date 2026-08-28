@@ -32,7 +32,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [fuzz_decode, fuzz_layout, fuzz_document]
+        target: [fuzz_decode, fuzz_layout, fuzz_document, fuzz_packed]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -126,7 +126,11 @@ jobs:
             fi
           }
           check fuzz_document crates/refx-io/src/dto.rs
-          check fuzz_journal  crates/refx-io/src/journal.rs
+          # ★ `fuzz_journal` ถูกถอดทิ้งแล้ว (P4-9) — `refx_io::journal` จะไม่มี
+          #   วันถูกเขียน เพราะ P4-3 เปลี่ยนไปใช้ snapshot (`docs/07 §4`)
+          #   ประตูที่เฝ้าโมดูลซึ่งจะไม่มีวันเกิด คือประตูที่ไม่มีวันได้ทำงาน
+          #   → ย้ายมาเฝ้า `packed` แทน ซึ่งเป็น parser ที่มีของจริงให้ยิง
+          check fuzz_packed   crates/refx-io/src/packed.rs
           exit $status
 
   # `fuzz/` อยู่ใน `exclude` ของ workspace → `cargo clippy --all-targets` ของ CI หลัก

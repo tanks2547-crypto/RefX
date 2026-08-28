@@ -34,14 +34,20 @@ path = "fuzz_targets/fuzz_document.rs"
 test = false
 doc  = false
 
-# ★ `fuzz_journal` **จงใจไม่ลงทะเบียนที่นี่**
+[[bin]]
+name = "fuzz_packed"
+path = "fuzz_targets/fuzz_packed.rs"
+test = false
+doc  = false
+
+# ★ target ทั้งสี่ต่อกับโค้ดจริงครบแล้ว (P4-9)
 #
-# โค้ดที่ควรยิง (`refx_io::journal`) ยังเป็นไฟล์ TODO บรรทัดเดียว การ build
-# แล้วรันมันจึงได้แต่ "เขียวแบบว่างเปล่า" ซึ่งคือบั๊กที่ `fuzz_decode`
-# เป็นมา 5 session (docs/06 §2.5)
+# `fuzz_layout` ต่อตอน P3-2 · `fuzz_document` ตอน P4-1 ·
+# **`fuzz_packed` มาแทน `fuzz_journal`** ตอน P4-9 — `refx_io::journal`
+# จะไม่มีวันถูกเขียนเพราะ P4-3 เปลี่ยนไปใช้ snapshot แล้ว (`docs/07 §4`)
+# ส่วน `packed` เป็น parser ไบนารีตัวเดียวที่เหลือซึ่งไม่เคยถูก fuzz เลย
 #
-# ลงทะเบียนกลับพร้อมกับตอนที่ต่อ target จริงเท่านั้น —
-# job `unwired-targets` ใน `.github/workflows/fuzz.yml` จะล้มถ้าลืม
-#
-# ★ `fuzz_layout` ถูกต่อแล้วตอน P3-2 — `refx_core::layout` มีของจริงแล้ว
-# ★ `fuzz_document` ถูกต่อแล้วตอน P4-1 — `refx_io::dto` มีของจริงแล้ว
+# ★ เพิ่ม target ใหม่เมื่อไหร่ ต้องทำครบสามจุดพร้อมกัน:
+#   (1) ไฟล์ target (2) `[[bin]]` ตรงนี้ (3) matrix ใน `.github/workflows/fuzz.yml`
+#   job `unwired-targets` จะล้มถ้าขาดข้อใดข้อหนึ่ง — และล้มทั้งสองทิศ
+#   (มีโค้ดแต่ไม่ได้ต่อ · ต่อแล้วแต่ไม่มีโค้ดให้ยิง)
