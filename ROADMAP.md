@@ -153,7 +153,16 @@ cargo run --features force-device-lost -p refx-app -- --force-device-lost-after-
 > `fuzz_journal` เล็งไปที่ `refx-io::journal` ซึ่ง **จะไม่มีวันถูกเขียน** —
 > P4-3 เปลี่ยนจาก command journal เป็น snapshot ไปแล้ว (`docs/07 §4`)
 >
-> **`fuzz_packed` → `packed::read_index` + `extract` + `spool::unpack`**
+> **`fuzz_packed` → `packed::read_index` + `extract`**
+>
+> > ★ **ไม่เรียก `spool::unpack` จริงในลูป** (แก้ 27 ส.ค. 2026 หลังวัด)
+> > มันทำ `create_dir_all` + `File::create` + `sync_all` + `rename` ต่อหนึ่งรอบ
+> > → throughput ตกจาก ~35,000 เหลือหลักร้อยรอบ/วินาที = coverage บน parser
+> > น้อยลงหลายร้อยเท่า **แลกกับข้อมูลใหม่แทบเป็นศูนย์** เพราะทุกไบต์ที่ `unpack` อ่าน
+> > เดินผ่าน `extract` ซึ่งถูกยิงอยู่แล้ว และกฎ "ห้ามเขียนทับ" มีเทสต์ของตัวเองใน `spool.rs`
+> >
+> > สิ่งที่ข้อกำหนดต้องการจริง ๆ — **ที่อยู่ปลายทางต้องไม่ถูกไบต์ในไฟล์กำหนด** —
+> > ยัง assert ทุกรอบ (ตัดนามสกุลแล้วที่เหลือต้องเป็น hex 64 ตัว)
 >
 > เป็น parser ไบนารีตัวเดียวที่เหลือซึ่งยังไม่มี fuzz แตะเลย และเป็นตัวที่อ่าน
 > `count`/`offset`/`len` **จากไฟล์** แล้ว seek/จองตามนั้น — คือสิ่งที่ I-4 มีไว้กันพอดี
