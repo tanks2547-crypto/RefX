@@ -26,6 +26,14 @@ crossbeam-channel.workspace = true   # รับผลจาก decode pool / IO
 thiserror.workspace  = true
 tracing.workspace    = true
 
+[dev-dependencies]
+criterion.workspace = true   # P5-1 — เพดาน `build_instances_1000` ของ docs/08 §2
+
+# ★ `harness = false` บังคับ: criterion มี `main` ของตัวเอง
+[[bench]]
+name    = "instances"
+harness = false
+
 [features]
 default = []
 force-device-lost = ["refx-render/force-device-lost"]

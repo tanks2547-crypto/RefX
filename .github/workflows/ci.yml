@@ -190,6 +190,28 @@ jobs:
           fi
           echo "::notice::negative control ผ่าน — ตัวตรวจขนาด binary ล้มได้จริง"
 
+      # ★ เพดาน benchmark (docs/08 §2) — P5-1
+      #
+      #   ★★ ครอบเฉพาะแถวที่วัดได้โดย **ไม่ต้องมี GPU และไม่ต้องมี dataset หลาย GB**
+      #   แถวที่เหลือ (frame_pan / startup / rss / vram / open_board) ต้องรันแอปจริง
+      #   พร้อมภาพ 1000 ใบ ซึ่งเอาเข้าทุก push ไม่ได้ด้วยงบ Actions — ดูรายงาน P5-1
+      #
+      #   ★ ตัวเลขบน runner ที่แชร์กับคนอื่นแกว่งกว่าในเครื่องมาก แต่เพดานของสองแถวนี้
+      #   ห่างจากค่าจริง **~150 เท่า** จึงไม่ใช่เทสต์ที่ assert เวลานาฬิกาแบบที่
+      #   `docs/08 §3.9` ข้อ 5b ห้ามไว้ — มันจับได้เฉพาะหายนะ ไม่ใช่ความแกว่ง
+      - name: benchmark ต้องไม่เกินเพดาน
+        shell: bash
+        run: scripts/check-bench.sh
+
+      - name: negative control ของตัวตรวจ benchmark
+        shell: bash
+        run: |
+          if REFX_BENCH_LIMIT_NS=1 scripts/check-bench.sh > /dev/null 2>&1; then
+            echo "::error::ตัวตรวจ benchmark ไม่ล้มแม้ตั้งเพดานเป็น 1 ns — ตัวตรวจเองพัง"
+            exit 1
+          fi
+          echo "::notice::negative control ผ่าน — ตัวตรวจ benchmark ล้มได้จริง"
+
   deny:
     needs: changes
     if: needs.changes.outputs.code == 'true'

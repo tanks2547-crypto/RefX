@@ -10,6 +10,7 @@ pub mod canvas; // ViewportBehavior ของ Canvas mode
 pub mod copy; // ก๊อปข้อความขึ้น clipboard บนเธรดชั่วคราว (P2-10) — ไม่ใช่ UI thread
 pub mod fonts; // ฟอนต์ที่ฝังใน binary (docs/03 §0) — ไทย + ละติน ยังไม่มี CJK
 pub mod inspector;
+pub mod instances; // Board → QuadInstance (ฟังก์ชันบริสุทธิ์ · วัดได้จาก benches/)
 pub mod keymap; // ตาราง data โหลดจาก keymap.toml — ห้าม hard-code (ADR-007)
 pub mod shell; // โครง UI กลาง: tabs, toolbar, library, inspector, status bar
 pub mod text; // ★ ประตูเดียวของข้อความที่ผู้ใช้เห็น (docs/03 §0) — ห้ามเขียนสตริงตรงใน widget

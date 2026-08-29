@@ -19,3 +19,10 @@ tracing.workspace  = true
 
 [dev-dependencies]
 proptest.workspace = true
+criterion.workspace = true   # P5-1 — `criterion` ประกาศไว้ตั้งแต่วันแรกโดยไม่มีใครเรียก
+
+# ★ `harness = false` บังคับ: criterion มี `main` ของตัวเอง
+#   `--output-format bencher` ของมันคือสิ่งที่ `scripts/check-bench.py` อ่าน
+[[bench]]
+name    = "core_benches"
+harness = false

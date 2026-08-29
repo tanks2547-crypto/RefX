@@ -24,6 +24,7 @@ use refx_core::spatial::SpatialIndex;
 use refx_core::view::{Camera, Mode};
 use refx_core::zorder::ZMove;
 
+use crate::instances::{self, crop_uv};
 use crate::shell::LoadProgress;
 use crate::text::{self, Key, Lang, Template};
 use refx_platform::redraw::RedrawReason;
@@ -1249,30 +1250,6 @@ impl Default for CanvasFrameInput {
             modifiers: Modifiers::default(),
         }
     }
-}
-
-/// หด uv ของช่องใน atlas ลงตามกรอบ crop (P2-7)
-///
-/// ★ `crop` เป็นสัดส่วน **ของภาพต้นฉบับ** (docs/02 §2.1) ส่วน `slot` คือช่องที่ภาพนั้น
-/// อยู่ใน atlas — จึงต้อง lerp กรอบ crop ลงในช่วงของช่อง ไม่ใช่เอาไปใช้ตรง ๆ
-/// ถ้าใช้ตรง ๆ ภาพทุกใบจะไปสุ่มหยิบ pixel ของภาพอื่นในชั้นเดียวกันมาแสดง
-///
-/// ★★ **ช่วงของภาพต้นฉบับมาจาก `refx_core::pick::source_span` ที่เดียว** (P2-10)
-/// ที่นี่ทำหน้าที่เดียวคือ lerp ช่วงนั้นลงในช่องของ atlas
-///
-/// เดิมสูตร crop+flip ถูกเขียนไว้ตรงนี้ และ picker ต้องเดินย้อนทางเดียวกัน
-/// ถ้าปล่อยให้เขียนคนละที่ วันที่มีคนแก้ข้างเดียว **ผู้ใช้จะจิ้มตรงที่เห็นสีหนึ่ง
-/// แล้วได้อีกสีหนึ่ง** โดยไม่มี error ที่ไหนเลย — เป็นรูปแบบเดียวกับบั๊ก `flip`
-/// ที่ไม่ถึงทาง working texture ตอน P2-8 เป๊ะ ๆ
-fn crop_uv(slot: [f32; 4], canvas: &ItemCanvas) -> [f32; 4] {
-    let [u0, v0, u1, v1] = slot;
-    let [left, top, right, bottom] = refx_core::pick::source_span(canvas);
-    [
-        u0 + (u1 - u0) * left,
-        v0 + (v1 - v0) * top,
-        u0 + (u1 - u0) * right,
-        v0 + (v1 - v0) * bottom,
-    ]
 }
 
 /// สีเด่นของภาพ (ARGB จาก `Thumbnail`) → tint ของ quad
@@ -3587,7 +3564,7 @@ impl RefxApp {
             let Some(state) = self.docs.active().render_state.get(&id) else {
                 continue;
             };
-            if let Some(mut quad) = Self::quad_for(&item.canvas, state) {
+            if let Some(mut quad) = instances::quad_for(&item.canvas, state.slot, state.tint) {
                 // ★ working texture ถือภาพเดียวเต็มใบที่ layer 0 — "ช่อง" ของมันคือ
                 //   texture ทั้งใบ (0..1) จึงใช้ **ฟังก์ชันเดียวกับทาง atlas** ได้เลย
                 //
@@ -6414,93 +6391,19 @@ impl RefxApp {
         doc.camera.set_center(bounds.center());
     }
 
-    /// แปลง item หนึ่งใบเป็น instance ที่ GPU วาดได้
-    ///
-    /// ★ **จุดเดียวที่เรขาคณิตของ `Board` กลายเป็น `QuadInstance`**
-    /// `transform` ใช้มุมซ้ายบน (unit quad คือ 0..1) ส่วน `ItemCanvas::pos` คือจุดกึ่งกลาง
-    /// จึงต้องลบครึ่งขนาดออก — ถ้าทำผิดตรงนี้ภาพทุกใบจะเลื่อนไปครึ่งตัว
-    ///
-    /// affine เก็บแบบ **column-major** ตาม `apply_affine` ใน `quad.wgsl`:
-    /// `(a, b)` คือภาพของแกน x ของ unit quad, `(c, d)` คือภาพของแกน y
-    /// ซึ่งตรงกับ `Obb::axes()` พอดี — hit-test กับสิ่งที่วาดจึงใช้นิยามเดียวกัน
-    /// (ถ้าสองที่นี้ไม่ตรงกัน ภาพที่หมุนจะกดไม่โดนที่ที่ตาเห็น)
-    /// ★ คืน `None` = **ไม่วาดใบนี้** — `visible` เป็นฟิลด์เดียวที่ตัดสินแบบนั้น
-    ///
-    /// เดิม `visible` ถูกเคารพที่ hit-test (`spatial.rs`) และที่กรอบเลือก
-    /// แต่ **ไม่ถูกเคารพตอนวาด quad** — ภาพที่ซ่อนไว้จะยังขึ้นจอโดยกดไม่โดน
-    /// ยังไม่มีใครตั้ง `visible = false` ได้ในวันนี้ แต่ `.refx` จะพามันมาตอน P4-1
-    /// (พบตอนกวาด audit ฟิลด์ → shader 4 ส.ค. 2026)
-    fn quad_for(canvas: &ItemCanvas, state: &ItemRender) -> Option<QuadInstance> {
-        if !canvas.visible {
-            return None;
-        }
-        let [x_axis, y_axis] = canvas.obb().axes();
-        let (a, b) = (x_axis * canvas.size.x).into();
-        let (c, d) = (y_axis * canvas.size.y).into();
-        // จุดกึ่งกลาง → มุมซ้ายบนของ quad **หลังหมุนแล้ว**
-        let origin = canvas.pos - (Vec2::new(a, b) + Vec2::new(c, d)) * 0.5;
-        // ★ ไม่มีช่องใน atlas = วาดสี่เหลี่ยมสีเด่นแทน **ห้ามข้ามไม่วาด** (docs/04 §8)
-        //   ผู้ใช้ต้องเห็นว่า layout ยังอยู่ครบ ไม่ใช่ช่องว่างที่อ่านได้ว่า "ภาพหาย"
-        let (uv_rect, layer, mut tint, mut flags) = match state.slot {
-            Some(slot) => (crop_uv(slot.uv_rect(), canvas), slot.layer, [1.0; 4], 0),
-            None => (
-                [0.0, 0.0, 1.0, 1.0],
-                0,
-                state.tint,
-                refx_render::instance::flags::PLACEHOLDER,
-            ),
-        };
-
-        // ★ opacity คูณลงช่อง alpha ของ tint — pipeline เปิด alpha blending ไว้แล้ว
-        //   (`BlendState::ALPHA_BLENDING`) ภาพโปร่งซ้อนกันจึงผสมตามลำดับ z ที่วาด
-        tint[3] *= canvas.opacity.clamp(0.0, 1.0);
-
-        // filter ที่คำนวณใน shader — ไม่แตะ texture เลยแม้แต่ไบต์เดียว (docs/04 §3)
-        let filter = canvas.filter.sanitized();
-        if filter.grayscale {
-            flags |= refx_render::instance::flags::GRAYSCALE;
-        }
-        if filter.invert {
-            flags |= refx_render::instance::flags::INVERT;
-        }
-
-        Some(QuadInstance {
-            transform: [a, b, c, d, origin.x, origin.y],
-            uv_rect,
-            // ★ tint เป็นไบต์แล้ว (docs/04 §3.5) — ปลายทาง framebuffer 8 บิตต่อช่อง
-            //   ความละเอียดที่หายไปมองไม่เห็น แต่ที่ที่ได้คืนมาเลี้ยง brightness/contrast
-            //   ให้เป็น f32 เต็มได้ ซึ่ง**เห็นความต่างจริง**บนสไลเดอร์
-            tint: refx_render::instance::pack_tint(tint),
-            layer,
-            flags,
-            adjust: [filter.brightness, filter.contrast],
-            reserved: 0,
-        })
-    }
-
     /// สร้าง `quads` ใหม่ทั้งชุดจาก `board`
     ///
     /// ★ **ประตูเดียวที่เขียน `gfx.quads` ได้** — `quads` เป็นผลลัพธ์ ไม่ใช่แหล่งความจริง
     /// ลำดับ render = ลำดับใน `z_order` อยู่แล้ว จึงไม่ต้อง sort (docs/02 §2.1)
     fn rebuild_quads(gfx: &mut Gfx, doc: &mut Doc) {
-        gfx.quads.clear();
-        for (id, item) in doc.board.items_in_z_order() {
-            // ★★★ **`Board` เป็นคนบอกว่า item นี้เป็นภาพหรือไม่ ไม่ใช่ `render_state`**
-            //
-            //   `render_state` เป็น cache ที่อยู่ยาวกว่าสถานะของ item โดยตั้งใจ
-            //   (ช่อง atlas ต้องรอด undo/redo ของ "ลบภาพ" — §2.5) พอ relink
-            //   ทำให้ item กลายเป็น `Missing` ช่องเก่าจึงยังอยู่ · ถ้าไม่ถามชนิด
-            //   จาก board ตรงนี้ **undo ของ relink จะคืน `Missing` ใน board
-            //   แต่จอยังโชว์ภาพเดิม** (เห็นจริงตอนยืนยัน P4-6 21 ส.ค. 2026)
-            if !matches!(item.kind, ItemKind::Image(_)) {
-                continue;
-            }
-            if let Some(state) = doc.render_state.get(&id)
-                && let Some(quad) = Self::quad_for(&item.canvas, state)
-            {
-                gfx.quads.push(quad);
-            }
-        }
+        // ★★★ กฎ "`Board` เป็นคนบอกว่า item เป็นภาพหรือไม่ ไม่ใช่ `render_state`"
+        //   (§4 ข้อ 28) ย้ายไปอยู่ **ข้างใน** `build_instances` แล้วตอน P5-1 —
+        //   กฎที่อยู่ในตัวเรียกคือกฎที่วันหนึ่งจะมีตัวเรียกที่ลืม
+        instances::build_instances(&doc.board, &mut gfx.quads, |id| {
+            doc.render_state
+                .get(&id)
+                .map(|state| (state.slot, state.tint))
+        });
         // ★ ประตูเดียวที่รู้ว่า board เปลี่ยน จึงเป็นที่เดียวที่บอกแผ่น Arrange ว่าเก่าแล้ว
         //   (P3-4 จะเปลี่ยนไปเทียบ `board.revision` ตาม docs/03 §3)
         //   ★★ ไม่ใช่ตาข่ายเดียว: `ArrangeView::plan` เทียบจำนวน item เองด้วย
@@ -6558,7 +6461,7 @@ impl RefxApp {
                 rotation: 0.0,
                 ..item.canvas
             };
-            if let Some(quad) = Self::quad_for(&canvas, state) {
+            if let Some(quad) = instances::quad_for(&canvas, state.slot, state.tint) {
                 gfx.arrange_quads.push(quad);
             }
         }
@@ -7941,7 +7844,8 @@ mod tests {
                 rotation,
                 ..ItemCanvas::default()
             };
-            let quad = RefxApp::quad_for(&canvas, &state).expect("ภาพที่มองเห็นต้องได้ quad");
+            let quad =
+                instances::quad_for(&canvas, state.slot, state.tint).expect("ภาพที่มองเห็นต้องได้ quad");
             let [a, b, c, d, tx, ty] = quad.transform;
             // unit quad (0,0) (1,0) (1,1) (0,1) → world (ตามลำดับของ Obb::corners)
             let mapped = |u: Vec2| Vec2::new(a * u.x + c * u.y + tx, b * u.x + d * u.y + ty);
@@ -7989,7 +7893,7 @@ mod tests {
             ..ItemCanvas::default()
         }
         .sanitized();
-        let baseline = RefxApp::quad_for(&base, &state);
+        let baseline = instances::quad_for(&base, state.slot, state.tint);
         assert!(baseline.is_some(), "ภาพปกติต้องได้ quad");
 
         // ★ ไม่มี `..` โดยตั้งใจ — ฟิลด์ใหม่ทำให้บรรทัดนี้คอมไพล์ไม่ผ่าน
@@ -8097,7 +8001,8 @@ mod tests {
         ];
 
         for (name, mutated, reaches_gpu, why) in cases {
-            let changed = RefxApp::quad_for(&mutated.sanitized(), &state) != baseline;
+            let changed =
+                instances::quad_for(&mutated.sanitized(), state.slot, state.tint) != baseline;
             assert_eq!(
                 changed,
                 reaches_gpu,
@@ -8124,8 +8029,8 @@ mod tests {
             ..plain
         };
         assert_ne!(
-            RefxApp::quad_for(&plain, &state).map(|q| q.transform),
-            RefxApp::quad_for(&spun, &state).map(|q| q.transform),
+            instances::quad_for(&plain, state.slot, state.tint).map(|q| q.transform),
+            instances::quad_for(&spun, state.slot, state.tint).map(|q| q.transform),
             "หมุนแล้ว transform ต้องเปลี่ยน ไม่งั้นการหมุนไม่มีผลบนจอเลย"
         );
     }
@@ -8608,8 +8513,8 @@ mod tests {
                 "{flip:?} ทำให้รูปทรงที่ hit-test ใช้เปลี่ยนไป"
             );
             let state = bare_render_state();
-            let a = RefxApp::quad_for(&plain, &state).unwrap();
-            let b = RefxApp::quad_for(&flipped, &state).unwrap();
+            let a = instances::quad_for(&plain, state.slot, state.tint).unwrap();
+            let b = instances::quad_for(&flipped, state.slot, state.tint).unwrap();
             assert_eq!(a.transform, b.transform, "เรขาคณิตต้องเท่าเดิมเป๊ะ");
             assert_ne!(a.uv_rect, b.uv_rect, "แต่ uv ต้องต่าง");
         }
