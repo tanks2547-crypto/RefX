@@ -250,7 +250,7 @@ impl FrameStats {
     ///
     /// **ต้องรายงาน present mode ด้วยเสมอ** — ถ้าเป็น `AutoVsync` ตัวเลขคือคาบสัญญาณจอ
     /// ไม่ใช่ต้นทุนการวาด เอาไปสรุปว่า "ผ่านเพดาน" ไม่ได้
-    fn report(&mut self, quads: usize, present: wgpu::PresentMode) {
+    fn report(&mut self, quads: usize, present: wgpu::PresentMode, vram: usize, vram_limit: usize) {
         if self.times_us.is_empty() {
             tracing::warn!("no frames were measured");
             return;
@@ -280,7 +280,10 @@ impl FrameStats {
 
         println!(
             "quad {quads} | เฟรม {n} | present {present:?}\n\
-             p50 {p50:.3} ms | p99 {p99:.3} ms | เฉลี่ย {mean_ms:.3} ms ({fps:.1} fps)"
+             p50 {p50:.3} ms | p99 {p99:.3} ms | เฉลี่ย {mean_ms:.3} ms ({fps:.1} fps)\n\
+             vram {vram_mb:.1} MB จากงบ {limit_mb:.1} MB",
+            vram_mb = vram as f64 / (1024.0 * 1024.0),
+            limit_mb = vram_limit as f64 / (1024.0 * 1024.0),
         );
         if vsync_capped {
             println!("⚠ ตัวเลขนี้ชนเพดาน vsync ของจอ — อ่านเป็นต้นทุนการวาดไม่ได้ และสรุปเรื่อง headroom ไม่ได้");
@@ -7239,18 +7242,26 @@ impl AppDelegate for RefxApp {
             //   ตรงนั้นจะพิมพ์ "3072" ทั้งที่วาดจริง 28 ใบ ซึ่งเป็นตัวเลขที่โกหก
             //   แล้วคนอ่านผลจะเทียบสองโหมดผิดทั้งหมด (docs/08 §3.9 ข้อ 9)
             let arrange_mode = self.shell.mode == Mode::Arrange;
-            let (quads, present) =
+            // ★ VRAM ที่ใช้อยู่ต้องออกมากับผลด้วย (P5-1) — `docs/08 §2` มีแถว
+            //   `vram_idle_1000` เป็นเกณฑ์ แต่ตัวเลขนั้นอยู่แต่บนแถบสถานะ
+            //   การอ่านมันจากภาพหน้าจอคือหลักฐานที่ตาอ่านผิดได้ (§3.9 ข้อ 9)
+            let (quads, present, vram, vram_limit) =
                 self.gfx
                     .as_ref()
-                    .map_or((0, wgpu::PresentMode::AutoVsync), |g| {
+                    .map_or((0, wgpu::PresentMode::AutoVsync, 0, 0), |g| {
                         let drawn = if arrange_mode {
                             g.arrange_quads.len()
                         } else {
                             g.quads.len()
                         };
-                        (drawn, g.render.present_mode())
+                        (
+                            drawn,
+                            g.render.present_mode(),
+                            g.textures.budget().used(),
+                            g.textures.budget().limit(),
+                        )
                     });
-            self.stats.report(quads, present);
+            self.stats.report(quads, present, vram, vram_limit);
             return None;
         }
 
