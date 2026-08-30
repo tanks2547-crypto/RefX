@@ -40,34 +40,59 @@
 #
 # 3. EVERY WAIT HAS A DEADLINE AND NAMES THE STEP IT DIED IN.
 #
+# ---------------------------------------------------------------------------
+# READ THIS BEFORE BELIEVING A HIGH startup_to_window
+# ---------------------------------------------------------------------------
+# The FIRST launch after `cargo build` reads an 18 MB binary that is not in the
+# OS file cache yet.  Measured on this box: 586 ms and 485 ms on the first
+# launch after a build, then 65-74 ms on every launch after that (n=6).
+#
+# That is not flakiness to be averaged away and it is not a code regression
+# either -- it is the number a user gets the first time they start a freshly
+# installed or freshly updated RefX.  If the row goes OVER, check whether the
+# binary was just rebuilt before deciding anything.
+#
 # ASCII ONLY, ON PURPOSE (docs/08 section 3.9 rule 9, 4th row): a Windows
 # console defaults to cp1252 and dies when a script prints Thai.
 #
 # USAGE
 #   powershell -File scripts/measure-app.ps1 -Images E:/refx-bench-1000
 #   powershell -File scripts/measure-app.ps1 -Images ... -Seconds 15 -SkipWarm
+#   powershell -File scripts/measure-app.ps1 -Images ... -Pan        <- frame_pan
 #
-# WHAT IT REPORTS (and what it deliberately does NOT claim)
-#   startup_to_window  process start -> window handle exists
-#   frame p50 / p99    printed by the app itself (--bench-seconds)
-#   vram_idle          printed by the app itself (texture budget in use)
-#   rss_idle           WorkingSet64 measured from outside, after the report
+# WHAT IT REPORTS
+#   startup_to_window            process start -> window handle exists
+#   open_board_..._warm_cache    printed by the app itself, measured by
+#                                LoadTracker from the first frame that saw work
+#                                pending to the frame the queue drained
+#   frame p50 / p99              printed by the app itself (--bench-seconds)
+#   vram_idle                    printed by the app itself (texture budget)
+#   rss_idle                     WorkingSet64 from outside, after the report
 #
-#   * The app draws continuously while --bench-seconds runs, so the frame
-#     numbers are "redraw with N items on the board", NOT "while panning".
-#     The docs/08 row is called frame_pan_1000 -- driving the mouse is a
-#     separate job (scripts/ui-drive.ps1) and is not done here.  Reporting
-#     this as frame_pan_1000 would claim something the tool did not measure.
+#   WITHOUT -Pan the frame numbers are redraw-standing-still.  WITH -Pan a real
+#   middle-button camera pan runs for the whole bench window, which is what the
+#   docs/08 row frame_pan_1000 actually asks for.  The window is attached and
+#   resized IN BOTH MODES so the two runs draw the same number of pixels and
+#   can be compared (docs/08 3.9 item 7).
 
 param(
     [Parameter(Mandatory = $true)][string]$Images,
     [int]$Seconds = 15,
     [switch]$SkipWarm,
+    # -Pan drives a real middle-button camera pan for the whole bench window,
+    # which is what the docs/08 row frame_pan_1000 actually asks for.  Without
+    # it the frame numbers are redraw-standing-still.
+    [switch]$Pan,
     [string]$Exe = "target/release/refx.exe",
     # deadline per pass.  cold decode of 1000 files is ~2 min on the dev box;
     # 12 min is generous enough that hitting it means something is really wrong.
     [int]$TimeoutSeconds = 720
 )
+
+# One pan step in ui-drive.ps1 costs ~660 ms (two 120 ms moves either side of a
+# 150 ms button hold, twice).  Measured, not guessed -- see the report line the
+# script prints at the end of the drive.
+$PAN_STEP_MS = 660
 
 $ErrorActionPreference = "Stop"
 
@@ -96,7 +121,7 @@ Write-Output ""
 # process exit -- see rule 1 in the header.
 # ---------------------------------------------------------------------------
 function Invoke-Pass {
-    param([string]$Label, [int]$BenchSeconds)
+    param([string]$Label, [int]$BenchSeconds, [bool]$DoPan = $false)
 
     $outFile = Join-Path ([System.IO.Path]::GetTempPath()) ("refx-bench-{0}.out" -f [guid]::NewGuid())
     $errFile = [System.IO.Path]::ChangeExtension($outFile, ".err")
@@ -142,6 +167,43 @@ function Invoke-Pass {
             $startupMs = $watch.Elapsed.TotalMilliseconds
             [Console]::WriteLine(("  [{0,6:N1}s] window is up after {1:N0} ms" -f `
                 $watch.Elapsed.TotalSeconds, $startupMs))
+
+            # ---- drive the window -------------------------------------------
+            # ATTACH RUNS IN BOTH MODES ON PURPOSE.  ui-drive's attach resizes
+            # the window to 1296x839 and takes focus; doing it only in -Pan
+            # would mean the pan run draws a different number of pixels than
+            # the still run, and the two numbers could not be compared at all
+            # (docs/08 3.9 item 7: compare the END STATE, not the input).
+            $steps = @("attach")
+            if ($DoPan) {
+                # alternate the direction so the camera oscillates around the
+                # board instead of wandering off it and panning over emptiness
+                $n = [int]([math]::Ceiling(($BenchSeconds * 1000.0) / $PAN_STEP_MS))
+                for ($i = 0; $i -lt $n; $i++) {
+                    if ($i % 2 -eq 0) { $steps += "pan|420|300|880|620" }
+                    else              { $steps += "pan|880|620|420|300" }
+                }
+                [Console]::WriteLine(("  [{0,6:N1}s] panning for the whole window ({1} steps)" -f `
+                    $watch.Elapsed.TotalSeconds, $n))
+            }
+
+            # ! capture, then print through [Console].  ui-drive writes a lot,
+            #   and Write-Output from a call inside THIS function would be
+            #   swallowed into our return value -- the exact bug rule 2 is about.
+            $driveOut = (& (Join-Path $PSScriptRoot "ui-drive.ps1") -Steps $steps 2>&1 | Out-String)
+            $driveCode = $LASTEXITCODE
+            foreach ($l in ($driveOut -split "`r?`n")) {
+                if ($l.Trim()) { [Console]::WriteLine("    ui-drive: " + $l.Trim()) }
+            }
+            if ($driveCode -and $driveCode -ne 0) {
+                try { $proc.Kill() } catch { }
+                Remove-Item $outFile, $errFile -ErrorAction SilentlyContinue
+                return @{
+                    Ok = $false
+                    Stage = "ui-drive refused to continue (exit $driveCode) -- focus was lost, so any number here would be a lie"
+                    Startup = $startupMs; Stdout = ""
+                }
+            }
         }
         try { if ($proc.WorkingSet64 -gt $peakRss) { $peakRss = $proc.WorkingSet64 } } catch { }
 
@@ -169,7 +231,16 @@ function Invoke-Pass {
             return @{ Ok = $false; Stage = $stage; Startup = $startupMs; Stdout = "" }
         }
 
-        Start-Sleep -Milliseconds 100
+        # ! POLL FAST UNTIL THE WINDOW IS UP, SLOW AFTERWARDS.
+        #
+        #   startup_to_window is measured by this loop, so the sleep here IS
+        #   the measurement's granularity.  A flat 100 ms sleep reported
+        #   119-153 ms for a startup that a 2 ms poll measures at 32-50 ms --
+        #   the tool was reporting its own latency and calling it the app's.
+        #   Once the window is up nothing needs millisecond resolution, so the
+        #   cadence drops back to 100 ms and stops burning a core.
+        if ($null -eq $startupMs) { Start-Sleep -Milliseconds 2 }
+        else                      { Start-Sleep -Milliseconds 100 }
     }
 
     $elapsed = $watch.Elapsed.TotalSeconds
@@ -200,7 +271,7 @@ function Invoke-Pass {
 # measurement of the decoder instead of the renderer.
 if (-not $SkipWarm) {
     Write-Output "pass 1/2: warming cache.sqlite (cold decode of $count files)"
-    $warm = Invoke-Pass -Label "cold pass" -BenchSeconds $Seconds
+    $warm = Invoke-Pass -Label "cold pass" -BenchSeconds $Seconds -DoPan $false
     if (-not $warm.Ok) {
         Write-Output "ABORT: cold pass did not reach its report line -- numbers would be meaningless"
         exit 1
@@ -212,7 +283,7 @@ if (-not $SkipWarm) {
 
 # ---- pass 2: the measured run ----------------------------------------------
 Write-Output "pass 2/2: measured run (warm cache)"
-$run = Invoke-Pass -Label "measured pass" -BenchSeconds $Seconds
+$run = Invoke-Pass -Label "measured pass" -BenchSeconds $Seconds -DoPan ([bool]$Pan)
 if (-not $run.Ok) {
     Write-Output ("ABORT: measured pass stuck while {0}" -f $run.Stage)
     exit 1
@@ -230,6 +301,36 @@ if ($run.Stdout -match "p50\s+([0-9.]+)\s+ms\s+\|\s+p99\s+([0-9.]+)\s+ms") {
     $p50 = [double]$Matches[1]; $p99 = [double]$Matches[2]
 }
 if ($run.Stdout -match "vram\s+([0-9.]+)\s+MB") { $vram = [double]$Matches[1] }
+# open_board_1000_warm_cache
+#
+# ! THE APP ALREADY MEASURES THIS.  It has printed
+#       "<thai> N <thai> M ms"   (drag & drop -> every image on screen)
+#   since P1-8, timed from the drop to the frame where the last image is up.
+#   A LoadTracker-based second measurement was written for this row and then
+#   thrown away on discovering the first one: two things measuring the same
+#   quantity drift, and the older one is the one the app itself reports to the
+#   user.  (They agreed to 0.1 ms while both existed: 303.9 vs 304.)
+#
+# Match on the SHAPE (two numbers, the second followed by "ms") rather than on
+# the Thai words, so a wording change cannot silently make this NOT MEASURED.
+#
+# ! TAKE THE BATCH WITH THE MOST IMAGES, NOT THE LAST LINE.
+#   Working textures decode through the same pool, so panning can add small
+#   batches.  Taking the last line once reported "5 ms" for a board that took
+#   591 ms to open -- a beautiful number measuring a few working textures.
+$loadItems = 0
+foreach ($l in ($run.Stdout -split "`r?`n")) {
+    if (($l -match "([0-9]+)\D+([0-9.]+)\s*ms\s*$") -and ($l -notmatch "p50")) {
+        $items = [int]$Matches[1]
+        if ($items -gt $loadItems) {
+            $loadItems = $items
+            $loadMs = [double]$Matches[2]
+        }
+    }
+}
+if ($loadItems -gt 0) {
+    Write-Output ("(open_board row came from the app's own line: {0} images)" -f $loadItems)
+}
 
 function Write-Row {
     param([string]$Name, $Value, [double]$Limit, [string]$Unit)
@@ -247,11 +348,21 @@ Write-Output ""
 Write-Output ("{0,-24} {1,12} {2,12}" -f "row (docs/08 s2)", "measured", "ceiling")
 Write-Output ("{0,-24} {1,12} {2,12}" -f "------------------------", "------------", "------------")
 Write-Row "startup_to_window" $run.Startup 400 "ms"
-Write-Row "frame p50 (redraw)" $p50 8 "ms"
-Write-Row "frame p99 (redraw)" $p99 16 "ms"
+Write-Row "open_board_1000_warm" $loadMs 1500 "ms"
+# ! the LABEL must follow what was actually done.  A tool that prints
+#   "(redraw)" after it just spent the whole window panning is producing
+#   mislabelled evidence, which is the failure mode this whole file is about.
+$what = if ($Pan) { "pan" } else { "redraw" }
+Write-Row "frame p50 ($what)" $p50 8 "ms"
+Write-Row "frame p99 ($what)" $p99 16 "ms"
 Write-Row "rss_idle_1000" ([math]::Round($run.RssIdle / 1MB, 2)) 250 "MB"
 Write-Row "vram_idle_1000" $vram 200 "MB"
 Write-Output ""
 Write-Output ("peak RSS during the measured pass: {0:N1} MB" -f ($run.PeakRss / 1MB))
-Write-Output "NOTE: the frame rows are redraw-with-N-items, NOT while panning."
-Write-Output "      docs/08 calls that row frame_pan_1000 -- see this script's header."
+if ($Pan) {
+    Write-Output "NOTE: a real middle-button pan ran for the whole bench window,"
+    Write-Output "      so the frame rows above ARE frame_pan_1000."
+} else {
+    Write-Output "NOTE: the frame rows are redraw-with-N-items, NOT while panning."
+    Write-Output "      pass -Pan to measure the frame_pan_1000 row of docs/08 s2."
+}
