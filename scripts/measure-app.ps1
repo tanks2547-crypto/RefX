@@ -183,8 +183,13 @@ function Invoke-Pass {
                     if ($i % 2 -eq 0) { $steps += "pan|420|300|880|620" }
                     else              { $steps += "pan|880|620|420|300" }
                 }
-                [Console]::WriteLine(("  [{0,6:N1}s] panning for the whole window ({1} steps)" -f `
-                    $watch.Elapsed.TotalSeconds, $n))
+                # ! ui-drive blocks for the whole pan, so the 10 s progress ticks
+                #   below cannot run while it does.  Say how long the silence
+                #   will last BEFORE it starts -- rule 2 is about the operator
+                #   being able to tell working from hung, and a silent 3 minutes
+                #   with no warning fails that just as badly as a hang.
+                [Console]::WriteLine(("  [{0,6:N1}s] panning for the whole window: {1} steps, ~{2:N0}s of no output" -f `
+                    $watch.Elapsed.TotalSeconds, $n, ($n * $PAN_STEP_MS / 1000.0)))
             }
 
             # ! capture, then print through [Console].  ui-drive writes a lot,

@@ -3274,7 +3274,16 @@ impl RefxApp {
                         undo_depth = self.docs.active().history.undo_depth(),
                         "drag & drop → every image on screen"
                     );
-                    println!("ลากไฟล์ {} ไฟล์ → ขึ้นจอครบใน {ms:.1} ms", self.drop.requested);
+                    // ★★ ต้องบอก **ทั้งสองจำนวน** — เดิมพิมพ์แต่ `requested` แล้วเติมคำว่า
+                    //    "ครบ" ต่อท้าย ซึ่งอ่านว่า "ขึ้นจอครบทั้ง 20 ใบ" ทั้งที่ไฟล์ที่
+                    //    เปิดไม่ได้จะไม่กลายเป็น item เลยสักใบ (ลาก 20 → ขึ้นจริง 4)
+                    //    · บรรทัดนี้เป็นสิ่งที่ `scripts/checklist-app.ps1` อ่านเพื่อ
+                    //    ตัดสินข้อ "ไฟล์เสีย 20 ไฟล์" ของ `docs/08 §3` — พิมพ์เลขที่
+                    //    ไม่ตรงกับสิ่งที่ผู้ใช้เห็นบนจอ = ประตูที่เขียวโดยไม่ได้ตรวจอะไร
+                    println!(
+                        "ลากไฟล์ {} ไฟล์ → ขึ้นจอ {} ใบใน {ms:.1} ms",
+                        self.drop.requested, self.drop.added
+                    );
                     self.shell.status = text::fill(
                         self.shell.lang,
                         Template::OpenedFiles,
