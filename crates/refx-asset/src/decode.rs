@@ -201,6 +201,39 @@ pub enum LoadError {
     },
 }
 
+/// ★★★ ทำไมภาพใบนี้เปิดไม่ได้ — **ในภาษาที่ `Board` เก็บลงไฟล์ได้**
+///
+/// `docs/02 §2.2.5` บังคับให้ `refx-core` นิยาม [`MissingReason`] เอง เพราะมัน
+/// ต้องลง `.refx` ได้ ส่วน `image::ImageError` serialize ไม่ได้และ `refx-core`
+/// พึ่ง `image` ไม่ได้ · ตัวแปลงจึงต้องอยู่ **ที่นี่ที่เดียว** — `HANDOFF §5`
+/// เขียนกฎข้อนี้ไว้ตั้งแต่ P4-1 แต่ตัวแปลงไม่เคยถูกเขียนจริง ทุกที่ในโปรแกรม
+/// hard-code `MissingReason::FileNotFound` ไปหมด แม้แต่ตอนที่ไฟล์อยู่ครบแต่เนื้อเสีย
+///
+/// ★ เขียนเป็น `From<&LoadError>` ไม่ใช่ `From<LoadError>` เพราะผู้เรียกยังต้อง
+/// เอา error ตัวเดิมไปทำข้อความบอกผู้ใช้ต่อ
+impl From<&LoadError> for refx_core::board::MissingReason {
+    fn from(err: &LoadError) -> Self {
+        use refx_core::board::MissingReason as R;
+        match err {
+            // ใหญ่เกินเพดานของ *เครื่องนี้* — เครื่องอื่นอาจเปิดได้ ไม่ใช่ไฟล์เสีย
+            LoadError::FileTooLarge { .. } | LoadError::ImageTooLarge { .. } => R::TooLarge,
+            // ชนิดไฟล์ที่เราไม่รองรับ (หรือไม่ใช่ภาพเลย)
+            LoadError::UnknownFormat | LoadError::FormatNotAllowed { .. } => R::UnsupportedFormat,
+            // เปิดได้ แต่เนื้อในใช้ไม่ได้
+            LoadError::BadHeader
+            | LoadError::DecoderPanic
+            | LoadError::Decode(_)
+            | LoadError::MalformedPixels { .. } => R::Damaged,
+            // ★ แตะไฟล์ไม่ได้เลย — แยก "ไม่มีไฟล์นั้น" ออกจาก "มีแต่เข้าไม่ถึง"
+            //   เพราะ relink ช่วยได้เฉพาะอันแรก
+            LoadError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
+                R::FileNotFound
+            }
+            LoadError::Io { .. } | LoadError::NotAFile { .. } => R::Unreadable,
+        }
+    }
+}
+
 /// ตรวจว่าขนาดภาพอยู่ในเพดานไหม
 ///
 /// แยกเป็นฟังก์ชันบริสุทธิ์เพื่อทดสอบขอบเขตได้โดยไม่ต้องสร้างภาพ 268 ล้าน pixel จริง

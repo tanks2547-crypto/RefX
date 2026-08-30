@@ -143,8 +143,17 @@ struct DropBatch {
     added: usize,
     /// **เพิ่มไม่ได้เพราะ board เต็ม** — ใบที่ผู้ใช้ต้องได้รับแจ้ง
     rejected: usize,
-    /// เปิดไฟล์ไม่ได้ (ไฟล์เสีย/ใหญ่เกินเพดาน/หายไป) — คนละเรื่องกับ board เต็ม
+    /// เปิดไฟล์ไม่ได้ **และเพิ่มเป็น `Missing` ก็ไม่ได้** — ใบที่หายไปจริง ๆ
+    ///
+    /// ★ หลัง ROADMAP P3-3 (28 ส.ค. 2026) ใบที่ decode ไม่ผ่านจะกลายเป็น
+    /// `Missing` บนกระดานแล้วนับเป็น [`DropBatch::added`] · ช่องนี้จึงเหลือไว้
+    /// สำหรับกรณีที่ **สร้าง item ไม่ได้เลย** (แท็บถูกปิด / `AddItems` ล้ม)
     failed: usize,
+    /// เปิดไม่ได้แต่ **ขึ้นเป็นช่องว่างบนกระดานแล้ว** — สำหรับข้อความสรุป
+    ///
+    /// ★ **ไม่เข้า [`DropBatch::answered`]** เพราะใบเดียวกันถูกนับใน `added` ไปแล้ว
+    /// นับสองช่องจะทำให้งวดจบเร็วไปหนึ่งเท่าตัว
+    damaged: usize,
     /// ★ ถูกยกเลิกกลางทาง — **ผู้ใช้ pan ระหว่างที่ไฟล์ยังทยอยเข้ามา**
     ///
     /// P1-4 ยกเลิกงานที่ผ่านจอไปแล้วโดยตั้งใจ ซึ่งแปลว่าใบพวกนี้จะไม่มีผลกลับมา
@@ -2830,6 +2839,13 @@ impl RefxApp {
         )> = Vec::new();
         // ไฟล์ที่พบใน clipboard — ส่งต่อเข้าเส้นทาง drag & drop หลังปล่อย borrow
         let mut pasted_files: Vec<std::path::PathBuf> = Vec::new();
+        // ★ ใบที่เปิดไม่ได้ — กลายเป็น `Missing` หลังจบลูป (ดูกิ่ง `Failed`)
+        let mut damaged: Vec<(
+            refx_asset::hash::ContentHash,
+            Option<refx_core::arena::BoardId>,
+            Option<refx_asset::pool::JobSource>,
+            refx_core::board::MissingReason,
+        )> = Vec::new();
         while let Some(result) = assets.pool.try_recv() {
             // งานวางจบแล้วไม่ว่าผลจะเป็นอะไร — เปิดทางให้กด Ctrl+V ครั้งต่อไปได้
             if self.paste_in_flight == Some(result.hash()) {
@@ -2966,10 +2982,22 @@ impl RefxApp {
                     //   — แต่ต้องนับ **เฉพาะงานของงวดนี้** เหมือนกรณี `Cancelled`
                     match target {
                         refx_asset::pool::JobTarget::Thumbnail => {
-                            self.drop.failed += 1;
-                            // ★ เหตุผลเดียวกับกิ่ง `Cancelled` — คีย์หมดหน้าที่แล้ว
-                            self.job_owner.remove(&hash);
-                            self.job_sources.remove(&hash);
+                            // ★★★ **ใบนี้ต้องกลายเป็น `Missing` ไม่ใช่หายไป**
+                            //     (ROADMAP P3-3 · ตัดสิน 28 ส.ค. 2026)
+                            //
+                            //   เดิมนับ `failed` แล้วจบ — ไม่มี item ถูกสร้างเลย
+                            //   ผู้ใช้ลากไฟล์เสีย 20 ใบแล้วเห็น 4 ใบ โดยไม่มีอะไร
+                            //   บอกว่าอีก 16 ใบไปไหน ซึ่งอ่านได้อย่างเดียวว่า
+                            //   โปรแกรมทำงานหาย (รูปแบบเดียวกับ "board เต็มแล้วเงียบ")
+                            //
+                            //   ★ เก็บไว้ทำหลังปล่อยการยืม `assets` เพราะการสร้าง
+                            //     item ต้องแตะ `docs` และต้องผ่าน `Command`
+                            damaged.push((
+                                hash,
+                                self.job_owner.remove(&hash),
+                                self.job_sources.remove(&hash),
+                                refx_core::board::MissingReason::from(&reason),
+                            ));
                         }
                         refx_asset::pool::JobTarget::Working { size } => {
                             gfx_working_pending_remove(self.gfx.as_mut(), hash, size);
@@ -3014,6 +3042,97 @@ impl RefxApp {
         //
         // ★★★ พก `BoardId` มาด้วย — `ItemId` ไม่ผูกกับ board (`docs/02 §1`)
         let mut repairs: Vec<(refx_core::arena::BoardId, ItemId, ItemKind)> = Vec::new();
+
+        // ★★★ ใบที่เปิดไม่ได้ → `Missing` บน board (ROADMAP P3-3)
+        //
+        // ★ อยู่ **ก่อน** บล็อกของ `done` และ **ไม่ต้องมี `gfx`** โดยตั้งใจ:
+        //   ช่องว่างไม่มีพิกเซลให้อัปขึ้น atlas · ถ้าไปผูกกับ `gfx.as_mut()`
+        //   เหมือนบล็อกข้างล่าง การ return ตอนไม่มี GPU จะทำให้ใบพวกนี้ไม่ถูกนับ
+        //   แล้ว `DropBatch::settled()` จะไม่มีวันเป็นจริง = แถบ "กำลังโหลด" ค้างถาวร
+        for (hash, owner, source, reason) in damaged {
+            let Some(index) = owner.and_then(|id| self.docs.list.iter().position(|d| d.id == id))
+            else {
+                // แท็บถูกปิดไประหว่างที่งานเดินอยู่ — ไม่มีที่ให้ผลลง
+                self.drop.cancelled += 1;
+                continue;
+            };
+            let original_path = source
+                .as_ref()
+                .and_then(|s| s.file())
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_default();
+            let board_id = self.docs.list[index].id;
+            let doc = &mut self.docs.list[index];
+
+            // ★★★ **เอกสารที่เปิดมาจากไฟล์: item มีอยู่แล้ว ห้ามสร้างใบใหม่**
+            //
+            //   เส้นทางเดียวกับกิ่ง `Done` เป๊ะ (ดู `relink_targets` ที่นั่น) ·
+            //   รุ่นแรกของโค้ดนี้สร้างใบใหม่ทุกครั้ง ผลคือเปิดไฟล์ที่มีภาพเสีย
+            //   หนึ่งใบแล้วได้ **ห้า item จากเอกสารที่มีสี่** — ใบผีที่ไม่มีอยู่
+            //   ในไฟล์ · เห็นเพราะรันแอปจริงแล้วนับตัวเลขบนแถบสถานะ
+            if let Some(id) = doc.relink_targets.remove(&hash) {
+                if doc.board.item(id).is_some() {
+                    repairs.push((
+                        board_id,
+                        id,
+                        ItemKind::Missing {
+                            original_path,
+                            reason,
+                        },
+                    ));
+                    self.drop.added += 1;
+                    self.drop.damaged += 1;
+                } else {
+                    // ใบนั้นถูกลบไประหว่างที่งานเดินอยู่ (undo / เปิดไฟล์อื่นทับ)
+                    self.drop.cancelled += 1;
+                }
+                continue;
+            }
+
+            // วางเป็นตารางเดียวกับภาพที่เปิดได้ — ใบที่เสียต้องอยู่ในลำดับที่ผู้ใช้
+            // ลากเข้ามา ไม่ใช่กองรวมกันที่มุมใดมุมหนึ่ง
+            let n = u32::try_from(doc.board.len()).unwrap_or(u32::MAX);
+            let (col, row) = (n % 16, n / 16);
+            let cell = 160.0;
+            // ไม่รู้สัดส่วนจริงเพราะอ่านหัวไฟล์ไม่ผ่าน — ใช้กรอบสี่เหลี่ยมกลาง ๆ
+            let size = Vec2::new(128.0, 96.0);
+            let top_left = Vec2::new(2000.0 + col as f32 * cell, 2000.0 + row as f32 * cell);
+            let item = Item::new(ItemKind::Missing {
+                original_path,
+                reason,
+            })
+            .at(top_left + size * 0.5, size);
+            let item = Item {
+                meta: ItemMeta {
+                    added_at: now_ms(),
+                    ..item.meta
+                },
+                ..item
+            };
+
+            // ★ ผ่าน `AddItems` เหมือนภาพปกติ — ลากไฟล์เสียเข้ามาแล้ว `Ctrl+Z` ได้
+            let Ok(command) = AddItems::new(vec![item]) else {
+                self.drop.failed += 1;
+                continue;
+            };
+            if let Err(err) = doc.history.apply(&mut doc.board, Box::new(command)) {
+                tracing::error!(%err, "cannot add the damaged image to the board");
+                self.drop.failed += 1;
+                continue;
+            }
+            if let Some(id) = doc.board.z_order().last().copied()
+                && let Some(item) = doc.board.item(id)
+            {
+                let canvas = item.canvas;
+                doc.index.insert(id, &canvas);
+            }
+            // ★ นับเป็น `added` เพราะ **ผู้ใช้เห็นมันบนกระดานจริง ๆ** ·
+            //   `damaged` เป็นตัวนับแยกสำหรับข้อความสรุป — ถ้านับทั้งสองช่อง
+            //   ลง `answered()` งวดจะจบเร็วไปหนึ่งเท่าตัว
+            self.drop.added += 1;
+            self.drop.damaged += 1;
+            tracing::debug!(hash = %hash.short(), ?reason, "damaged image became a placeholder");
+        }
 
         // อัดขึ้น atlas แล้ววาง quad ให้เห็นบน canvas
         let had_results = !done.is_empty();
@@ -5241,7 +5360,31 @@ impl RefxApp {
                     let mut located = refx_core::relink::locate(
                         &want,
                         doc_dir.as_deref(),
-                        |path| path.is_file(),
+                        // ★★★ **ด่าน path ที่มาจากไฟล์อยู่ตรงนี้** (`docs/06 §4`)
+                        //
+                        //   ต้องอยู่ **ก่อน** `is_file()` ไม่ใช่หลัง: `Path::is_file()`
+                        //   บน UNC **ต่อออกไปหาเซิร์ฟเวอร์เพื่อจะตอบ** ด่านที่ตรวจ
+                        //   หลังจากนั้นก็สายไปแล้ว — การเชื่อมต่อเกิดขึ้นไปแล้ว
+                        //   (ผมวางด่านไว้ผิดที่ในรุ่นแรกด้วยเหตุผลนี้พอดี)
+                        //
+                        //   ★ คลุมทั้งห้าขั้นของ relink ในคราวเดียว รวมขั้นที่ 3 ที่
+                        //     path มาจากตาราง `paths` ใน cache DB ซึ่งก็คือข้อมูล
+                        //     ที่มาจากไฟล์เหมือนกัน
+                        //
+                        //   ★★ ที่นี่ตรวจ **ผู้สมัคร** ไม่ใช่สิ่งที่ผู้ใช้ชี้เอง —
+                        //     คนที่กด "หาไฟล์เอง" แล้วเลือกไดรฟ์เครือข่ายตั้งใจทำแบบนั้น
+                        //     และเดินคนละเส้นทาง (`Step::PickedByUser`)
+                        |path| match refx_io::validate::validate_asset_path(path) {
+                            Ok(()) => path.is_file(),
+                            Err(err) => {
+                                tracing::warn!(
+                                    %err,
+                                    file = %refx_asset::decode::file_label(path),
+                                    "refusing a path that came out of the document"
+                                );
+                                false
+                            }
+                        },
                         |hash| paths_known_for(io.as_ref(), hash),
                     );
                     if located.is_none()
@@ -8797,6 +8940,7 @@ mod tests {
             added: 3_072,
             rejected: 6_900,
             failed: 0,
+            damaged: 0,
             cancelled: 28,
             reported: false,
         };
@@ -8814,6 +8958,7 @@ mod tests {
             added: 3,
             rejected: 7,
             failed: 1,
+            damaged: 0,
             cancelled: 2,
             reported: true,
         };
@@ -8835,6 +8980,7 @@ mod tests {
             added: 3_072,
             rejected: 6_928,
             failed: 0,
+            damaged: 0,
             cancelled: 0,
             reported: false,
         };
@@ -8865,6 +9011,7 @@ mod tests {
             added: 200,
             rejected: 0,
             failed: 0,
+            damaged: 0,
             cancelled: 0,
             reported: false,
         };
@@ -8880,6 +9027,7 @@ mod tests {
             added: 4,
             rejected: 0,
             failed: 1,
+            damaged: 0,
             cancelled: 0,
             reported: false,
         };

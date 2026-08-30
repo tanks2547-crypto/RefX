@@ -133,13 +133,147 @@ pub fn build_instances(
 ) {
     out.clear();
     for (id, item) in board.items_in_z_order() {
-        if !matches!(item.kind, ItemKind::Image(_)) {
-            continue;
-        }
-        if let Some((slot, tint)) = state_of(id)
-            && let Some(quad) = quad_for(&item.canvas, slot, tint)
-        {
+        let (slot, tint) = match &item.kind {
+            ItemKind::Image(_) => match state_of(id) {
+                Some(state) => state,
+                None => continue, // ยังไม่มีพิกเซล — ใบนี้ยังไม่มีอะไรให้วาด
+            },
+            // ★★★ **ใบที่เปิดไม่ได้ต้องเห็นบนจอ** (ROADMAP P3-3 · ตัดสิน 28 ส.ค. 2026)
+            //
+            // เดิมที่นี่ข้าม `Missing` ทิ้งไปเลย ผลคือภาพที่หาไฟล์ไม่เจอ
+            // **มองไม่เห็นบนแคนวาสเลยสักใบ** — มีแต่ตัวเลขบนแถบสถานะกับช่อง
+            // inspector ที่ต้องเลือกใบนั้นให้ได้ก่อนถึงจะเห็น (แล้วจะเลือกของที่
+            // มองไม่เห็นได้ยังไง) · ผู้ใช้ลาก 20 ใบต้องเห็น 20 ใบ จะเป็นภาพหรือ
+            // ช่องว่างก็ได้ แต่ห้ามหาย
+            //
+            // ★★ **บังคับ `slot = None` เสมอ ห้ามถาม `state_of`** — `render_state`
+            // เป็น cache ที่อยู่ยาวกว่าสถานะของ item โดยตั้งใจ (§4 ข้อ 28) ใบที่
+            // เพิ่งกลายเป็น `Missing` จาก undo ของ relink ยังถือช่อง atlas เดิมอยู่
+            // ถ้าหยิบมาใช้ จอจะโชว์ภาพเก่าของใบที่เอกสารบอกว่าหาไม่เจอแล้ว
+            ItemKind::Missing { .. } => (None, MISSING_TINT),
+            // โน้ตข้อความวาดด้วย egui ไม่ใช่ quad
+            ItemKind::Text(_) => continue,
+        };
+        if let Some(quad) = quad_for(&item.canvas, slot, tint) {
             out.push(quad);
         }
+    }
+}
+
+/// สีของช่องว่างที่แทนภาพซึ่งเปิดไม่ได้/หาไม่เจอ
+///
+/// ★ ต้องต่างจาก placeholder ของภาพที่ **กำลังโหลด** ซึ่งใช้สีเด่นของภาพเอง —
+/// ผู้ใช้ต้องแยก "เดี๋ยวก็มา" ออกจาก "ใบนี้มีปัญหา" ได้โดยไม่ต้องอ่านอะไร
+/// · เลือกโทนแดงหม่นเพราะอ่านว่า "มีอะไรผิด" โดยไม่ตะโกนเท่าสีแดงสด
+const MISSING_TINT: [f32; 4] = [0.45, 0.28, 0.28, 1.0];
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+    use refx_core::arena::{ArenaKey as _, BoardId, ItemId};
+    use refx_core::board::{
+        AssetRef, BoardParts, ImageFormat, Item, ItemParts, MissingReason, TextNote,
+    };
+    use refx_core::hash::ContentHash;
+    use refx_render::instance::flags;
+
+    fn slot() -> AtlasSlot {
+        AtlasSlot { layer: 3, index: 7 }
+    }
+
+    fn image_item() -> Item {
+        Item::new(ItemKind::Image(AssetRef {
+            hash: ContentHash::from_bytes([1; 32]),
+            path: std::path::PathBuf::from("a.png"),
+            px_size: glam::UVec2::new(64, 64),
+            format: ImageFormat::Unknown,
+            embedded: false,
+            mtime: 0,
+            file_size: 0,
+        }))
+        .at(Vec2::new(100.0, 100.0), Vec2::new(80.0, 60.0))
+    }
+
+    fn missing_item() -> Item {
+        Item::new(ItemKind::Missing {
+            original_path: std::path::PathBuf::from("gone.png"),
+            reason: MissingReason::Damaged,
+        })
+        .at(Vec2::new(300.0, 100.0), Vec2::new(80.0, 60.0))
+    }
+
+    fn board_of(items: Vec<Item>) -> Board {
+        Board::load(
+            BoardId::from_parts(0, 0),
+            BoardParts {
+                items: items
+                    .into_iter()
+                    .map(|item| ItemParts { item, group: None })
+                    .collect(),
+                ..BoardParts::default()
+            },
+        )
+    }
+
+    /// ★★★ **ใบที่เปิดไม่ได้ต้องมี quad ของตัวเอง** (ROADMAP P3-3)
+    ///
+    /// ก่อนหน้านี้ `Missing` ถูกข้ามทิ้ง ผู้ใช้จึงเห็นแค่ช่องว่างบนกระดาน
+    /// แล้วอ่านได้อย่างเดียวว่าโปรแกรมทำภาพหาย
+    #[test]
+    fn an_image_that_cannot_be_opened_still_takes_up_space_on_the_board() {
+        let board = board_of(vec![image_item(), missing_item()]);
+        let mut out = Vec::new();
+        build_instances(&board, &mut out, |_| Some((Some(slot()), [1.0; 4])));
+
+        assert_eq!(out.len(), 2, "ใบที่เปิดไม่ได้หายไปจากจอ");
+        let missing = out[1];
+        assert!(
+            missing.flags & flags::PLACEHOLDER != 0,
+            "ใบที่เปิดไม่ได้ต้องวาดเป็นช่องว่าง ไม่ใช่ภาพ"
+        );
+    }
+
+    /// ★★★ **negative control ของ `HANDOFF §4` ข้อ 28**
+    ///
+    /// `render_state` อยู่ยาวกว่าสถานะของ item โดยตั้งใจ — ใบที่เพิ่งกลายเป็น
+    /// `Missing` จาก undo ของ relink **ยังถือช่อง atlas เดิมอยู่** ถ้า
+    /// `build_instances` หยิบช่องนั้นมาใช้ จอจะโชว์ภาพเก่าของใบที่เอกสารบอกว่า
+    /// หาไม่เจอแล้ว ซึ่งเป็นบั๊กที่เคยเกิดจริงตอน P4-6 และเทสต์ตอนนั้นจับไม่ได้
+    #[test]
+    fn a_missing_item_never_reuses_the_atlas_slot_it_used_to_have() {
+        let board = board_of(vec![missing_item()]);
+        let mut out = Vec::new();
+        // `state_of` ตอบว่ายังมีช่องอยู่ — เหมือนสภาพจริงหลัง undo ของ relink
+        build_instances(&board, &mut out, |_| Some((Some(slot()), [1.0; 4])));
+
+        assert_eq!(out.len(), 1);
+        assert!(
+            out[0].flags & flags::PLACEHOLDER != 0,
+            "หยิบช่อง atlas ของภาพเก่ามาวาดให้ใบที่หาไฟล์ไม่เจอ"
+        );
+        assert_eq!(out[0].layer, 0, "ยังชี้ layer ของช่องเดิมอยู่");
+    }
+
+    /// โน้ตข้อความไม่ใช่ quad — egui เป็นคนวาด
+    #[test]
+    fn a_text_note_is_not_drawn_as_a_quad() {
+        let board = board_of(vec![Item::new(ItemKind::Text(TextNote {
+            text: "x".to_owned(),
+        }))]);
+        let mut out = Vec::new();
+        build_instances(&board, &mut out, |_| Some((Some(slot()), [1.0; 4])));
+        assert!(out.is_empty());
+    }
+
+    /// ★ ใบที่ยังไม่มีพิกเซลเลย (ยังโหลดไม่เสร็จ) ต้องไม่ถูกวาด — ต่างจาก
+    /// `Missing` ซึ่งจบแล้วและต้องเห็น
+    #[test]
+    fn an_image_still_loading_is_not_drawn_yet() {
+        let board = board_of(vec![image_item()]);
+        let mut out = Vec::new();
+        build_instances(&board, &mut out, |_: ItemId| None);
+        assert!(out.is_empty());
     }
 }

@@ -283,6 +283,24 @@ pub enum JobFailure {
     Clipboard(#[from] ClipboardError),
 }
 
+/// ทำไมภาพใบนี้เปิดไม่ได้ — ในภาษาที่ `Board` เก็บลงไฟล์ได้
+///
+/// ต่อจาก `From<&LoadError>` ใน [`crate::decode`] · อยู่ที่นี่เพราะ `JobFailure`
+/// เป็นของชั้น pool · **ที่เดียวในโปรแกรมที่แปลงสองอย่างนี้เข้าหากัน**
+impl From<&JobFailure> for refx_core::board::MissingReason {
+    fn from(err: &JobFailure) -> Self {
+        use refx_core::board::MissingReason as R;
+        match err {
+            JobFailure::Load(load) => Self::from(load),
+            // ★ decode ไม่จบในเวลาที่ให้ = ไฟล์ที่ decoder เดินไม่จบ ซึ่งเป็น
+            //   อาการของเนื้อในที่ผิดรูป ไม่ใช่ของไฟล์ที่แตะไม่ได้
+            JobFailure::Timeout { .. } => R::Damaged,
+            // ไม่มีไฟล์ให้กลับไปอ่านเลย — relink ช่วยอะไรไม่ได้
+            JobFailure::Clipboard(_) => R::Unreadable,
+        }
+    }
+}
+
 /// ★★★ hash ของ **เนื้อ** ที่ worker คำนวณได้ และเนื้อนั้นอยู่ที่ไหน
 ///
 /// ## ทำไมคีย์ของงานใช้เป็น `AssetRef::hash` ไม่ได้
