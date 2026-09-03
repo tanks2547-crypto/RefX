@@ -1797,7 +1797,7 @@ pub struct RefxApp {
     /// แล้ว id นั้นก็แค่ไม่ถูกใช้ ซึ่งไม่เป็นไรเพราะตัวแจกเดินหน้าอย่างเดียว
     load_job: Option<(
         refx_core::arena::BoardId,
-        crossbeam_channel::Receiver<Result<LoadedDoc, String>>,
+        crossbeam_channel::Receiver<Result<LoadedDoc, OpenFailure>>,
     )>,
     /// ★★★ งานค้างจาก session ก่อนที่กำลังถามผู้ใช้อยู่ — `None` = ไม่มี
     pending_recovery: Option<PendingRecovery>,
@@ -2422,20 +2422,119 @@ fn format_when(at: std::time::SystemTime) -> String {
     }
 }
 
+/// ★★★ เปิดเอกสารไม่ได้ **เพราะอะไร** — และผู้ใช้ต้องทำคนละอย่างในแต่ละกรณี
+///
+/// `docs/07 §1` บังคับไว้ตั้งแต่วันแรกว่า `doc_crc` มีไว้ **แยก "ไฟล์เสียหายจาก
+/// ดิสก์" ออกจาก "ไฟล์เวอร์ชันที่เราอ่านไม่เป็น"** และตัวอ่าน (`OpenError`)
+/// แยกได้จริงมาตลอด — แต่ชั้น UI รวมทั้งสองกรณีกลับเป็นข้อความเดียวว่า
+/// *"ไฟล์อาจเสียหาย หรือถูกเขียนด้วย RefX รุ่นใหม่กว่า"* ซึ่งบอกผู้ใช้ว่า
+/// **ทั้งสองอย่างอาจจริง** ทั้งที่เรารู้แน่ชัดว่าอันไหน
+///
+/// | สถานการณ์ | ผู้ใช้ต้องทำ |
+/// |---|---|
+/// | เสียหาย | ไปเอาไฟล์สำรอง `.refx.bak` — งานรอบล่าสุดอาจเสียไปแล้ว |
+/// | รุ่นใหม่กว่า | **อัปเดตโปรแกรม** · ไฟล์ยังดีอยู่ครบ ห้ามบันทึกทับ |
+///
+/// สองอย่างนี้ต่างกันคนละขั้ว: คำแนะนำ "ไปหาไฟล์สำรอง" กับไฟล์ที่ยังดีอยู่
+/// คือการชวนให้ผู้ใช้ทิ้งงานรุ่นล่าสุดของตัวเองทิ้ง
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OpenFailure {
+    /// ไฟล์มาจาก RefX รุ่นใหม่กว่า — **ไฟล์ไม่ได้เสีย**
+    NewerVersion,
+    /// เนื้อในเสียหาย · `backup` = ชื่อไฟล์สำรองที่ **มีอยู่จริง** ข้าง ๆ (ถ้ามี)
+    Damaged {
+        /// ★ `None` แปลว่าไม่มีให้ลอง — ห้ามแนะนำไฟล์ที่ไม่มีอยู่
+        backup: Option<String>,
+    },
+    /// ไบต์ชุดนี้ไม่ใช่ `.refx` เลย — ผู้ใช้เลือกไฟล์ผิด
+    NotABoard,
+    /// เปิดไฟล์จากดิสก์ไม่ได้ — ยังไม่ได้อ่านเนื้อในเลยสักไบต์
+    Unreadable,
+}
+
+/// [`OpenError`](refx_io::dto::OpenError) ตัวไหน แปลว่าผู้ใช้ต้องทำอะไร
+///
+/// ★★ `match` ตัวนี้ **ไม่มี `_ =>` โดยตั้งใจ** — วันที่มีคนเพิ่ม variant ใหม่
+/// ให้ `OpenError` คอมไพเลอร์จะบังคับให้มาตัดสินตรงนี้ว่ามันเป็นเรื่องของ
+/// "ไฟล์เสีย" หรือ "รุ่นใหม่กว่า" แทนที่จะเงียบ ๆ ตกไปอยู่กองใดกองหนึ่ง
+fn classify_open_error(err: &refx_io::dto::OpenError, doc: &std::path::Path) -> OpenFailure {
+    use refx_io::dto::OpenError;
+    match err {
+        OpenError::NewerVersion { .. } => OpenFailure::NewerVersion,
+        // ★ ไม่ใช่ `.refx` เลย ≠ `.refx` ที่เสีย — คนละคำแนะนำอีกอันหนึ่ง
+        //   (เลือกไฟล์อื่น vs ไปเอาไฟล์สำรองของไฟล์นี้)
+        OpenError::TooShort { .. } | OpenError::NotRefx => OpenFailure::NotABoard,
+        OpenError::Truncated { .. }
+        | OpenError::Corrupt
+        | OpenError::TooLarge { .. }
+        | OpenError::Malformed => OpenFailure::Damaged {
+            backup: existing_backup_name(doc),
+        },
+    }
+}
+
+/// ข้อความที่ผู้ใช้เห็นสำหรับแต่ละเหตุ
+///
+/// ★ แยกเป็นฟังก์ชันบริสุทธิ์เพื่อ **เทสต์ได้โดยไม่ต้องมีหน้าต่าง** — ข้อความที่
+/// รวมสองสถานการณ์เข้าด้วยกันเป็นบั๊กที่ไม่มี unit test ไหนจับได้ถ้าตรรกะ
+/// ฝังอยู่ใน `match` ของ `poll_open` (รูปแบบเดียวกับคีย์ลัดทุกตัวในไฟล์นี้)
+fn open_failure_text(lang: Lang, failure: &OpenFailure) -> String {
+    match failure {
+        OpenFailure::NewerVersion => text::t(lang, Key::OpenFailedNewer).to_owned(),
+        OpenFailure::Damaged { backup: Some(name) } => text::fill(
+            lang,
+            Template::OpenFailedDamagedBackup,
+            &[("backup", name.as_str())],
+        ),
+        OpenFailure::Damaged { backup: None } => text::t(lang, Key::OpenFailedDamaged).to_owned(),
+        OpenFailure::NotABoard => text::t(lang, Key::OpenFailedNotABoard).to_owned(),
+        OpenFailure::Unreadable => text::t(lang, Key::OpenFailedUnreadable).to_owned(),
+    }
+}
+
+/// ชื่อไฟล์สำรองของเอกสารนี้ — `None` เมื่อมันไม่มีอยู่จริงบนดิสก์
+///
+/// ★★ **ต้องถามดิสก์จริง ไม่ใช่ประกอบชื่อแล้วเชื่อ** — `.refx.bak` เกิดตอน
+/// บันทึกทับครั้งที่สองเป็นต้นไป (`save_atomic`) เอกสารที่เพิ่งบันทึกครั้งแรก
+/// จึงยังไม่มี · ชี้ผู้ใช้ที่กำลังกลัวว่างานหายไปหาไฟล์ที่ไม่มีอยู่ = ทำให้เขา
+/// เสียเวลาแล้วเชื่อโปรแกรมน้อยลงพอดีตอนที่เขาต้องการมันที่สุด
+///
+/// ★ **รันบนเธรดอ่านไฟล์เท่านั้น** (I-2) — ผู้เรียกอยู่ในเธรดนั้นอยู่แล้ว
+fn existing_backup_name(doc: &std::path::Path) -> Option<String> {
+    let backup = refx_io::save::backup_path(doc);
+    backup.is_file().then(|| file_label_of(&backup))
+}
+
 /// อ่านไฟล์ `.refx` ทั้งไฟล์แล้วแปลงเป็น `Board` — **รันบนเธรดอื่นเท่านั้น** (I-2)
 ///
 /// ★ `std::fs::read` ถูกแบนใน `clippy.toml` เพราะเส้นทางจริงต้องมีเพดานขนาด —
 /// ที่นี่ใช้ `File::take` ด้วยเพดานเดียวกับตัวอ่านเอกสารตัวอื่นทุกตัว
-fn read_document(path: &std::path::Path, id: refx_core::arena::BoardId) -> Result<Board, String> {
+///
+/// ★★ รายละเอียดเชิงเทคนิคลง **log เป็นอังกฤษ** ที่นี่ (ผู้ใช้ส่ง log มาให้เรา
+/// อ่านได้) ส่วนสิ่งที่คืนออกไปคือ *ผู้ใช้ต้องทำอะไรต่อ* — แยกบทบาทตาม
+/// `docs/03 §0` เหมือน `LoadError`/`JobFailure`
+fn read_document(
+    path: &std::path::Path,
+    id: refx_core::arena::BoardId,
+) -> Result<Board, OpenFailure> {
     use std::io::Read as _;
 
     let mut bytes = Vec::new();
-    let mut file = std::fs::File::open(path).map_err(|err| err.to_string())?;
+    let mut file = std::fs::File::open(path).map_err(|err| {
+        tracing::error!(%err, path = %path.display(), "cannot open the document file");
+        OpenFailure::Unreadable
+    })?;
     file.by_ref()
         .take(refx_io::dto::MAX_COMPRESSED_BYTES + refx_io::dto::HEADER_LEN as u64)
         .read_to_end(&mut bytes)
-        .map_err(|err| err.to_string())?;
-    refx_io::dto::decode(&bytes, id).map_err(|err| err.to_string())
+        .map_err(|err| {
+            tracing::error!(%err, path = %path.display(), "cannot read the document file");
+            OpenFailure::Unreadable
+        })?;
+    refx_io::dto::decode(&bytes, id).map_err(|err| {
+        tracing::error!(%err, path = %path.display(), "cannot decode the document");
+        classify_open_error(&err, path)
+    })
 }
 
 /// ★★★ snapshot ของเอกสารนี้ที่ **ยังไม่เคยไปถึงไฟล์** — `None` = ไม่มีอะไรให้ถาม
@@ -4941,8 +5040,15 @@ impl RefxApp {
         let done = match rx.try_recv() {
             Ok(result) => result,
             Err(crossbeam_channel::TryRecvError::Empty) => return,
+            // ★ เธรดตายก่อนตอบ — **ไม่ใช่เรื่องของตัวไฟล์** จึงห้ามยืมข้อความ
+            //   ของ `OpenFailure` มาใช้ · การบอกว่า "ไฟล์อาจถูกย้าย" ตอนที่ไฟล์
+            //   ยังอยู่ครบ จะส่งผู้ใช้ไปไล่หาปัญหาที่ไม่มีอยู่
             Err(crossbeam_channel::TryRecvError::Disconnected) => {
-                Err("open thread died".to_owned())
+                self.load_job = None;
+                tracing::error!("the open thread died before answering");
+                self.shell.status = text::t(lang, Key::OpenFailed).to_owned();
+                self.shell.status_warn = true;
+                return;
             }
         };
         self.load_job = None;
@@ -4969,9 +5075,11 @@ impl RefxApp {
                 self.offer_pending_snapshot(pending);
                 self.offer_kept_snapshot();
             }
-            Err(err) => {
-                tracing::error!(%err, "cannot open the document");
-                self.shell.status = text::t(lang, Key::OpenFailed).to_owned();
+            // ★★★ **เหตุผลที่เปิดไม่ได้ ถึงหน้าจอแยกกัน** (docs/07 §1) — ตัวอ่าน
+            //     แยกได้อยู่แล้ว ชั้นนี้เคยรวมกลับเป็นข้อความเดียว
+            //     (รายละเอียดเชิงเทคนิคลง log ไปแล้วที่ `read_document`)
+            Err(failure) => {
+                self.shell.status = open_failure_text(lang, &failure);
                 self.shell.status_warn = true;
             }
         }
@@ -10116,6 +10224,123 @@ mod tests {
         );
         assert_eq!(back.tags().name(TagId(2)), Some("light"), "ชื่อแท็ก");
         let _ = id;
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ★★★ **"ไฟล์เสียหาย" กับ "มาจากรุ่นใหม่กว่า" ต้องไม่ใช้ข้อความเดียวกัน**
+    ///
+    /// `docs/07 §1` บอกว่า `doc_crc` มีอยู่เพื่อแยกสองกรณีนี้ให้ขาด และตัวอ่าน
+    /// แยกได้จริงมาตั้งแต่ P4-1 (`OpenError::Corrupt` vs `NewerVersion`)
+    /// — แต่ชั้น UI รวมกลับเป็น *"ไฟล์อาจเสียหาย หรือมาจากรุ่นใหม่กว่า"*
+    ///
+    /// สองสถานการณ์นี้ผู้ใช้ต้องทำ **คนละอย่าง**: อันหนึ่งไปเอา `.refx.bak`
+    /// (ยอมเสียงานรอบล่าสุด) อีกอันอัปเดตโปรแกรมแล้วเปิดไฟล์เดิมได้ครบ
+    /// — คำแนะนำ "ไปเอาไฟล์สำรอง" กับไฟล์ที่ยังดีอยู่ คือการชวนให้เขาทิ้งงานตัวเอง
+    ///
+    /// ★ เดินผ่าน [`read_document`] **ตัวที่ `Ctrl+O` ใช้จริง** และไฟล์ที่ยิงเข้าไป
+    /// ถูกเขียนด้วย `save_atomic` ตัวจริง แล้วค่อยทำให้เสียทีละอย่าง
+    /// (`docs/08 §3.9` ข้อ 1b: ถูกต้องทุกอย่างยกเว้นสิ่งที่กำลังทดสอบ)
+    #[test]
+    fn a_damaged_board_and_a_newer_one_never_give_the_same_advice() {
+        let dir = temp_dir_named("open-failure");
+        let board = refx_core::board::Board::new(probe_board_id(), "open failure");
+
+        // ---- เขียนไฟล์จริงสองใบ: ใบที่มี `.bak` ข้าง ๆ และใบที่ยังไม่มี ----
+        let with_backup = dir.join("with-backup.refx");
+        // ★ บันทึกสองรอบ — รอบที่สองคือรอบที่ `save_atomic` สร้าง `.bak` ของรอบแรก
+        for _ in 0..2 {
+            refx_io::save::save_atomic(&with_backup, &board, refx_platform::fsops::rename_durable)
+                .unwrap();
+        }
+        assert!(
+            refx_io::save::backup_path(&with_backup).is_file(),
+            "เตรียมเทสต์ผิด: ต้องมี .bak อยู่จริงถึงจะทดสอบคำแนะนำนี้ได้"
+        );
+
+        let no_backup = dir.join("no-backup.refx");
+        refx_io::save::save_atomic(&no_backup, &board, refx_platform::fsops::rename_durable)
+            .unwrap();
+        assert!(!refx_io::save::backup_path(&no_backup).is_file());
+
+        // `std::fs::read` ถูกแบนใน `clippy.toml` (ไม่มีเพดานขนาด) — เทสต์ก็ไม่ยกเว้น
+        let read_all = |path: &std::path::Path| {
+            use std::io::Read as _;
+            let mut bytes = Vec::new();
+            std::fs::File::open(path)
+                .unwrap()
+                .read_to_end(&mut bytes)
+                .unwrap();
+            bytes
+        };
+        let good = read_all(&with_backup);
+        // sanity: ไฟล์ที่ยังไม่ถูกแตะต้องเปิดได้ ไม่งั้นเทสต์นี้ไม่ได้ทดสอบอะไร
+        read_document(&with_backup, probe_board_id()).expect("ไฟล์ดี ๆ เปิดไม่ได้");
+
+        // ---- (ก) เสียหาย: พลิกไบต์ใน document เอง → `doc_crc` ไม่ตรง ----
+        let damage = |path: &std::path::Path| {
+            let mut bytes = read_all(path);
+            let last = bytes.len() - 1;
+            bytes[last] ^= 0xFF;
+            std::fs::write(path, &bytes).unwrap();
+        };
+        damage(&with_backup);
+        damage(&no_backup);
+
+        // ---- (ข) รุ่นใหม่กว่า: แก้ **เฉพาะ** เลขเวอร์ชัน — เนื้อและ crc ยังถูกครบ ----
+        let newer = dir.join("newer.refx");
+        let mut bytes = good.clone();
+        bytes[4..6].copy_from_slice(&9u16.to_le_bytes());
+        std::fs::write(&newer, &bytes).unwrap();
+
+        // ---- (ค) ไม่ใช่ไฟล์ของเราเลย · (ง) ไม่มีไฟล์ ----
+        let stranger = dir.join("photo.jpg");
+        std::fs::write(&stranger, b"\xFF\xD8\xFF\xE0 this is a jpeg, not a board").unwrap();
+        let gone = dir.join("never-existed.refx");
+
+        let fail =
+            |path: &std::path::Path| read_document(path, probe_board_id()).expect_err("ควรเปิดไม่ได้");
+        assert_eq!(
+            fail(&with_backup),
+            OpenFailure::Damaged {
+                backup: Some("with-backup.refx.bak".to_owned())
+            }
+        );
+        assert_eq!(
+            fail(&no_backup),
+            OpenFailure::Damaged { backup: None },
+            "ไม่มี .bak อยู่จริง — ห้ามชี้ผู้ใช้ไปหาไฟล์ที่ไม่มี"
+        );
+        assert_eq!(fail(&newer), OpenFailure::NewerVersion);
+        assert_eq!(fail(&stranger), OpenFailure::NotABoard);
+        assert_eq!(fail(&gone), OpenFailure::Unreadable);
+
+        // ---- ★★★ ข้อความบนจอต้องต่างกันจริง **ทั้งสองภาษา** ----
+        for lang in [Lang::En, Lang::Th] {
+            let damaged = open_failure_text(
+                lang,
+                &OpenFailure::Damaged {
+                    backup: Some("with-backup.refx.bak".to_owned()),
+                },
+            );
+            let newer_text = open_failure_text(lang, &OpenFailure::NewerVersion);
+            assert_ne!(
+                damaged, newer_text,
+                "{lang:?}: สองสถานการณ์นี้ยังใช้ข้อความเดียวกันอยู่"
+            );
+            assert!(
+                damaged.contains("with-backup.refx.bak"),
+                "{lang:?}: ข้อความไฟล์เสียต้องบอกชื่อไฟล์สำรองที่มีอยู่จริง — {damaged}"
+            );
+            assert!(
+                !newer_text.contains(".bak"),
+                "{lang:?}: ไฟล์จากรุ่นใหม่กว่ายังดีอยู่ ห้ามชวนให้ไปเอาไฟล์สำรองแทน — {newer_text}"
+            );
+            assert!(
+                !open_failure_text(lang, &OpenFailure::Damaged { backup: None }).contains(".bak"),
+                "{lang:?}: ไม่มีไฟล์สำรอง แต่ยังพูดถึงมัน"
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }

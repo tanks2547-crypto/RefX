@@ -274,8 +274,16 @@ pub enum Key {
     RecoverKeptSaved,
     /// เก็บไว้ไม่สำเร็จ — ต้องบอก เพราะของเดิมกำลังจะถูกเขียนทับ
     RecoverKeepFailed,
-    /// เปิดไฟล์ไม่สำเร็จ
+    /// เปิดไฟล์ไม่สำเร็จด้วยเหตุที่ไม่ได้มาจากตัวไฟล์ (เธรด/ช่องทางล้ม)
     OpenFailed,
+    /// ★★★ ไฟล์มาจาก RefX **รุ่นใหม่กว่า** — ไฟล์ไม่ได้เสีย ทางออกคืออัปเดตโปรแกรม
+    OpenFailedNewer,
+    /// ★★★ ไฟล์ **เสียหาย** และไม่มีไฟล์สำรองข้าง ๆ ให้ลอง
+    OpenFailedDamaged,
+    /// ไฟล์ที่เลือกไม่ใช่ board ของ RefX เลย — ทางออกคือเลือกไฟล์อื่น
+    OpenFailedNotABoard,
+    /// เปิดไฟล์จากดิสก์ไม่ได้ (ถูกย้าย/ลบ/ไม่มีสิทธิ์) — ยังไม่ได้อ่านเนื้อในเลย
+    OpenFailedUnreadable,
     /// กำลังเปิดไฟล์ที่ผู้ใช้เลือก
     OpenInProgress,
     /// กำลังรอผู้ใช้เลือกไฟล์ที่จะเปิด
@@ -441,8 +449,19 @@ fn en(key: Key) -> &'static str {
         Key::RecoveredIntoDocument => {
             "Brought the unsaved changes back - press Ctrl+S to write them to the file"
         }
-        Key::OpenFailed => {
-            "Could not open that board - the file may be damaged or from a newer RefX"
+        Key::OpenFailed => "Could not open that board - please try again",
+        Key::OpenFailedNewer => {
+            "This board was made by a newer RefX - update RefX to open it. \
+             The file itself is fine, so do not overwrite it with this version."
+        }
+        Key::OpenFailedDamaged => {
+            "This board file is damaged - part of it could not be read. \
+             There is no backup copy next to it, so try an older copy if you have one."
+        }
+        Key::OpenFailedNotABoard => "That file is not a RefX board - choose a .refx file instead",
+        Key::OpenFailedUnreadable => {
+            "Could not read that file - it may have been moved, renamed, \
+             or be on a drive that is no longer connected"
         }
         Key::OpenInProgress => "Opening",
         Key::OpenChoosing => "Choose a board to open",
@@ -588,7 +607,17 @@ fn th(key: Key) -> Option<&'static str> {
             "ตอนนี้ยังไม่มีอะไรถูกลบ — แต่ถ้าแก้กระดานนี้ต่อ งานชุดนั้นจะถูกเขียนทับภายในไม่กี่วินาที ตัดสินใจก่อนทำงานต่อ"
         }
         Key::RecoveredIntoDocument => "เอาการแก้ที่ค้างอยู่กลับมาแล้ว — กด Ctrl+S เพื่อเขียนลงไฟล์",
-        Key::OpenFailed => "เปิดกระดานไม่ได้ — ไฟล์อาจเสียหาย หรือถูกเขียนด้วย RefX รุ่นใหม่กว่า",
+        Key::OpenFailed => "เปิดกระดานไม่ได้ — ลองใหม่อีกครั้ง",
+        Key::OpenFailedNewer => {
+            "ไฟล์นี้ถูกเขียนด้วย RefX รุ่นใหม่กว่า — อัปเดตโปรแกรมก่อนจึงจะเปิดได้ \
+             ตัวไฟล์ไม่ได้เสียหาย อย่าบันทึกทับด้วยรุ่นนี้"
+        }
+        Key::OpenFailedDamaged => {
+            "ไฟล์กระดานนี้เสียหาย — อ่านเนื้อในบางส่วนไม่ได้ \
+             ไม่มีไฟล์สำรองอยู่ข้าง ๆ ถ้ามีสำเนาเก่ากว่านี้ให้ลองเปิดอันนั้น"
+        }
+        Key::OpenFailedNotABoard => "ไฟล์ที่เลือกไม่ใช่กระดานของ RefX — เลือกไฟล์ `.refx` แทน",
+        Key::OpenFailedUnreadable => "อ่านไฟล์นี้ไม่ได้ — อาจถูกย้าย ถูกเปลี่ยนชื่อ หรืออยู่ในไดรฟ์ที่ไม่ได้ต่ออยู่แล้ว",
         Key::OpenInProgress => "กำลังเปิด",
         Key::OpenChoosing => "เลือกกระดานที่จะเปิด",
         Key::UnsavedHint => "ยังไม่ได้บันทึกลงไฟล์ — กด Ctrl+S เพื่อเก็บงานนี้ไว้",
@@ -742,6 +771,12 @@ pub enum Template {
     RelinkUnpacked,
     /// `{inside}` `{images}` — กี่ใบที่อยู่ในไฟล์งานแล้ว (ตัวบ่งชี้โหมด)
     StorageInside,
+    /// ★★★ `{backup}` — ไฟล์เสียหาย **และมีไฟล์สำรองอยู่จริง** ให้ลอง
+    ///
+    /// ★ ผู้เรียกต้องยืนยันว่าไฟล์นั้น**มีอยู่จริง**ก่อนใช้เทมเพลตนี้ — การชี้ไป
+    /// ไฟล์ที่ไม่มีอยู่คือการส่งผู้ใช้ที่กำลังกลัวว่างานหายไปหาของที่ไม่มี
+    /// (`CLAUDE.md`: "สิ่งที่เกิดขึ้น + สิ่งที่ทำได้ต่อ" — ต้องทำได้จริง)
+    OpenFailedDamagedBackup,
 }
 
 /// เทมเพลตภาษาอังกฤษ — ต้องมีครบทุกตัว
@@ -834,6 +869,9 @@ Drag in a PNG, JPEG, WebP, GIF, BMP, TGA or TIFF instead."
         }
         Template::RelinkUnpacked => "Loaded {n} images stored inside this board file",
         Template::StorageInside => "{inside} of {images} images are inside the board file",
+        Template::OpenFailedDamagedBackup => {
+            "This board file is damaged - part of it could not be read. Try the backup copy {backup} in the same folder."
+        }
         Template::ErrClipboardEmpty => {
             "There is no image in the clipboard\n\
              Copy an image or an image file first, or drag the file into the window."
@@ -946,6 +984,9 @@ fn template_th(template: Template) -> Option<&'static str> {
         }
         Template::RelinkUnpacked => "ใช้ภาพ {n} ใบที่เก็บอยู่ในไฟล์กระดานนี้",
         Template::StorageInside => "ภาพอยู่ในไฟล์กระดานแล้ว {inside} จาก {images} ใบ",
+        Template::OpenFailedDamagedBackup => {
+            "ไฟล์กระดานนี้เสียหาย — อ่านเนื้อในบางส่วนไม่ได้ ลองไฟล์สำรอง {backup} ที่อยู่ในโฟลเดอร์เดียวกัน"
+        }
         Template::ErrClipboardEmpty => {
             "ใน clipboard ไม่มีภาพ\n\
              ลองก๊อปภาพหรือไฟล์ภาพมาก่อน หรือลากไฟล์เข้ามาในหน้าต่างก็ได้เหมือนกัน"
@@ -1214,6 +1255,10 @@ mod tests {
         Key::RecoverKeptSaved,
         Key::RecoverKeepFailed,
         Key::OpenFailed,
+        Key::OpenFailedNewer,
+        Key::OpenFailedDamaged,
+        Key::OpenFailedNotABoard,
+        Key::OpenFailedUnreadable,
         Key::OpenInProgress,
         Key::OpenChoosing,
         Key::UnsavedHint,
@@ -1286,6 +1331,7 @@ mod tests {
         Template::RelinkMissing,
         Template::RelinkUnpacked,
         Template::StorageInside,
+        Template::OpenFailedDamagedBackup,
     ];
 
     /// ★ กฎข้อ 2 ของ docs/03 §0: ห้ามมีทางที่ผู้ใช้จะเห็นช่องว่างหรือชื่อ key
