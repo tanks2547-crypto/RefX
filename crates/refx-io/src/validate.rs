@@ -93,35 +93,44 @@ pub fn validate_asset_path(candidate: &Path) -> Result<(), SecError> {
         return Err(SecError::Unc);
     }
 
+    // ★★★ แยก segment **เอง** ด้วยตัวคั่นทั้งสองแบบ — ห้ามใช้ `components()`
+    //
+    //   `components()` ยอมรับ `\` เป็นตัวคั่นเฉพาะตอนคอมไพล์บน Windows · บน Linux
+    //   `C:\refs\NUL` เป็นชื่อไฟล์ **ก้อนเดียว** แล้วด่านทั้งสองข้อข้างล่างมองไม่เห็น
+    //   อะไรเลย · เหตุผลเดียวกับกิ่ง raw ข้างบนเป๊ะ แต่รอบแรกทำครึ่งเดียว →
+    //   `a_path_that_names_a_device_is_refused` **แดงจริงบน ubuntu** (run 33381377345)
+    //   ทั้งที่เขียวบน Windows
+    // ★ ลำดับเดิม: `..` ทั้ง path ก่อน แล้วค่อยชื่อสงวน — path ที่ผิดสองข้อพร้อมกัน
+    //   จึงตอบ `Traversal` เหมือนเดิม (เทสต์ผูกกับคำตอบที่เจาะจง ไม่ใช่แค่ "ถูกปฏิเสธ")
+    //   · ไม่เก็บลง `Vec` เพราะด่านนี้ถูกเรียกต่อ **ทุกภาพทุกครั้งที่เปิดเอกสาร**
+    if raw.split(['/', '\\']).any(|part| part == "..") {
+        return Err(SecError::Traversal);
+    }
+    if raw.split(['/', '\\']).any(names_a_device) {
+        return Err(SecError::Device);
+    }
+
+    // ★ ตาข่ายชั้นที่สองสำหรับ Windows ที่ `components()` แยก prefix ให้แล้ว
     for component in candidate.components() {
-        match component {
-            Component::ParentDir => return Err(SecError::Traversal),
-            // ★ ตาข่ายชั้นที่สองสำหรับ Windows ที่ `components()` แยก prefix ให้แล้ว
-            Component::Prefix(prefix) => match prefix.kind() {
+        if let Component::Prefix(prefix) = component {
+            match prefix.kind() {
                 Prefix::UNC(..) | Prefix::VerbatimUNC(..) => return Err(SecError::Unc),
                 Prefix::DeviceNS(..) | Prefix::Verbatim(..) | Prefix::VerbatimDisk(_) => {
                     return Err(SecError::Device);
                 }
                 Prefix::Disk(_) => {}
-            },
-            _ => {}
-        }
-    }
-
-    for component in candidate.components() {
-        if let Component::Normal(name) = component {
-            let text = name.to_string_lossy();
-            // `nul.png` ยังเป็น `NUL` — ตัดที่จุดแรกแล้วเทียบ
-            let stem = text.split('.').next().unwrap_or("");
-            if RESERVED
-                .iter()
-                .any(|reserved| stem.eq_ignore_ascii_case(reserved))
-            {
-                return Err(SecError::Device);
             }
         }
     }
     Ok(())
+}
+
+/// segment นี้เป็นชื่ออุปกรณ์สงวนหรือไม่ — `nul.png` ยังเป็น `NUL`
+fn names_a_device(part: &str) -> bool {
+    let stem = part.split('.').next().unwrap_or("");
+    RESERVED
+        .iter()
+        .any(|reserved| stem.eq_ignore_ascii_case(reserved))
 }
 
 #[cfg(test)]
@@ -163,6 +172,38 @@ mod tests {
                 Err(SecError::Device),
                 "{evil} ควรถูกปฏิเสธ"
             );
+        }
+    }
+
+    /// ★★★ **คำตอบของด่านต้องไม่ขึ้นกับแพลตฟอร์มที่คอมไพล์**
+    ///
+    /// `.refx` เดินทางข้าม OS ได้โดยตั้งใจ (นั่นคือเหตุผลที่ packed mode มีอยู่)
+    /// path ในไฟล์จึงเป็น path ของ Windows ได้เสมอแม้เปิดบน Linux
+    ///
+    /// รอบแรกด่านนี้ตรวจ `..`/ชื่อสงวนด้วย `Path::components()` ซึ่งยอมรับ `\`
+    /// เป็นตัวคั่น **เฉพาะตอนคอมไพล์บน Windows** → บน Linux ทั้ง `C:\refs\NUL`
+    /// และ `C:\refs\..\..\Windows\win.ini` เป็นชื่อไฟล์ก้อนเดียวที่ผ่านด่านฉลุย
+    /// · เขียวบนเครื่องพัฒนา **แดงจริงบน ubuntu** (CI run `33381377345`)
+    ///
+    /// ★ เทสต์นี้ไม่ได้ `cfg` แยกแพลตฟอร์มโดยตั้งใจ — มันจะมีความหมายก็ต่อเมื่อ
+    /// รันเหมือนกันทั้งสองฝั่ง
+    #[test]
+    fn a_windows_path_is_judged_the_same_on_every_platform() {
+        for (evil, expected) in [
+            (r"C:\refs\NUL", SecError::Device),
+            (r"C:\refs\nul.png", SecError::Device),
+            (r"C:\refs\..\..\Windows\win.ini", SecError::Traversal),
+            (r"..\..\Windows\System32\config\SAM", SecError::Traversal),
+        ] {
+            assert_eq!(
+                validate_asset_path(Path::new(evil)),
+                Err(expected),
+                "{evil} ต้องได้คำตอบเดียวกันทุกแพลตฟอร์ม — `\\` เป็นตัวคั่นเสมอ"
+            );
+        }
+        // negative control: ตัวคั่นทั้งสองแบบต้องไม่ทำให้ path ปกติถูกปฏิเสธ
+        for ok in [r"C:\refs\CONCEPT\hero.png", "/home/a/refs/COM10.png"] {
+            assert_eq!(validate_asset_path(Path::new(ok)), Ok(()), "{ok}");
         }
     }
 
