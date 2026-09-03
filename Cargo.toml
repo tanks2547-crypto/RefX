@@ -101,6 +101,11 @@ postcard  = { version = "1", features = ["use-std"] }
 zstd      = "0.13"
 serde     = { version = "1", features = ["derive"] }
 crc32fast = "1"
+# ★ P5-3: อ่าน settings.toml / keymap.toml — เหตุผลที่เลือกตัวนี้แทน `toml 0.8`
+#   อยู่ใน docs/09 (dep เดียวคือ serde ที่มีอยู่แล้ว · `toml 0.8` ลากมาอีกสี่ตัว
+#   เพื่อความสามารถที่เราไม่ใช้) · และ **ไม่เขียน parser เอง** เพราะไฟล์ config
+#   คือ input ที่ไม่น่าไว้ใจตาม I-4 เหมือนกับที่เราไม่เขียน JPEG decoder เอง
+basic-toml = "0.1"
 
 # --- concurrency (ไม่มี tokio - ADR-004) --------------------------------
 crossbeam-channel = "0.5"

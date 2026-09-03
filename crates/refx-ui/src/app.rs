@@ -1121,9 +1121,18 @@ struct DeviceBound {
 
 impl DeviceBound {
     /// สร้าง resource ที่ผูกกับ device ปัจจุบันทั้งชุด
-    fn build(render: &RenderContext) -> Result<Self, refx_render::texture::VramError> {
+    ///
+    /// `vram_limit` = ค่าที่ผู้ใช้ตั้งใน `settings.toml` · `None` = เลือกตาม
+    /// ชนิดการ์ดจอเหมือนเดิม (`docs/05 §2` — iGPU ได้น้อยกว่าเพราะแชร์ RAM ระบบ)
+    fn build(
+        render: &RenderContext,
+        vram_limit: Option<usize>,
+    ) -> Result<Self, refx_render::texture::VramError> {
         // ★ ทางเดียวที่สร้าง texture ได้ (I-6) — atlas ต้องขอผ่านตัวนี้
-        let textures = TextureAllocator::new(render.capabilities());
+        let textures = vram_limit.map_or_else(
+            || TextureAllocator::new(render.capabilities()),
+            TextureAllocator::with_limit,
+        );
         // atlas ขอได้ไม่เกินครึ่งงบ VRAM — อีกครึ่งเผื่อ working texture (P1-7)
         // ★ ตัวเลขนี้เป็น **เพดาน** ไม่ใช่การจองจริง — atlas จองทีละ layer
         //   ตอนมีภาพเข้ามาจริง เปิดโปรแกรมเปล่าจึงกิน VRAM ≈ 0 (docs/05 §2)
@@ -1708,8 +1717,13 @@ impl CanvasRect {
 
 /// แอปหลักของ RefX
 ///
-/// `Default` = ยังไม่มีหน้าต่าง (winit 0.30 บังคับให้สร้างหน้าต่างใน `resumed()`)
-#[derive(Default)]
+/// ★ **ไม่มี `Default`** (ถอดออก P5-3) — สร้างด้วย [`RefxApp::new`] เท่านั้น
+///
+/// เดิมมี `#[derive(Default)]` ที่ **ไม่มีใครเรียกเลยสักที่** · พอ P5-3 เพิ่ม
+/// [`refx_io::settings::Caps`] เข้ามา การรักษามันไว้จะบังคับให้ `Caps` ต้องมี
+/// ค่าปริยาย ซึ่งแปลว่าต้องแต่ง "เครื่องสมมติ" ขึ้นมาหนึ่งเครื่อง — แล้ววันหนึ่ง
+/// จะมีโค้ดเส้นทางไหนตกไปใช้เพดานของเครื่องที่ไม่มีอยู่จริงโดยไม่มีอะไรบ่น
+/// ซึ่งเป็นสิ่งที่ `HANDOFF §4` ข้อ 3 กันไว้พอดี
 pub struct RefxApp {
     gfx: Option<Gfx>,
     args: AppArgs,
@@ -1886,6 +1900,67 @@ pub struct RefxApp {
     /// working texture ต้อง decode ใหม่จากไฟล์จริง จึงต้องจำที่มาไว้จับคู่
     job_sources:
         std::collections::HashMap<refx_asset::hash::ContentHash, refx_asset::pool::JobSource>,
+
+    /// ★★★ ค่าที่ผู้ใช้ตั้งไว้ (P5-3) — **มีค่าที่ใช้ได้เสมอ** แม้ไฟล์จะพัง
+    settings: refx_io::settings::Settings,
+    /// ข้อจำกัดของเครื่องนี้ที่ใช้ตรวจค่าของผู้ใช้ — คำนวณครั้งเดียวตอนเปิดโปรแกรม
+    caps: refx_io::settings::Caps,
+    /// ★★ เรื่องที่ต้องบอกผู้ใช้เกี่ยวกับ `settings.toml` — ว่าง = ไม่มีอะไรผิดปกติ
+    ///
+    /// ★ ค้างอยู่จนกว่าจะได้ขึ้นจอ: การโหลดเกิด**ก่อนหน้าต่างมี** จึงเขียนลง
+    /// status bar ตอนนั้นไม่ได้ (ยังไม่มีใครวาด) ถ้าไม่เก็บไว้ ผู้ใช้ที่ตั้งค่าผิด
+    /// จะไม่มีวันรู้ว่าค่าของเขาไม่ถูกใช้ ซึ่งเป็นความเงียบที่ P5-3 ห้ามไว้ตรง ๆ
+    settings_notes: Vec<refx_io::settings::Note>,
+    /// ยังไม่ได้เอา [`Self::settings_notes`] ขึ้นจอ — เอาขึ้นเฟรมแรกที่วาดได้
+    settings_notes_pending: bool,
+    /// ★ มีค่าที่ผู้ใช้เปลี่ยนแล้วยังไม่มีผลจนกว่าจะเปิดโปรแกรมใหม่
+    ///
+    /// เพดาน RAM/VRAM/ขนาดภาพ และ present mode ถูกอ่าน **ตอนสร้าง** pool /
+    /// allocator / surface เท่านั้น · การเปลี่ยนกลางคันต้องรื้อ threading model
+    /// ซึ่ง `CLAUDE.md` บอกให้หยุดถามก่อน → บอกผู้ใช้ตรง ๆ แทน
+    settings_restart_pending: bool,
+    /// งานเขียน `settings.toml` ที่ส่งไปเธรดแล้ว รอผลกลับ (ไม่บล็อก I-2)
+    settings_write: Option<crossbeam_channel::Receiver<Result<(), String>>>,
+    /// โฟลเดอร์ config — `None` = หาที่อยู่ไม่ได้ (บันทึกค่าที่ตั้งไม่ได้ แต่ยังใช้ได้)
+    config_dir: Option<std::path::PathBuf>,
+}
+
+/// ที่อยู่ของ `settings.toml` ในโฟลเดอร์ config
+#[must_use]
+fn settings_path(config_dir: &std::path::Path) -> std::path::PathBuf {
+    config_dir.join("settings.toml")
+}
+
+/// ข้อจำกัดของเครื่องนี้ที่ `settings.toml` ต้องเคารพ
+///
+/// ★★★ `max_pixels_ceiling` **ต้องเป็นตัวเดียวกับที่ `decode` ใช้จริง**
+/// (`HANDOFF §4` ข้อ 3) — ถ้าแผง Settings บอกเพดานหนึ่งแต่ด่าน decode ใช้อีกเพดาน
+/// ผู้ใช้จะตั้งค่าที่ "ผ่าน" แล้วเจอภาพถูกปฏิเสธอยู่ดี โดยไม่มีอะไรอธิบาย
+/// เพดานที่ `decode` จะใช้จริง เมื่อรวมเครื่องเข้ากับสิ่งที่ผู้ใช้ตั้ง (P5-3)
+///
+/// ★★★ **ฟังก์ชันบริสุทธิ์ เพราะนี่คือรอยต่อที่ค่าจะเพี้ยนได้เงียบที่สุด**
+///
+/// ถ้าเขียนแทรกอยู่ใน `start_assets` มันจะทดสอบได้ก็ต่อเมื่อเปิด cache.sqlite ได้
+/// และ **ไม่มีเทสต์ไหนถามได้เลย** ว่า `max_pixels` ที่ผู้ใช้ตั้งไปถึงด่าน decode
+/// จริงไหม · ผลของการพลาดตรงนี้คือผู้ใช้ลดเพดานลงเพื่อกัน OOM แล้วมันไม่มีผล
+/// โดยไม่มีอะไรบอก ซึ่งคือรูปแบบ "ทุกชิ้นถูก ประกอบผิด" (`docs/08 §3.9` ข้อ 5)
+#[must_use]
+fn decode_limits(
+    caps: refx_io::settings::Caps,
+    settings: &refx_io::settings::Settings,
+) -> refx_asset::decode::Limits {
+    // ★ เริ่มจากเพดานของเครื่อง แล้วให้ค่าที่ผู้ใช้ตั้งทับ — ค่านั้นถูก clamp
+    //   กับเครื่องมาแล้วตั้งแต่ `settings::parse` จึงต่ำกว่าหรือเท่าเสมอ
+    refx_asset::decode::Limits::for_system(caps.total_ram).with_max_pixels(settings.max_pixels)
+}
+
+#[must_use]
+fn machine_caps() -> refx_io::settings::Caps {
+    let total_ram = refx_platform::memory::total_ram();
+    refx_io::settings::Caps {
+        total_ram,
+        max_pixels_ceiling: refx_asset::decode::max_pixels_for_ram(total_ram),
+    }
 }
 
 /// เขียนสรุปผลการตามหาไฟล์ลง status bar
@@ -2647,6 +2722,10 @@ impl RefxApp {
     pub fn new(args: AppArgs) -> Self {
         let lang = args.lang.unwrap_or_else(Lang::from_system);
         let mode = args.mode.unwrap_or_default();
+        // ★ เพดานของเครื่องคำนวณครั้งเดียวตรงนี้ แล้วใช้ทั้งตอนอ่าน settings
+        //   และตอนสร้าง pool — สองที่นี้ต้องเห็นเลขเดียวกัน ไม่งั้นค่าที่แผง
+        //   Settings บอกว่า "สูงสุดเท่านี้" จะไม่ใช่เพดานที่ decode ใช้จริง
+        let caps = machine_caps();
         Self {
             gfx: None,
             args,
@@ -2719,7 +2798,43 @@ impl RefxApp {
             batch_from_clipboard: false,
             loading: LoadTracker::default(),
             job_sources: std::collections::HashMap::new(),
+            // ★ ค่าปริยายจนกว่า `load_settings` จะถูกเรียก — แอปที่ไม่มี
+            //   config dir (เทสต์) จึงยังทำงานได้ครบด้วยค่าที่ปลอดภัย
+            settings: refx_io::settings::Settings::defaults(caps),
+            caps,
+            settings_notes: Vec::new(),
+            settings_notes_pending: false,
+            settings_restart_pending: false,
+            settings_write: None,
+            config_dir: None,
         }
+    }
+
+    /// อ่าน `settings.toml` — **เรียกก่อน `start_assets` และก่อนหน้าต่างจะมี**
+    ///
+    /// ★ แตะดิสก์ จึงเรียกได้เฉพาะตอนเปิดโปรแกรม ไม่ใช่จากในเฟรม (I-2)
+    ///
+    /// ★★ ไม่คืน `Result` โดยตั้งใจ — ไฟล์ที่พังต้องไม่มีทางหยุดการเปิดโปรแกรม
+    /// (ดู `refx_io::settings` หัวข้อแรก) สิ่งที่ผิดไปเป็น [`refx_io::settings::Note`]
+    /// ที่ถูกพาขึ้นจอในเฟรมแรกแทน
+    pub fn load_settings(&mut self, config_dir: &std::path::Path) {
+        let loaded = refx_io::settings::load(&settings_path(config_dir), self.caps);
+        tracing::info!(
+            ram_limit_mb = loaded.settings.ram_limit / (1 << 20),
+            vram_limit_mb = loaded.settings.vram_limit.map(|b| b / (1 << 20)),
+            max_pixels = loaded.settings.max_pixels,
+            theme = loaded.settings.theme.as_str(),
+            present = loaded.settings.present.as_str(),
+            notes = loaded.notes.len(),
+            "settings loaded"
+        );
+        for note in &loaded.notes {
+            tracing::warn!(?note, "settings.toml was not used exactly as written");
+        }
+        self.settings_notes_pending = !loaded.notes.is_empty();
+        self.settings = loaded.settings;
+        self.settings_notes = loaded.notes;
+        self.config_dir = Some(config_dir.to_path_buf());
     }
 
     /// ไฟล์ที่สั่งเปิดจากบรรทัดคำสั่ง — เข้าคิวเหมือนลากเข้ามาทุกประการ
@@ -2887,7 +3002,8 @@ impl RefxApp {
             .clone()
             .map(|dir| std::sync::Arc::new(SpoolSink { dir }) as _);
         let pool = DecodePool::with_defaults(
-            refx_platform::memory::total_ram(),
+            self.settings.ram_limit,
+            decode_limits(self.caps, &self.settings),
             std::sync::Arc::new(refx_platform::clipboard::SystemClipboard),
             io_tx.clone(),
             spool,
@@ -3570,23 +3686,21 @@ impl RefxApp {
     fn build_egui(
         window: &Arc<Window>,
         render: &RenderContext,
+        theme: refx_io::settings::Theme,
     ) -> (egui::Context, egui_winit::State, egui_wgpu::Renderer) {
         let egui_ctx = egui::Context::default();
+        // ★★ ธีมต้องตั้งที่นี่ **ที่เดียว** เพราะที่นี่คือจุดเดียวที่ `egui::Context`
+        //    ถูกสร้าง — ทั้งตอนเปิดโปรแกรมและตอนกู้ device (`HANDOFF §4` ข้อ 8
+        //    บังคับให้สร้าง Context ใหม่ทั้งก้อน) · ตั้งที่อื่นแล้วธีมจะเด้งกลับ
+        //    เป็นค่าปริยายทุกครั้งที่ไดรเวอร์สะดุด โดยไม่มีอะไรบอก
+        crate::theme::install(&egui_ctx, theme);
         // ★ ต้องทำก่อนวาดเฟรมแรก และต้องทำ **ทุกครั้งที่สร้าง Context ใหม่**
         //   ซึ่งรวมถึงตอนกู้ device (docs/04 §7 ข้อ 3) — ไม่งั้นตัวหนังสือไทย
         //   จะกลับไปเป็นสี่เหลี่ยมหลัง driver อัปเดต
         crate::fonts::install(&egui_ctx);
-        // ★★★ ปิดการกะพริบของเคอร์เซอร์ข้อความ — **เรื่องของ I-1 ไม่ใช่เรื่องรสนิยม**
-        //
-        //   egui ขอวาดใหม่ทุกครั้งที่เคอร์เซอร์กะพริบ วัดจากของจริงได้ **13 เฟรม/วินาที
-        //   ตลอดเวลาที่ช่องข้อความมี focus** — ผู้ใช้ที่พิมพ์คำค้นแล้วเดินไปชงกาแฟ
-        //   ทิ้งโปรแกรมไว้กินซีพียูทั้งบ่ายโดยที่ภาพบนจอนิ่งสนิท ซึ่งเป็นสิ่งเดียว
-        //   ที่ I-1 ห้ามไว้ (โปรแกรมนี้ถูกเปิดค้างทั้งวันข้าง Photoshop)
-        //
-        //   ★ กระทบทุกช่องข้อความ ไม่ใช่แค่ช่องค้นหาของ P3-4: โน้ตของ P2-11
-        //   และช่องแท็กของ P3-1 มีอาการเดียวกันมาตลอดโดยไม่มีใครวัด
-        //   · เคอร์เซอร์ที่ไม่กะพริบยังเห็นได้ชัด (วาดทึบตลอด) — แลกกันคุ้ม
-        egui_ctx.global_style_mut(|style| style.visuals.text_cursor.blink = false);
+        // ★ เคอร์เซอร์ข้อความที่ไม่กะพริบ (I-1 — เดิมอยู่ตรงนี้) ย้ายเข้าไปอยู่ใน
+        //   `theme::install` แล้ว เพราะ `set_visuals` เขียน `style` ทั้งก้อน
+        //   ถ้าปล่อยไว้ตรงนี้ธีมจะล้างมันทิ้งเงียบ ๆ แล้ว 13 fps จะกลับมา
         let egui_winit = egui_winit::State::new(
             egui_ctx.clone(),
             egui::ViewportId::ROOT,
@@ -3615,6 +3729,11 @@ impl RefxApp {
     /// ผลข้างเคียงคือสถานะชั่วคราวของ UI (ตำแหน่ง scroll ฯลฯ) รีเซ็ต
     /// ซึ่งยอมรับได้เพราะ device lost เป็นเหตุการณ์นาน ๆ ครั้ง และ "เสถียร" มาก่อน
     fn recover_device(&mut self) -> Option<RedrawReason> {
+        // ★ อ่านค่าที่ตั้งไว้ **ก่อน** ยืม `gfx` — และต้องอ่านทุกครั้ง ไม่ใช่จำ
+        //   ค่าตอนเปิดโปรแกรม: ธีม/เพดาน VRAM ที่ผู้ใช้เปลี่ยนไปแล้วต้องรอดข้าม
+        //   การกู้ device ไปด้วย ไม่งั้น driver อัปเดตทีเดียวแล้วค่าที่เขาตั้งหาย
+        let theme = self.settings.theme;
+        let vram_limit = self.settings.vram_limit;
         let gfx = self.gfx.as_mut()?;
 
         if let Err(err) = gfx.render.recover() {
@@ -3623,7 +3742,8 @@ impl RefxApp {
             return None;
         }
 
-        let (egui_ctx, egui_winit, egui_renderer) = Self::build_egui(&gfx.window, &gfx.render);
+        let (egui_ctx, egui_winit, egui_renderer) =
+            Self::build_egui(&gfx.window, &gfx.render, theme);
         gfx.egui_ctx = egui_ctx;
         gfx.egui_winit = egui_winit;
         gfx.egui_renderer = egui_renderer;
@@ -3648,7 +3768,7 @@ impl RefxApp {
             atlas,
             pipeline,
             working,
-        } = match DeviceBound::build(&gfx.render) {
+        } = match DeviceBound::build(&gfx.render, vram_limit) {
             Ok(bound) => bound,
             Err(err) => {
                 tracing::error!(%err, "cannot build the resources for the new device");
@@ -6835,12 +6955,20 @@ impl AppDelegate for RefxApp {
             RenderOptions {
                 force_device_lost_after: self.args.force_device_lost_after,
                 force_device_lost_after_ms: self.args.force_device_lost_after_ms,
-                // ปลด vsync เฉพาะตอน benchmark — ใช้งานปกติเป็น AutoVsync เสมอ
-                uncapped_present: self.args.bench_seconds.is_some(),
+                // ★ ปลด vsync ตอน benchmark **หรือ** ตอนผู้ใช้สั่งใน `settings.toml`
+                //   (P5-3) · ค่าปริยายยังเป็น AutoVsync เสมอตาม `docs/04 §8`
+                //
+                //   ★★ อยู่ใน `RenderOptions` ที่เดียว **ไม่ใช่ตัวแปรที่สองข้าง ๆ
+                //   `config.present_mode`** — `recover()` สร้าง surface ใหม่จาก
+                //   options ชุดนี้ ค่าที่เก็บไว้อีกที่จะหายทุกครั้งที่ driver สะดุด
+                //   (รูปแบบ "แหล่งความจริงที่สอง" ที่ `HANDOFF §4` ข้อ 29 ห้ามไว้)
+                uncapped_present: self.args.bench_seconds.is_some()
+                    || self.settings.present == refx_io::settings::Present::Uncapped,
             },
         )?;
 
-        let (egui_ctx, egui_winit, egui_renderer) = Self::build_egui(&window, &render);
+        let (egui_ctx, egui_winit, egui_renderer) =
+            Self::build_egui(&window, &render, self.settings.theme);
         // ★ destructure ไว้โดยตั้งใจ — เพิ่ม resource ใหม่ใน DeviceBound เมื่อไหร่
         //   ตรงนี้จะคอมไพล์ไม่ผ่าน พร้อมกับฝั่ง recover_device()
         let DeviceBound {
@@ -6848,7 +6976,7 @@ impl AppDelegate for RefxApp {
             atlas,
             pipeline,
             working,
-        } = DeviceBound::build(&render).map_err(|err| {
+        } = DeviceBound::build(&render, self.settings.vram_limit).map_err(|err| {
             tracing::error!(%err, "cannot create the atlas");
             DeviceError::NoSupportedFormat
         })?;
@@ -7058,6 +7186,14 @@ impl AppDelegate for RefxApp {
             pick_in_flight,
             pick_count,
             docs,
+            settings,
+            caps,
+            settings_notes,
+            settings_notes_pending,
+            settings_restart_pending,
+            settings_write,
+            config_dir,
+            waker,
             ..
         } = self;
         let gfx = gfx.as_mut()?;
@@ -7109,6 +7245,32 @@ impl AppDelegate for RefxApp {
         };
         // ★ ปุ่มบน toolbar เป็นภาพสะท้อนของ `gfx.tool` เท่านั้น — เจ้าของมีคนเดียว
         shell.tool = gfx.tool;
+        // ★★★ ค่าที่แผง Settings แสดง (P5-3) — เติมทุกเฟรมเหมือน `storage`
+        shell.settings = crate::shell::SettingsView {
+            ram_limit_mb: (settings.ram_limit >> 20) as u64,
+            vram_limit_mb: settings.vram_limit.map(|bytes| (bytes >> 20) as u64),
+            max_pixels: settings.max_pixels,
+            theme: settings.theme,
+            present: settings.present,
+            max_pixels_ceiling: caps.max_pixels_ceiling,
+            needs_restart: *settings_restart_pending,
+        };
+        // ★★ ปัญหาของ `settings.toml` **เปิดแผงขึ้นมาเอง** ครั้งเดียวตอนเปิดโปรแกรม
+        //
+        //   การอ่านไฟล์เกิดก่อนหน้าต่างจะมี จึงเขียนลงจอตอนนั้นไม่ได้ · และการ
+        //   เขียนลง status bar อย่างเดียวไม่พอ เพราะข้อความบนนั้นถูกทับได้ใน
+        //   ไม่กี่มิลลิวินาที (เกิดจริงสองครั้งแล้ว — §2.24, §2.30) ส่วนคนที่
+        //   ตั้งค่าผิดต้องได้เห็น **เหตุผล** ไม่ใช่แค่รู้ว่ามีอะไรผิด
+        //
+        //   ★ `pending` ทำให้มันเปิดเองครั้งเดียว — ผู้ใช้ปิดแผงแล้วต้องปิดได้จริง
+        //     (จุดสีส้มข้างปุ่ม ⚙ ยังอยู่ให้กลับมาดูได้เสมอ)
+        if *settings_notes_pending {
+            *settings_notes_pending = false;
+            shell.settings_notes = settings_notes.clone();
+            shell.settings_open = true;
+            shell.status = text::t(shell.lang, Key::SettingsProblemsStatus).to_owned();
+            shell.status_warn = true;
+        }
         // ★ inspector อ่านค่าจากภาพ **ตัวแรกในชุดที่เลือก** (anchor ของการเลือก)
         //   เลือกหลายใบแล้วปรับ = ทุกใบได้ค่าเดียวกัน ซึ่งตรงกับที่ผู้ใช้เห็นบนสไลเดอร์
         shell.appearance = doc
@@ -7311,6 +7473,99 @@ impl AppDelegate for RefxApp {
             // ไม่ใช่ "นี่คือผลการวัดของฉัน"
             doc.select_tool.clear_measurement();
             doc.rubber_band = None;
+        }
+
+        // ★★★ ผู้ใช้แตะแผง Settings (P5-3) — **คำขอ ไม่ใช่สถานะ** เหมือน `tool_request`
+        if shell.settings_notes_dismissed {
+            shell.settings_notes_dismissed = false;
+            shell.settings_notes.clear();
+            settings_notes.clear();
+        }
+        if let Some(edit) = shell.settings_edit.take() {
+            let asked = refx_io::settings::Settings {
+                ram_limit: usize::try_from(edit.ram_limit_mb << 20).unwrap_or(usize::MAX),
+                vram_limit: edit
+                    .vram_limit_mb
+                    .map(|mb| usize::try_from(mb << 20).unwrap_or(usize::MAX)),
+                max_pixels: edit.max_pixels,
+                theme: edit.theme,
+                present: edit.present,
+            };
+            if asked != *settings {
+                // ★★ ธีมเห็นผลทันที — `set_visuals` มีผลตั้งแต่เฟรมถัดไป
+                if asked.theme != settings.theme {
+                    crate::theme::install(&gfx.egui_ctx, asked.theme);
+                    gfx.window.request_redraw();
+                }
+                // ★★★ ที่เหลือ **ยังไม่มีผลจนกว่าจะเปิดใหม่** และเราบอกตรง ๆ
+                //
+                //   เพดาน RAM ถูกอ่านตอนสร้าง `RamBudget` · เพดาน VRAM ตอนสร้าง
+                //   `TextureAllocator` · present mode ตอนสร้าง surface — ทั้งสาม
+                //   เปลี่ยนกลางคันได้ก็ต่อเมื่อรื้อ threading/resource model ซึ่ง
+                //   `CLAUDE.md` บอกให้ **หยุดถามก่อน** · เราจึงเลือกทางที่ไม่แตะ
+                //   invariant แล้วบอกความจริงบนจอแทนการแกล้งทำเป็นว่ามันมีผลแล้ว
+                if asked.ram_limit != settings.ram_limit
+                    || asked.vram_limit != settings.vram_limit
+                    || asked.max_pixels != settings.max_pixels
+                    || asked.present != settings.present
+                {
+                    *settings_restart_pending = true;
+                }
+                *settings = asked;
+            }
+        }
+        // ★★ ผู้ใช้ปล่อยตัวควบคุมแล้ว → เขียนลงไฟล์ **บนเธรดอื่น** (I-2)
+        //
+        //   ไฟล์เล็กแค่ไหนก็เขียนบน UI thread ไม่ได้ — `write_bytes_atomic` มี
+        //   `sync_all()` ซึ่งรอดิสก์จริง และดิสก์ที่ยุ่งอยู่ทำให้มันเป็นสิบ ms
+        //   · เส้นทางเดียวกับการบันทึกเอกสาร (`save_job`) เป๊ะ
+        if shell.settings_sealed {
+            shell.settings_sealed = false;
+            match config_dir.as_deref() {
+                None => {
+                    shell.status = text::t(shell.lang, Key::SettingsNoConfigDir).to_owned();
+                    shell.status_warn = true;
+                }
+                Some(dir) => {
+                    let path = settings_path(dir);
+                    let body = settings.to_toml();
+                    let (tx, rx) = crossbeam_channel::bounded(1);
+                    let wake = waker.clone();
+                    std::thread::spawn(move || {
+                        let written = refx_io::save::write_bytes_atomic(
+                            &path,
+                            body.as_bytes(),
+                            // ★ ตัวเดียวกับที่การบันทึกเอกสารใช้จริง — ไม่ใช่
+                            //   `fs::rename` ที่จำลองขึ้นมา (`docs/08 §3.9` ข้อ 9)
+                            refx_platform::fsops::rename_durable,
+                        )
+                        .map_err(|err| err.to_string());
+                        let _ = tx.send(written);
+                        // ★ ผลต้องขึ้นจอ แต่แอปหลับสนิทตอน idle (I-1) — ต้องปลุก
+                        if let Some(wake) = wake {
+                            wake.wake();
+                        }
+                    });
+                    *settings_write = Some(rx);
+                }
+            }
+        }
+        if let Some(rx) = settings_write.as_ref()
+            && let Ok(written) = rx.try_recv()
+        {
+            *settings_write = None;
+            match written {
+                Ok(()) => {
+                    shell.status = text::t(shell.lang, Key::SettingsSaved).to_owned();
+                    shell.status_warn = false;
+                }
+                Err(err) => {
+                    // ★ ต้องบอก — ค่าที่ตั้งใช้ได้จนกว่าจะปิดโปรแกรม แล้วหายเงียบ ๆ
+                    tracing::error!(%err, "cannot write settings.toml");
+                    shell.status = text::t(shell.lang, Key::SettingsSaveFailed).to_owned();
+                    shell.status_warn = true;
+                }
+            }
         }
 
         let (width, height) = {
@@ -7817,8 +8072,12 @@ pub fn run(
     cache_db: &std::path::Path,
     recovery_dir: &std::path::Path,
     spool_dir: &std::path::Path,
+    config_dir: &std::path::Path,
 ) -> Result<(), refx_platform::window::RunError<DeviceError>> {
     let mut app = RefxApp::new(args);
+    // ★★ ต้องมาก่อน `start_assets` — เพดาน RAM/pixel ของ pool ถูกอ่านตอนสร้าง
+    //    เท่านั้น เสียบทีหลังไม่ได้ · แตะดิสก์ตรงนี้ได้เพราะยังไม่มีหน้าต่าง (I-2)
+    app.load_settings(config_dir);
     // ★ ที่อยู่ของงานที่ยังไม่เคยบันทึก — ถูกส่งเข้ามาเพราะ `AppPaths` เป็นของ
     //   ชั้น platform · ★★ ต้องเป็น `<data_dir>/recovery` เท่านั้น ห้าม cache
     app.recovery_dir = Some(recovery_dir.to_path_buf());
@@ -7852,6 +8111,78 @@ mod tests {
 
     fn rect(x: f32, y: f32, w: f32, h: f32) -> egui::Rect {
         egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, h))
+    }
+
+    // ---------- P5-3: ค่าที่ผู้ใช้ตั้งต้องไปถึงด่านที่มันควบคุมจริง ----------
+
+    /// ★★★ เพดาน `max_pixels` ที่ผู้ใช้ตั้ง **ต้องไปถึง `decode` จริง ๆ**
+    ///
+    /// นี่คือครึ่งที่ `refx_io::settings` พิสูจน์ไม่ได้: ที่นั่นพิสูจน์ว่าค่าถูก
+    /// อ่านและ clamp ถูกต้อง แต่ค่าที่ถูกต้องซึ่ง **ไม่มีใครเอาไปใช้** ก็ยังเป็น
+    /// ฟีเจอร์ที่ไม่ทำงาน · ผู้ใช้ที่ลดเพดานลงเพื่อกัน OOM แล้วมันไม่มีผล
+    /// จะเจอสิ่งที่เขาพยายามหลีกเลี่ยงพอดี (I-3)
+    ///
+    /// ★ และ `max_alloc` ต้องตามลงมาด้วย ไม่งั้นด่านที่เขาตั้งจะไม่ได้คุม
+    /// หน่วยความจำที่ decoder จองจริงเลยสักไบต์
+    #[test]
+    fn the_ceiling_the_user_sets_is_the_ceiling_decode_enforces() {
+        let caps = refx_io::settings::Caps {
+            total_ram: 16 << 30,
+            max_pixels_ceiling: refx_asset::decode::max_pixels_for_ram(16 << 30),
+        };
+        let machine = decode_limits(caps, &refx_io::settings::Settings::defaults(caps));
+        assert_eq!(machine.max_pixels, caps.max_pixels_ceiling);
+
+        let asked = refx_io::settings::Settings {
+            max_pixels: 4_000_000,
+            ..refx_io::settings::Settings::defaults(caps)
+        };
+        let limited = decode_limits(caps, &asked);
+        assert_eq!(limited.max_pixels, 4_000_000, "ค่าที่ผู้ใช้ตั้งไม่ถึง decode");
+        assert!(
+            limited.max_alloc < machine.max_alloc,
+            "ลดเพดาน pixel แล้ว max_alloc ไม่ตาม — decoder ยังจองได้เท่าเดิม \
+             ({} vs {})",
+            limited.max_alloc,
+            machine.max_alloc
+        );
+    }
+
+    /// ★★ ค่าปริยายของเพดาน RAM ต้องเป็น **เลขเดียวกัน** ทั้งสองชั้น
+    ///
+    /// `refx-io` ตั้งค่าปริยายของ `settings.toml` ส่วน `refx-asset` ตั้งค่าปริยาย
+    /// ของถัง RAM · ทั้งคู่พึ่งกันไม่ได้ (คนละชั้น ARCHITECTURE §2) ค่าจึงถูก
+    /// เขียนไว้สองที่ — ซึ่ง `HANDOFF §4` ข้อ 21 บอกว่าเป็นจุดที่จะ drift
+    /// **ที่นี่คือชั้นเดียวที่เห็นทั้งสองตัว** จึงเป็นที่เดียวที่ตั้งประตูได้
+    ///
+    /// drift แล้วผลคือ: ผู้ใช้เปิดโปรแกรมครั้งแรกได้เพดานหนึ่ง พอกดบันทึกค่า
+    /// จากแผงโดยไม่แตะอะไรเลย เพดานเปลี่ยนไปอีกค่าหนึ่งโดยไม่มีใครสั่ง
+    #[test]
+    fn the_two_layers_agree_on_the_default_ram_budget() {
+        assert_eq!(
+            (refx_io::settings::DEFAULT_RAM_LIMIT_MB as usize) << 20,
+            refx_asset::budget::DEFAULT_RAM_LIMIT,
+            "ค่าปริยายของเพดาน RAM ใน refx-io กับ refx-asset ไม่ตรงกันแล้ว"
+        );
+    }
+
+    /// ★ ค่าปริยายของ `SettingsView` ต้องตรงกับค่าปริยายจริงของ `Settings`
+    ///
+    /// แผงที่แสดงค่าปริยายผิดตั้งแต่เฟรมแรกจะทำให้ผู้ใช้กด "บันทึก" แล้วเขียน
+    /// ค่าที่เขาไม่ได้เลือกลงไฟล์
+    #[test]
+    fn the_panel_starts_from_the_same_defaults_the_loader_uses() {
+        let caps = refx_io::settings::Caps {
+            total_ram: 16 << 30,
+            max_pixels_ceiling: refx_asset::decode::MAX_PIXELS_ABS,
+        };
+        let real = refx_io::settings::Settings::defaults(caps);
+        let shown = crate::shell::SettingsView::default();
+        assert_eq!(shown.ram_limit_mb, (real.ram_limit >> 20) as u64);
+        assert_eq!(shown.vram_limit_mb, None);
+        assert_eq!(shown.max_pixels, real.max_pixels);
+        assert_eq!(shown.theme, real.theme);
+        assert_eq!(shown.present, real.present);
     }
 
     /// ★ `set_viewport` ที่ล้นขอบ attachment คือ validation error ของ wgpu

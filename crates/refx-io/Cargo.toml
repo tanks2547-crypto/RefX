@@ -16,6 +16,7 @@ postcard.workspace  = true
 zstd.workspace      = true
 serde.workspace     = true
 crc32fast.workspace = true
+basic-toml.workspace = true   # settings.toml / keymap.toml (P5-3) — ดู docs/09
 notify.workspace    = true
 thiserror.workspace = true
 tracing.workspace   = true

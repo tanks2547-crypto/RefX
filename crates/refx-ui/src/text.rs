@@ -333,6 +333,62 @@ pub enum Key {
     GroupCollapsedHint,
     /// สิ่งที่เลือกอยู่คนละกลุ่มกัน
     GroupMixed,
+
+    // ---- P5-3: แผง Settings ----
+    /// tooltip ของปุ่มเปิดแผง Settings
+    SettingsHint,
+    /// หัวข้อของแผง
+    SettingsTitle,
+    /// ปุ่มปิดแผง
+    SettingsClose,
+    /// หัวข้อย่อย: ธีม
+    SettingsTheme,
+    /// ธีมมืด
+    SettingsThemeDark,
+    /// ธีมสว่าง
+    SettingsThemeLight,
+    /// หัวข้อย่อย: จังหวะการแสดงเฟรม
+    SettingsPresent,
+    /// รอรอบจอ
+    SettingsPresentVsync,
+    /// ไม่รอรอบจอ
+    SettingsPresentUncapped,
+    /// คำอธิบายของ "ไม่รอรอบจอ" — ต้องบอกราคาที่ต้องจ่าย ไม่ใช่แค่ชื่อ
+    SettingsPresentUncappedHint,
+    /// หัวข้อย่อย: หน่วยความจำ
+    SettingsMemory,
+    /// เพดาน RAM ของ decode
+    SettingsRamLimit,
+    /// คำอธิบายเพดาน RAM
+    SettingsRamLimitHint,
+    /// เพดาน VRAM
+    SettingsVramLimit,
+    /// คำอธิบายเพดาน VRAM
+    SettingsVramLimitHint,
+    /// ปุ่มให้โปรแกรมเลือกเพดาน VRAM เอง
+    SettingsVramAuto,
+    /// เพดานขนาดภาพ
+    SettingsMaxPixels,
+    /// คำอธิบายเพดานขนาดภาพ
+    SettingsMaxPixelsHint,
+    /// ★★ ค่าที่เปลี่ยนแล้วยังไม่มีผลจนกว่าจะเปิดโปรแกรมใหม่
+    ///
+    /// ต้องมี เพราะการเลื่อนตัวเลขแล้วไม่มีอะไรเกิดขึ้นอ่านได้อย่างเดียวว่าปุ่มเสีย
+    SettingsNeedsRestart,
+    /// บันทึกค่าที่ตั้งลงไฟล์แล้ว
+    SettingsSaved,
+    /// ★ บันทึกค่าที่ตั้งไม่สำเร็จ — ต้องบอก ไม่งั้นค่าจะหายตอนเปิดใหม่โดยไม่มีใครรู้
+    SettingsSaveFailed,
+    /// ไม่มีที่เก็บ `settings.toml` (หาโฟลเดอร์ config ไม่เจอ)
+    SettingsNoConfigDir,
+    /// ★★ หัวข้อของรายการเรื่องที่ `settings.toml` ไม่ได้ถูกใช้ตามที่เขียน
+    SettingsProblemsTitle,
+    /// ปุ่มรับทราบรายการปัญหา
+    SettingsProblemsDismiss,
+    /// สรุปสั้น ๆ บน status bar ว่ามีเรื่องกับ `settings.toml`
+    SettingsProblemsStatus,
+    /// ★ ไฟล์ settings อ่านไม่ได้ทั้งไฟล์ → ใช้ค่าปริยายทั้งชุด
+    SettingsNoteUnparsable,
 }
 
 /// ข้อความภาษาอังกฤษ — **ต้องมีครบทุก key เสมอ** (เป็นตัวสำรองสุดท้าย)
@@ -498,6 +554,53 @@ fn en(key: Key) -> &'static str {
         Key::GroupCollapsedHint => "Show this group as a single tile in Arrange",
         Key::GroupMixed => "Selection spans several groups",
         Key::NothingToApply => "Nothing moved — the images are already arranged like this",
+
+        Key::SettingsHint => "Settings",
+        Key::SettingsTitle => "Settings",
+        Key::SettingsClose => "Close",
+        Key::SettingsTheme => "Theme",
+        Key::SettingsThemeDark => "Dark",
+        Key::SettingsThemeLight => "Light",
+        Key::SettingsPresent => "Frame timing",
+        Key::SettingsPresentVsync => "Match the screen",
+        Key::SettingsPresentUncapped => "Uncapped",
+        Key::SettingsPresentUncappedHint => {
+            "Lower delay while panning, but the image can tear. Uses more GPU."
+        }
+        Key::SettingsMemory => "Memory",
+        Key::SettingsRamLimit => "RAM for decoding",
+        Key::SettingsRamLimitHint => {
+            "Shared by every decode worker, not per image. \
+             Raise it if you often drop hundreds of large files at once."
+        }
+        Key::SettingsVramLimit => "Video memory",
+        Key::SettingsVramLimitHint => {
+            "Holds thumbnails and sharp images. \
+             RefX keeps this low on purpose so it does not fight your paint program for VRAM."
+        }
+        Key::SettingsVramAuto => "Automatic",
+        Key::SettingsMaxPixels => "Largest image",
+        Key::SettingsMaxPixelsHint => {
+            "Images with more pixels than this are refused instead of decoded. \
+             The ceiling comes from how much RAM this machine has."
+        }
+        Key::SettingsNeedsRestart => "Takes effect the next time RefX starts",
+        Key::SettingsSaved => "Settings saved",
+        Key::SettingsSaveFailed => {
+            "Could not write settings.toml - the change works until you close RefX, \
+             but it will be forgotten after that"
+        }
+        Key::SettingsNoConfigDir => {
+            "No place to keep settings.toml on this machine - \
+             changes work until you close RefX, then they are forgotten"
+        }
+        Key::SettingsProblemsTitle => "settings.toml was not used exactly as written",
+        Key::SettingsProblemsDismiss => "Got it",
+        Key::SettingsProblemsStatus => "Some settings were adjusted - open Settings to see why",
+        Key::SettingsNoteUnparsable => {
+            "settings.toml could not be read at all, so every setting is back to its default. \
+             Fix the file, or delete it and set things up again here."
+        }
     }
 }
 
@@ -646,6 +749,51 @@ fn th(key: Key) -> Option<&'static str> {
         Key::GroupCollapsedHint => "ยุบกลุ่มนี้ให้เหลือใบเดียวในโหมด Arrange",
         Key::GroupMixed => "สิ่งที่เลือกอยู่คนละกลุ่มกัน",
         Key::NothingToApply => "ไม่มีอะไรขยับ — ภาพเรียงแบบนี้อยู่แล้ว",
+
+        Key::SettingsHint => "ตั้งค่า",
+        Key::SettingsTitle => "ตั้งค่า",
+        Key::SettingsClose => "ปิด",
+        Key::SettingsTheme => "ธีม",
+        Key::SettingsThemeDark => "มืด",
+        Key::SettingsThemeLight => "สว่าง",
+        Key::SettingsPresent => "จังหวะแสดงเฟรม",
+        Key::SettingsPresentVsync => "ตามรอบจอ",
+        Key::SettingsPresentUncapped => "ไม่รอรอบจอ",
+        Key::SettingsPresentUncappedHint => "หน่วงน้อยลงตอนเลื่อนภาพ แต่ภาพฉีกได้ และกินการ์ดจอมากขึ้น",
+        Key::SettingsMemory => "หน่วยความจำ",
+        Key::SettingsRamLimit => "RAM สำหรับถอดรหัสภาพ",
+        Key::SettingsRamLimitHint => {
+            "ใช้ร่วมกันทุก worker ไม่ใช่ต่อภาพ\n\
+             เพิ่มได้ถ้าลากไฟล์ใหญ่ทีละหลายร้อยใบเป็นประจำ"
+        }
+        Key::SettingsVramLimit => "หน่วยความจำการ์ดจอ",
+        Key::SettingsVramLimitHint => {
+            "ที่เก็บภาพย่อและภาพคม\n\
+             RefX ตั้งไว้ต่ำโดยตั้งใจ จะได้ไม่แย่ง VRAM กับโปรแกรมวาดของคุณ"
+        }
+        Key::SettingsVramAuto => "อัตโนมัติ",
+        Key::SettingsMaxPixels => "ภาพใหญ่สุดที่รับได้",
+        Key::SettingsMaxPixelsHint => {
+            "ภาพที่มีจุดมากกว่านี้จะถูกปฏิเสธแทนที่จะถอดรหัส\n\
+             เพดานมาจากขนาด RAM ของเครื่องนี้"
+        }
+        Key::SettingsNeedsRestart => "มีผลเมื่อเปิด RefX ครั้งถัดไป",
+        Key::SettingsSaved => "บันทึกค่าที่ตั้งแล้ว",
+        Key::SettingsSaveFailed => {
+            "เขียน settings.toml ไม่ได้ — ค่าที่เปลี่ยนใช้ได้จนกว่าจะปิด RefX \
+             แล้วจะหายไปหลังจากนั้น"
+        }
+        Key::SettingsNoConfigDir => {
+            "เครื่องนี้ไม่มีที่เก็บ settings.toml — ค่าที่เปลี่ยนใช้ได้จนกว่าจะปิด RefX \
+             แล้วจะหายไป"
+        }
+        Key::SettingsProblemsTitle => "settings.toml ไม่ได้ถูกใช้ตรงตามที่เขียนไว้",
+        Key::SettingsProblemsDismiss => "รับทราบ",
+        Key::SettingsProblemsStatus => "มีค่าที่ถูกปรับให้ — เปิดแผงตั้งค่าเพื่อดูว่าทำไม",
+        Key::SettingsNoteUnparsable => {
+            "อ่าน settings.toml ไม่ได้ทั้งไฟล์ ทุกค่าจึงกลับไปเป็นค่าปริยาย\n\
+             แก้ไฟล์ให้ถูก หรือลบทิ้งแล้วตั้งค่าใหม่ที่นี่ก็ได้"
+        }
     })
 }
 
@@ -777,6 +925,23 @@ pub enum Template {
     /// ไฟล์ที่ไม่มีอยู่คือการส่งผู้ใช้ที่กำลังกลัวว่างานหายไปหาของที่ไม่มี
     /// (`CLAUDE.md`: "สิ่งที่เกิดขึ้น + สิ่งที่ทำได้ต่อ" — ต้องทำได้จริง)
     OpenFailedDamagedBackup,
+
+    // ---- P5-3: settings.toml ----
+    /// `{key}` — มีคีย์ที่ RefX ไม่รู้จักในไฟล์ (มักเป็นการพิมพ์ผิด)
+    SettingsNoteUnknownKey,
+    /// `{field}` `{asked}` `{used}` — ค่าอยู่นอกช่วงที่ตั้งได้
+    SettingsNoteClamped,
+    /// ★★ `{asked}` `{used}` `{ram}` — `max_pixels` ถูกจำกัดด้วย RAM ของ **เครื่องนี้**
+    ///
+    /// ★ ต้องแยกจาก [`Template::SettingsNoteClamped`] เพราะทางออกคนละอย่าง:
+    /// ตัวนั้นแก้ได้ด้วยการพิมพ์เลขใหม่ ตัวนี้แก้ได้ด้วยการเพิ่ม RAM เท่านั้น
+    SettingsNoteCappedByRam,
+    /// `{field}` `{given}` — ค่าเป็นคำที่ไม่รู้จัก
+    SettingsNoteUnknownValue,
+    /// `{side}` `{pixels}` — เพดานขนาดภาพของเครื่องนี้ (แสดงใต้ช่องกรอก)
+    SettingsCeiling,
+    /// `{mb}` — เพดานหน่วยความจำเป็น MB
+    SettingsMegabytes,
 }
 
 /// เทมเพลตภาษาอังกฤษ — ต้องมีครบทุกตัว
@@ -892,6 +1057,24 @@ Drag in a PNG, JPEG, WebP, GIF, BMP, TGA or TIFF instead."
             "The pasted image is damaged ({w}×{h} with the wrong amount of data)\n\
              Copy it again from the program it came from."
         }
+
+        Template::SettingsNoteUnknownKey => {
+            "settings.toml has a setting RefX does not know: {key}\n\
+             It was ignored - check the spelling, or set it here instead."
+        }
+        Template::SettingsNoteClamped => {
+            "{field} was set to {asked}, which is outside what RefX accepts - using {used}"
+        }
+        Template::SettingsNoteCappedByRam => {
+            "The largest image was set to {asked} pixels, but this machine has {ram} GB of RAM \
+             and can only decode {used} - using that instead.\n\
+             This ceiling only moves if the machine gets more RAM."
+        }
+        Template::SettingsNoteUnknownValue => {
+            "{field} was set to \"{given}\", which RefX does not recognise - using the default"
+        }
+        Template::SettingsCeiling => "Up to {side}×{side} ({pixels} pixels) on this machine",
+        Template::SettingsMegabytes => "{mb} MB",
     }
 }
 
@@ -1007,6 +1190,24 @@ fn template_th(template: Template) -> Option<&'static str> {
             "ภาพที่วางเข้ามาเสียหาย ({w}×{h} แต่ข้อมูลไม่ครบตามขนาด)\n\
              ลองก๊อปใหม่จากโปรแกรมต้นทางอีกครั้ง"
         }
+
+        Template::SettingsNoteUnknownKey => {
+            "settings.toml มีค่าที่ RefX ไม่รู้จัก: {key}\n\
+             ค่านั้นถูกข้ามไป — ลองตรวจตัวสะกด หรือตั้งจากแผงนี้แทน"
+        }
+        Template::SettingsNoteClamped => {
+            "{field} ถูกตั้งเป็น {asked} ซึ่งอยู่นอกช่วงที่ RefX รับได้ — ใช้ {used} แทน"
+        }
+        Template::SettingsNoteCappedByRam => {
+            "ภาพใหญ่สุดถูกตั้งไว้ที่ {asked} จุด แต่เครื่องนี้มี RAM {ram} GB \
+             ถอดรหัสได้มากสุด {used} จุด — ใช้ค่านั้นแทน\n\
+             เพดานนี้ขยับได้ทางเดียวคือเพิ่ม RAM ให้เครื่อง"
+        }
+        Template::SettingsNoteUnknownValue => {
+            "{field} ถูกตั้งเป็น \"{given}\" ซึ่ง RefX ไม่รู้จัก — ใช้ค่าปริยายแทน"
+        }
+        Template::SettingsCeiling => "เครื่องนี้รับได้ถึง {side}×{side} ({pixels} จุด)",
+        Template::SettingsMegabytes => "{mb} MB",
     })
 }
 
@@ -1140,6 +1341,69 @@ pub fn atlas_error(lang: Lang, err: &AtlasError) -> String {
                 ("used", &used_mb.to_string()),
                 ("limit", &limit_mb.to_string()),
             ],
+        ),
+    }
+}
+
+/// ชื่อช่องของ `settings.toml` อย่างที่ผู้ใช้เห็นบนแผง
+///
+/// ★ **ไม่ใช่ชื่อคีย์ในไฟล์** — ผู้ใช้ที่ตั้งค่าจากแผงไม่เคยเห็น `memory.ram_limit_mb`
+/// เลยสักครั้ง · ชื่อคีย์จริงอยู่ใน [`refx_io::settings::Field::path`] สำหรับ log
+#[must_use]
+fn settings_field(lang: Lang, field: refx_io::settings::Field) -> &'static str {
+    use refx_io::settings::Field;
+    t(
+        lang,
+        match field {
+            Field::RamLimitMb => Key::SettingsRamLimit,
+            Field::VramLimitMb => Key::SettingsVramLimit,
+            Field::MaxPixels => Key::SettingsMaxPixels,
+            Field::Theme => Key::SettingsTheme,
+            Field::Present => Key::SettingsPresent,
+        },
+    )
+}
+
+/// ข้อความสำหรับผู้ใช้เมื่อ `settings.toml` ไม่ได้ถูกใช้ตรงตามที่เขาเขียน (P5-3)
+///
+/// ★ ประกอบจาก **ฟิลด์** ของ [`refx_io::settings::Note`] ไม่ใช่จากสตริงที่ชั้นล่าง
+/// เตรียมไว้ — หลักการเดียวกับ [`load_error`] (`docs/03 §0`)
+///
+/// ★★ ทุก variant ต้องบอก **สิ่งที่เกิดขึ้น + สิ่งที่ทำได้ต่อ** (`CLAUDE.md`) ·
+/// `match` ไม่มี `_ =>` โดยตั้งใจ: เพิ่ม `Note` ใหม่เมื่อไหร่ คอมไพเลอร์จะบังคับ
+/// ให้มาเขียนข้อความให้มัน แทนที่จะปล่อยตกลงประโยครวมที่ไม่ช่วยอะไรใคร
+#[must_use]
+pub fn settings_note(lang: Lang, note: &refx_io::settings::Note) -> String {
+    use refx_io::settings::Note;
+    match note {
+        Note::Unparsable { .. } => t(lang, Key::SettingsNoteUnparsable).to_owned(),
+        Note::UnknownKey { name } => fill(lang, Template::SettingsNoteUnknownKey, &[("key", name)]),
+        Note::Clamped { field, asked, used } => fill(
+            lang,
+            Template::SettingsNoteClamped,
+            &[
+                ("field", settings_field(lang, *field)),
+                ("asked", &asked.to_string()),
+                ("used", &used.to_string()),
+            ],
+        ),
+        Note::MaxPixelsCappedByRam {
+            asked,
+            used,
+            ram_gb,
+        } => fill(
+            lang,
+            Template::SettingsNoteCappedByRam,
+            &[
+                ("asked", &asked.to_string()),
+                ("used", &used.to_string()),
+                ("ram", &ram_gb.to_string()),
+            ],
+        ),
+        Note::UnknownValue { field, given } => fill(
+            lang,
+            Template::SettingsNoteUnknownValue,
+            &[("field", settings_field(lang, *field)), ("given", given)],
         ),
     }
 }
@@ -1281,6 +1545,32 @@ mod tests {
         Key::GroupCollapsed,
         Key::GroupCollapsedHint,
         Key::GroupMixed,
+        Key::SettingsHint,
+        Key::SettingsTitle,
+        Key::SettingsClose,
+        Key::SettingsTheme,
+        Key::SettingsThemeDark,
+        Key::SettingsThemeLight,
+        Key::SettingsPresent,
+        Key::SettingsPresentVsync,
+        Key::SettingsPresentUncapped,
+        Key::SettingsPresentUncappedHint,
+        Key::SettingsMemory,
+        Key::SettingsRamLimit,
+        Key::SettingsRamLimitHint,
+        Key::SettingsVramLimit,
+        Key::SettingsVramLimitHint,
+        Key::SettingsVramAuto,
+        Key::SettingsMaxPixels,
+        Key::SettingsMaxPixelsHint,
+        Key::SettingsNeedsRestart,
+        Key::SettingsSaved,
+        Key::SettingsSaveFailed,
+        Key::SettingsNoConfigDir,
+        Key::SettingsProblemsTitle,
+        Key::SettingsProblemsDismiss,
+        Key::SettingsProblemsStatus,
+        Key::SettingsNoteUnparsable,
     ];
 
     const ALL_TEMPLATES: &[Template] = &[
@@ -1332,6 +1622,12 @@ mod tests {
         Template::RelinkUnpacked,
         Template::StorageInside,
         Template::OpenFailedDamagedBackup,
+        Template::SettingsNoteUnknownKey,
+        Template::SettingsNoteClamped,
+        Template::SettingsNoteCappedByRam,
+        Template::SettingsNoteUnknownValue,
+        Template::SettingsCeiling,
+        Template::SettingsMegabytes,
     ];
 
     /// ★ กฎข้อ 2 ของ docs/03 §0: ห้ามมีทางที่ผู้ใช้จะเห็นช่องว่างหรือชื่อ key

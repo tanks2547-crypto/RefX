@@ -696,25 +696,28 @@ impl DecodePool {
         self.wake.clone()
     }
 
-    /// เปิด pool ด้วยค่าเริ่มต้นที่ **ผูกกับเครื่องจริง**
+    /// เปิด pool ด้วยจำนวน worker ตามเครื่อง แต่ **เพดานมาจากผู้เรียก**
     ///
-    /// เพดานขนาดภาพคำนวณจาก RAM ที่ติดตั้ง (docs/05 §3) ไม่ใช่ค่าคงที่
-    /// — ภาพที่ผ่านเกราะมาได้จึงไม่มีทางเกิน 1/8 ของ RAM เครื่อง
+    /// ★★ `ram_limit` กับ `limits` ถูกส่งเข้ามาตั้งแต่ P5-3 แทนที่จะคำนวณเอง
+    /// เพราะผู้ใช้ตั้งทับได้ใน `settings.toml` แล้ว — ถ้าที่นี่ยังคำนวณเอง
+    /// ค่าที่เขาตั้งจะถูกทับเงียบ ๆ ทุกครั้งที่เปิดโปรแกรม · ผู้เรียกที่ยังอยาก
+    /// ได้ค่าที่ผูกกับเครื่องส่ง [`Limits::for_system`] เข้ามาได้เหมือนเดิม
     ///
-    /// `total_ram` · `clipboard` · `spool` **รับเข้ามา ไม่ได้ไปถามเอง** เพราะทั้งสาม
-    /// อย่างต้องถาม OS หรือแตะดิสก์ ซึ่งเป็นงานของ `refx-platform`/`refx-io` —
-    /// ชั้น asset ไม่รู้จักมัน (ARCHITECTURE §2, HANDOFF §2.0) ผู้เรียกจริงคือ `refx-ui`
+    /// `ram_limit` · `limits` · `clipboard` · `spool` **รับเข้ามา ไม่ได้ไปถามเอง**
+    /// เพราะทั้งหมดต้องถาม OS หรือแตะดิสก์ ซึ่งเป็นงานของ `refx-platform`/`refx-io`
+    /// — ชั้น asset ไม่รู้จักมัน (ARCHITECTURE §2, HANDOFF §2.0) ผู้เรียกจริงคือ `refx-ui`
     #[must_use]
     pub fn with_defaults(
-        total_ram: u64,
+        ram_limit: usize,
+        limits: Limits,
         clipboard: ClipboardHandle,
         io: Option<crossbeam_channel::Sender<IoRequest>>,
         spool: Option<SpoolHandle>,
     ) -> Self {
         Self::new(
             default_worker_count(),
-            Arc::new(RamBudget::new(crate::budget::DEFAULT_RAM_LIMIT)),
-            Limits::for_system(total_ram),
+            Arc::new(RamBudget::new(ram_limit)),
+            limits,
             io,
             Some(clipboard),
             spool,

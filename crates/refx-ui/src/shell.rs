@@ -16,8 +16,28 @@ use refx_core::view::Mode;
 
 use crate::text::{self, Key, Lang, Template};
 
-/// สีของข้อความที่ผู้ใช้ต้องสังเกตเห็น — ตัวเดียวกับ RAM/VRAM ตอนใกล้เต็ม
-const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(230, 160, 60);
+/// สีของข้อความที่ผู้ใช้ต้องสังเกตเห็นบน**ธีมมืด** — ตัวเดียวกับ RAM/VRAM ตอนใกล้เต็ม
+const WARN_COLOR_DARK: egui::Color32 = egui::Color32::from_rgb(230, 160, 60);
+
+/// ★★ สีเดียวกันสำหรับ**ธีมสว่าง** — เข้มกว่ามาก
+///
+/// ส้มอ่อนบนพื้นขาวแทบอ่านไม่ออก และข้อความที่ใช้สีนี้คือข้อความที่ **สำคัญที่สุด**
+/// ทั้งหมด ("ยังไม่ได้บันทึก" · "board เต็มแล้ว" · "ค่าที่ตั้งถูกปรับ") — สีที่
+/// อ่านไม่ออกทำให้สิ่งที่เราตั้งใจให้เด่นที่สุดกลายเป็นสิ่งที่มองข้ามง่ายที่สุด
+/// (เจอตอนถ่ายภาพหน้าจอธีมสว่างของ P5-3 · ไม่มีเทสต์ไหนถามเรื่องคอนทราสต์ได้)
+const WARN_COLOR_LIGHT: egui::Color32 = egui::Color32::from_rgb(150, 85, 0);
+
+/// สีเตือนที่อ่านออกบนธีมที่ใช้อยู่จริง
+///
+/// ★ อ่านจาก `ui.visuals()` ไม่ใช่จากค่าที่จำไว้ — ผู้ใช้สลับธีมกลางคันได้
+/// (`crate::theme`) และค่าที่จำไว้จะค้างเป็นสีของธีมเก่าไปทั้ง session
+fn warn_color(ui: &egui::Ui) -> egui::Color32 {
+    if ui.visuals().dark_mode {
+        WARN_COLOR_DARK
+    } else {
+        WARN_COLOR_LIGHT
+    }
+}
 
 /// ★★★ เครื่องหมาย "ยังไม่ถูกบันทึก" ที่นำหน้าชื่อเอกสารบนแท็บ (docs/03 §1)
 ///
@@ -31,6 +51,14 @@ const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(230, 160, 60);
 /// (`docs/08 §3.9` ข้อ 5) → ตอนนี้มีประตู `the_unsaved_mark_has_a_real_glyph`
 /// ที่ถาม `Fonts::has_glyph` ตรง ๆ ปิดช่องนั้นแล้ว
 const UNSAVED_MARK: char = '*';
+
+/// ★★ สัญลักษณ์บนปุ่มเปิดแผงตั้งค่า (P5-3)
+///
+/// อยู่ในค่าคงที่ **เพื่อให้ประตู glyph จับมันได้** เหมือน [`UNSAVED_MARK`] —
+/// P5-3 เผลอใส่ `●` กลับมาเป็นจุดเตือนแล้วเห็นเป็น tofu บนภาพหน้าจอจริงอีกรอบ
+/// ทั้งที่บทเรียนถูกจดไว้แล้วสิบบรรทัดข้างบนนี้เอง · สัญลักษณ์ใหม่ทุกตัวที่
+/// โผล่บนจอต้องเข้าประตู `every_symbol_on_screen_has_a_real_glyph`
+const SETTINGS_MARK: char = '⚙';
 
 /// ค่าการแสดงผลที่ inspector ปรับได้ — สำเนาของช่องใน `ItemCanvas` ที่เกี่ยวข้อง
 ///
@@ -473,6 +501,66 @@ pub struct ShellState {
     /// เห็นว่ามันคืบหน้าอยู่ ไม่ใช่ค้าง — ถ้าไม่มีตัวนี้ เขาจะคิดว่าโปรแกรมแฮงก์
     /// แล้วปิดทิ้งกลางคัน ซึ่งแย่กว่ารอนาน
     pub loading: Option<LoadProgress>,
+
+    /// ★ แผง Settings เปิดอยู่ไหม (P5-3) — สถานะของ widget ล้วน ๆ
+    pub settings_open: bool,
+    /// ค่าที่แผงแสดง — **ค่าสำหรับ *แสดง* เท่านั้น** ชั้น `app` เติมทุกเฟรม
+    pub settings: SettingsView,
+    /// ★★ สิ่งที่ผู้ใช้เปลี่ยนในเฟรมนี้ — `None` = ไม่ได้แตะ
+    ///
+    /// แยกจาก [`Self::settings`] ด้วยเหตุผลเดียวกับ `appearance_edit` เป๊ะ:
+    /// ถ้าอ่านค่าที่แสดงกลับไปเขียนทุกเฟรม ค่าที่ค้างจากเฟรมก่อนจะทับสิ่งที่
+    /// เพิ่งถูกตั้ง (`docs/08 §3.9` ข้อ 8.1)
+    pub settings_edit: Option<SettingsView>,
+    /// ★★★ ผู้ใช้ปล่อยตัวควบคุมแล้ว → **ถึงเวลาเขียนลงไฟล์**
+    ///
+    /// ★ ถ้าเขียนทุกเฟรมที่ค่าเปลี่ยน การลากแถบเลื่อนหนึ่งครั้งจะเขียนดิสก์
+    /// หลายสิบรอบ — สิ้นเปลืองและทำให้ UI thread สะดุด (I-2) · หลักการเดียวกับ
+    /// `appearance_sealed` ที่ปิดหน้าต่าง merge ของ undo
+    pub settings_sealed: bool,
+    /// ★★ เรื่องที่ `settings.toml` ไม่ได้ถูกใช้ตามที่เขียน — ว่าง = ไม่มีอะไรผิด
+    pub settings_notes: Vec<refx_io::settings::Note>,
+    /// ผู้ใช้กด "รับทราบ" รายการปัญหาในเฟรมนี้
+    pub settings_notes_dismissed: bool,
+}
+
+/// ค่าที่แผง Settings แสดงและแก้ได้ (P5-3)
+///
+/// ★ หน่วยเป็น **MB และจำนวนจุด** ไม่ใช่ไบต์ — ตัวเลขที่ผู้ใช้พิมพ์ต้องเป็น
+/// ตัวเลขที่เขาคิดในหัว ส่วนการแปลงเป็นไบต์เป็นเรื่องของชั้น `app`
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettingsView {
+    /// เพดาน RAM ของ decode (MB)
+    pub ram_limit_mb: u64,
+    /// เพดาน VRAM (MB) — `None` = ให้โปรแกรมเลือกตามการ์ดจอ
+    pub vram_limit_mb: Option<u64>,
+    /// เพดานขนาดภาพ (จำนวนจุด)
+    pub max_pixels: u64,
+    /// ธีมของ UI
+    pub theme: refx_io::settings::Theme,
+    /// จังหวะการแสดงเฟรม
+    pub present: refx_io::settings::Present,
+    /// ★ เพดานของ **เครื่องนี้** — แสดงอย่างเดียว แก้ไม่ได้ (`HANDOFF §4` ข้อ 3)
+    pub max_pixels_ceiling: u64,
+    /// ★★ มีค่าที่เปลี่ยนแล้วยังไม่มีผลจนกว่าจะเปิดโปรแกรมใหม่
+    ///
+    /// ต้องบอก ไม่งั้นผู้ใช้ที่เลื่อนเพดาน RAM แล้วเห็นตัวเลขบนแถบสถานะไม่ขยับ
+    /// จะสรุปว่าแผงนี้เสีย แล้วไม่กลับมาใช้อีกเลย
+    pub needs_restart: bool,
+}
+
+impl Default for SettingsView {
+    fn default() -> Self {
+        Self {
+            ram_limit_mb: refx_io::settings::DEFAULT_RAM_LIMIT_MB,
+            vram_limit_mb: None,
+            max_pixels: refx_asset::decode::MAX_PIXELS_ABS,
+            theme: refx_io::settings::Theme::default(),
+            present: refx_io::settings::Present::default(),
+            max_pixels_ceiling: refx_asset::decode::MAX_PIXELS_ABS,
+            needs_restart: false,
+        }
+    }
 }
 
 /// ความคืบหน้าของงาน decode งวดปัจจุบัน
@@ -585,6 +673,12 @@ impl Default for ShellState {
             picked: None,
             measured: None,
             loading: None,
+            settings_open: false,
+            settings: SettingsView::default(),
+            settings_edit: None,
+            settings_sealed: false,
+            settings_notes: Vec::new(),
+            settings_notes_dismissed: false,
         }
     }
 }
@@ -640,7 +734,7 @@ pub fn draw_in_ui(
                 let label = if tab.unsaved {
                     // ★ เครื่องหมายนำหน้า **ไม่ใช่สี** อย่างเดียว — คนตาบอดสีต้องอ่านออกด้วย
                     //   (สีถูกใช้เสริม ไม่ใช่ใช้แทน)
-                    egui::RichText::new(format!("{UNSAVED_MARK} {title}")).color(WARN_COLOR)
+                    egui::RichText::new(format!("{UNSAVED_MARK} {title}")).color(warn_color(ui))
                 } else {
                     egui::RichText::new(title.to_owned())
                 };
@@ -693,7 +787,7 @@ pub fn draw_in_ui(
                 ui.label(
                     egui::RichText::new(text::t(lang, title))
                         .strong()
-                        .color(WARN_COLOR),
+                        .color(warn_color(ui)),
                 );
                 ui.separator();
                 // ★ ปุ่มที่ **ปลอดภัยที่สุดมาก่อน** — ผู้ใช้ที่กดเร็วโดยไม่อ่าน
@@ -767,7 +861,7 @@ pub fn draw_in_ui(
                 ui.label(
                     egui::RichText::new(text::t(lang, title))
                         .strong()
-                        .color(WARN_COLOR),
+                        .color(warn_color(ui)),
                 );
                 ui.label(text::fill(
                     lang,
@@ -840,6 +934,40 @@ pub fn draw_in_ui(
                 Mode::Canvas => canvas_tools(ui, state),
                 Mode::Arrange => arrange_tools(ui, state),
             }
+
+            // ★ ปุ่มตั้งค่าชิดขวาสุด (P5-3) — ห่างจากเครื่องมือที่ใช้ทุกนาที
+            //   เพราะมันเป็นของที่แตะปีละครั้ง การวางไว้ข้าง ๆ ปุ่ม crop
+            //   คือการเพิ่มโอกาสกดผิดโดยไม่ได้อะไรตอบแทน
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // ★★ ปุ่มเปลี่ยน**สี** เมื่อ `settings.toml` มีปัญหา แทนที่จะมีจุด
+                //    เตือนแยกอีกดวง · ผู้ใช้ที่ปิดรายการปัญหาไปแล้วต้องยังหาทาง
+                //    กลับมาดูได้ ไม่ใช่ข้อความที่ผ่านไปแล้วผ่านเลย (บทเรียน
+                //    เดียวกับตัวบ่งชี้โหมดของ P4-5)
+                //
+                //    ★★★ **ห้ามเติมอักขระสัญลักษณ์ตัวใหม่มาเป็นจุดเตือน** —
+                //    รุ่นแรกของโค้ดนี้ใช้ `●` ซึ่งเป็นตัวเดียวกับที่เคยออกมาเป็น
+                //    สี่เหลี่ยม tofu ตอนทำแท็บ และ `the_unsaved_mark_has_a_real_glyph`
+                //    บันทึกไว้แล้วว่ามันไม่มี glyph ในฟอนต์ที่เราฝัง · เห็นอีกครั้ง
+                //    บนภาพหน้าจอจริงของ P5-3 (`docs/08 §3.9` ข้อ 5)
+                let trouble = !state.settings_notes.is_empty();
+                let icon = if trouble {
+                    egui::RichText::new(SETTINGS_MARK).color(warn_color(ui))
+                } else {
+                    egui::RichText::new(SETTINGS_MARK)
+                };
+                let hint = if trouble {
+                    Key::SettingsProblemsStatus
+                } else {
+                    Key::SettingsHint
+                };
+                if ui
+                    .selectable_label(state.settings_open, icon)
+                    .on_hover_text(text::t(lang, hint))
+                    .clicked()
+                {
+                    state.settings_open = !state.settings_open;
+                }
+            });
         });
     });
 
@@ -857,7 +985,7 @@ pub fn draw_in_ui(
             } else if state.status_warn {
                 // ★ ข้อความที่บอกว่า "ของที่คุณขอไม่ได้เข้ามาครบ" ต้องเห็นได้
                 //   ไม่ใช่กลืนไปกับ "พร้อม" (P3-3)
-                ui.colored_label(WARN_COLOR, &state.status);
+                ui.colored_label(warn_color(ui), &state.status);
             } else {
                 ui.label(&state.status);
             }
@@ -910,7 +1038,7 @@ pub fn draw_in_ui(
                 if !state.arrange_filter.is_open() {
                     ui.separator();
                     ui.colored_label(
-                        WARN_COLOR,
+                        warn_color(ui),
                         text::fill(
                             lang,
                             Template::FilterShowing,
@@ -960,7 +1088,7 @@ pub fn draw_in_ui(
             );
             if state.ram_limit > 0 && state.ram_used * 10 > state.ram_limit * 9 {
                 // ใกล้เต็ม — ให้เห็นชัดว่ากำลังตึง
-                ui.colored_label(WARN_COLOR, ram);
+                ui.colored_label(warn_color(ui), ram);
             } else {
                 ui.label(ram);
             }
@@ -976,7 +1104,7 @@ pub fn draw_in_ui(
                 ],
             );
             if state.vram_limit > 0 && state.vram_used * 10 > state.vram_limit * 9 {
-                ui.colored_label(WARN_COLOR, vram);
+                ui.colored_label(warn_color(ui), vram);
             } else {
                 ui.label(vram);
             }
@@ -1042,6 +1170,16 @@ pub fn draw_in_ui(
             ui.label(text::t(lang, Key::LibraryPlaceholder));
             ui.small(text::t(lang, Key::LibraryDropHint));
         });
+
+    // ---- ★ ขวาสุด: แผงตั้งค่า (P5-3) ----
+    //
+    //   วางไว้ **นอกกว่า** inspector เพื่อไม่ให้มันดันเนื้องานหาย: ผู้ใช้ที่เปิด
+    //   แผงนี้กำลังตั้งค่า ไม่ได้กำลังจัดภาพ · ปิดแล้วทุกอย่างกลับเหมือนเดิม
+    if state.settings_open {
+        egui::Panel::right("refx-settings")
+            .default_size(260.0)
+            .show_inside(ui, |ui| settings_panel(ui, state));
+    }
 
     // ---- ขวา: inspector ----
     egui::Panel::right("refx-inspector")
@@ -1120,6 +1258,204 @@ fn storage_indicator(ui: &mut egui::Ui, state: &mut ShellState) {
         .clicked()
     {
         state.storage_request = Some(!view.packed);
+    }
+}
+
+/// ★★★ แผงตั้งค่า (P5-3) — memory budget · theme · present mode
+///
+/// ## กติกาที่ทำให้แผงนี้ไม่ทำให้เปิดโปรแกรมไม่ขึ้น
+///
+/// ตัวควบคุมทุกตัวเป็น **ช่วงปิด** (`range` ของ `DragValue`) จึงพิมพ์ค่าที่อยู่นอก
+/// ช่วงลงไปไม่ได้ตั้งแต่ต้น — ด่านใน `refx_io::settings` ยังอยู่ครบสำหรับคนที่แก้
+/// ไฟล์เอง แต่ทางนี้ **ไม่มีทางผลิตไฟล์ที่ตัวเองอ่านกลับไม่ได้**
+///
+/// ★ เพดานของ `max_pixels` ผูกกับ **RAM ของเครื่อง** (`HANDOFF §4` ข้อ 3) จึงเป็น
+/// เพดานของตัวควบคุมเลย ไม่ใช่แค่ข้อความเตือน — ผู้ใช้จะเลื่อนเกินไม่ได้
+///
+/// ## ทำไมต้องมี `settings_sealed`
+///
+/// การลากตัวเลขหนึ่งครั้งผลิตค่าใหม่ทุกเฟรม ถ้าเขียนไฟล์ตามนั้นจะได้การเขียน
+/// ดิสก์หลายสิบรอบต่อการลากหนึ่งครั้ง — บน UI thread ซึ่ง I-2 ห้ามไว้
+/// จึงเขียนตอน **ปล่อย** เท่านั้น (หลักการเดียวกับ `appearance_sealed`)
+fn settings_panel(ui: &mut egui::Ui, state: &mut ShellState) {
+    use refx_io::settings::{Present, Theme};
+
+    let lang = state.lang;
+    let view = state.settings;
+    let mut edit = view;
+    // ★ "ปล่อยแล้ว" ของทั้งแผง — ปุ่มถือว่าปล่อยทันที ส่วนตัวเลขรอ `drag_stopped`
+    let mut sealed = false;
+
+    ui.horizontal(|ui| {
+        ui.heading(text::t(lang, Key::SettingsTitle));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.button(text::t(lang, Key::SettingsClose)).clicked() {
+                state.settings_open = false;
+            }
+        });
+    });
+    ui.separator();
+
+    // ---- ★★ เรื่องที่ settings.toml ไม่ได้ถูกใช้ตามที่เขียน ----
+    //
+    //   อยู่ **บนสุด** เพราะเป็นเหตุผลเดียวที่แผงนี้เปิดขึ้นมาเองได้ · ผู้ใช้ที่
+    //   ตั้งค่าผิดต้องเห็นคำอธิบายก่อนตัวควบคุม ไม่ใช่ต้องเลื่อนหา
+    if !state.settings_notes.is_empty() {
+        ui.label(
+            egui::RichText::new(text::t(lang, Key::SettingsProblemsTitle))
+                .strong()
+                .color(warn_color(ui)),
+        );
+        for note in &state.settings_notes {
+            ui.label(egui::RichText::new(text::settings_note(lang, note)).color(warn_color(ui)));
+        }
+        if ui
+            .button(text::t(lang, Key::SettingsProblemsDismiss))
+            .clicked()
+        {
+            state.settings_notes_dismissed = true;
+        }
+        ui.separator();
+    }
+
+    // ---- ธีม — ★ ตัวเดียวในแผงนี้ที่เห็นผลทันที ----
+    ui.label(egui::RichText::new(text::t(lang, Key::SettingsTheme)).strong());
+    ui.horizontal(|ui| {
+        for (theme, key) in [
+            (Theme::Dark, Key::SettingsThemeDark),
+            (Theme::Light, Key::SettingsThemeLight),
+        ] {
+            if ui
+                .selectable_label(edit.theme == theme, text::t(lang, key))
+                .clicked()
+            {
+                edit.theme = theme;
+                sealed = true;
+            }
+        }
+    });
+    ui.add_space(6.0);
+
+    // ---- จังหวะการแสดงเฟรม ----
+    ui.label(egui::RichText::new(text::t(lang, Key::SettingsPresent)).strong());
+    ui.horizontal(|ui| {
+        for (present, key, hint) in [
+            (Present::Vsync, Key::SettingsPresentVsync, None),
+            (
+                Present::Uncapped,
+                Key::SettingsPresentUncapped,
+                Some(Key::SettingsPresentUncappedHint),
+            ),
+        ] {
+            let mut button = ui.selectable_label(edit.present == present, text::t(lang, key));
+            if let Some(hint) = hint {
+                button = button.on_hover_text(text::t(lang, hint));
+            }
+            if button.clicked() {
+                edit.present = present;
+                sealed = true;
+            }
+        }
+    });
+    ui.add_space(6.0);
+
+    // ---- หน่วยความจำ (docs/05 §2) ----
+    ui.label(egui::RichText::new(text::t(lang, Key::SettingsMemory)).strong());
+
+    ui.horizontal(|ui| {
+        ui.label(text::t(lang, Key::SettingsRamLimit));
+        let response = ui.add(
+            egui::DragValue::new(&mut edit.ram_limit_mb)
+                .range(refx_io::settings::RAM_LIMIT_MB)
+                .speed(8.0)
+                .suffix(" MB"),
+        );
+        if response.drag_stopped() || response.lost_focus() {
+            sealed = true;
+        }
+        response.on_hover_text(text::t(lang, Key::SettingsRamLimitHint));
+    });
+
+    ui.horizontal(|ui| {
+        ui.label(text::t(lang, Key::SettingsVramLimit));
+        // ★ "อัตโนมัติ" เป็น **ค่าหนึ่งของช่องนี้** ไม่ใช่ช่องแยก — ผู้ใช้ที่เคย
+        //   ตั้งเองแล้วอยากกลับไปให้โปรแกรมเลือก ต้องมีทางกลับที่ชัดเจน
+        //   (ไม่งั้นเขาจะเดาว่าต้องพิมพ์ 0 แล้วได้เพดาน 0 MB ซึ่งใช้ไม่ได้)
+        let auto = edit.vram_limit_mb.is_none();
+        if ui
+            .selectable_label(auto, text::t(lang, Key::SettingsVramAuto))
+            .clicked()
+        {
+            edit.vram_limit_mb = if auto {
+                Some(*refx_io::settings::VRAM_LIMIT_MB.start().max(&384))
+            } else {
+                None
+            };
+            sealed = true;
+        }
+        if let Some(mb) = edit.vram_limit_mb.as_mut() {
+            let response = ui.add(
+                egui::DragValue::new(mb)
+                    .range(refx_io::settings::VRAM_LIMIT_MB)
+                    .speed(8.0)
+                    .suffix(" MB"),
+            );
+            if response.drag_stopped() || response.lost_focus() {
+                sealed = true;
+            }
+        }
+    })
+    .response
+    .on_hover_text(text::t(lang, Key::SettingsVramLimitHint));
+
+    ui.horizontal(|ui| {
+        ui.label(text::t(lang, Key::SettingsMaxPixels));
+        // ★★★ เพดานบนของตัวควบคุมคือเพดานของ **เครื่องนี้** ไม่ใช่ค่าคงที่
+        //     (`HANDOFF §4` ข้อ 3) — เลื่อนเกินไม่ได้ ไม่ใช่เลื่อนได้แล้วค่อยบ่น
+        let ceiling = view
+            .max_pixels_ceiling
+            .max(refx_io::settings::MIN_MAX_PIXELS);
+        let response = ui.add(
+            egui::DragValue::new(&mut edit.max_pixels)
+                .range(refx_io::settings::MIN_MAX_PIXELS.min(ceiling)..=ceiling)
+                .speed(100_000.0),
+        );
+        if response.drag_stopped() || response.lost_focus() {
+            sealed = true;
+        }
+        response.on_hover_text(text::t(lang, Key::SettingsMaxPixelsHint));
+    });
+    // ★ จำนวนจุดเป็นตัวเลขที่ไม่มีใครคิดในหัว — บอกด้านเทียบเท่าไว้ด้วย
+    let side = (view.max_pixels_ceiling as f64).sqrt() as u64;
+    ui.small(text::fill(
+        lang,
+        Template::SettingsCeiling,
+        &[
+            ("side", &side.to_string()),
+            ("pixels", &view.max_pixels_ceiling.to_string()),
+        ],
+    ));
+
+    // ---- ★★ ค่าที่ยังไม่มีผล ----
+    //
+    //   เพดานหน่วยความจำถูกอ่านตอนสร้าง pool/allocator เท่านั้น การเปลี่ยนกลางคัน
+    //   ต้องรื้อ threading model ซึ่ง `CLAUDE.md` บอกให้ถามก่อน — **บอกความจริง
+    //   ดีกว่าแกล้งทำเป็นว่ามันมีผลแล้ว** ผู้ใช้ที่เห็นตัวเลขบนแถบสถานะไม่ขยับ
+    //   จะเชื่อว่าแผงนี้เสียทั้งแผง
+    if view.needs_restart {
+        ui.add_space(6.0);
+        ui.label(
+            egui::RichText::new(text::t(lang, Key::SettingsNeedsRestart))
+                .small()
+                .color(warn_color(ui)),
+        );
+    }
+
+    if edit != view {
+        state.settings_edit = Some(edit);
+    }
+    if sealed {
+        state.settings_sealed = true;
     }
 }
 
@@ -2094,6 +2430,23 @@ mod tests {
             measured: _,           // ไม้บรรทัด
             loading: _,
 
+            // ---- ★ แผงตั้งค่า (P5-3) — **ไม่มีตัวไหนแตะเอกสารเลย** ----
+            //
+            //   ค่าที่ตั้งเป็นของ *โปรแกรม* ทั้งหมด (เพดานหน่วยความจำ · ธีม ·
+            //   จังหวะเฟรม) ไม่มีตัวไหนลง `.refx` และไม่มีตัวไหนผ่าน `Command`
+            //   · `settings_sealed` สั่งเขียน **`settings.toml`** ซึ่งเป็นไฟล์
+            //   ของโปรแกรม ไม่ใช่ไฟล์งานของผู้ใช้
+            //
+            //   ★ สีพื้นหลัง canvas เป็นคนละเรื่องและ **จะแตะเอกสาร** เพราะมัน
+            //     คือ `BoardSettings::background` — ถ้าวันหนึ่งมีคนเอามาไว้ในแผงนี้
+            //     ต้องย้ายมันขึ้นไปอยู่กลุ่มบนพร้อมกับ `Command` ของตัวเอง
+            settings_open: _,
+            settings: _,
+            settings_edit: _,
+            settings_sealed: _,
+            settings_notes: _,
+            settings_notes_dismissed: _,
+
             // ---- ตัวเลขที่โชว์บน status bar ----
             atlas_uploads: _,
             item_count: _,
@@ -2305,8 +2658,13 @@ mod tests {
     ///
     /// ★ ประตูนี้ถาม `Fonts::has_glyph` ตรง ๆ จึงเป็นสิ่งที่**เทสต์ทำแทนตาได้**
     /// สำหรับข้อนี้โดยเฉพาะ · negative control: เปลี่ยนกลับเป็น `●` แล้วมันแดง
+    ///
+    /// ★★★ **ขยายให้ครอบทุกสัญลักษณ์ ไม่ใช่แค่ตัวเดียว (P5-3)** — ประตูรุ่นแรก
+    /// ถามเฉพาะ [`UNSAVED_MARK`] แล้ว P5-3 ก็เผลอใส่ `●` กลับเข้ามาเป็นจุดเตือน
+    /// ข้างปุ่มตั้งค่า **ทั้งที่บทเรียนอยู่ในไฟล์เดียวกัน** และเห็นเป็น tofu บน
+    /// ภาพหน้าจอจริงอีกครั้ง · ประตูที่คุมของชิ้นเดียวไม่ได้คุมรูปแบบของบั๊ก
     #[test]
-    fn the_unsaved_mark_has_a_real_glyph() {
+    fn every_symbol_on_screen_has_a_real_glyph() {
         let ctx = egui::Context::default();
         // ต้องวาดหนึ่งเฟรมก่อน ฟอนต์ถึงถูกโหลดจริง
         let input = egui::RawInput {
@@ -2322,18 +2680,121 @@ mod tests {
         });
 
         let font = egui::FontId::proportional(14.0);
-        let has = ctx.fonts_mut(|fonts| fonts.has_glyph(&font, UNSAVED_MARK));
-        assert!(
-            has,
-            "เครื่องหมาย {UNSAVED_MARK:?} ไม่มี glyph ในฟอนต์ที่ฝังไว้ — \
-             ผู้ใช้จะเห็นสี่เหลี่ยม tofu ข้างชื่อไฟล์ ซึ่งอ่านว่า 'โปรแกรมพัง'"
-        );
+        for mark in [UNSAVED_MARK, SETTINGS_MARK] {
+            assert!(
+                ctx.fonts_mut(|fonts| fonts.has_glyph(&font, mark)),
+                "เครื่องหมาย {mark:?} ไม่มี glyph ในฟอนต์ที่ฝังไว้ — \
+                 ผู้ใช้จะเห็นสี่เหลี่ยม tofu ซึ่งอ่านว่า 'โปรแกรมพัง'"
+            );
+        }
         // ★ และ `●` ที่เคยใช้ **ไม่มีจริง** — พิสูจน์ว่าประตูนี้แยกสองกรณีออกจากกัน
         //   ไม่ใช่ประตูที่ตอบ true กับทุกอักขระ (ประตูที่ผ่านทุกอย่าง = ไม่มีประตู)
         assert!(
             !ctx.fonts_mut(|fonts| fonts.has_glyph(&font, '\u{25CF}')),
             "ถ้า ● มี glyph แล้ว ประตูนี้ก็ไม่ได้พิสูจน์อะไร — ทบทวนว่ายังจำเป็นไหม"
         );
+    }
+
+    /// วาด shell หนึ่งเฟรมแล้วคืนข้อความที่ขึ้นจอ
+    fn draw_once(state: &mut ShellState, ctx: &egui::Context) -> String {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| {
+            let _ = draw_in_ui(ui, state, |_, _| {});
+        });
+        shell_text(&output)
+    }
+
+    /// ★★★ ค่าที่ตั้งผิดต้อง **ขึ้นจอพร้อมเหตุผล** ไม่ใช่แค่ไม่ทำให้โปรแกรมล้ม (P5-3)
+    ///
+    /// `refx_io::settings` พิสูจน์แล้วว่าไฟล์ที่พังยังให้ค่าที่ใช้ได้ — แต่ครึ่งนั้น
+    /// เขียวได้แม้ไม่มีใครบอกผู้ใช้เลยสักคำ · ครึ่งที่เหลืออยู่ตรงนี้: ตัวเลขที่เขา
+    /// เขียน ตัวเลขที่ได้จริง และ **เหตุผล** ต้องอ่านได้จากบนจอ
+    #[test]
+    fn a_setting_that_was_adjusted_says_so_on_screen_with_its_numbers() {
+        let ctx = egui::Context::default();
+        let mut state = ShellState {
+            settings_open: true,
+            settings_notes: vec![
+                refx_io::settings::Note::MaxPixelsCappedByRam {
+                    asked: 268_435_456,
+                    used: 134_217_728,
+                    ram_gb: 8,
+                },
+                refx_io::settings::Note::UnknownKey {
+                    name: "ram_limit_md".to_owned(),
+                },
+            ],
+            ..ShellState::default()
+        };
+
+        let shown = draw_once(&mut state, &ctx);
+        for needle in ["268435456", "134217728", "8", "ram_limit_md"] {
+            assert!(
+                shown.contains(needle),
+                "แผงไม่ได้บอก {needle:?} ให้ผู้ใช้เห็น:\n{shown}"
+            );
+        }
+        assert!(
+            shown.contains(text::t(Lang::En, Key::SettingsProblemsTitle)),
+            "ไม่มีหัวข้อบอกว่าไฟล์ไม่ได้ถูกใช้ตามที่เขียน"
+        );
+    }
+
+    /// ★★ แผงตั้งค่าต้อง **ไม่ขออะไร** ถ้าผู้ใช้ไม่ได้แตะมัน
+    ///
+    /// เหตุผลเดียวกับ inspector และช่องโน้ต — ถ้าค่าที่แสดงถูกอ่านกลับไปเขียนทุกเฟรม
+    /// มันจะสั่งเขียน `settings.toml` ทุกเฟรมที่แผงเปิดอยู่ ซึ่งคือการเขียนดิสก์
+    /// ตลอดเวลาโดยไม่มีใครสั่ง (`docs/08 §3.9` ข้อ 8.1)
+    #[test]
+    fn the_settings_panel_asks_for_nothing_when_nobody_touches_it() {
+        let ctx = egui::Context::default();
+        let mut state = ShellState {
+            settings_open: true,
+            settings: SettingsView {
+                ram_limit_mb: 512,
+                vram_limit_mb: Some(1024),
+                max_pixels: 100_000_000,
+                theme: refx_io::settings::Theme::Light,
+                present: refx_io::settings::Present::Uncapped,
+                max_pixels_ceiling: 268_435_456,
+                needs_restart: true,
+            },
+            ..ShellState::default()
+        };
+
+        for _ in 0..3 {
+            let _ = draw_once(&mut state, &ctx);
+            assert!(state.settings_edit.is_none(), "ไม่มีใครแตะ แต่แผงกลับขอเปลี่ยนค่า");
+            assert!(!state.settings_sealed, "ไม่มีใครแตะ แต่แผงกลับสั่งเขียนไฟล์");
+        }
+    }
+
+    /// ★ ค่าที่เปลี่ยนแล้วยังไม่มีผลต้องบอก — ไม่ใช่ปล่อยให้ผู้ใช้เดาว่าปุ่มเสีย
+    #[test]
+    fn a_value_that_needs_a_restart_says_so() {
+        let ctx = egui::Context::default();
+        let notice = text::t(Lang::En, Key::SettingsNeedsRestart);
+        let shown = |needs_restart: bool| {
+            let mut state = ShellState {
+                settings_open: true,
+                settings: SettingsView {
+                    needs_restart,
+                    ..SettingsView::default()
+                },
+                ..ShellState::default()
+            };
+            draw_once(&mut state, &ctx).contains(notice)
+        };
+
+        assert!(shown(true), "เปลี่ยนค่าแล้วไม่มีอะไรบอกว่าต้องเปิดใหม่");
+        // ★ negative control: ข้อความที่ขึ้นตลอดเวลาไม่ได้บอกอะไรใครเลย
+        assert!(!shown(false), "ข้อความ 'ต้องเปิดใหม่' ขึ้นทั้งที่ยังไม่มีอะไรรออยู่");
     }
 
     /// ข้อความทั้งหมดที่ egui วาดออกมาในเฟรมนั้น

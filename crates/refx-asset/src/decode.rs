@@ -100,11 +100,24 @@ impl Limits {
             capped = max_pixels >= MAX_PIXELS_ABS,
             "image size ceiling derived from this machine's RAM"
         );
+        Self::default().with_max_pixels(max_pixels)
+    }
+
+    /// เปลี่ยนเพดาน pixel — ★ `max_alloc` ตามไปเองเสมอ
+    ///
+    /// ★★ มีอยู่เพราะ P5-3 ให้ผู้ใช้ตั้ง `max_pixels` เองได้ และ **สองค่านี้
+    /// แยกจากกันไม่ได้**: `max_alloc` คือเพดานที่เราบอก `image` ว่าจองได้เท่าไหร่
+    /// ถ้าผู้ใช้ลด `max_pixels` แล้ว `max_alloc` ยังเท่าเดิม ด่านที่เขาเพิ่งตั้ง
+    /// จะไม่มีผลกับหน่วยความจำที่ decoder จองจริงเลย · ให้มันเป็นสูตรเดียวที่
+    /// เขียนไว้ที่เดียว แทนที่จะเป็นสองค่าที่ผู้เรียกต้องจำให้ตรงกันเอง
+    /// (`docs/08 §3.9` ข้อ 8.1)
+    #[must_use]
+    pub fn with_max_pixels(self, max_pixels: u64) -> Self {
         Self {
             max_pixels,
             // ให้ image จองได้ไม่เกินเพดานเดียวกัน ไม่ใช่ 1 GB ตายตัว
             max_alloc: max_pixels.saturating_mul(BYTES_PER_PIXEL_PEAK),
-            ..Self::default()
+            ..self
         }
     }
 }

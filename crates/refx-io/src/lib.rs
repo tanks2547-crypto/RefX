@@ -16,5 +16,6 @@ pub mod packed; // packed mode: ฝังไฟล์ภาพต้นฉบั
 pub mod recovery; // งานที่ยังไม่เคยบันทึก: <data_dir>/recovery/<session>.refx (P4-4)
 pub mod relink; // หาไฟล์ที่หายด้วย hash (5 ขั้นตอน)
 pub mod save; // atomic save: tmp -> fsync -> rename -> fsync dir
+pub mod settings; // settings.toml — ค่าที่ผู้ใช้ตั้งเอง ห้ามทำให้เปิดโปรแกรมไม่ขึ้น (P5-3)
 pub mod spool; // ภาพที่ไม่มีไฟล์ต้นทาง: <data_local_dir>/pasted/<hash>.png (P4-5)
 pub mod validate; // validate_path + bound ทุก field ตอน deserialize

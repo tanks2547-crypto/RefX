@@ -172,6 +172,9 @@ fn main() -> anyhow::Result<()> {
         // ★ ภาพที่วางจาก clipboard สร้างใหม่ไม่ได้จากอะไรเลย — เหตุผลเดียวกับ
         //   `recovery_dir()` เป๊ะ จึงอยู่ใต้ data_local_dir ไม่ใช่ cache_dir
         &paths.spool_dir(),
+        // ★ `settings.toml` อยู่ใต้ config_dir — เป็นของที่ผู้ใช้แก้เองด้วยมือ
+        //   จึงต้องอยู่ที่ที่ OS บอกว่าเป็น config ไม่ใช่ cache ที่มีคนตั้งใจลบ
+        paths.config_dir(),
     )?;
     Ok(())
 }
