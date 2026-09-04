@@ -205,7 +205,25 @@ cargo run --features force-device-lost -p refx-app -- --force-device-lost-after-
 |---|---|
 | P5-1 | Benchmark suite ครบ + บังคับใน CI |
 | P5-2 | Manual checklist ครบทุกข้อ (08-testing §3) |
-| P5-3 | Settings (memory budget, theme, present mode, keymap.toml) |
+| P5-3a | Settings — memory budget · theme · present mode · `settings.toml` | ✅ เสร็จ (`d56c281`) |
+| P5-3b | **keymap เป็นตาราง + `keymap.toml` + ตรวจการชน** | |
+
+> ### ★ ทำไม keymap แยกเป็น task ของตัวเอง (แยก 4 ก.ย. 2026)
+>
+> ไม่ใช่เพราะจำนวนบรรทัด (11 ฟังก์ชัน · 348 บรรทัด + dispatch 99 บรรทัด 10 กิ่ง)
+> แต่เพราะ **ตารางแบนตามที่ `docs/03 §5` เขียนไว้ ทำห้าเรื่องนี้ไม่ได้** — ดู §5 ที่แก้แล้ว
+>
+> และ `Tab` (สลับโหมด) พันกับหนี้ §6 *"โหมดเป็นของแท็บ อ่านจาก `Board::view`"* ที่ยังไม่ได้ทำ
+>
+> **แบ่งสามก้อน:**
+> | | ทำอะไร | เกณฑ์ |
+> |---|---|---|
+> | **a** | ตาราง + wrapper · ตารางค่าปริยาย hard-code · **ยังไม่อ่าน TOML** | พฤติกรรมเหมือนเดิมทุกประการ · **ห้ามเพิ่มคีย์ใหม่** · assertion เดิมเขียวโดยไม่แก้สักบรรทัด |
+> | **b** | อ่าน `keymap.toml` + ตรวจการชน + แผงใน Settings | งานเพิ่ม ไม่ใช่งานรื้อ |
+> | **c** | เติม 6 คีย์ที่ไม่เคยมี (`Tab` `Ctrl+A` `Esc` `F` `1` `0`) | `Tab` ปิดหนี้ §6 ไปในตัว |
+>
+> ★ ก้อน a คือก้อนเสี่ยง — **assertion เดิมคือ oracle** ที่พิสูจน์ว่าตารางให้ผลเท่าของเดิม
+> การเพิ่มคีย์ใหม่ระหว่างนั้นทำให้พิสูจน์ความเท่ากันไม่ได้
 | P5-4 | Export PNG/JPEG แบบ tile |
 | P5-5 | Sidecar `.refx-meta` (opt-in) |
 | P5-6 | Binary hardening + packaging (MSI/portable zip, AppImage/deb) · **+ ลดขนาด binary (ดูด้านล่าง)** |

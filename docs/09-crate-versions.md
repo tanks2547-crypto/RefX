@@ -83,7 +83,17 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rfd         = "0.15"         # native file dialog
 arboard     = "3"            # clipboard รวมรูปภาพ
 notify      = "7"            # file watching
-directories = "5"            # หา cache/config dir ตามมาตรฐานแต่ละ OS
+directories = "5"
+
+# --- config ---------------------------------------------------------------
+# ★ เพิ่ม 29 ส.ค. 2026 (P5-3) — อ่าน settings.toml / keymap.toml
+#   เลือก `basic-toml` ไม่ใช่ `toml 0.8` เพราะ:
+#   · dep เดียวคือ serde ซึ่งมีอยู่แล้ว — `toml 0.8` ลาก toml_edit + winnow
+#     + serde_spanned + toml_datetime มาอีกสี่ตัวเพื่อความสามารถที่เราไม่ใช้ (แก้ไฟล์ · span · วันที่)
+#   · pure Rust · MIT/Apache · maintainer เดียวกับ serde/thiserror
+#   ★ และไม่เขียน parser เอง — ไฟล์ config คือ input ที่ไม่น่าไว้ใจตาม I-4
+#     parser ที่เราเขียนเองต้อง fuzz และดูแลเอง ซึ่งเป็นเหตุผลเดียวกับที่ไม่เขียน JPEG decoder
+basic-toml  = "0.1"            # หา cache/config dir ตามมาตรฐานแต่ละ OS
 
 [workspace.package]
 edition      = "2024"
