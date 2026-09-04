@@ -338,21 +338,57 @@ impl FrameStats {
 ///
 /// ★ ลำดับสำคัญ: ถ้าถาม physical ก่อน Dvorak จะพัง ถ้าถาม logical อย่างเดียว
 /// ไทย/รัสเซีย/กรีกจะพัง — ต้องถามสองชั้นตามลำดับนี้เท่านั้น
+///
+/// ## ★★★ เงื่อนไขที่จะตกไปชั้น physical คือ **"ไม่มี binding ไหนตรง"**
+/// ## ไม่ใช่ "อักขระหน้าตาแบบไหน" (`docs/03 §5` แก้ 4 ก.ย. 2026)
+///
+/// รุ่นก่อนหน้ารับ logical ทันทีถ้ามันเป็น **ASCII ตัวเดียว** แล้วหยุด —
+/// ซึ่งทำให้ **`Ctrl+Shift+Z` ตายบน layout ไทย**: ปุ่ม `Z` ชั้น shift ของไทย
+/// ส่ง **`(` (U+0028)** ซึ่งเป็น ASCII ตัวเดียวพอดี → ไม่มีวันตกไปถึง physical
+/// · ปุ่มอื่นรอด**โดยบังเอิญ** เพราะชั้น shift ส่งสองอักขระ (ตัวอักษร + U+000E)
+/// ซึ่งด่าน "ตัวเดียว" ปฏิเสธ — `(` เป็นตัวเดียวที่หลุด
+///
+/// ★★ คำถามที่ถูกคือ **"ตรงกับอะไรไหม"** ไม่ใช่ *"หน้าตาเป็นอะไร"* —
+/// และมันถามได้ก็ต่อเมื่อ **มีตารางแล้ว** (P5-3b ก้อน a ปลดล็อกข้อนี้ไปในตัว)
+///
+/// ★★★ ถามที่ระดับ **อักขระ ไม่ใช่ระดับ (อักขระ + modifier)** โดยตั้งใจ:
+/// ถ้าถามแบบตรงทั้งชุด ปุ่มตัวอักษรเปล่า ๆ บน layout ที่ไม่ใช่ QWERTY จะตกไป
+/// จุดเครื่องมือที่ตำแหน่ง physical นั้นแทน — ซึ่งคือ **"ถาม physical ก่อน
+/// แล้ว Dvorak พัง"** ที่ §2.12 ห้ามไว้ กลับมาในรูปที่ช้าลงหนึ่งจังหวะ
+/// · `docs/03 §5` เขียนเหตุผลไว้ตรงกันว่า *"Thai `(` **ไม่ผูกกับอะไร** จึงตกลงไป"*
 fn shortcut_char(
     logical: &winit::keyboard::Key,
     physical: winit::keyboard::PhysicalKey,
 ) -> Option<char> {
-    use winit::keyboard::{KeyCode, PhysicalKey};
-
-    if let winit::keyboard::Key::Character(text) = logical {
-        let mut chars = text.chars();
-        // อักขระตัวเดียวและเป็น ASCII เท่านั้น — `แ` ตกลงไปใช้ physical แทน
-        if let (Some(ch), None) = (chars.next(), chars.next())
-            && ch.is_ascii()
-        {
-            return Some(ch.to_ascii_lowercase());
-        }
+    let produced = logical_ascii(logical);
+    // ★ ชั้น 1: อักขระที่ layout ผลิต **ถ้ามันมีความหมายกับเราจริง**
+    if let Some(ch) = produced
+        && keymap::builtin().binds_char(ch)
+    {
+        return Some(ch);
     }
+    // ★ ชั้น 2: ตำแหน่งปุ่มบนคีย์บอร์ด · ★★ `or(produced)` ไว้ท้ายสุดเพื่อให้
+    //   ปุ่มที่ไม่มีในแผนที่ physical (เช่น F13 ในเทสต์) ยังคืนอักขระเดิมเหมือนก่อน
+    physical_char(physical).or(produced)
+}
+
+/// อักขระที่ **layout ของผู้ใช้ผลิตออกมา** — `None` ถ้าไม่ใช่ ASCII ตัวเดียว
+///
+/// `แ` / `с` / `ψ` ตกที่นี่ (ไม่ใช่ ASCII) แล้วไปใช้ [`physical_char`] แทน
+fn logical_ascii(logical: &winit::keyboard::Key) -> Option<char> {
+    let winit::keyboard::Key::Character(text) = logical else {
+        return None;
+    };
+    let mut chars = text.chars();
+    match (chars.next(), chars.next()) {
+        (Some(ch), None) if ch.is_ascii() => Some(ch.to_ascii_lowercase()),
+        _ => None,
+    }
+}
+
+/// อักขระตาม **ตำแหน่งปุ่มบนคีย์บอร์ด** ไม่ขึ้นกับ layout — ตาข่ายรอง
+fn physical_char(physical: winit::keyboard::PhysicalKey) -> Option<char> {
+    use winit::keyboard::{KeyCode, PhysicalKey};
 
     let PhysicalKey::Code(code) = physical else {
         return None;
@@ -9151,64 +9187,101 @@ mod tests {
         );
     }
 
-    /// ★★★ **บั๊กที่ยังเปิดอยู่: `Ctrl+Shift+Z` ตายบน layout ไทย** (เจอ 4 ก.ย. 2026)
+    /// ★★★ **`Ctrl+Shift+Z` บน layout ไทย — เคยตาย แก้แล้ว** (4 ก.ย. 2026)
     ///
-    /// เทสต์นี้ **ไม่ได้บอกว่าพฤติกรรมนี้ถูก** — มันตรึง *กลไก* ไว้ให้คนที่มาแก้
-    /// มี input ที่แน่นอนอยู่ในมือ · วันที่มีคนแก้ `shortcut_char` เทสต์นี้จะแดง
-    /// แล้วเขาจะได้อ่านย่อหน้านี้ก่อนตัดสินใจ (`docs/08 §3.9` ข้อ 5c: ห้ามเขียนว่า
-    /// "ปิดแล้ว" กับสิ่งที่ยังไม่ปิด)
+    /// ## บั๊กเดิมและกลไกของมัน (เก็บไว้เพราะมันคือเหตุผลที่กฎเป็นแบบนี้)
     ///
-    /// ## กลไก
+    /// `shortcut_char` เคยรับ logical ทันทีถ้าเป็น **ASCII ตัวเดียว** แล้วหยุด ·
+    /// ปุ่ม `Z` ชั้น shift ของ layout ไทยส่ง **`(` (U+0028)** ซึ่งเป็น ASCII
+    /// ตัวเดียวพอดี → **ไม่มีวันตกไปถึงชั้น physical** → redo หายไปทั้งดุ้น
     ///
-    /// `shortcut_char` ถาม **logical ก่อน** แล้วรับทันทีถ้าเป็น ASCII ตัวเดียว
-    /// · บน layout ไทย ปุ่ม `Z` ที่กด Shift ค้างส่ง **`(` (U+0028)** ซึ่งเป็น
-    /// ASCII ตัวเดียวพอดี → รับไปเลย **ไม่ตกไปถึงชั้น physical**
+    /// ปุ่มอื่นรอด**โดยบังเอิญ**: ชั้น shift ของ `S`/`G` ส่ง **สองอักขระ**
+    /// (ตัวอักษร + U+000E) ซึ่งด่าน "ตัวเดียว" ปฏิเสธ → ตกไป physical → ติด ·
+    /// **`(` เป็นตัวเดียวที่หลุด** จึงเสียเฉพาะ `Ctrl+Shift+Z`
     ///
-    /// ทำไมปุ่มอื่นรอด: `Shift+S` / `Shift+G` บน layout เดียวกันส่ง **สองอักขระ**
-    /// (ตัวอักษร + U+000E) ซึ่งด่าน "อักขระตัวเดียว" ปฏิเสธ → ตกไป physical → ติด
-    /// · **`(` เป็นตัวเดียวที่หลุด** จึงเสียเฉพาะ `Ctrl+Shift+Z`
+    /// ★ เทสต์เดิมมองไม่เห็นเพราะจำลอง `Shift+G` ด้วย logical ไทย ซึ่ง
+    /// **บังเอิญถูกสำหรับ `G` แต่ไม่ถูกสำหรับ `Z`** — เจอด้วยการรันของจริง
+    /// บนเครื่องที่ layout เป็นไทยเท่านั้น (`docs/08 §3.9` ข้อ 5)
     ///
-    /// ## ยืนยันบนแอปจริง (layout ไทย 041E · อ่าน HKL จากเธรดของ RefX เอง)
+    /// ## กฎที่แก้แล้ว — และสิ่งที่มันต้องไม่พัง
     ///
-    /// `Ctrl+Z` → 5→4 ใบ ✓ · `Ctrl+Y` → 4→5 ใบ ✓ · **`Ctrl+Shift+Z` → 4 ใบ ไม่ขยับ ✗**
-    ///
-    /// ## ทำไมไม่แก้ในก้อน a
-    ///
-    /// `ROADMAP` P5-3b ก้อน a คือการพิสูจน์ว่า **ตารางให้ผลเท่าโค้ดเดิมเป๊ะ** ·
-    /// `shortcut_char` เป็นชั้นก่อนตาราง และการแก้มันคือการเปลี่ยนพฤติกรรม
-    /// ซึ่งทำลายเส้นเทียบ · และทางแก้ไม่ตรงไปตรงมา: "ASCII ที่ไม่ใช่ตัวอักษร
-    /// ให้ใช้ physical แทน" จะไปทับ `[` `]` `{` `}` ซึ่งเป็นคีย์ลัดจริงที่อยู่บน
-    /// ปุ่มวรรคตอนพอดี → เป็นงานที่ต้องมีเทสต์ของตัวเอง
+    /// เงื่อนไขที่จะตกไปชั้น physical คือ **"ไม่มี binding ไหนตรง"** ไม่ใช่
+    /// "หน้าตาของอักขระ" · ทิศที่สี่ (Dvorak) แยกไปอยู่
+    /// [`a_bound_character_always_beats_the_physical_position`] เพราะมันเป็น
+    /// invariant คนละตัวและควรบอกชื่อตัวเองตอนแดง
     #[test]
-    fn shift_z_on_a_thai_layout_is_still_lost_before_the_table_ever_sees_it() {
-        let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
-        // ปุ่ม Z ตำแหน่งเดิม แต่ layout ไทยชั้น shift ส่ง `(` มาแทน
-        let seen = shortcut_char(
-            &key("("),
-            winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyZ),
+    fn a_thai_layout_gets_redo_back_and_the_bracket_keys_survive() {
+        use winit::keyboard::KeyCode;
+        let ctrl = ModifiersState::CONTROL;
+        let ctrl_shift = ctrl | ModifiersState::SHIFT;
+
+        // ---- 1. ทิศที่เคยพัง: layout ไทย ชั้น shift ส่ง `(` ที่ตำแหน่งปุ่ม Z ----
+        let seen = shortcut_char(&key("("), winit::keyboard::PhysicalKey::Code(KeyCode::KeyZ));
+        assert_eq!(
+            seen,
+            Some('z'),
+            "`(` ไม่ผูกกับคีย์ลัดไหนเลย ต้องตกไปถึงตำแหน่งปุ่ม physical"
         );
-        assert_eq!(seen, Some('('), "กลไกเปลี่ยนไปแล้ว — อ่านหัวเทสต์ก่อนแก้");
         assert_eq!(
             history_shortcut(seen, ctrl_shift),
-            None,
-            "ถ้าตัวนี้เป็น Some(Redo) แล้ว แปลว่ามีคนแก้บั๊กนี้ — ลบเทสต์นี้ทิ้งได้เลย"
+            Some(HistoryRequest::Redo),
+            "Ctrl+Shift+Z บน layout ไทยต้อง redo ได้"
         );
 
-        // ★ และนี่คือทางที่ผู้ใช้ไทยยังใช้ได้จริงวันนี้ — ต้องไม่พังไปด้วย
+        // ---- 2. ทิศที่ทางแก้แบบ "ASCII ที่ไม่ใช่ตัวอักษรให้ใช้ physical" จะพัง ----
+        //
+        // ★★ `[` `]` `{` `}` เป็นคีย์ลัดจริงที่อยู่บนปุ่มวรรคตอนพอดี — กฎที่ตัดสิน
+        //    จาก *หน้าตา* ของอักขระจะกวาดพวกนี้ไปด้วย · กฎที่ถามว่า "ผูกกับอะไรไหม"
+        //    ไม่แตะมันเลยเพราะมันผูกอยู่
+        for (text, code, want) in [
+            ("[", KeyCode::BracketLeft, ZMove::Backward),
+            ("]", KeyCode::BracketRight, ZMove::Forward),
+            ("{", KeyCode::BracketLeft, ZMove::ToBack),
+            ("}", KeyCode::BracketRight, ZMove::ToFront),
+        ] {
+            let seen = shortcut_char(&key(text), winit::keyboard::PhysicalKey::Code(code));
+            assert_eq!(
+                zorder_shortcut(seen, ModifiersState::empty()),
+                Some(want),
+                "ปุ่มวรรคตอน {text:?} ถูกกฎใหม่กวาดไปด้วย"
+            );
+        }
+
+        // ---- 3. ทิศที่ใช้ได้อยู่แล้ว ต้องไม่พังไปด้วย ----
         assert_eq!(
-            history_shortcut(
-                pressed_thai("ผ", winit::keyboard::KeyCode::KeyZ),
-                ModifiersState::CONTROL
-            ),
+            history_shortcut(pressed_thai("ผ", KeyCode::KeyZ), ctrl),
             Some(HistoryRequest::Undo)
         );
         assert_eq!(
-            history_shortcut(
-                pressed_thai("ั", winit::keyboard::KeyCode::KeyY),
-                ModifiersState::CONTROL
-            ),
-            Some(HistoryRequest::Redo),
-            "Ctrl+Y เป็นทางเดียวที่คนไทย redo ได้ตอนนี้ — ห้ามพัง"
+            history_shortcut(pressed_thai("ั", KeyCode::KeyY), ctrl),
+            Some(HistoryRequest::Redo)
+        );
+    }
+
+    /// ★★★ อักขระที่ **ผูกกับคีย์ลัดอยู่** ต้องชนะตำแหน่งปุ่มเสมอ (`HANDOFF §2.12`)
+    ///
+    /// นี่คือครึ่งที่ห้ามเสียไปตอนแก้บั๊ก layout ไทย: *"ถ้าถาม physical ก่อน
+    /// Dvorak จะพัง"* · กฎใหม่ตกไป physical **เฉพาะตอนอักขระนั้นไม่ผูกกับอะไรเลย**
+    ///
+    /// ★★ **แยกเป็นเทสต์ของตัวเองเพราะเทสต์ Dvorak เดิมจับข้อนี้ไม่ได้** —
+    /// มันยิงด้วย `KeyCode::Period` ซึ่ง **ไม่มีในแผนที่ physical** เลย
+    /// ตาข่ายรองจึงคืน `None` ทุกกรณี แล้วผลก็ตกกลับเป็น logical เสมอ
+    /// ไม่ว่ากฎจะเป็นแบบไหน · ตัวนี้ยิงด้วย `KeyCode::KeyZ` ซึ่ง**อยู่ในแผนที่**
+    /// จึงเป็นตัวเดียวที่แยก "logical ชนะ" ออกจาก "physical ชนะ" ได้จริง
+    #[test]
+    fn a_bound_character_always_beats_the_physical_position() {
+        use winit::keyboard::KeyCode;
+        // กด `v` ที่ตำแหน่งปุ่ม `Z` — `v` ผูกกับเครื่องมือเลือกอยู่ จึงต้องชนะ
+        let dvorak = shortcut_char(&key("v"), winit::keyboard::PhysicalKey::Code(KeyCode::KeyZ));
+        assert_eq!(dvorak, Some('v'), "อักขระที่ผูกอยู่ต้องชนะตำแหน่งปุ่ม");
+        assert_eq!(
+            tool_shortcut(dvorak, ModifiersState::empty()),
+            Some(Tool::Select)
+        );
+        assert_eq!(
+            history_shortcut(dvorak, ModifiersState::CONTROL),
+            None,
+            "ตำแหน่งปุ่มแย่ง `Ctrl+V` ไปเป็น undo — Dvorak พังแบบเดียวกับที่ §2.12 ห้าม"
         );
     }
 
