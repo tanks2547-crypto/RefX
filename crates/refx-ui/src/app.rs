@@ -25,6 +25,9 @@ use refx_core::view::{Camera, Mode};
 use refx_core::zorder::ZMove;
 
 use crate::instances::{self, crop_uv};
+// ★ คำศัพท์ของคีย์ลัดย้ายไปอยู่ `keymap` แล้ว (P5-3b ก้อน a) — ชื่อเดิมทุกตัว
+//   ยังเรียกได้เหมือนเดิม เทสต์ที่ใช้ `super::*` จึงไม่ต้องแก้สักบรรทัด
+use crate::keymap::{self, AppearanceKey, GroupRequest, HistoryRequest, SaveRequest, TabKey};
 use crate::shell::LoadProgress;
 use crate::text::{self, Key, Lang, Template};
 use refx_platform::redraw::RedrawReason;
@@ -319,15 +322,7 @@ impl FrameStats {
 /// อักขระควบคุม `SYN` (U+0016) จึงรับตัวนั้นด้วย
 ///
 /// TODO(P6): macOS ใช้ `Cmd+V` ต้องรับ `super_key()` เพิ่มตอนทำ P6
-/// ผู้ใช้ขออะไรกับประวัติ
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum HistoryRequest {
-    /// Ctrl+Z
-    Undo,
-    /// Ctrl+Y หรือ Ctrl+Shift+Z
-    Redo,
-}
-
+///
 /// อักขระ ASCII ที่คีย์ลัดควรถือว่าผู้ใช้กด — `None` ถ้าไม่ใช่ปุ่มที่มีความหมาย
 ///
 /// ★★★ **logical ก่อน · physical เป็นตาข่ายรอง**
@@ -395,22 +390,26 @@ fn shortcut_char(
     })
 }
 
+/// ★★★ ปุ่มที่เพิ่งกด → สิ่งที่มันสั่ง — **ทางเดียวที่ทุก wrapper ข้างล่างใช้**
+///
+/// การจับคู่ทั้งหมดเป็น **ข้อมูล** อยู่ใน [`crate::keymap`] แล้ว (P5-3b ก้อน a)
+/// ฟังก์ชันข้างล่างจึงเหลือหน้าที่เดียวคือ *"action ตัวนี้ใช่ของฉันไหม"*
+///
+/// ★ ยังเป็นฟังก์ชันแยกกันอยู่โดยตั้งใจ: **assertion เดิมทั้งชุดคือ oracle**
+/// ที่พิสูจน์ว่าตารางให้ผลเท่าของเดิมเป๊ะ (`ROADMAP` P5-3b ก้อน a) ·
+/// การยุบ `on_input` ให้เหลือ dispatch เดียวทำให้ oracle นั้นหายไป จึงเป็นงานของ
+/// ก้อนถัดไป ไม่ใช่ก้อนนี้
+fn action_for(pressed: Option<char>, modifiers: ModifiersState) -> Option<keymap::Action> {
+    keymap::builtin().action(pressed, None, modifiers)
+}
+
 /// แปลงปุ่มที่กดเป็นคำขอกับประวัติ
 ///
 /// ★ รับ **Ctrl+Shift+Z เป็น redo ด้วย** ไม่ใช่แค่ Ctrl+Y — คนจำนวนมากใช้อันนั้น
 /// (ติดมาจาก Photoshop/Illustrator) ถ้าไม่รับ เขาจะคิดว่า redo ไม่มีในโปรแกรมนี้
 fn history_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> Option<HistoryRequest> {
-    if !modifiers.control_key() {
-        return None;
-    }
-    // ปุ่มควบคุมบางระบบส่งมาเป็นอักขระ control (Ctrl+Z = 0x1A, Ctrl+Y = 0x19)
-    match pressed? {
-        'z' | '\u{1a}' => Some(if modifiers.shift_key() {
-            HistoryRequest::Redo
-        } else {
-            HistoryRequest::Undo
-        }),
-        'y' | '\u{19}' => Some(HistoryRequest::Redo),
+    match action_for(pressed, modifiers)? {
+        keymap::Action::History(request) => Some(request),
         _ => None,
     }
 }
@@ -419,38 +418,17 @@ fn history_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> Option<
 ///
 /// `docs/03 §5` ระบุแค่ `[` `]` = ส่งไปหลัง / นำมาหน้า **ไม่ได้ระบุปุ่มของสุดหัว-สุดท้าย**
 /// เลือก `Shift+[` / `Shift+]` เพราะอยู่ตระกูลเดียวกันและไม่ชนกับอะไรใน keymap
-/// (ไม่ใช้ `Ctrl+[` เพราะ Ctrl ถูกจองไว้ให้คำสั่งระดับเอกสารทั้งหมดแล้ว)
-///
-/// ★ ต้องรับ `{` `}` ด้วย: บนคีย์บอร์ดส่วนใหญ่ Shift+`[` **ส่งอักขระ `{` มาเลย**
-/// ไม่ได้ส่ง `[` พร้อมธง shift — ถ้าดูแต่ธง ปุ่มสุดหัว-สุดท้ายจะไม่ทำงานเลย
 fn zorder_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> Option<ZMove> {
-    if modifiers.control_key() || modifiers.alt_key() {
-        return None;
-    }
-    let all_the_way = modifiers.shift_key();
-    match pressed? {
-        '[' if all_the_way => Some(ZMove::ToBack),
-        ']' if all_the_way => Some(ZMove::ToFront),
-        '[' => Some(ZMove::Backward),
-        ']' => Some(ZMove::Forward),
-        '{' => Some(ZMove::ToBack),
-        '}' => Some(ZMove::ToFront),
+    match action_for(pressed, modifiers)? {
+        keymap::Action::ZOrder(movement) => Some(movement),
         _ => None,
     }
 }
 
 /// แปลงปุ่มที่กดเป็นการสลับเครื่องมือ (docs/03 §2: `V` = Select/Move · `C` = Crop)
 fn tool_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> Option<Tool> {
-    if modifiers.control_key() || modifiers.alt_key() {
-        return None;
-    }
-    match pressed? {
-        'v' => Some(Tool::Select),
-        'c' => Some(Tool::Crop),
-        // docs/03 §2: `I` = color picker · `M` = measure · `T` = text note
-        'i' => Some(Tool::Picker),
-        'm' => Some(Tool::Measure),
-        't' => Some(Tool::Text),
+    match action_for(pressed, modifiers)? {
+        keymap::Action::Tool(tool) => Some(tool),
         _ => None,
     }
 }
@@ -461,34 +439,20 @@ fn tool_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> Option<Too
 /// (uniform ตัวเดียว ไม่กิน undo ไม่ทำให้ dirty) ส่วน `H` **แก้เอกสาร**
 /// ของภาพที่เลือก จึงผ่าน `Command` และย้อนได้ตามปกติ
 fn appearance_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> Option<AppearanceKey> {
-    if modifiers.control_key() || modifiers.alt_key() {
-        return None;
-    }
-    match pressed? {
-        'g' => Some(AppearanceKey::ToggleBoardGrayscale),
-        'h' => Some(AppearanceKey::FlipHorizontal),
+    match action_for(pressed, modifiers)? {
+        keymap::Action::Appearance(what) => Some(what),
         _ => None,
     }
 }
 
 /// `Ctrl+G` = จัดกลุ่ม · `Ctrl+Shift+G` = แยกกลุ่ม (docs/03 §5, P3-7)
 ///
-/// ★ ต้องอยู่หลัง `control_key()` เพราะ `G` เปล่า ๆ เป็น grayscale ของทั้ง board
-/// อยู่แล้ว (`appearance_shortcut`) — สองตัวนี้แยกกันด้วย Ctrl ตัวเดียว
-/// จึงต้องเป็นคนละฟังก์ชันที่ตรวจ modifier ของตัวเองอย่างเคร่งครัดทั้งคู่
-///
-/// ★★ รับอักขระ control `0x07` ด้วย: บางระบบส่ง `Ctrl+G` มาเป็น BEL ไม่ใช่ `'g'`
-/// พร้อมธง ctrl — รูปแบบเดียวกับที่ `Ctrl+Z`/`Ctrl+V` เจอมาแล้ว
+/// ★ `G` เปล่า ๆ เป็น grayscale ของทั้ง board — สองตัวนี้แยกกันด้วย Ctrl ตัวเดียว
+/// ตอนนี้ความเคร่งครัดนั้นเป็น **ข้อมูล** ([`keymap::Hold`]) ไม่ใช่วินัยของคนเขียน
+/// และมีประตู `no_single_keypress_can_ever_fire_two_actions` คุมทั้งตาราง
 fn group_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> Option<GroupRequest> {
-    if !modifiers.control_key() || modifiers.alt_key() {
-        return None;
-    }
-    match pressed? {
-        'g' | '\u{7}' => Some(if modifiers.shift_key() {
-            GroupRequest::Ungroup
-        } else {
-            GroupRequest::Group
-        }),
+    match action_for(pressed, modifiers)? {
+        keymap::Action::Group(request) => Some(request),
         _ => None,
     }
 }
@@ -522,16 +486,8 @@ fn selection_after_history(
 
 /// `Ctrl+S` = บันทึก · `Ctrl+Shift+S` = บันทึกเป็น (docs/03 §5, P4-2)
 fn save_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> Option<SaveRequest> {
-    if !modifiers.control_key() || modifiers.alt_key() {
-        return None;
-    }
-    match pressed? {
-        // บางระบบส่ง Ctrl+S มาเป็นอักขระ control (DC3) ไม่ใช่ 's'
-        's' | '\u{13}' => Some(if modifiers.shift_key() {
-            SaveRequest::SaveAs
-        } else {
-            SaveRequest::Save
-        }),
+    match action_for(pressed, modifiers)? {
+        keymap::Action::Save(request) => Some(request),
         _ => None,
     }
 }
@@ -539,13 +495,9 @@ fn save_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> Option<Sav
 /// `Ctrl+O` = เปิดกระดาน (docs/03 §5, P4-4)
 ///
 /// ★ ไม่รับ `Ctrl+Shift+O` เป็นอย่างอื่น — ปุ่มที่ยังไม่มีความหมายควรเงียบ
-/// ไม่ใช่ทำอะไรที่ผู้ใช้ไม่ได้ขอ
+/// ไม่ใช่ทำอะไรที่ผู้ใช้ไม่ได้ขอ (ในตารางคือ `shift: Up` ไม่ใช่ `Either`)
 fn open_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> bool {
-    if !modifiers.control_key() || modifiers.alt_key() || modifiers.shift_key() {
-        return false;
-    }
-    // บางระบบส่ง Ctrl+O มาเป็นอักขระ control (SI) ไม่ใช่ 'o' — เหมือน Ctrl+S
-    matches!(pressed, Some('o' | '\u{f}'))
+    action_for(pressed, modifiers) == Some(keymap::Action::OpenBoard)
 }
 
 /// ★★★ คีย์ของแท็บ (`docs/03 §5` — P4-7c)
@@ -558,53 +510,39 @@ fn open_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> bool {
 ///
 /// (`Ctrl+O` อยู่ที่ [`open_shortcut`] เพราะมันมีความหมายมาก่อนโครงแท็บ)
 ///
-/// ★ เป็นฟังก์ชันบริสุทธิ์เหมือนคีย์ลัดตัวอื่นทุกตัว — เทสต์ได้โดยไม่ต้องมีหน้าต่าง
-/// และเป็นที่เดียวที่ตัดสิน จึงไม่มี `if key == …` กระจายอยู่ใน `on_input`
+/// ★★ ตัวเดียวที่รับ `Key` ดิบด้วย เพราะ `Ctrl+Tab` มาเป็น **named key**
+/// ซึ่ง `shortcut_char` มองไม่เห็นเลย — คือกิ่ง [`keymap::Chord::Key`] ในตาราง
 fn tab_shortcut(
     pressed: Option<char>,
     key: &winit::keyboard::Key,
     modifiers: ModifiersState,
 ) -> Option<TabKey> {
-    if !modifiers.control_key() || modifiers.alt_key() {
-        return None;
-    }
-    // ★ `Ctrl+Tab` มาเป็น **named key** ไม่ใช่อักขระ — `shortcut_char` มองไม่เห็น
-    //   (นี่คือเหตุผลเดียวกับที่ `is_delete` รับ `Key` ดิบ)
-    if matches!(
-        key,
-        winit::keyboard::Key::Named(winit::keyboard::NamedKey::Tab)
-    ) {
-        return Some(TabKey::Next);
-    }
-    if modifiers.shift_key() {
-        return None; // `Ctrl+Shift+T`/`W` ยังไม่มีความหมาย — ต้องเงียบ
-    }
-    match pressed? {
-        // บางระบบส่งมาเป็นอักขระ control (DC4 / ETB) — เหมือน `Ctrl+S`/`Ctrl+O`
-        't' | '\u{14}' => Some(TabKey::New),
-        'w' | '\u{17}' => Some(TabKey::Close),
+    match keymap::builtin().action(pressed, named_key(key), modifiers)? {
+        keymap::Action::Tab(which) => Some(which),
         _ => None,
     }
 }
 
-/// ปุ่มของแท็บที่ผู้ใช้เพิ่งกด
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TabKey {
-    /// `Ctrl+T`
-    New,
-    /// `Ctrl+W`
-    Close,
-    /// `Ctrl+Tab`
-    Next,
+/// ปุ่มที่มีชื่อของ event นี้ — `None` ถ้าเป็นตัวอักษร
+fn named_key(key: &winit::keyboard::Key) -> Option<winit::keyboard::NamedKey> {
+    match key {
+        winit::keyboard::Key::Named(named) => Some(*named),
+        _ => None,
+    }
 }
 
-/// ผู้ใช้ขออะไรกับการบันทึก (P4-2)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SaveRequest {
-    /// `Ctrl+S` — บันทึกลงที่เดิม (ยังไม่เคยบันทึก = ถามที่เก็บก่อน)
-    Save,
-    /// `Ctrl+Shift+S` — ถามที่เก็บใหม่เสมอ
-    SaveAs,
+/// ★★ ปุ่มนี้ควรลงมือในเฟรมนี้ไหม — **นโยบายกดค้างอ่านจากตาราง**
+///
+/// เดิมเป็น `!event.repeat` ที่เขียนซ้ำอยู่ 8 จุดในบล็อกเดียว โดยที่อีก 2 จุด
+/// **จงใจไม่มีมัน** (undo/redo · ย้ายชั้น) · ความต่างที่ตั้งใจแบบนั้นแยกไม่ออก
+/// จากการลืมพิมพ์ เมื่อมันอยู่ในรูปของ "บรรทัดที่หายไป" — และไม่มีเทสต์ไหน
+/// ถามมันได้เลยเพราะมันไม่ใช่ค่าอะไรทั้งสิ้น
+///
+/// ★ ตอนนี้เป็น [`keymap::RepeatPolicy`] ในตาราง ซึ่งเทสต์ถามตรง ๆ ได้
+/// (`holding_a_key_repeats_only_where_it_should`) และก้อน b จะให้ผู้ใช้ตั้งเอง
+/// ได้โดยไม่ต้องแตะโค้ดตรงนี้เลย
+fn wanted(event: &winit::event::KeyEvent, action: keymap::Action) -> bool {
+    event.state.is_pressed() && (!event.repeat || keymap::builtin().repeats(action))
 }
 
 /// สิ่งที่ต้องทำต่อหลังบันทึกเสร็จ (P4-2)
@@ -621,41 +559,18 @@ enum AfterSave {
     CloseTab(refx_core::arena::BoardId),
 }
 
-/// ผู้ใช้ขออะไรกับกลุ่ม (P3-7)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GroupRequest {
-    /// `Ctrl+G` — รวมสิ่งที่เลือกเป็นกลุ่มใหม่
-    Group,
-    /// `Ctrl+Shift+G` — เอาสิ่งที่เลือกออกจากกลุ่ม
-    Ungroup,
-}
-
-/// ปุ่มที่แตะการแสดงผล
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AppearanceKey {
-    /// `G` — ขาวดำทั้ง board (การมองเห็น ไม่ใช่เอกสาร)
-    ToggleBoardGrayscale,
-    /// `H` — พลิกแนวนอนของภาพที่เลือก (เอกสาร → ผ่าน Command)
-    FlipHorizontal,
-}
-
 /// `Delete` / `Backspace` = ลบสิ่งที่เลือก (docs/03 §5)
 ///
 /// รับ `Backspace` ด้วยเพราะบนแล็ปท็อปหลายรุ่นไม่มีปุ่ม `Delete` แยก
 fn is_delete(key: &winit::keyboard::Key) -> bool {
-    matches!(
-        key,
-        winit::keyboard::Key::Named(
-            winit::keyboard::NamedKey::Delete | winit::keyboard::NamedKey::Backspace
-        )
-    )
+    // ★ ไม่ตรวจ modifier เลยสักตัว — ในตารางคือ `Either` ทั้งสามช่อง
+    //   จึงส่ง `ModifiersState::empty()` เข้าไปได้โดยผลไม่เปลี่ยน
+    keymap::builtin().action(None, named_key(key), ModifiersState::empty())
+        == Some(keymap::Action::Delete)
 }
 
 fn is_paste(pressed: Option<char>, modifiers: ModifiersState) -> bool {
-    if !modifiers.control_key() {
-        return false;
-    }
-    matches!(pressed, Some('v' | '\u{16}'))
+    action_for(pressed, modifiers) == Some(keymap::Action::Paste)
 }
 
 /// ★★★ กล้อง/โหมดที่ **ใช้อยู่จริง** ประกอบเป็น `ViewState` ที่จะลงไฟล์ (P4-1)
@@ -7915,9 +7830,10 @@ impl AppDelegate for RefxApp {
                 // ★ ตัดสินว่า "ตัวอักษรอะไร" ครั้งเดียวแล้วส่งต่อให้ทุกตัวจับคู่ —
                 //   logical ก่อน physical เป็นตาข่ายรอง (ดู `shortcut_char`)
                 let pressed = shortcut_char(&event.logical_key, event.physical_key);
-                // `repeat` = ผู้ใช้กดค้างไว้ ไม่ใช่เจตนาจะวางหลายรอบ
-                // ถ้าไม่กรอง การกดค้างหนึ่งวินาทีจะสั่งอ่าน clipboard หลายสิบครั้ง
-                if event.state.is_pressed() && !event.repeat && is_paste(pressed, gfx.modifiers) {
+                // ★★★ `repeat` = ผู้ใช้กดค้างไว้ ไม่ใช่เจตนาสั่งหลายรอบ —
+                //     **นโยบายของแต่ละ action มาจากตาราง ไม่ใช่จาก `!event.repeat`
+                //     ที่เคยกระจายอยู่ 8 จุดในบล็อกนี้** (ดู `keymap::RepeatPolicy`)
+                if wanted(event, keymap::Action::Paste) && is_paste(pressed, gfx.modifiers) {
                     // อ่าน clipboard ที่นี่ไม่ได้ — บล็อกได้ (I-2) ทำที่ต้นเฟรมถัดไป
                     self.pending_paste = true;
                     needs_redraw = true;
@@ -7925,16 +7841,16 @@ impl AppDelegate for RefxApp {
                 // ★ undo/redo **ยอมให้กดค้างซ้ำได้** ต่างจาก Ctrl+V โดยตั้งใจ
                 //   กด Ctrl+Z ค้างแล้วย้อนเรื่อย ๆ เป็นสิ่งที่ทุกคนคาดหวัง
                 //   ส่วนการวางซ้ำ ๆ ไม่ใช่ (แถมภาพจาก clipboard ใหญ่ได้เป็นร้อย MB)
-                if event.state.is_pressed()
-                    && let Some(request) = history_shortcut(pressed, gfx.modifiers)
+                if let Some(request) = history_shortcut(pressed, gfx.modifiers)
+                    && wanted(event, keymap::Action::History(request))
                 {
                     self.pending_history = Some(request);
                     needs_redraw = true;
                 }
                 // ★ ย้ายชั้น — กดค้างซ้ำได้เหมือน undo (กด `]` รัว ๆ จนถึงบนสุดคือท่าปกติ)
                 //   ตัวที่ถึงสุดขอบแล้วจะไม่สร้างคำสั่งเอง (`zorder::reordered` คืน `None`)
-                if event.state.is_pressed()
-                    && let Some(movement) = zorder_shortcut(pressed, gfx.modifiers)
+                if let Some(movement) = zorder_shortcut(pressed, gfx.modifiers)
+                    && wanted(event, keymap::Action::ZOrder(movement))
                 {
                     self.pending_zorder = Some(movement);
                     needs_redraw = true;
@@ -7942,14 +7858,13 @@ impl AppDelegate for RefxApp {
                 // ★ ลบ — **ห้ามซ้ำตอนกดค้าง** ต่างจากย้ายชั้นโดยตั้งใจ
                 //   กดค้างหนึ่งวินาทีแล้วลบทีละชุดจนหมด board คือหายนะที่ undo
                 //   ต้องกดกลับหลายสิบครั้ง ทั้งที่ผู้ใช้ตั้งใจกดครั้งเดียว
-                if event.state.is_pressed() && !event.repeat && is_delete(&event.logical_key) {
+                if wanted(event, keymap::Action::Delete) && is_delete(&event.logical_key) {
                     self.pending_delete = true;
                     needs_redraw = true;
                 }
                 // ★ การแสดงผล (P2-8)
-                if event.state.is_pressed()
-                    && !event.repeat
-                    && let Some(what) = appearance_shortcut(pressed, gfx.modifiers)
+                if let Some(what) = appearance_shortcut(pressed, gfx.modifiers)
+                    && wanted(event, keymap::Action::Appearance(what))
                 {
                     self.pending_appearance = Some(what);
                     needs_redraw = true;
@@ -7957,18 +7872,15 @@ impl AppDelegate for RefxApp {
                 // ★ บันทึก (P4-2) — **ห้ามซ้ำตอนกดค้าง**: กดค้างหนึ่งวินาที
                 //   = เขียนไฟล์หลายสิบรอบ ซึ่งนอกจากเปลืองแล้วยังเปิด dialog
                 //   ซ้อนกันเป็นสิบบานถ้ายังไม่เคยบันทึก
-                if event.state.is_pressed()
-                    && !event.repeat
-                    && let Some(request) = save_shortcut(pressed, gfx.modifiers)
+                if let Some(request) = save_shortcut(pressed, gfx.modifiers)
+                    && wanted(event, keymap::Action::Save(request))
                 {
                     self.pending_save = Some(request);
                     needs_redraw = true;
                 }
                 // ★ เปิดกระดาน (P4-4) — ห้ามซ้ำตอนกดค้างด้วยเหตุผลเดียวกับ Ctrl+S
                 //   (กดค้าง = dialog เปิดซ้อนกันเป็นสิบบาน)
-                if event.state.is_pressed()
-                    && !event.repeat
-                    && open_shortcut(pressed, gfx.modifiers)
+                if wanted(event, keymap::Action::OpenBoard) && open_shortcut(pressed, gfx.modifiers)
                 {
                     self.pending_open = true;
                     needs_redraw = true;
@@ -7976,9 +7888,8 @@ impl AppDelegate for RefxApp {
                 // ★★★ คีย์ของแท็บ (P4-7c · `docs/03 §5`) — **ห้ามซ้ำตอนกดค้าง**
                 //     ทั้งสามตัว: `Ctrl+T` ค้าง = แท็บเปล่าสิบใบ · `Ctrl+W` ค้าง =
                 //     ปิดทุกแท็บรวดเดียว ซึ่งคือการทำงานหายจากการกดผิดครั้งเดียว
-                if event.state.is_pressed()
-                    && !event.repeat
-                    && let Some(which) = tab_shortcut(pressed, &event.logical_key, gfx.modifiers)
+                if let Some(which) = tab_shortcut(pressed, &event.logical_key, gfx.modifiers)
+                    && wanted(event, keymap::Action::Tab(which))
                 {
                     match which {
                         TabKey::New => self.pending_new_tab = true,
@@ -7990,16 +7901,15 @@ impl AppDelegate for RefxApp {
                 // ★ จัดกลุ่ม / แยกกลุ่ม (P3-7) — **ห้ามซ้ำตอนกดค้าง** เหมือน Delete
                 //   กดค้างหนึ่งวินาที = สร้างกลุ่มใหม่ทับกันหลายสิบชั้นใน undo stack
                 //   ทั้งที่ผู้ใช้ตั้งใจกดครั้งเดียว
-                if event.state.is_pressed()
-                    && !event.repeat
-                    && let Some(request) = group_shortcut(pressed, gfx.modifiers)
+                if let Some(request) = group_shortcut(pressed, gfx.modifiers)
+                    && wanted(event, keymap::Action::Group(request))
                 {
                     self.pending_group = Some(request);
                     needs_redraw = true;
                 }
                 // ★ สลับเครื่องมือ (P2-7) — กดค้างซ้ำไม่มีผลอยู่แล้วเพราะตั้งค่าเดิมซ้ำ
-                if event.state.is_pressed()
-                    && let Some(tool) = tool_shortcut(pressed, gfx.modifiers)
+                if let Some(tool) = tool_shortcut(pressed, gfx.modifiers)
+                    && wanted(event, keymap::Action::Tool(tool))
                     && gfx.tool != tool
                 {
                     gfx.tool = tool;
@@ -9238,6 +9148,67 @@ mod tests {
             tool_shortcut(pressed_thai("v", KeyCode::Period), none),
             Some(Tool::Select),
             "layout ละตินที่สลับตำแหน่งต้องยึด logical เหมือนเดิม"
+        );
+    }
+
+    /// ★★★ **บั๊กที่ยังเปิดอยู่: `Ctrl+Shift+Z` ตายบน layout ไทย** (เจอ 4 ก.ย. 2026)
+    ///
+    /// เทสต์นี้ **ไม่ได้บอกว่าพฤติกรรมนี้ถูก** — มันตรึง *กลไก* ไว้ให้คนที่มาแก้
+    /// มี input ที่แน่นอนอยู่ในมือ · วันที่มีคนแก้ `shortcut_char` เทสต์นี้จะแดง
+    /// แล้วเขาจะได้อ่านย่อหน้านี้ก่อนตัดสินใจ (`docs/08 §3.9` ข้อ 5c: ห้ามเขียนว่า
+    /// "ปิดแล้ว" กับสิ่งที่ยังไม่ปิด)
+    ///
+    /// ## กลไก
+    ///
+    /// `shortcut_char` ถาม **logical ก่อน** แล้วรับทันทีถ้าเป็น ASCII ตัวเดียว
+    /// · บน layout ไทย ปุ่ม `Z` ที่กด Shift ค้างส่ง **`(` (U+0028)** ซึ่งเป็น
+    /// ASCII ตัวเดียวพอดี → รับไปเลย **ไม่ตกไปถึงชั้น physical**
+    ///
+    /// ทำไมปุ่มอื่นรอด: `Shift+S` / `Shift+G` บน layout เดียวกันส่ง **สองอักขระ**
+    /// (ตัวอักษร + U+000E) ซึ่งด่าน "อักขระตัวเดียว" ปฏิเสธ → ตกไป physical → ติด
+    /// · **`(` เป็นตัวเดียวที่หลุด** จึงเสียเฉพาะ `Ctrl+Shift+Z`
+    ///
+    /// ## ยืนยันบนแอปจริง (layout ไทย 041E · อ่าน HKL จากเธรดของ RefX เอง)
+    ///
+    /// `Ctrl+Z` → 5→4 ใบ ✓ · `Ctrl+Y` → 4→5 ใบ ✓ · **`Ctrl+Shift+Z` → 4 ใบ ไม่ขยับ ✗**
+    ///
+    /// ## ทำไมไม่แก้ในก้อน a
+    ///
+    /// `ROADMAP` P5-3b ก้อน a คือการพิสูจน์ว่า **ตารางให้ผลเท่าโค้ดเดิมเป๊ะ** ·
+    /// `shortcut_char` เป็นชั้นก่อนตาราง และการแก้มันคือการเปลี่ยนพฤติกรรม
+    /// ซึ่งทำลายเส้นเทียบ · และทางแก้ไม่ตรงไปตรงมา: "ASCII ที่ไม่ใช่ตัวอักษร
+    /// ให้ใช้ physical แทน" จะไปทับ `[` `]` `{` `}` ซึ่งเป็นคีย์ลัดจริงที่อยู่บน
+    /// ปุ่มวรรคตอนพอดี → เป็นงานที่ต้องมีเทสต์ของตัวเอง
+    #[test]
+    fn shift_z_on_a_thai_layout_is_still_lost_before_the_table_ever_sees_it() {
+        let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        // ปุ่ม Z ตำแหน่งเดิม แต่ layout ไทยชั้น shift ส่ง `(` มาแทน
+        let seen = shortcut_char(
+            &key("("),
+            winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyZ),
+        );
+        assert_eq!(seen, Some('('), "กลไกเปลี่ยนไปแล้ว — อ่านหัวเทสต์ก่อนแก้");
+        assert_eq!(
+            history_shortcut(seen, ctrl_shift),
+            None,
+            "ถ้าตัวนี้เป็น Some(Redo) แล้ว แปลว่ามีคนแก้บั๊กนี้ — ลบเทสต์นี้ทิ้งได้เลย"
+        );
+
+        // ★ และนี่คือทางที่ผู้ใช้ไทยยังใช้ได้จริงวันนี้ — ต้องไม่พังไปด้วย
+        assert_eq!(
+            history_shortcut(
+                pressed_thai("ผ", winit::keyboard::KeyCode::KeyZ),
+                ModifiersState::CONTROL
+            ),
+            Some(HistoryRequest::Undo)
+        );
+        assert_eq!(
+            history_shortcut(
+                pressed_thai("ั", winit::keyboard::KeyCode::KeyY),
+                ModifiersState::CONTROL
+            ),
+            Some(HistoryRequest::Redo),
+            "Ctrl+Y เป็นทางเดียวที่คนไทย redo ได้ตอนนี้ — ห้ามพัง"
         );
     }
 

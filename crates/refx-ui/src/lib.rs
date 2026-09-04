@@ -11,7 +11,7 @@ pub mod copy; // ก๊อปข้อความขึ้น clipboard บน�
 pub mod fonts; // ฟอนต์ที่ฝังใน binary (docs/03 §0) — ไทย + ละติน ยังไม่มี CJK
 pub mod inspector;
 pub mod instances; // Board → QuadInstance (ฟังก์ชันบริสุทธิ์ · วัดได้จาก benches/)
-pub mod keymap; // ตาราง data โหลดจาก keymap.toml — ห้าม hard-code (ADR-007)
+pub mod keymap; // ★ ตาราง data ของคีย์ลัด — ห้าม hard-code `if key == …` (docs/03 §5)
 pub mod shell; // โครง UI กลาง: tabs, toolbar, library, inspector, status bar
 pub mod text; // ★ ประตูเดียวของข้อความที่ผู้ใช้เห็น (docs/03 §0) — ห้ามเขียนสตริงตรงใน widget
 pub mod theme;
