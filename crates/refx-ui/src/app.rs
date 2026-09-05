@@ -363,7 +363,7 @@ fn shortcut_char(
     let produced = logical_ascii(logical);
     // ★ ชั้น 1: อักขระที่ layout ผลิต **ถ้ามันมีความหมายกับเราจริง**
     if let Some(ch) = produced
-        && keymap::builtin().binds_char(ch)
+        && keymap::active().binds_char(ch)
     {
         return Some(ch);
     }
@@ -436,7 +436,7 @@ fn physical_char(physical: winit::keyboard::PhysicalKey) -> Option<char> {
 /// การยุบ `on_input` ให้เหลือ dispatch เดียวทำให้ oracle นั้นหายไป จึงเป็นงานของ
 /// ก้อนถัดไป ไม่ใช่ก้อนนี้
 fn action_for(pressed: Option<char>, modifiers: ModifiersState) -> Option<keymap::Action> {
-    keymap::builtin().action(pressed, None, modifiers)
+    keymap::active().action(pressed, None, modifiers)
 }
 
 /// แปลงปุ่มที่กดเป็นคำขอกับประวัติ
@@ -553,7 +553,7 @@ fn tab_shortcut(
     key: &winit::keyboard::Key,
     modifiers: ModifiersState,
 ) -> Option<TabKey> {
-    match keymap::builtin().action(pressed, named_key(key), modifiers)? {
+    match keymap::active().action(pressed, named_key(key), modifiers)? {
         keymap::Action::Tab(which) => Some(which),
         _ => None,
     }
@@ -578,7 +578,7 @@ fn named_key(key: &winit::keyboard::Key) -> Option<winit::keyboard::NamedKey> {
 /// (`holding_a_key_repeats_only_where_it_should`) และก้อน b จะให้ผู้ใช้ตั้งเอง
 /// ได้โดยไม่ต้องแตะโค้ดตรงนี้เลย
 fn wanted(event: &winit::event::KeyEvent, action: keymap::Action) -> bool {
-    event.state.is_pressed() && (!event.repeat || keymap::builtin().repeats(action))
+    event.state.is_pressed() && (!event.repeat || keymap::active().repeats(action))
 }
 
 /// สิ่งที่ต้องทำต่อหลังบันทึกเสร็จ (P4-2)
@@ -601,7 +601,7 @@ enum AfterSave {
 fn is_delete(key: &winit::keyboard::Key) -> bool {
     // ★ ไม่ตรวจ modifier เลยสักตัว — ในตารางคือ `Either` ทั้งสามช่อง
     //   จึงส่ง `ModifiersState::empty()` เข้าไปได้โดยผลไม่เปลี่ยน
-    keymap::builtin().action(None, named_key(key), ModifiersState::empty())
+    keymap::active().action(None, named_key(key), ModifiersState::empty())
         == Some(keymap::Action::Delete)
 }
 
@@ -1872,8 +1872,21 @@ pub struct RefxApp {
     settings_restart_pending: bool,
     /// งานเขียน `settings.toml` ที่ส่งไปเธรดแล้ว รอผลกลับ (ไม่บล็อก I-2)
     settings_write: Option<crossbeam_channel::Receiver<Result<(), String>>>,
+    /// ★★ เหตุที่ `keymap.toml` ใช้ไม่ได้ — `None` = ไม่มีไฟล์ หรือใช้ได้ปกติ
+    ///
+    /// ค้างอยู่จนกว่าจะได้ขึ้นจอ ด้วยเหตุผลเดียวกับ [`Self::settings_notes`]:
+    /// การอ่านเกิด**ก่อนหน้าต่างมี**
+    keymap_problem: Option<crate::keymap::Problem>,
+    /// ตารางคีย์ลัดที่ใช้อยู่มาจาก `keymap.toml` ของผู้ใช้ (ไม่ใช่ค่าปริยาย)
+    keymap_from_file: bool,
     /// โฟลเดอร์ config — `None` = หาที่อยู่ไม่ได้ (บันทึกค่าที่ตั้งไม่ได้ แต่ยังใช้ได้)
     config_dir: Option<std::path::PathBuf>,
+}
+
+/// ที่อยู่ของ `keymap.toml` ในโฟลเดอร์ config
+#[must_use]
+fn keymap_path(config_dir: &std::path::Path) -> std::path::PathBuf {
+    config_dir.join("keymap.toml")
 }
 
 /// ที่อยู่ของ `settings.toml` ในโฟลเดอร์ config
@@ -2757,7 +2770,53 @@ impl RefxApp {
             settings_notes_pending: false,
             settings_restart_pending: false,
             settings_write: None,
+            keymap_problem: None,
+            keymap_from_file: false,
             config_dir: None,
+        }
+    }
+
+    /// ★★★ อ่าน `keymap.toml` — **เรียกก่อนหน้าต่างจะมี** (แตะดิสก์ — I-2)
+    ///
+    /// ## พังที่ไหนก็ใช้ค่าปริยาย **ทั้งชุด**
+    ///
+    /// ไม่ว่าจะพังเพราะไวยากรณ์ · ปุ่มที่อ่านไม่ออก · ชื่อ action ที่ไม่รู้จัก
+    /// หรือ **สองแถวที่กดครั้งเดียวติดทั้งคู่** — ผลเหมือนกันหมดคือตารางค่าปริยาย
+    /// ทั้งชุด พร้อมข้อความที่ชี้แถวที่ผิด
+    ///
+    /// ★ ห้ามใช้ครึ่งเดียว: ผู้ใช้ที่พิมพ์ผิดบรรทัดเดียวแล้วได้คีย์ลัดหายไป
+    /// ครึ่งหนึ่ง จะหาสาเหตุไม่เจอและสรุปว่าโปรแกรมทำงานหาย (`ROADMAP` P5-3b)
+    ///
+    /// ★★ ไม่คืน `Result` โดยตั้งใจ — เหตุผลเดียวกับ [`Self::load_settings`]
+    pub fn load_keymap(&mut self, config_dir: &std::path::Path) {
+        let path = keymap_path(config_dir);
+        let rows = match refx_io::keymap::load(&path) {
+            // ไม่มีไฟล์ = สภาพปกติของการเปิดครั้งแรก · เงียบสนิท
+            Ok(None) => return,
+            Ok(Some(rows)) => rows,
+            Err(err) => {
+                tracing::warn!(path = %path.display(), %err, "keymap.toml unusable - using the built-in table");
+                self.keymap_problem = Some(crate::keymap::Problem::File {
+                    detail: err.to_string(),
+                });
+                return;
+            }
+        };
+        match crate::keymap::Keymap::from_rows(&rows) {
+            Ok(map) => {
+                let count = map.bindings().len();
+                if crate::keymap::install(map) {
+                    self.keymap_from_file = true;
+                    tracing::info!(count, "keymap.toml is in effect");
+                } else {
+                    // ★ ตั้งได้ครั้งเดียวต่อโปรเซส — ถ้ามาถึงตรงนี้แปลว่ามีคนเรียกซ้ำ
+                    tracing::error!("keymap was already installed - ignoring the second one");
+                }
+            }
+            Err(problem) => {
+                tracing::warn!(?problem, "keymap.toml unusable - using the built-in table");
+                self.keymap_problem = Some(problem);
+            }
         }
     }
 
@@ -7143,6 +7202,8 @@ impl AppDelegate for RefxApp {
             settings_notes_pending,
             settings_restart_pending,
             settings_write,
+            keymap_problem,
+            keymap_from_file,
             config_dir,
             waker,
             ..
@@ -7221,6 +7282,33 @@ impl AppDelegate for RefxApp {
             shell.settings_open = true;
             shell.status = text::t(shell.lang, Key::SettingsProblemsStatus).to_owned();
             shell.status_warn = true;
+        }
+        // ★★ คีย์ลัดที่ใช้อยู่ (P5-3b ก้อน b) — เติมครั้งเดียว ไม่ใช่ทุกเฟรม
+        //
+        //   ตารางเปลี่ยนได้ทางเดียวคือเปิดโปรแกรมใหม่ (`keymap::install` ตั้งได้
+        //   ครั้งเดียว) การประกอบสตริง 27 แถวทุกเฟรมจึงเป็นงานที่ทิ้งเปล่า
+        if shell.keymap.rows.is_empty() {
+            shell.keymap = crate::shell::KeymapView {
+                // ★ `display()` คืน `None` ให้ alias อักขระควบคุม — มันไม่มี glyph
+                //   ในฟอนต์ที่ฝังไว้ วาดลงไปคือสี่เหลี่ยม tofu
+                rows: keymap::active()
+                    .bindings()
+                    .iter()
+                    .filter_map(|binding| Some((binding.chord.display()?, binding.action.name())))
+                    .collect(),
+                from_file: *keymap_from_file,
+                problem: keymap_problem
+                    .as_ref()
+                    .map(|problem| text::keymap_problem(shell.lang, problem)),
+            };
+            // ★★★ ไฟล์ที่ใช้ไม่ได้ต้อง **เปิดแผงขึ้นมาเอง** เหมือน settings ที่พัง —
+            //     ผู้ใช้ที่เขียน keymap.toml แล้วคีย์ลัดไม่เปลี่ยนจะสรุปว่าฟีเจอร์นี้
+            //     ไม่มีจริง ถ้าไม่มีอะไรบอกเขาว่าไฟล์ถูกปฏิเสธเพราะแถวไหน
+            if keymap_problem.is_some() {
+                shell.settings_open = true;
+                shell.status = text::t(shell.lang, Key::KeymapFellBackToDefaults).to_owned();
+                shell.status_warn = true;
+            }
         }
         // ★ inspector อ่านค่าจากภาพ **ตัวแรกในชุดที่เลือก** (anchor ของการเลือก)
         //   เลือกหลายใบแล้วปรับ = ทุกใบได้ค่าเดียวกัน ซึ่งตรงกับที่ผู้ใช้เห็นบนสไลเดอร์
@@ -8024,6 +8112,9 @@ pub fn run(
     // ★★ ต้องมาก่อน `start_assets` — เพดาน RAM/pixel ของ pool ถูกอ่านตอนสร้าง
     //    เท่านั้น เสียบทีหลังไม่ได้ · แตะดิสก์ตรงนี้ได้เพราะยังไม่มีหน้าต่าง (I-2)
     app.load_settings(config_dir);
+    // ★★ ต้องมาก่อนหน้าต่างเช่นกัน — `keymap::install` ตั้งได้ครั้งเดียวต่อโปรเซส
+    //    และ `shortcut_char` ถามตารางตั้งแต่ปุ่มแรกที่ผู้ใช้กด
+    app.load_keymap(config_dir);
     // ★ ที่อยู่ของงานที่ยังไม่เคยบันทึก — ถูกส่งเข้ามาเพราะ `AppPaths` เป็นของ
     //   ชั้น platform · ★★ ต้องเป็น `<data_dir>/recovery` เท่านั้น ห้าม cache
     app.recovery_dir = Some(recovery_dir.to_path_buf());

@@ -389,6 +389,18 @@ pub enum Key {
     SettingsProblemsStatus,
     /// ★ ไฟล์ settings อ่านไม่ได้ทั้งไฟล์ → ใช้ค่าปริยายทั้งชุด
     SettingsNoteUnparsable,
+
+    // ---- P5-3b ก้อน b: keymap.toml ----
+    /// หัวข้อย่อย: คีย์ลัด
+    SettingsKeymap,
+    /// ตารางที่ใช้อยู่มาจากค่าปริยายที่มากับโปรแกรม
+    SettingsKeymapBuiltin,
+    /// ตารางที่ใช้อยู่มาจาก `keymap.toml` ของผู้ใช้
+    SettingsKeymapFromFile,
+    /// ★ คำอธิบายว่าชื่อที่เห็นคือชื่อที่ต้องพิมพ์ลงไฟล์
+    SettingsKeymapHint,
+    /// ★★ `keymap.toml` ใช้ไม่ได้ → กลับไปใช้ตารางค่าปริยาย **ทั้งชุด**
+    KeymapFellBackToDefaults,
 }
 
 /// ข้อความภาษาอังกฤษ — **ต้องมีครบทุก key เสมอ** (เป็นตัวสำรองสุดท้าย)
@@ -601,6 +613,17 @@ fn en(key: Key) -> &'static str {
             "settings.toml could not be read at all, so every setting is back to its default. \
              Fix the file, or delete it and set things up again here."
         }
+        Key::SettingsKeymap => "Shortcuts",
+        Key::SettingsKeymapBuiltin => "Built-in shortcuts",
+        Key::SettingsKeymapFromFile => "From your keymap.toml",
+        Key::SettingsKeymapHint => {
+            "These are the names to write in keymap.toml. \
+             The file replaces the whole list, so copy the rows you want to keep."
+        }
+        Key::KeymapFellBackToDefaults => {
+            "keymap.toml could not be used, so the built-in shortcuts are in effect. \
+             Fix the line below and restart RefX - nothing else was changed."
+        }
     }
 }
 
@@ -794,6 +817,17 @@ fn th(key: Key) -> Option<&'static str> {
             "อ่าน settings.toml ไม่ได้ทั้งไฟล์ ทุกค่าจึงกลับไปเป็นค่าปริยาย\n\
              แก้ไฟล์ให้ถูก หรือลบทิ้งแล้วตั้งค่าใหม่ที่นี่ก็ได้"
         }
+        Key::SettingsKeymap => "คีย์ลัด",
+        Key::SettingsKeymapBuiltin => "คีย์ลัดที่มากับโปรแกรม",
+        Key::SettingsKeymapFromFile => "จาก keymap.toml ของคุณ",
+        Key::SettingsKeymapHint => {
+            "ชื่อที่เห็นคือชื่อที่ต้องพิมพ์ลงใน keymap.toml\n\
+             ไฟล์นั้นแทนที่รายการทั้งชุด ก๊อปแถวที่อยากเก็บไว้ไปด้วย"
+        }
+        Key::KeymapFellBackToDefaults => {
+            "ใช้ keymap.toml ไม่ได้ ตอนนี้จึงเป็นคีย์ลัดที่มากับโปรแกรม\n\
+             แก้บรรทัดข้างล่างแล้วเปิด RefX ใหม่ — ไม่มีอย่างอื่นถูกเปลี่ยน"
+        }
     })
 }
 
@@ -942,6 +976,18 @@ pub enum Template {
     SettingsCeiling,
     /// `{mb}` — เพดานหน่วยความจำเป็น MB
     SettingsMegabytes,
+
+    // ---- P5-3b ก้อน b: keymap.toml ----
+    /// `{detail}` — อ่าน `keymap.toml` ไม่ได้เลย (ไวยากรณ์/เพดาน/ดิสก์)
+    KeymapProblemFile,
+    /// `{row}` `{given}` — ปุ่มในแถวนั้นอ่านไม่ออก
+    KeymapProblemUnknownKey,
+    /// `{row}` `{given}` — ชื่อ action ในแถวนั้นไม่รู้จัก
+    KeymapProblemUnknownAction,
+    /// ★★ `{row}` `{keys}` `{other_row}` `{other_keys}` — สองแถวถูกจุดพร้อมกันได้
+    KeymapProblemConflict,
+    /// `{n}` — จำนวนคีย์ลัดที่ใช้อยู่
+    SettingsKeymapCount,
 }
 
 /// เทมเพลตภาษาอังกฤษ — ต้องมีครบทุกตัว
@@ -1075,6 +1121,21 @@ Drag in a PNG, JPEG, WebP, GIF, BMP, TGA or TIFF instead."
         }
         Template::SettingsCeiling => "Up to {side}×{side} ({pixels} pixels) on this machine",
         Template::SettingsMegabytes => "{mb} MB",
+
+        Template::KeymapProblemFile => "keymap.toml could not be read: {detail}",
+        Template::KeymapProblemUnknownKey => {
+            "keymap.toml row {row}: RefX does not understand the key \"{given}\""
+        }
+        Template::KeymapProblemUnknownAction => {
+            "keymap.toml row {row}: there is no shortcut called \"{given}\" - \
+             the Settings panel lists every name you can use"
+        }
+        Template::KeymapProblemConflict => {
+            "keymap.toml row {row} (\"{keys}\") and row {other_row} (\"{other_keys}\") \
+             can both be triggered by one keypress, so which one wins would depend on \
+             their order in the file"
+        }
+        Template::SettingsKeymapCount => "{n} shortcuts",
     }
 }
 
@@ -1208,6 +1269,18 @@ fn template_th(template: Template) -> Option<&'static str> {
         }
         Template::SettingsCeiling => "เครื่องนี้รับได้ถึง {side}×{side} ({pixels} จุด)",
         Template::SettingsMegabytes => "{mb} MB",
+
+        Template::KeymapProblemFile => "อ่าน keymap.toml ไม่ได้: {detail}",
+        Template::KeymapProblemUnknownKey => "keymap.toml แถว {row}: RefX ไม่เข้าใจปุ่ม \"{given}\"",
+        Template::KeymapProblemUnknownAction => {
+            "keymap.toml แถว {row}: ไม่มีคีย์ลัดชื่อ \"{given}\"\n\
+             แผงตั้งค่าแสดงชื่อที่ใช้ได้ทั้งหมดไว้แล้ว"
+        }
+        Template::KeymapProblemConflict => {
+            "keymap.toml แถว {row} (\"{keys}\") กับแถว {other_row} (\"{other_keys}\") \
+             ถูกจุดด้วยการกดครั้งเดียวกันได้ ตัวไหนชนะจึงขึ้นกับลำดับในไฟล์"
+        }
+        Template::SettingsKeymapCount => "คีย์ลัด {n} ปุ่ม",
     })
 }
 
@@ -1408,6 +1481,46 @@ pub fn settings_note(lang: Lang, note: &refx_io::settings::Note) -> String {
     }
 }
 
+/// ข้อความสำหรับผู้ใช้เมื่อ `keymap.toml` ใช้ไม่ได้ (P5-3b ก้อน b)
+///
+/// ★ ประกอบจาก **ฟิลด์** ของ [`crate::keymap::Problem`] — หลักการเดียวกับ
+/// [`load_error`] และ [`settings_note`] (`docs/03 §0`)
+///
+/// ★★ ทุก variant ต้องบอก **แถวที่ผิด** ไม่ใช่แค่ว่าไฟล์ผิด · ผู้ใช้ที่ได้
+/// ข้อความว่า "keymap.toml ผิด" เฉย ๆ ต้องไล่อ่านทั้งไฟล์เอง
+#[must_use]
+pub fn keymap_problem(lang: Lang, problem: &crate::keymap::Problem) -> String {
+    use crate::keymap::Problem;
+    match problem {
+        Problem::File { detail } => fill(lang, Template::KeymapProblemFile, &[("detail", detail)]),
+        Problem::UnknownKey { row, given } => fill(
+            lang,
+            Template::KeymapProblemUnknownKey,
+            &[("row", &row.to_string()), ("given", given)],
+        ),
+        Problem::UnknownAction { row, given } => fill(
+            lang,
+            Template::KeymapProblemUnknownAction,
+            &[("row", &row.to_string()), ("given", given)],
+        ),
+        Problem::Conflict {
+            row,
+            keys,
+            other_row,
+            other_keys,
+        } => fill(
+            lang,
+            Template::KeymapProblemConflict,
+            &[
+                ("row", &row.to_string()),
+                ("keys", keys),
+                ("other_row", &other_row.to_string()),
+                ("other_keys", other_keys),
+            ],
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -1571,6 +1684,11 @@ mod tests {
         Key::SettingsProblemsDismiss,
         Key::SettingsProblemsStatus,
         Key::SettingsNoteUnparsable,
+        Key::SettingsKeymap,
+        Key::SettingsKeymapBuiltin,
+        Key::SettingsKeymapFromFile,
+        Key::SettingsKeymapHint,
+        Key::KeymapFellBackToDefaults,
     ];
 
     const ALL_TEMPLATES: &[Template] = &[
@@ -1628,6 +1746,11 @@ mod tests {
         Template::SettingsNoteUnknownValue,
         Template::SettingsCeiling,
         Template::SettingsMegabytes,
+        Template::KeymapProblemFile,
+        Template::KeymapProblemUnknownKey,
+        Template::KeymapProblemUnknownAction,
+        Template::KeymapProblemConflict,
+        Template::SettingsKeymapCount,
     ];
 
     /// ★ กฎข้อ 2 ของ docs/03 §0: ห้ามมีทางที่ผู้ใช้จะเห็นช่องว่างหรือชื่อ key

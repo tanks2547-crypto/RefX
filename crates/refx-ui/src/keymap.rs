@@ -2,17 +2,18 @@
 //!
 //! spec: `docs/03-modes-and-ui.md §5` · `ROADMAP` P5-3b
 //!
-//! ## ก้อน a ทำอะไร และ **ไม่** ทำอะไร
+//! ## ก้อน a และ b ทำอะไร และ **ยังไม่** ทำอะไร
 //!
-//! ทำ: ย้ายการจับคู่ทั้งหมดมาเป็น **ข้อมูล** แล้วให้ฟังก์ชันเดิมใน `app.rs`
-//! กลายเป็น wrapper บาง ๆ ที่อ่านตารางนี้
+//! **ก้อน a** ย้ายการจับคู่ทั้งหมดมาเป็น **ข้อมูล** แล้วให้ฟังก์ชันเดิมใน
+//! `app.rs` กลายเป็น wrapper บาง ๆ ที่อ่านตารางนี้ · ★★ **assertion เดิมคือ
+//! oracle** ที่พิสูจน์ว่าตารางให้ผลเท่าของเดิมเป๊ะ จึงห้ามเพิ่มคีย์ใหม่ตอนนั้น
 //!
-//! ไม่ทำ: **ไม่อ่าน `keymap.toml`** · **ไม่เพิ่มคีย์ใหม่สักตัว** ·
-//! ไม่แตะเทสต์เดิมสักบรรทัด
+//! **ก้อน b** (ที่นี่) รับตารางจาก `keymap.toml` ของผู้ใช้ + **ประตูตรวจการชน**
+//! · ไฟล์ถูกอ่านเป็นสตริงดิบที่ `refx_io::keymap` แล้วแปลงเป็นชนิดจริงด้วย
+//! [`Keymap::from_rows`]
 //!
-//! ★★ เหตุผลที่ `ROADMAP` แยกก้อนไว้แบบนี้: **assertion เดิมคือ oracle**
-//! ที่พิสูจน์ว่าตารางให้ผลเท่าของเดิมเป๊ะ · การเพิ่มคีย์ใหม่ระหว่างทางทำให้
-//! พิสูจน์ความเท่ากันไม่ได้อีกต่อไป เพราะไม่มีของเดิมให้เทียบ
+//! **ยังไม่ทำ (ก้อน c):** 6 คีย์ที่ `docs/03 §5` สั่งไว้แต่ไม่เคยมี —
+//! `Tab` · `Ctrl+A` · `Esc` · `F` · `1` · `0`
 //!
 //! ## ทำไมไม่ใช่ `HashMap<(Modifiers, Key), Action>` (`docs/03 §5` แก้ 4 ก.ย. 2026)
 //!
@@ -110,6 +111,79 @@ pub enum Action {
     OpenBoard,
     /// คีย์ของแท็บ
     Tab(TabKey),
+}
+
+impl Action {
+    /// ★★★ ชื่อที่ผู้ใช้เขียนใน `keymap.toml` — **สัญญากับไฟล์ ห้ามเปลี่ยนพร่ำเพรื่อ**
+    ///
+    /// เปลี่ยนชื่อเมื่อไหร่ `keymap.toml` ของผู้ใช้ทุกคนที่ใช้ชื่อเดิมจะกลายเป็น
+    /// "action ไม่รู้จัก" แล้ว**คีย์ลัดหายทั้งไฟล์** (ตามกฎ "พังที่ไหนก็ใช้
+    /// ค่าปริยายทั้งชุด") · `match` ไม่มี `_ =>` โดยตั้งใจ: เพิ่ม action ใหม่
+    /// เมื่อไหร่ คอมไพเลอร์บังคับให้มาตั้งชื่อให้มัน
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::History(HistoryRequest::Undo) => "undo",
+            Self::History(HistoryRequest::Redo) => "redo",
+            Self::Paste => "paste",
+            Self::Delete => "delete",
+            Self::ZOrder(ZMove::Backward) => "send-backward",
+            Self::ZOrder(ZMove::Forward) => "send-forward",
+            Self::ZOrder(ZMove::ToBack) => "send-to-back",
+            Self::ZOrder(ZMove::ToFront) => "send-to-front",
+            Self::Tool(Tool::Select) => "tool-select",
+            Self::Tool(Tool::Crop) => "tool-crop",
+            Self::Tool(Tool::Picker) => "tool-picker",
+            Self::Tool(Tool::Measure) => "tool-measure",
+            Self::Tool(Tool::Text) => "tool-text",
+            Self::Appearance(AppearanceKey::ToggleBoardGrayscale) => "toggle-grayscale",
+            Self::Appearance(AppearanceKey::FlipHorizontal) => "flip-horizontal",
+            Self::Group(GroupRequest::Group) => "group",
+            Self::Group(GroupRequest::Ungroup) => "ungroup",
+            Self::Save(SaveRequest::Save) => "save",
+            Self::Save(SaveRequest::SaveAs) => "save-as",
+            Self::OpenBoard => "open-board",
+            Self::Tab(TabKey::New) => "new-tab",
+            Self::Tab(TabKey::Close) => "close-tab",
+            Self::Tab(TabKey::Next) => "next-tab",
+        }
+    }
+
+    /// ทุก action ที่มี — ★ ใช้ทั้งตอนแปลงชื่อกลับ และตอนแสดงรายการบนแผง
+    ///
+    /// ★★ **ประกอบจาก [`Self::name`] ไม่ใช่ตารางชื่อชุดที่สอง** — สองรายการ
+    /// ที่ต้องตรงกันเองคือรายการที่วันหนึ่งจะไม่ตรงกัน
+    pub const ALL: &'static [Self] = &[
+        Self::History(HistoryRequest::Undo),
+        Self::History(HistoryRequest::Redo),
+        Self::Paste,
+        Self::Delete,
+        Self::ZOrder(ZMove::Backward),
+        Self::ZOrder(ZMove::Forward),
+        Self::ZOrder(ZMove::ToBack),
+        Self::ZOrder(ZMove::ToFront),
+        Self::Tool(Tool::Select),
+        Self::Tool(Tool::Crop),
+        Self::Tool(Tool::Picker),
+        Self::Tool(Tool::Measure),
+        Self::Tool(Tool::Text),
+        Self::Appearance(AppearanceKey::ToggleBoardGrayscale),
+        Self::Appearance(AppearanceKey::FlipHorizontal),
+        Self::Group(GroupRequest::Group),
+        Self::Group(GroupRequest::Ungroup),
+        Self::Save(SaveRequest::Save),
+        Self::Save(SaveRequest::SaveAs),
+        Self::OpenBoard,
+        Self::Tab(TabKey::New),
+        Self::Tab(TabKey::Close),
+        Self::Tab(TabKey::Next),
+    ];
+
+    /// ชื่อจากไฟล์ → action — `None` ถ้าไม่รู้จัก
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|a| a.name() == name)
+    }
 }
 
 /// ★★ เงื่อนไขของปุ่มค้างหนึ่งตัว — **สามสถานะ ไม่ใช่สอง**
@@ -219,6 +293,19 @@ pub enum Chord {
     },
 }
 
+/// ปุ่มที่มีชื่อที่ `keymap.toml` เขียนได้ — ★ รายการสั้นโดยตั้งใจ
+///
+/// เพิ่มตัวใหม่ได้เสมอ แต่ตัวที่ **ไม่มี action ให้ผูก** จะกลายเป็นแถวที่ผู้ใช้
+/// เขียนได้แล้วไม่เกิดอะไรขึ้น ซึ่งอ่านว่าโปรแกรมเสีย
+const NAMED_KEYS: &[(&str, NamedKey)] = &[
+    ("delete", NamedKey::Delete),
+    ("backspace", NamedKey::Backspace),
+    ("tab", NamedKey::Tab),
+    ("escape", NamedKey::Escape),
+    ("enter", NamedKey::Enter),
+    ("space", NamedKey::Space),
+];
+
 impl Chord {
     /// เงื่อนไขปุ่มค้างของ chord นี้ — ใช้ตรวจการชน (ดู [`Mods::overlaps`])
     #[must_use]
@@ -226,6 +313,93 @@ impl Chord {
         match self {
             Self::Char { mods, .. } | Self::Key { mods, .. } => mods,
         }
+    }
+
+    /// ★★★ แปลงข้อความที่ผู้ใช้เขียนเป็น chord — `"ctrl+shift+z"` · `"["` · `"delete"`
+    ///
+    /// ## ★★ modifier จากไฟล์เป็น **ค่าตรงตัวเสมอ** ไม่มี [`Hold::Either`]
+    ///
+    /// เขียน `ctrl+z` แปลว่า **ctrl กด shift ไม่กด alt ไม่กด** เป๊ะ ๆ ·
+    /// `Either` มีอยู่เพื่ออธิบายควาามเป็นมาของตารางค่าปริยาย (เช่น `Ctrl+Y`
+    /// ที่ไม่เคยสน shift มาแต่ไหนแต่ไร) **ไม่ใช่คำศัพท์ที่ผู้ใช้ต้องเรียนรู้** —
+    /// ให้เขาเขียนสิ่งที่เขาหมายถึงตรง ๆ แล้วได้สิ่งนั้นกลับไป
+    ///
+    /// ★ ปฏิเสธอักขระที่ไม่ใช่ ASCII: `shortcut_char` ไม่มีทางผลิตมันออกมาได้เลย
+    /// (logical ที่ไม่ใช่ ASCII ตกไปชั้น physical เสมอ) — binding ที่ไม่มีวัน
+    /// ถูกจุดคือ binding ที่หลอกผู้ใช้ว่าเขาตั้งค่าสำเร็จแล้ว
+    #[must_use]
+    pub fn parse(spec: &str) -> Option<Self> {
+        let spec = spec.trim();
+        let mut mods = Mods::new(Up, Up, Up);
+        let mut rest = spec;
+        // ★ กินทีละ modifier จากซ้าย · หยุดทันทีที่เจอคำที่ไม่ใช่ modifier
+        //   ทำให้ `"ctrl++"` อ่านได้ว่า Ctrl + ปุ่ม `+` ไม่ใช่ token ว่าง
+        while let Some(plus) = rest.find('+') {
+            if plus == 0 {
+                break; // ปุ่มคือ `+` เอง
+            }
+            let (head, tail) = rest.split_at(plus);
+            match head.to_ascii_lowercase().as_str() {
+                "ctrl" | "control" => mods.ctrl = Down,
+                "shift" => mods.shift = Down,
+                "alt" => mods.alt = Down,
+                _ => break,
+            }
+            rest = &tail[1..];
+        }
+        if rest.is_empty() {
+            return None;
+        }
+        let mut chars = rest.chars();
+        if let (Some(ch), None) = (chars.next(), chars.next()) {
+            return ch.is_ascii().then_some(Chord::Char {
+                ch: ch.to_ascii_lowercase(),
+                mods,
+            });
+        }
+        let wanted = rest.to_ascii_lowercase();
+        NAMED_KEYS
+            .iter()
+            .find(|(name, _)| *name == wanted)
+            .map(|(_, key)| Chord::Key { key: *key, mods })
+    }
+
+    /// ข้อความที่แสดงบนแผง Settings — `None` ถ้าเขียนออกมาแล้วผู้ใช้อ่านไม่ได้
+    ///
+    /// ★★★ **อักขระควบคุมคืน `None`** — ตารางค่าปริยายมี alias อย่าง
+    /// `Ctrl+Z` = `\u{1a}` สำหรับ compositor ที่ส่งมาแบบนั้น · มันไม่มี glyph
+    /// ในฟอนต์ที่เราฝัง การวาดมันลงแผงคือ **สี่เหลี่ยม tofu** ซึ่งเป็นบั๊กที่
+    /// โปรเจกต์นี้เจอมาแล้วสองครั้ง (`shell::UNSAVED_MARK` · จุดเตือนของ P5-3a)
+    /// · มันเป็นรายละเอียดของแพลตฟอร์ม ไม่ใช่คีย์ลัดคนละตัว
+    #[must_use]
+    pub fn display(self) -> Option<String> {
+        let mut out = String::new();
+        let mods = self.mods();
+        // ★ แสดงเฉพาะตัวที่ **บังคับให้กด** — `Either` แปลว่า "ไม่เกี่ยว"
+        //   จึงไม่ควรโผล่มาเป็นเงื่อนไขให้ผู้ใช้เข้าใจผิดว่าต้องกด
+        for (hold, name) in [
+            (mods.ctrl, "ctrl"),
+            (mods.shift, "shift"),
+            (mods.alt, "alt"),
+        ] {
+            if hold == Down {
+                out.push_str(name);
+                out.push('+');
+            }
+        }
+        match self {
+            Self::Char { ch, .. } => {
+                if ch.is_control() {
+                    return None;
+                }
+                out.push(ch);
+            }
+            Self::Key { key, .. } => {
+                let name = NAMED_KEYS.iter().find(|(_, k)| *k == key)?;
+                out.push_str(name.0);
+            }
+        }
+        Some(out)
     }
 }
 
@@ -486,23 +660,177 @@ static BUILTIN: &[Binding] = &[
     ),
 ];
 
-/// ตารางคีย์ลัดที่ใช้อยู่
-#[derive(Debug, Clone, Copy)]
-pub struct Keymap {
-    bindings: &'static [Binding],
+/// ★★★ สอง binding นี้ถูกจุดด้วยการกดปุ่มครั้งเดียวกันได้ไหม
+///
+/// **นี่คือคำถามที่ประตูตรวจการชนถาม** และมันไม่ใช่ *"คีย์ซ้ำเป๊ะไหม"* —
+/// สองแถวที่เขียนไม่เหมือนกันเลยก็ทับกันได้ถ้าเงื่อนไข modifier ของมันคาบเกี่ยว
+/// (`Ctrl+Z` กับ `Ctrl+Z` ที่ shift เป็น [`Hold::Either`]) · ตอนนั้นผลจะขึ้นกับ
+/// **ลำดับในตาราง** ซึ่งไม่มีใครตั้งใจและไม่มีใครสังเกตเห็น
+///
+/// ★★ เจอจริงตอน negative control ของก้อน a: ปลด ctrl ของ `Ctrl+G` เป็น
+/// `Either` แล้ว **เทสต์เดิมทุกตัวยังเขียว** เพราะ `'g'` ของ appearance อยู่
+/// ก่อนในตารางจึงชนะไปเงียบ ๆ
+///
+/// ★ `Char` กับ `Key` ชนกันไม่ได้เพราะ [`Keymap::binding`] ถาม `Char` ให้จบก่อน
+/// แล้วค่อยตกไป `Key` — ปุ่มเดียวจึงเดินได้ทางเดียวเสมอ
+#[must_use]
+pub fn conflict(a: &Binding, b: &Binding) -> bool {
+    let same_key = match (a.chord, b.chord) {
+        (Chord::Char { ch: x, .. }, Chord::Char { ch: y, .. }) => x == y,
+        (Chord::Key { key: x, .. }, Chord::Key { key: y, .. }) => x == y,
+        _ => false,
+    };
+    same_key && a.chord.mods().overlaps(b.chord.mods())
 }
 
-/// ตารางค่าปริยาย — **ยังไม่มีทางให้ผู้ใช้ทับ** (นั่นคือก้อน b)
+/// ตารางคีย์ลัดที่ใช้อยู่
+///
+/// `Cow` เพราะตารางมีสองที่มา: ค่าปริยายที่คอมไพล์มากับโปรแกรม (`Borrowed`)
+/// และตารางที่อ่านจาก `keymap.toml` ของผู้ใช้ (`Owned`)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Keymap {
+    bindings: std::borrow::Cow<'static, [Binding]>,
+}
+
+/// ตารางค่าปริยายที่คอมไพล์มากับโปรแกรม
+static BUILTIN_MAP: Keymap = Keymap {
+    bindings: std::borrow::Cow::Borrowed(BUILTIN),
+};
+
+/// ★★ ตารางที่ **ใช้อยู่จริง** ตลอดอายุโปรเซส
+///
+/// เป็น global เพราะ `shortcut_char` ต้องถาม [`Keymap::binds_char`] และมันเป็น
+/// ฟังก์ชันอิสระที่ **assertion เดิม 8 เทสต์เรียกตรง ๆ** (ก้อน a) —
+/// การร้อยพารามิเตอร์เพิ่มเข้าไปคือการแก้ลายเซ็นซึ่งทำลาย oracle นั้นทิ้ง
+///
+/// ★ ตั้งได้ครั้งเดียวตอนเปิดโปรแกรม · เทสต์ **ห้ามเรียก [`install`]**
+/// (จะรั่วข้ามเทสต์ในโปรเซสเดียวกัน) — เทสต์ที่ต้องการตารางอื่นให้สร้าง
+/// [`Keymap`] แล้วเรียกเมธอดของมันตรง ๆ
+static ACTIVE: std::sync::OnceLock<Keymap> = std::sync::OnceLock::new();
+
+/// ตารางค่าปริยาย — **ไม่สนใจว่าผู้ใช้ตั้งอะไรไว้** (เทสต์และการเทียบใช้ตัวนี้)
 #[must_use]
-pub const fn builtin() -> Keymap {
-    Keymap { bindings: BUILTIN }
+pub fn builtin() -> &'static Keymap {
+    &BUILTIN_MAP
+}
+
+/// ตารางที่ใช้อยู่จริง — ค่าปริยายถ้ายังไม่มีใคร [`install`]
+#[must_use]
+pub fn active() -> &'static Keymap {
+    ACTIVE.get().unwrap_or(&BUILTIN_MAP)
+}
+
+/// ตั้งตารางที่ผู้ใช้กำหนด — **เรียกได้ครั้งเดียว** คืน `false` ถ้าตั้งไปแล้ว
+///
+/// เรียกตอนเปิดโปรแกรมก่อนมีหน้าต่างเท่านั้น (คู่กับ `settings.toml`)
+pub fn install(map: Keymap) -> bool {
+    ACTIVE.set(map).is_ok()
+}
+
+/// เหตุที่ `keymap.toml` ใช้ไม่ได้ — ★ **ทุกตัวชี้แถวที่ผิด** ไม่ใช่แค่ว่าผิด
+///
+/// ★★ พังข้อเดียวก็ **ใช้ค่าปริยายทั้งชุด** (`ROADMAP` P5-3b ก้อน b) —
+/// การใช้ครึ่งเดียวทำให้ผู้ใช้เจอคีย์ลัดบางตัวหายโดยไม่มีอะไรบอกว่าทำไม
+/// ซึ่งอ่านได้อย่างเดียวว่าโปรแกรมทำงานหาย
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Problem {
+    /// อ่านไฟล์/ไวยากรณ์/เพดานไม่ผ่าน — ข้อความมาจาก `refx-io` (อังกฤษ สำหรับ log)
+    File {
+        /// สิ่งที่ชั้นอ่านไฟล์บ่น
+        detail: String,
+    },
+    /// ปุ่มที่เขียนไว้อ่านไม่ออก
+    UnknownKey {
+        /// แถวที่ผิด (เริ่มที่ 1)
+        row: usize,
+        /// สิ่งที่เขาเขียน
+        given: String,
+    },
+    /// ชื่อ action ที่ไม่รู้จัก
+    UnknownAction {
+        /// แถวที่ผิด (เริ่มที่ 1)
+        row: usize,
+        /// สิ่งที่เขาเขียน
+        given: String,
+    },
+    /// ★★★ สองแถวถูกจุดด้วยการกดครั้งเดียวกันได้ — **ไม่จำเป็นต้องเขียนเหมือนกัน**
+    Conflict {
+        /// แถวหลัง
+        row: usize,
+        /// ปุ่มของแถวหลัง
+        keys: String,
+        /// แถวแรกที่มันไปชน
+        other_row: usize,
+        /// ปุ่มของแถวแรก
+        other_keys: String,
+    },
 }
 
 impl Keymap {
-    /// binding ทั้งหมด (เทสต์และก้อน b ใช้)
+    /// ★★★ แปลงแถวดิบจาก `keymap.toml` เป็นตารางจริง พร้อม **ตรวจการชน**
+    ///
+    /// ## ไฟล์ **แทนที่ตารางทั้งชุด** ไม่ใช่ทับทีละปุ่ม
+    ///
+    /// เพราะกฎ "พังที่ไหนก็ใช้ค่าปริยายทั้งไฟล์" จะไม่มีความหมายเลยถ้าไฟล์เป็น
+    /// แค่ส่วนเสริม — และการทับทีละปุ่มเปิดคำถามที่ยังไม่มีคำตอบ (จะ *ลบ*
+    /// ปุ่มค่าปริยายยังไง · ปุ่มที่ผู้ใช้ตั้งชนกับค่าปริยายนับเป็นการชนไหม)
+    /// ★ แผง Settings จึงต้องบอกจำนวนปุ่มที่ไฟล์กำหนด ให้เห็นทันทีว่าแทนที่ไปแล้ว
+    ///
+    /// # Errors
+    /// [`Problem`] — **ตัวแรกที่เจอ** · ไฟล์ถูกปฏิเสธทั้งชุดอยู่แล้ว เหตุผลเดียว
+    /// จึงพอ และการไล่รายงานทุกข้อพร้อมกันทำให้ผู้ใช้ไม่รู้ว่าจะแก้ตัวไหนก่อน
+    pub fn from_rows(rows: &[refx_io::keymap::RawBind]) -> Result<Self, Problem> {
+        let mut bindings: Vec<Binding> = Vec::with_capacity(rows.len());
+        let mut specs: Vec<(usize, String)> = Vec::with_capacity(rows.len());
+
+        for row in rows {
+            let Some(chord) = Chord::parse(&row.keys) else {
+                return Err(Problem::UnknownKey {
+                    row: row.row,
+                    given: row.keys.clone(),
+                });
+            };
+            let Some(action) = Action::from_name(&row.action) else {
+                return Err(Problem::UnknownAction {
+                    row: row.row,
+                    given: row.action.clone(),
+                });
+            };
+            let binding = Binding {
+                chord,
+                action,
+                repeat: if row.repeat { Allow } else { Once },
+            };
+            // ★★ ตรวจ **ตอนเพิ่ม** ไม่ใช่ตอนจบ — จะได้ชี้ได้ว่าแถวไหนไปชนแถวไหน
+            //    ซึ่งเป็นสิ่งเดียวที่ผู้ใช้เอาไปแก้ได้จริง
+            if let Some((at, other)) = bindings
+                .iter()
+                .zip(&specs)
+                .find(|(existing, _)| conflict(existing, &binding))
+                .map(|(_, (at, spec))| (*at, spec.clone()))
+            {
+                return Err(Problem::Conflict {
+                    row: row.row,
+                    keys: row.keys.clone(),
+                    other_row: at,
+                    other_keys: other,
+                });
+            }
+            bindings.push(binding);
+            specs.push((row.row, row.keys.clone()));
+        }
+
+        Ok(Self {
+            bindings: std::borrow::Cow::Owned(bindings),
+        })
+    }
+}
+
+impl Keymap {
+    /// binding ทั้งหมด
     #[must_use]
-    pub const fn bindings(&self) -> &'static [Binding] {
-        self.bindings
+    pub fn bindings(&self) -> &[Binding] {
+        &self.bindings
     }
 
     /// ★★★ ปุ่มที่เพิ่งกด แปลว่าอะไร — **`Char` ก่อน `Key` เป็นตาข่ายรอง**
@@ -528,7 +856,7 @@ impl Keymap {
         pressed: Option<char>,
         key: Option<NamedKey>,
         state: ModifiersState,
-    ) -> Option<&'static Binding> {
+    ) -> Option<&Binding> {
         if let Some(pressed) = pressed
             && let Some(found) = self.bindings.iter().find(|binding| {
                 matches!(binding.chord, Chord::Char { ch, mods }
@@ -585,16 +913,13 @@ mod tests {
 
     use super::*;
 
-    /// สอง binding นี้ถูกจุดด้วยการกดปุ่มครั้งเดียวกันได้ไหม
+    /// ★★ เรียก [`conflict`] **ตัวจริงที่ production ใช้** ไม่ใช่สำเนาในเทสต์
+    ///
+    /// รุ่นแรกของเทสต์ชุดนี้เขียนตรรกะซ้ำไว้เอง ซึ่งแปลว่ามันพิสูจน์ได้แค่ว่า
+    /// *สำเนาในเทสต์พอใจ* ไม่ใช่ว่าประตูของจริงพอใจ — รูปแบบเดียวกับที่
+    /// `docs/08 §3.9` ข้อ 9 ห้ามไว้ (ยืนยันประตูด้วยสิ่งที่เขียนเลียนแบบประตู)
     fn can_both_fire(a: &Binding, b: &Binding) -> bool {
-        let same_key = match (a.chord, b.chord) {
-            (Chord::Char { ch: x, .. }, Chord::Char { ch: y, .. }) => x == y,
-            (Chord::Key { key: x, .. }, Chord::Key { key: y, .. }) => x == y,
-            // ★ `Char` กับ `Key` ชนกันไม่ได้เพราะ `binding()` ถาม `Char` ให้จบก่อน
-            //   แล้วค่อยตกไป `Key` — ปุ่มเดียวจึงเดินได้ทางเดียวเสมอ
-            _ => false,
-        };
-        same_key && a.chord.mods().overlaps(b.chord.mods())
+        conflict(a, b)
     }
 
     /// ★★★ **ไม่มีปุ่มไหนสั่งสองอย่างพร้อมกัน** — ทั้งตาราง
@@ -720,6 +1045,261 @@ mod tests {
             )),
             "Esc ถูกเพิ่มเข้ามาในก้อน a — ต้องรอก้อน c"
         );
+    }
+
+    // ---------- ก้อน b: keymap.toml ----------
+
+    fn row(at: usize, keys: &str, action: &str) -> refx_io::keymap::RawBind {
+        refx_io::keymap::RawBind {
+            row: at,
+            keys: keys.to_owned(),
+            action: action.to_owned(),
+            repeat: false,
+        }
+    }
+
+    /// ★★★ **ประตูตรวจการชนต้องจับแถวที่ *ทับกัน* ไม่ใช่แค่แถวที่ *ซ้ำเป๊ะ***
+    ///
+    /// นี่คือรูปที่ negative control ของก้อน a เผยให้เห็น: `'g'` ที่ ctrl เป็น
+    /// `Either` ไม่ได้ "ซ้ำ" กับ `'g'` ที่ ctrl เป็น `Up` เลยสักตัวอักษร
+    /// แต่กด `G` เปล่า ๆ ทีเดียวติดทั้งคู่ แล้วผลขึ้นกับลำดับในตาราง
+    ///
+    /// ★ ไฟล์ของผู้ใช้เขียน `Either` ไม่ได้ (ดู [`Chord::parse`]) การชนจากไฟล์
+    /// จึงมาในรูป **modifier ซ้อนกัน** เช่น `z` กับ `z` · หรือ `ctrl+z` สองแถว
+    /// · เทสต์นี้ยิงทั้งรูปที่เขียนเหมือนกันและรูปที่เขียนไม่เหมือนกัน
+    #[test]
+    fn two_rows_that_one_keypress_can_both_trigger_are_reported_by_row() {
+        // เขียนเหมือนกันเป๊ะ
+        let same = [row(1, "ctrl+z", "undo"), row(2, "ctrl+z", "redo")];
+        assert_eq!(
+            Keymap::from_rows(&same),
+            Err(Problem::Conflict {
+                row: 2,
+                keys: "ctrl+z".to_owned(),
+                other_row: 1,
+                other_keys: "ctrl+z".to_owned(),
+            })
+        );
+
+        // ★★ เขียนไม่เหมือนกันเลย แต่ทับกัน — `CTRL+Z` กับ `control+z`
+        //    ตัวจับคู่แบบ "สตริงซ้ำ" มองไม่เห็นคู่นี้
+        let spelled = [row(1, "CTRL+Z", "undo"), row(2, "control+z", "paste")];
+        assert!(matches!(
+            Keymap::from_rows(&spelled),
+            Err(Problem::Conflict {
+                row: 2,
+                other_row: 1,
+                ..
+            })
+        ));
+
+        // ★ ต่างกันที่ shift แบบบังคับคนละทาง = ไม่มีทางติดพร้อมกัน → ต้องผ่าน
+        let fine = [
+            row(1, "ctrl+z", "undo"),
+            row(2, "ctrl+shift+z", "redo"),
+            row(3, "z", "tool-select"),
+        ];
+        assert_eq!(Keymap::from_rows(&fine).unwrap().bindings().len(), 3);
+    }
+
+    /// ★★★ **ขอบเขตที่การชนจากไฟล์ไปไม่ถึง** — บันทึกไว้ ไม่ใช่ปล่อยให้คนเดา
+    ///
+    /// `docs/08 §3.9` ข้อ 1b: ก่อนเชื่อว่าเทสต์คุมกิ่งไหน ต้องรู้ว่า input ของมัน
+    /// **ไปถึงกิ่งนั้นได้** · [`Chord::parse`] ไม่มีทางผลิต [`Hold::Either`]
+    /// เลย (ดูเหตุผลที่นั่น) → การชนที่มาจาก `keymap.toml` จึงเป็น
+    /// **chord ที่เท่ากันเป๊ะ** เสมอ และกิ่งที่น่าสนใจของ[`Mods::overlaps`]
+    /// (`Either` คาบกับ `Down`/`Up`) **ไม่มีทางถูกยิงจากไฟล์**
+    ///
+    /// กิ่งนั้นถูกคุมที่ระดับ [`Binding`] แทน โดย
+    /// `the_conflict_check_can_actually_see_a_conflict` และ
+    /// `no_single_keypress_can_ever_fire_two_actions` ซึ่งยิงตารางค่าปริยาย
+    /// ที่ **มี `Either` อยู่จริง** — ถ้าวันหนึ่งไฟล์เขียน `Either` ได้
+    /// เทสต์นี้จะแดงแล้วคนแก้จะรู้ว่าต้องไปเติมเคสที่ระดับไฟล์ด้วย
+    #[test]
+    fn a_file_can_never_write_the_modifier_state_that_makes_overlap_interesting() {
+        for spec in [
+            "z",
+            "ctrl+z",
+            "shift+z",
+            "alt+z",
+            "ctrl+shift+z",
+            "ctrl+shift+alt+z",
+            "delete",
+            "ctrl+tab",
+            "[",
+            "{",
+        ] {
+            let mods = Chord::parse(spec).unwrap().mods();
+            for (hold, which) in [
+                (mods.ctrl, "ctrl"),
+                (mods.shift, "shift"),
+                (mods.alt, "alt"),
+            ] {
+                assert_ne!(
+                    hold, Either,
+                    "{spec:?} ผลิต Either ที่ {which} — ไฟล์เขียน Either ได้แล้ว \
+                     ต้องเพิ่มเคสการชนแบบคาบเกี่ยวที่ระดับไฟล์"
+                );
+            }
+        }
+        // ★ และตารางค่าปริยาย **มี** `Either` อยู่จริง — ถ้าไม่มี กิ่งนั้นก็ไม่มีใครยิง
+        assert!(
+            builtin()
+                .bindings()
+                .iter()
+                .any(|b| b.chord.mods().shift == Either),
+            "ตารางค่าปริยายไม่มี Either แล้ว — ทบทวนว่ากิ่ง overlaps ยังมีคนยิงไหม"
+        );
+    }
+
+    /// ★ ปุ่มที่อ่านไม่ออก และ action ที่ไม่รู้จัก ต้องบอก **แถว** และ **สิ่งที่เขาเขียน**
+    #[test]
+    fn a_row_that_cannot_be_understood_names_itself_and_what_was_written() {
+        assert_eq!(
+            Keymap::from_rows(&[row(1, "ctrl+z", "undo"), row(2, "ctrl+นก", "redo")]),
+            Err(Problem::UnknownKey {
+                row: 2,
+                given: "ctrl+นก".to_owned(),
+            })
+        );
+        assert_eq!(
+            Keymap::from_rows(&[row(4, "ctrl+z", "unbdo")]),
+            Err(Problem::UnknownAction {
+                row: 4,
+                given: "unbdo".to_owned(),
+            })
+        );
+        // ★★ อักขระที่ไม่ใช่ ASCII ตัวเดียวก็รับไม่ได้ — `shortcut_char` ไม่มีทาง
+        //    ผลิตมันออกมา binding นั้นจึงไม่มีวันถูกจุด = หลอกผู้ใช้ว่าตั้งสำเร็จ
+        assert!(matches!(
+            Keymap::from_rows(&[row(1, "ผ", "undo")]),
+            Err(Problem::UnknownKey { row: 1, .. })
+        ));
+    }
+
+    /// ★★ ชื่อ action ต้อง round-trip ได้ทุกตัว — มันคือสัญญากับไฟล์ของผู้ใช้
+    ///
+    /// ชื่อซ้ำกันสองตัวจะทำให้ `from_name` คืนตัวแรกเสมอ แล้ว action อีกตัว
+    /// **ผูกจากไฟล์ไม่ได้เลยตลอดกาล** โดยไม่มีอะไรบ่น
+    #[test]
+    fn every_action_name_round_trips_and_none_of_them_collide() {
+        for action in Action::ALL {
+            assert_eq!(
+                Action::from_name(action.name()),
+                Some(*action),
+                "{} ไม่ round-trip",
+                action.name()
+            );
+        }
+        let mut names: Vec<&str> = Action::ALL.iter().map(|a| a.name()).collect();
+        names.sort_unstable();
+        let before = names.len();
+        names.dedup();
+        assert_eq!(before, names.len(), "มีชื่อ action ซ้ำกัน");
+        assert_eq!(before, 23, "จำนวน action เปลี่ยน — ก้อน c เท่านั้นที่เพิ่มได้");
+
+        // ★ ทุก action ในตารางค่าปริยายต้องเขียนลงไฟล์ได้ ไม่งั้นผู้ใช้ทำ
+        //   keymap.toml ที่ได้พฤติกรรมเท่าค่าปริยายไม่ได้เลย
+        for binding in builtin().bindings() {
+            assert!(Action::from_name(binding.action.name()).is_some());
+        }
+    }
+
+    /// ★★★ ไฟล์ของผู้ใช้ **แทนที่ตารางทั้งชุด** และ `Either` ไม่หลุดเข้ามา
+    #[test]
+    fn what_the_user_writes_is_exactly_what_they_get() {
+        let map = Keymap::from_rows(&[row(1, "ctrl+z", "undo")]).unwrap();
+        assert_eq!(map.bindings().len(), 1, "ไฟล์แทนที่ทั้งชุด ไม่ใช่ส่วนเสริม");
+
+        let ctrl = ModifiersState::CONTROL;
+        assert_eq!(
+            map.action(Some('z'), None, ctrl),
+            Some(A::History(HistoryRequest::Undo))
+        );
+        // ★ เขียน `ctrl+z` แปลว่า ctrl กด · shift ไม่กด · alt ไม่กด **เป๊ะ ๆ**
+        assert_eq!(
+            map.action(Some('z'), None, ctrl | ModifiersState::SHIFT),
+            None,
+            "modifier จากไฟล์ต้องตรงตัว ไม่ใช่ Either"
+        );
+        assert_eq!(
+            map.action(Some('z'), None, ctrl | ModifiersState::ALT),
+            None
+        );
+        // ปุ่มที่ไฟล์ไม่ได้พูดถึงต้องเงียบ — ไม่ใช่ตกกลับไปค่าปริยาย
+        assert_eq!(map.action(Some('v'), None, ctrl), None);
+    }
+
+    /// ★ ปุ่มที่มีชื่อ และปุ่ม `+` เอง — สองรูปที่ตัวแยก modifier พลาดได้ง่ายที่สุด
+    #[test]
+    fn the_chord_parser_handles_the_shapes_that_look_ambiguous() {
+        assert_eq!(
+            Chord::parse("delete"),
+            Some(Chord::Key {
+                key: NamedKey::Delete,
+                mods: Mods::new(Up, Up, Up),
+            })
+        );
+        assert_eq!(
+            Chord::parse("ctrl+tab"),
+            Some(Chord::Key {
+                key: NamedKey::Tab,
+                mods: Mods::new(Down, Up, Up),
+            })
+        );
+        // ★ `ctrl++` = Ctrl กับปุ่ม `+` ไม่ใช่ token ว่าง
+        assert_eq!(
+            Chord::parse("ctrl++"),
+            Some(Chord::Char {
+                ch: '+',
+                mods: Mods::new(Down, Up, Up),
+            })
+        );
+        assert_eq!(
+            Chord::parse(" Shift+[ "),
+            Some(Chord::Char {
+                ch: '[',
+                mods: Mods::new(Up, Down, Up),
+            })
+        );
+        // อ่านไม่ออก
+        assert_eq!(Chord::parse(""), None);
+        assert_eq!(Chord::parse("ctrl+"), None);
+        assert_eq!(Chord::parse("f13"), None, "ปุ่มที่ยังไม่รองรับต้องบอกว่าไม่รู้จัก");
+    }
+
+    /// ★★★ **อักขระควบคุมห้ามขึ้นแผง** — มันไม่มี glyph แล้วจะเป็นสี่เหลี่ยม tofu
+    ///
+    /// บทเรียนนี้โปรเจกต์นี้เจอมาแล้วสองครั้ง (`shell::UNSAVED_MARK` และจุดเตือน
+    /// ของ P5-3a) · ตารางค่าปริยายมี alias อย่าง `Ctrl+Z` = `\u{1a}` อยู่ **11 ใบ**
+    /// — อักขระควบคุม 8 ตัวที่ต่างกัน แต่สามตัว (`Ctrl+Z`/`Ctrl+G`/`Ctrl+S`)
+    /// มีสองใบเพราะแยกตามธง shift
+    #[test]
+    fn control_character_aliases_never_reach_the_panel() {
+        let hidden = builtin()
+            .bindings()
+            .iter()
+            .filter(|b| b.chord.display().is_none())
+            .count();
+        assert_eq!(hidden, 11, "จำนวน alias อักขระควบคุมเปลี่ยนไป");
+
+        for binding in builtin().bindings() {
+            if let Some(shown) = binding.chord.display() {
+                assert!(
+                    !shown.chars().any(char::is_control),
+                    "{shown:?} มีอักขระควบคุมหลุดขึ้นแผง"
+                );
+            }
+        }
+        // ★ สิ่งที่แผงแสดงต้องเป็นสิ่งที่ผู้ใช้ก๊อปไปเขียนในไฟล์ได้จริง
+        for binding in builtin().bindings() {
+            if let Some(shown) = binding.chord.display() {
+                assert!(
+                    Chord::parse(&shown).is_some(),
+                    "{shown:?} แสดงได้แต่เขียนกลับลงไฟล์ไม่ได้"
+                );
+            }
+        }
     }
 
     /// ★ `Char` ต้องถูกถามก่อน `Key` เสมอ (`docs/03 §5` — ห้ามสลับ)

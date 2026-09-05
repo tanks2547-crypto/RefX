@@ -522,6 +522,26 @@ pub struct ShellState {
     pub settings_notes: Vec<refx_io::settings::Note>,
     /// ผู้ใช้กด "รับทราบ" รายการปัญหาในเฟรมนี้
     pub settings_notes_dismissed: bool,
+    /// ★★ คีย์ลัดที่ใช้อยู่ — **อ่านอย่างเดียว** (P5-3b ก้อน b)
+    pub keymap: KeymapView,
+}
+
+/// คีย์ลัดที่ใช้อยู่ ตามที่แผง Settings แสดง (P5-3b ก้อน b)
+///
+/// ★ **อ่านอย่างเดียวรอบนี้** — แก้คีย์ในแอปยังไม่ทำ · หน้าที่ของมันคือตอบสอง
+/// คำถามที่ผู้ใช้ถามก่อนจะเปิด `keymap.toml`: *"ตอนนี้มีปุ่มอะไรบ้าง"* และ
+/// *"ต้องพิมพ์ชื่ออะไรลงไฟล์"*
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KeymapView {
+    /// คู่ (ปุ่ม, ชื่อ action) ที่แสดงได้ — ชั้น `app` เติมให้
+    ///
+    /// ★★ **ไม่รวม alias อักขระควบคุม** — มันไม่มี glyph ในฟอนต์ที่ฝังไว้
+    /// การวาดมันคือสี่เหลี่ยม tofu (ดู `keymap::Chord::display`)
+    pub rows: Vec<(String, &'static str)>,
+    /// ตารางนี้มาจาก `keymap.toml` ของผู้ใช้ (ไม่ใช่ค่าปริยาย)
+    pub from_file: bool,
+    /// ★★★ เหตุที่ `keymap.toml` ใช้ไม่ได้ (แปลแล้ว) — `None` = ไม่มีปัญหา
+    pub problem: Option<String>,
 }
 
 /// ค่าที่แผง Settings แสดงและแก้ได้ (P5-3)
@@ -679,6 +699,7 @@ impl Default for ShellState {
             settings_sealed: false,
             settings_notes: Vec::new(),
             settings_notes_dismissed: false,
+            keymap: KeymapView::default(),
         }
     }
 }
@@ -1451,12 +1472,79 @@ fn settings_panel(ui: &mut egui::Ui, state: &mut ShellState) {
         );
     }
 
+    // ---- ★★ คีย์ลัด (P5-3b ก้อน b) — **อ่านอย่างเดียว** ----
+    ui.add_space(8.0);
+    ui.separator();
+    keymap_section(ui, state);
+
     if edit != view {
         state.settings_edit = Some(edit);
     }
     if sealed {
         state.settings_sealed = true;
     }
+}
+
+/// ★★ คีย์ลัดที่ใช้อยู่ — **แสดงอย่างเดียว ยังแก้ในแอปไม่ได้** (P5-3b ก้อน b)
+///
+/// ตอบสองคำถามที่ผู้ใช้ถามก่อนจะเปิด `keymap.toml`:
+/// *"ตอนนี้มีปุ่มอะไรบ้าง"* และ *"ต้องพิมพ์ชื่ออะไรลงไฟล์"*
+///
+/// ★★★ **ต้องบอกว่าตารางมาจากไหน** — ไฟล์ของผู้ใช้ *แทนที่ทั้งชุด* คนที่เขียน
+/// ไปสามบรรทัดแล้วเหลือคีย์ลัดสามปุ่มต้องเห็นทันทีว่านั่นคือสิ่งที่เกิดขึ้น
+/// ไม่ใช่ว่าโปรแกรมทำงานหาย
+fn keymap_section(ui: &mut egui::Ui, state: &ShellState) {
+    let lang = state.lang;
+    let view = &state.keymap;
+
+    ui.label(egui::RichText::new(text::t(lang, Key::SettingsKeymap)).strong());
+
+    // ★ เหตุที่ keymap.toml ใช้ไม่ได้ มาก่อนรายการ — ผู้ใช้ที่ไฟล์พังต้องเห็น
+    //   คำอธิบายก่อน ไม่ใช่ต้องเลื่อนผ่านตาราง 27 แถวไปหา
+    if let Some(problem) = view.problem.as_deref() {
+        ui.label(
+            egui::RichText::new(text::t(lang, Key::KeymapFellBackToDefaults))
+                .strong()
+                .color(warn_color(ui)),
+        );
+        ui.label(egui::RichText::new(problem).color(warn_color(ui)));
+    }
+
+    let source = if view.from_file {
+        Key::SettingsKeymapFromFile
+    } else {
+        Key::SettingsKeymapBuiltin
+    };
+    ui.small(format!(
+        "{} · {}",
+        text::t(lang, source),
+        text::fill(
+            lang,
+            Template::SettingsKeymapCount,
+            &[("n", &view.rows.len().to_string())],
+        )
+    ));
+    ui.small(text::t(lang, Key::SettingsKeymapHint));
+
+    // ★ รายการยาว 27 แถว — ต้องเลื่อนได้ ไม่งั้นมันดันตัวควบคุมข้างบนหายจากจอ
+    egui::ScrollArea::vertical()
+        .max_height(220.0)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            for (chord, action) in &view.rows {
+                ui.horizontal(|ui| {
+                    ui.monospace(chord);
+                    // ★★★ ASCII เท่านั้น — `→` (U+2192) **ไม่มี glyph** ในฟอนต์ที่
+                    //     ฝังไว้ และออกมาเป็นสี่เหลี่ยม tofu บนภาพหน้าจอจริงของ
+                    //     P5-3b · เป็นครั้งที่สามของบั๊กเดิม (`UNSAVED_MARK` ·
+                    //     จุดเตือนของ P5-3a · ตัวนี้) และสองครั้งแรกมีค่าคงที่
+                    //     คอยคุมไว้แล้ว — **ตัวอักษรที่เขียนสด ๆ ในโค้ดคือรูที่เหลือ**
+                    //     ปิดด้วย `every_character_the_shell_draws_has_a_glyph`
+                    ui.monospace("->");
+                    ui.monospace(*action);
+                });
+            }
+        });
 }
 
 /// ปุ่มเครื่องมือของ Canvas mode
@@ -2446,6 +2534,10 @@ mod tests {
             settings_sealed: _,
             settings_notes: _,
             settings_notes_dismissed: _,
+            // ★ คีย์ลัด: **อ่านอย่างเดียว** ในก้อน b · ไม่มีทางกลับไปแตะเอกสาร
+            //   วันที่แก้คีย์ในแอปได้ ให้ทบทวนอีกครั้ง — การเปลี่ยนคีย์เองก็ยัง
+            //   ไม่แตะ `Board` แต่คำขอที่มันผลิตจะแตะ ต้องแยกให้ชัดตอนนั้น
+            keymap: _,
 
             // ---- ตัวเลขที่โชว์บน status bar ----
             atlas_uploads: _,
@@ -2666,6 +2758,9 @@ mod tests {
     #[test]
     fn every_symbol_on_screen_has_a_real_glyph() {
         let ctx = egui::Context::default();
+        // ★★ ฟอนต์ชุดที่แอปใช้จริง — เดิมเทสต์นี้ถามฟอนต์ของ egui เอง
+        //    ข้อสรุปบังเอิญตรงกัน แต่มันตอบคนละคำถามกับที่ชื่อมันอ้าง
+        crate::fonts::install(&ctx);
         // ต้องวาดหนึ่งเฟรมก่อน ฟอนต์ถึงถูกโหลดจริง
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
@@ -2775,6 +2870,94 @@ mod tests {
         }
     }
 
+    /// ★★★ `keymap.toml` ที่ใช้ไม่ได้ ต้องบอก **แถวที่ผิด** บนจอ (P5-3b ก้อน b)
+    ///
+    /// ชั้น `keymap` พิสูจน์แล้วว่ามันตรวจเจอ — แต่ครึ่งนั้นเขียวได้แม้ไม่มีใคร
+    /// บอกผู้ใช้เลยสักคำ · ครึ่งที่เหลืออยู่ตรงนี้: เลขแถวทั้งสอง ปุ่มทั้งสอง
+    /// และคำว่า "กลับไปใช้ค่าปริยาย" ต้องอ่านได้จากบนจอ
+    #[test]
+    fn a_keymap_file_that_conflicts_with_itself_says_which_rows_on_screen() {
+        let ctx = egui::Context::default();
+        let problem = crate::keymap::Problem::Conflict {
+            row: 7,
+            keys: "ctrl+z".to_owned(),
+            other_row: 3,
+            other_keys: "CTRL+Z".to_owned(),
+        };
+        let mut state = ShellState {
+            settings_open: true,
+            keymap: KeymapView {
+                rows: vec![("ctrl+s".to_owned(), "save")],
+                from_file: false,
+                problem: Some(text::keymap_problem(Lang::En, &problem)),
+            },
+            ..ShellState::default()
+        };
+
+        let shown = draw_once(&mut state, &ctx);
+        for needle in ["7", "3", "ctrl+z", "CTRL+Z"] {
+            assert!(
+                shown.contains(needle),
+                "แผงไม่ได้บอก {needle:?} ให้ผู้ใช้เห็น:\n{shown}"
+            );
+        }
+        assert!(
+            shown.contains(text::t(Lang::En, Key::KeymapFellBackToDefaults)),
+            "ไม่มีข้อความบอกว่ากลับไปใช้ค่าปริยายแล้ว"
+        );
+        // ★ และต้องบอกว่าตารางที่ใช้อยู่มาจากไหน — ไฟล์แทนที่ทั้งชุด คนที่เขียน
+        //   ไปสามบรรทัดต้องเห็นทันทีว่าทำไมเหลือสามปุ่ม
+        assert!(shown.contains(text::t(Lang::En, Key::SettingsKeymapBuiltin)));
+    }
+
+    /// ★★ ชื่อ action ที่แผงแสดง ต้องเป็นชื่อที่ **พิมพ์ลงไฟล์ได้จริง**
+    ///
+    /// แผงนี้มีไว้ตอบคำถาม *"ต้องพิมพ์อะไรลงใน keymap.toml"* · ถ้ามันแสดงชื่อ
+    /// ที่ตัวอ่านไฟล์ไม่รู้จัก มันจะพาผู้ใช้ไปเขียนไฟล์ที่ถูกปฏิเสธทั้งชุด
+    #[test]
+    fn the_names_the_panel_shows_are_the_names_the_file_accepts() {
+        let ctx = egui::Context::default();
+        let rows: Vec<(String, &'static str)> = crate::keymap::builtin()
+            .bindings()
+            .iter()
+            .filter_map(|b| Some((b.chord.display()?, b.action.name())))
+            .collect();
+        assert!(!rows.is_empty());
+
+        let mut state = ShellState {
+            settings_open: true,
+            keymap: KeymapView {
+                rows: rows.clone(),
+                from_file: true,
+                problem: None,
+            },
+            ..ShellState::default()
+        };
+        let shown = draw_once(&mut state, &ctx);
+
+        // ---- 1. ทุกแถวต้องเขียนกลับลงไฟล์ได้ — ตรวจที่ **ข้อมูล** ไม่ใช่ที่จอ ----
+        //
+        // ★★ แยกจากการตรวจบนจอโดยตั้งใจ: รายการอยู่ใน `ScrollArea` ซึ่งวาดเฉพาะ
+        //    แถวที่อยู่ในกรอบ · ถ้าเอาไปผูกกับ `shown` แถวท้าย ๆ จะ "ไม่ผ่าน"
+        //    เพราะมันแค่ยังไม่ถูกเลื่อนมาให้เห็น ซึ่งเป็นคนละเรื่องกับความถูกต้อง
+        for (chord, action) in &rows {
+            assert!(
+                crate::keymap::Action::from_name(action).is_some(),
+                "{action:?} แสดงบนแผงแต่ตัวอ่านไฟล์ไม่รู้จัก"
+            );
+            assert!(
+                crate::keymap::Chord::parse(chord).is_some(),
+                "{chord:?} แสดงบนแผงแต่เขียนกลับลงไฟล์ไม่ได้"
+            );
+        }
+
+        // ---- 2. บนจอ: แถวแรก ๆ ต้องเห็นจริง และต้องบอกว่าตารางมาจากไหน ----
+        let (chord, action) = &rows[0];
+        assert!(shown.contains(chord.as_str()), "{chord:?} ไม่ได้ขึ้นจอ");
+        assert!(shown.contains(*action), "{action:?} ไม่ได้ขึ้นจอ");
+        assert!(shown.contains(text::t(Lang::En, Key::SettingsKeymapFromFile)));
+    }
+
     /// ★ ค่าที่เปลี่ยนแล้วยังไม่มีผลต้องบอก — ไม่ใช่ปล่อยให้ผู้ใช้เดาว่าปุ่มเสีย
     #[test]
     fn a_value_that_needs_a_restart_says_so() {
@@ -2795,6 +2978,136 @@ mod tests {
         assert!(shown(true), "เปลี่ยนค่าแล้วไม่มีอะไรบอกว่าต้องเปิดใหม่");
         // ★ negative control: ข้อความที่ขึ้นตลอดเวลาไม่ได้บอกอะไรใครเลย
         assert!(!shown(false), "ข้อความ 'ต้องเปิดใหม่' ขึ้นทั้งที่ยังไม่มีอะไรรออยู่");
+    }
+
+    /// ★★★ **ทุกอักขระที่ shell วาด ต้องมี glyph จริง** — ประตูที่ครอบตัวอักษรสด
+    ///
+    /// ## ทำไมประตูเดิมยังไม่พอ
+    ///
+    /// `every_symbol_on_screen_has_a_real_glyph` ถาม `has_glyph` ให้ **ค่าคงที่**
+    /// ที่เราจดชื่อไว้ (`UNSAVED_MARK` · `SETTINGS_MARK`) · แต่บั๊กครั้งที่สาม
+    /// (P5-3b) มาในรูป **`ui.monospace("→")` ที่เขียนสดในโค้ด** — ไม่มีค่าคงที่
+    /// ให้จด ประตูจึงมองไม่เห็น และมันโผล่เป็นสี่เหลี่ยม tofu บนภาพหน้าจอจริง
+    /// เป็นครั้งที่สามของบั๊กเดิมกันในไฟล์เดียวกัน
+    ///
+    /// ## วิธีที่ครอบได้จริง
+    ///
+    /// วาด shell ด้วยสถานะที่ **มีของให้วาดครบ** แล้วเดินทุกอักขระที่ galley
+    /// ผลิตออกมา · ★ `galley.text()` เก็บอักขระต้นฉบับไว้เสมอไม่ว่าจะวาดเป็น
+    /// glyph จริงหรือ tofu — เทสต์ที่ดูแต่ข้อความจึงจับไม่ได้ ต้องถาม
+    /// `Fonts::has_glyph` ทีละตัว
+    ///
+    /// ★★ ข้อความในเทสต์นี้เป็นของเราทั้งหมด (ไม่มี input ของผู้ใช้จริง)
+    /// อักขระที่หลุดออกมาจึงเป็นความผิดของโค้ดเสมอ ไม่ใช่ของข้อมูล
+    #[test]
+    fn every_character_the_shell_draws_has_a_glyph() {
+        let ctx = egui::Context::default();
+        // ★★★ **ต้องเป็นฟอนต์ชุดที่แอปใช้จริง** — `Context::default()` มีฟอนต์ของ
+        //     egui เอง ซึ่งไม่ใช่สิ่งที่ผู้ใช้เห็น · ประตูที่ตรวจฟอนต์คนละชุดกับ
+        //     production คือประตูที่ตอบคนละคำถาม (`docs/08 §3.9` ข้อ 1b)
+        crate::fonts::install(&ctx);
+        let mut state = ShellState {
+            lang: Lang::Th,
+            settings_open: true,
+            keymap: KeymapView {
+                rows: crate::keymap::builtin()
+                    .bindings()
+                    .iter()
+                    .filter_map(|b| Some((b.chord.display()?, b.action.name())))
+                    .collect(),
+                from_file: true,
+                problem: Some(text::keymap_problem(
+                    Lang::Th,
+                    &crate::keymap::Problem::UnknownAction {
+                        row: 2,
+                        given: "undoo".to_owned(),
+                    },
+                )),
+            },
+            settings_notes: vec![refx_io::settings::Note::MaxPixelsCappedByRam {
+                asked: 268_435_456,
+                used: 134_217_728,
+                ram_gb: 8,
+            }],
+            status: text::t(Lang::Th, Key::SettingsProblemsStatus).to_owned(),
+            status_warn: true,
+            ..ShellState::default()
+        };
+
+        // สองเฟรม: egui ใช้ layout ของรอบก่อน รอบแรกขนาด panel ยังไม่นิ่ง
+        let mut drawn: Vec<(egui::FontId, String)> = Vec::new();
+        for _ in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                let _ = draw_in_ui(ui, &mut state, |_, _| {});
+            });
+            drawn = drawn_runs(&output);
+        }
+        assert!(!drawn.is_empty(), "ไม่มีอะไรถูกวาดเลย — ประตูนี้ไม่ได้ตรวจอะไร");
+
+        // ★★★ ถามด้วย **ฟอนต์ที่ข้อความท่อนนั้นถูกจัดหน้าด้วยจริง ๆ**
+        //
+        //     รุ่นแรกของประตูนี้ถามแบบ `proportional || monospace` แล้ว **ปล่อย
+        //     `→` ผ่าน** เพราะฟอนต์ proportional มีมัน ส่วนของจริงถูกวาดด้วย
+        //     `ui.monospace()` ซึ่งไม่มี — ประตูตอบคนละคำถามกับที่มันอ้าง
+        //     พิสูจน์ด้วย NC: เอา `→` กลับเข้าไปแล้วประตูรุ่นแรก **ยังเขียว**
+        //     (`docs/08 §3.9` ข้อ 1b)
+        let mut missing: Vec<(String, char)> = Vec::new();
+        for (font, text) in &drawn {
+            for ch in text.chars() {
+                // ช่องว่าง/ขึ้นบรรทัดไม่ใช่ glyph ที่ต้องมี และไม่มีทางเป็น tofu
+                if ch.is_whitespace() || ch.is_control() {
+                    continue;
+                }
+                if !ctx.fonts_mut(|fonts| fonts.has_glyph(font, ch)) {
+                    missing.push((format!("{:?}", font.family), ch));
+                }
+            }
+        }
+        missing.sort_unstable();
+        missing.dedup();
+        assert!(
+            missing.is_empty(),
+            "อักขระที่ไม่มี glyph ในฟอนต์ที่ใช้วาดมันจริง ๆ \
+             (จะเห็นเป็นสี่เหลี่ยม tofu): {missing:?}"
+        );
+    }
+
+    /// ข้อความที่ถูกวาด **พร้อมฟอนต์ที่ใช้จัดหน้าท่อนนั้น**
+    ///
+    /// `LayoutJob` แบ่งข้อความเป็น section ที่มี `font_id` ของตัวเอง — ตัวเดียว
+    /// ที่บอกได้ว่าอักขระตัวนี้ถูกวาดด้วยฟอนต์ตระกูลไหน
+    fn drawn_runs(output: &egui::FullOutput) -> Vec<(egui::FontId, String)> {
+        let mut runs = Vec::new();
+        for shape in &output.shapes {
+            collect_runs(&shape.shape, &mut runs);
+        }
+        runs
+    }
+
+    fn collect_runs(shape: &egui::Shape, out: &mut Vec<(egui::FontId, String)>) {
+        match shape {
+            egui::Shape::Text(text) => {
+                let job = &text.galley.job;
+                for section in &job.sections {
+                    if let Some(part) = job.text.get(section.byte_range.clone()) {
+                        out.push((section.format.font_id.clone(), part.to_owned()));
+                    }
+                }
+            }
+            egui::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    collect_runs(shape, out);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// ข้อความทั้งหมดที่ egui วาดออกมาในเฟรมนั้น

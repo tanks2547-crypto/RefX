@@ -12,6 +12,7 @@ mod killclock;
 pub mod autosave; // snapshot ทั้ง board กันงานหายตอน crash (P4-3)
 pub mod dto; // DTO มีเวอร์ชัน — แยกจาก type ใน refx-core เสมอ
 pub mod journal; // append-only command journal + CRC ต่อ record
+pub mod keymap; // keymap.toml — อ่านเป็นสตริงดิบ ชนิดจริงอยู่ refx-ui (P5-3b)
 pub mod packed; // packed mode: ฝังไฟล์ภาพต้นฉบับไว้ในเอกสาร (P4-5)
 pub mod recovery; // งานที่ยังไม่เคยบันทึก: <data_dir>/recovery/<session>.refx (P4-4)
 pub mod relink; // หาไฟล์ที่หายด้วย hash (5 ขั้นตอน)
