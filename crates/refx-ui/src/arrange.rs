@@ -198,6 +198,17 @@ pub struct ArrangeView {
     sheet: Sheet,
     /// ระยะที่เลื่อนลงมาแล้ว (world unit = physical pixel ที่ zoom 1)
     scroll: f32,
+    /// ★★★ จุดกึ่งกลางที่ **ไฟล์ขอให้กลับไป** — `None` = ไม่มีอะไรค้าง (หนี้ §6 — คืนมุมมองจากไฟล์)
+    ///
+    /// เก็บเป็น **จุดกึ่งกลางใน world** ไม่ใช่ระยะเลื่อน เพราะนั่นคือสิ่งที่
+    /// [`Camera`] หมายถึงจริง ๆ และเป็นสิ่งเดียวที่ `Board::view` เก็บไว้ ·
+    /// ระยะเลื่อนแปลงกลับได้ก็ต่อเมื่อรู้ความสูงของช่อง ซึ่ง **ยังไม่รู้ตอน
+    /// เปิดไฟล์** (`plan` เป็นที่แรกที่รู้) — เก็บค้างไว้แล้วแปลงตอนนั้น
+    ///
+    /// ★★ ผลคือ "สิ่งที่เคยอยู่กลางจอ กลับมาอยู่กลางจอ" ไม่ใช่ "ขอบบนเท่าเดิม"
+    /// ซึ่งถูกต้องกว่าเมื่อหน้าต่างเปลี่ยนขนาดระหว่างบันทึกกับเปิด — และเป็น
+    /// ความหมายของ `Camera::center` อยู่แล้ว ไม่ใช่การตีความเพิ่ม
+    pending_center_y: Option<f32>,
     /// กรอบของ viewport ตอน [`ArrangeView::plan`] ครั้งล่าสุด (physical pixel)
     viewport: Vec2,
     /// ★ วิธีเรียง + ตัวกรอง (P3-4)
@@ -321,6 +332,22 @@ impl ArrangeView {
     /// ซึ่งอ่านว่า "กดแล้วไม่มีอะไรเกิดขึ้น" ทั้งที่ลำดับเปลี่ยนไปหมดแล้ว
     pub fn scroll_to_top(&mut self) {
         self.scroll = 0.0;
+        // ★ ผู้ใช้เพิ่งสั่งเรียงใหม่ = เจตนาที่สดกว่ามุมมองที่บันทึกไว้
+        self.pending_center_y = None;
+    }
+
+    /// ★★★ กลับไปที่มุมมองที่บันทึกไว้ในไฟล์ (`Board::view.arrange`)
+    ///
+    /// ยังไม่ขยับอะไรทันที — เก็บค้างไว้ให้ [`Self::plan`] แปลงเป็นระยะเลื่อน
+    /// ตอนที่รู้ความสูงของช่องแล้ว (ดู [`Self::pending_center_y`])
+    ///
+    /// ★ ค่าที่ไม่ใช่ตัวเลขถูกปฏิเสธที่นี่ (I-4) — ถึงจะผ่าน `Camera::new`
+    /// มาแล้วก็ตาม เพราะด่านที่พึ่งได้คือด่านที่อยู่ติดกับการใช้งาน
+    pub fn restore_from(&mut self, camera: Camera) {
+        let center_y = camera.center().y;
+        if center_y.is_finite() {
+            self.pending_center_y = Some(center_y);
+        }
     }
 
     /// ★★ จำนวนครั้งที่ **กรอง+เรียงจริง** — เกณฑ์ ROADMAP P3-4 วัดด้วยตัวเลขนี้
@@ -444,7 +471,15 @@ impl ArrangeView {
         }
 
         // ---- 3. หาชุดที่ต้องวาด ----
+        //
+        // ★★★ มุมมองที่ไฟล์ขอไว้ถูกแปลงเป็นระยะเลื่อน **ที่นี่** เพราะนี่คือจุดแรก
+        //     ที่รู้ทั้งความสูงของช่องและความสูงของแผ่น (ขั้น 2 เพิ่งจัดเสร็จ) —
+        //     แปลงตอนเปิดไฟล์ไม่ได้ ทั้งสองค่ายังไม่มี
+        if let Some(center_y) = self.pending_center_y.take() {
+            self.scroll = center_y - viewport.y * 0.5;
+        }
         // เลื่อนใหม่ให้อยู่ในระยะเสมอ — หน้าต่างที่ถูกย่อลงทำให้ค่าเดิมเกินขอบได้
+        // ★ ด่านนี้คุมค่าจากไฟล์ด้วย: แผ่นที่สั้นลงเพราะกรองอยู่ต้องไม่เลื่อนไปพ้นของ
         self.scroll = self.scroll.clamp(0.0, self.max_scroll());
         let (top, bottom) = (self.scroll, self.scroll + viewport.y);
         let buffer = viewport.y * BUFFER_SCREENS;
@@ -1150,5 +1185,63 @@ mod tests {
         // ★ และ history ต้องไม่โตขึ้นเลย — คำสั่งที่เกิดใหม่คือหลักฐานตรง ๆ
         //   ว่ามีการแก้เอกสารระหว่างสลับโหมด
         assert_eq!(history.redo_depth(), 0);
+    }
+
+    // ---------- หนี้ §6: คืนมุมมองที่บันทึกไว้ในไฟล์ ----------
+
+    /// ★★★ **มุมมองที่ไฟล์ขอไว้ต้องกลายเป็นระยะเลื่อนจริง** — และแปลงตอนที่รู้จอแล้ว
+    ///
+    /// `Board::view.arrange` เก็บเป็น `Camera` ซึ่งมีแค่ *จุดกึ่งกลางใน world* ·
+    /// ระยะเลื่อนคำนวณได้ก็ต่อเมื่อรู้ความสูงของช่อง ซึ่งตอนเปิดไฟล์ยังไม่รู้
+    /// → เก็บค้างไว้แล้วแปลงใน [`ArrangeView::plan`]
+    #[test]
+    fn the_view_the_file_asked_for_becomes_a_real_scroll_position() {
+        let board = board_of(400);
+        let mut view = ArrangeView::new();
+
+        // ขอให้จุด y = 900 มาอยู่กลางจอ → ขอบบนต้องอยู่ที่ 900 - 600/2 = 600
+        view.restore_from(Camera::new(Vec2::new(0.0, 900.0), 1.0));
+        assert_eq!(view.scroll(), 0.0, "ยังไม่ควรขยับก่อนรู้ขนาดจอ");
+
+        view.plan(&board, VIEW, 1.0, aspect_of(&board));
+        assert_eq!(view.scroll(), 900.0 - VIEW.y * 0.5);
+
+        // ★ ใช้ครั้งเดียวแล้วหมดไป — ไม่งั้นผู้ใช้เลื่อนเองแล้วโดนดีดกลับทุกเฟรม
+        view.scroll_by(-120.0);
+        let after = view.scroll();
+        view.plan(&board, VIEW, 1.0, aspect_of(&board));
+        assert_eq!(view.scroll(), after, "มุมมองจากไฟล์ต้องไม่ดีดผู้ใช้กลับ");
+    }
+
+    /// ★★ ค่าจากไฟล์ต้องถูก clamp เหมือนค่าที่ผู้ใช้เลื่อนเอง (I-4)
+    ///
+    /// แผ่นสั้นลงได้ตั้งแต่บันทึก: ตัวกรองเปิดอยู่ · หน้าต่างกว้างขึ้น ·
+    /// ผู้ใช้ลบภาพทิ้ง · ถ้าไม่ clamp จะเปิดไฟล์มาเจอ **จอว่างเปล่า** ที่ผู้ใช้
+    /// ไม่รู้ว่าต้องเลื่อนขึ้นเพื่อหาของ
+    #[test]
+    fn a_scroll_from_the_file_can_never_land_past_the_end_of_the_sheet() {
+        let board = board_of(12);
+        let mut view = ArrangeView::new();
+        view.restore_from(Camera::new(Vec2::new(0.0, 5_000_000.0), 1.0));
+        view.plan(&board, VIEW, 1.0, aspect_of(&board));
+        assert_eq!(view.scroll(), view.max_scroll());
+
+        // ค่าที่ไม่ใช่ตัวเลขต้องไม่ถูกรับไว้ตั้งแต่แรก
+        let mut view = ArrangeView::new();
+        view.restore_from(Camera::new(Vec2::new(0.0, 1000.0), 1.0));
+        view.restore_from(Camera::new(Vec2::new(0.0, f32::NAN), 1.0));
+        view.plan(&board, VIEW, 1.0, aspect_of(&board));
+        assert!(view.scroll().is_finite(), "NaN หลุดเข้ามาเป็นระยะเลื่อน");
+    }
+
+    /// ★ ผู้ใช้สั่งเรียงใหม่ = เจตนาที่สดกว่ามุมมองที่บันทึกไว้
+    #[test]
+    fn sorting_again_beats_the_view_the_file_asked_for() {
+        let board = board_of(400);
+        let mut view = ArrangeView::new();
+        view.restore_from(Camera::new(Vec2::new(0.0, 900.0), 1.0));
+        view.scroll_to_top();
+        view.plan(&board, VIEW, 1.0, aspect_of(&board));
+        assert_eq!(view.scroll(), 0.0);
     }
 }

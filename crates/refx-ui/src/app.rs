@@ -442,73 +442,6 @@ fn physical_char(physical: winit::keyboard::PhysicalKey) -> Option<char> {
     })
 }
 
-/// ★★★ ปุ่มที่เพิ่งกด → สิ่งที่มันสั่ง — **ทางเดียวที่ทุก wrapper ข้างล่างใช้**
-///
-/// การจับคู่ทั้งหมดเป็น **ข้อมูล** อยู่ใน [`crate::keymap`] แล้ว (P5-3b ก้อน a)
-/// ฟังก์ชันข้างล่างจึงเหลือหน้าที่เดียวคือ *"action ตัวนี้ใช่ของฉันไหม"*
-///
-/// ★ ยังเป็นฟังก์ชันแยกกันอยู่โดยตั้งใจ: **assertion เดิมทั้งชุดคือ oracle**
-/// ที่พิสูจน์ว่าตารางให้ผลเท่าของเดิมเป๊ะ (`ROADMAP` P5-3b ก้อน a) ·
-/// การยุบ `on_input` ให้เหลือ dispatch เดียวทำให้ oracle นั้นหายไป จึงเป็นงานของ
-/// ก้อนถัดไป ไม่ใช่ก้อนนี้
-fn action_for(pressed: Option<char>, modifiers: ModifiersState) -> Option<keymap::Action> {
-    keymap::active().action(pressed, None, modifiers)
-}
-
-/// แปลงปุ่มที่กดเป็นคำขอกับประวัติ
-///
-/// ★ รับ **Ctrl+Shift+Z เป็น redo ด้วย** ไม่ใช่แค่ Ctrl+Y — คนจำนวนมากใช้อันนั้น
-/// (ติดมาจาก Photoshop/Illustrator) ถ้าไม่รับ เขาจะคิดว่า redo ไม่มีในโปรแกรมนี้
-fn history_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> Option<HistoryRequest> {
-    match action_for(pressed, modifiers)? {
-        keymap::Action::History(request) => Some(request),
-        _ => None,
-    }
-}
-
-/// แปลงปุ่มที่กดเป็นคำสั่งย้ายชั้น (P2-6)
-///
-/// `docs/03 §5` ระบุแค่ `[` `]` = ส่งไปหลัง / นำมาหน้า **ไม่ได้ระบุปุ่มของสุดหัว-สุดท้าย**
-/// เลือก `Shift+[` / `Shift+]` เพราะอยู่ตระกูลเดียวกันและไม่ชนกับอะไรใน keymap
-fn zorder_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> Option<ZMove> {
-    match action_for(pressed, modifiers)? {
-        keymap::Action::ZOrder(movement) => Some(movement),
-        _ => None,
-    }
-}
-
-/// แปลงปุ่มที่กดเป็นการสลับเครื่องมือ (docs/03 §2: `V` = Select/Move · `C` = Crop)
-fn tool_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> Option<Tool> {
-    match action_for(pressed, modifiers)? {
-        keymap::Action::Tool(tool) => Some(tool),
-        _ => None,
-    }
-}
-
-/// `G` = grayscale ทั้ง board · `H` = พลิกแนวนอน (docs/03 §2, §5)
-///
-/// ★ สองปุ่มนี้ทำคนละชั้นกันโดยตั้งใจ: `G` เป็น**สวิตช์การมองเห็น**ของทั้ง board
-/// (uniform ตัวเดียว ไม่กิน undo ไม่ทำให้ dirty) ส่วน `H` **แก้เอกสาร**
-/// ของภาพที่เลือก จึงผ่าน `Command` และย้อนได้ตามปกติ
-fn appearance_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> Option<AppearanceKey> {
-    match action_for(pressed, modifiers)? {
-        keymap::Action::Appearance(what) => Some(what),
-        _ => None,
-    }
-}
-
-/// `Ctrl+G` = จัดกลุ่ม · `Ctrl+Shift+G` = แยกกลุ่ม (docs/03 §5, P3-7)
-///
-/// ★ `G` เปล่า ๆ เป็น grayscale ของทั้ง board — สองตัวนี้แยกกันด้วย Ctrl ตัวเดียว
-/// ตอนนี้ความเคร่งครัดนั้นเป็น **ข้อมูล** ([`keymap::Hold`]) ไม่ใช่วินัยของคนเขียน
-/// และมีประตู `no_single_keypress_can_ever_fire_two_actions` คุมทั้งตาราง
-fn group_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> Option<GroupRequest> {
-    match action_for(pressed, modifiers)? {
-        keymap::Action::Group(request) => Some(request),
-        _ => None,
-    }
-}
-
 /// การเลือกควรเป็นอะไรหลัง undo/redo — `None` = **อย่าแตะการเลือกเดิม**
 ///
 /// ★★★ **"ไม่ได้แตะ item ไหนเลย" ≠ "ให้ล้างการเลือก"** (แยกออกมาตอน P3-7)
@@ -534,80 +467,6 @@ fn selection_after_history(
         return None;
     }
     Some(affected.iter().copied().filter(|id| alive(*id)).collect())
-}
-
-/// `Ctrl+S` = บันทึก · `Ctrl+Shift+S` = บันทึกเป็น (docs/03 §5, P4-2)
-fn save_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> Option<SaveRequest> {
-    match action_for(pressed, modifiers)? {
-        keymap::Action::Save(request) => Some(request),
-        _ => None,
-    }
-}
-
-/// `Ctrl+O` = เปิดกระดาน (docs/03 §5, P4-4)
-///
-/// ★ ไม่รับ `Ctrl+Shift+O` เป็นอย่างอื่น — ปุ่มที่ยังไม่มีความหมายควรเงียบ
-/// ไม่ใช่ทำอะไรที่ผู้ใช้ไม่ได้ขอ (ในตารางคือ `shift: Up` ไม่ใช่ `Either`)
-fn open_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> bool {
-    action_for(pressed, modifiers) == Some(keymap::Action::OpenBoard)
-}
-
-/// ★★★ คีย์ของแท็บ (`docs/03 §5` — P4-7c)
-///
-/// | คีย์ | ทำอะไร |
-/// |---|---|
-/// | `Ctrl+T` | board เปล่าใบใหม่ |
-/// | `Ctrl+W` | ปิดแท็บ — **ถามก่อนถ้ายังไม่บันทึก** |
-/// | `Ctrl+Tab` | แท็บถัดไป |
-///
-/// (`Ctrl+O` อยู่ที่ [`open_shortcut`] เพราะมันมีความหมายมาก่อนโครงแท็บ)
-///
-/// ★★ ตัวเดียวที่รับ `Key` ดิบด้วย เพราะ `Ctrl+Tab` มาเป็น **named key**
-/// ซึ่ง `shortcut_char` มองไม่เห็นเลย — คือกิ่ง [`keymap::Chord::Key`] ในตาราง
-fn tab_shortcut(
-    pressed: Option<char>,
-    key: &winit::keyboard::Key,
-    modifiers: ModifiersState,
-) -> Option<TabKey> {
-    match keymap::active().action(pressed, named_key(key), modifiers)? {
-        keymap::Action::Tab(which) => Some(which),
-        _ => None,
-    }
-}
-
-/// ★★★ `Tab` — สลับ Canvas ⇄ Arrange (`docs/03 §5` · P5-3b ก้อน c)
-///
-/// ★★ รับ `Key` ดิบด้วยเหตุผลเดียวกับ [`tab_shortcut`]: `Tab` เป็น named key
-/// ที่ `shortcut_char` มองไม่เห็นเลย
-fn mode_shortcut(
-    pressed: Option<char>,
-    key: &winit::keyboard::Key,
-    modifiers: ModifiersState,
-) -> bool {
-    keymap::active().action(pressed, named_key(key), modifiers) == Some(keymap::Action::ToggleMode)
-}
-
-/// `Ctrl+A` — เลือกทั้งหมด (`docs/03 §5` · P5-3b ก้อน c)
-fn select_all_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> bool {
-    action_for(pressed, modifiers) == Some(keymap::Action::SelectAll)
-}
-
-/// `Esc` — ยกเลิกเลือก (`docs/03 §5` · P5-3b ก้อน c) — named key เช่นเดียวกับ `Tab`
-fn clear_selection_shortcut(
-    pressed: Option<char>,
-    key: &winit::keyboard::Key,
-    modifiers: ModifiersState,
-) -> bool {
-    keymap::active().action(pressed, named_key(key), modifiers)
-        == Some(keymap::Action::ClearSelection)
-}
-
-/// `F` / `1` / `0` — ระดับซูม (`docs/03 §5` · P5-3b ก้อน c)
-fn zoom_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> Option<keymap::ZoomRequest> {
-    match action_for(pressed, modifiers)? {
-        keymap::Action::Zoom(request) => Some(request),
-        _ => None,
-    }
 }
 
 /// สิ่งที่ `Esc` ควรทำในสถานะนี้ (P5-3b ก้อน c)
@@ -708,8 +567,40 @@ fn named_key(key: &winit::keyboard::Key) -> Option<winit::keyboard::NamedKey> {
 /// ★ ตอนนี้เป็น [`keymap::RepeatPolicy`] ในตาราง ซึ่งเทสต์ถามตรง ๆ ได้
 /// (`holding_a_key_repeats_only_where_it_should`) และก้อน b จะให้ผู้ใช้ตั้งเอง
 /// ได้โดยไม่ต้องแตะโค้ดตรงนี้เลย
-fn wanted(event: &winit::event::KeyEvent, action: keymap::Action) -> bool {
-    event.state.is_pressed() && (!event.repeat || keymap::active().repeats(action))
+/// ★ รับชิ้นส่วนของ event ไม่ใช่ทั้ง `KeyEvent` เพราะ **`KeyEvent` สร้างในเทสต์
+/// ไม่ได้** (`platform_specific` เป็นฟิลด์ปิดของ winit) — และการทดสอบไม่ได้
+/// แปลว่าไม่มีเทสต์ แต่แปลว่ามีเทสต์ที่เรียกของเลียนแบบ ซึ่ง `§3.9 ข้อ 9` ห้าม
+fn wanted(down: bool, repeat: bool, action: keymap::Action) -> bool {
+    down && (!repeat || keymap::active().repeats(action))
+}
+
+/// ★★★ **ปุ่มที่เพิ่งกด → สิ่งที่ต้องลงมือในเฟรมนี้** — ทางเดียวของคีย์บอร์ดทั้งหมด
+///
+/// รวมสามคำถามที่เคยกระจายอยู่ 14 กิ่งใน `on_input` ให้เหลือลำดับเดียว:
+///
+/// 1. อักขระอะไร (`shortcut_char` — logical ก่อน physical เป็นตาข่ายรอง)
+/// 2. ตารางว่ายังไง (`Keymap::action` — `Char` ก่อน `Key`)
+/// 3. กดค้างแล้วซ้ำได้ไหม ([`wanted`] — นโยบายอยู่ในตาราง)
+///
+/// ★★ ยุบได้เพราะ **ทุกกิ่งเดิมถาม `Keymap::action` ตัวเดียวกัน** แล้วกรองด้วย
+/// variant ของผลลัพธ์ · ปุ่มหนึ่งชุดจึงจับคู่ได้ไม่เกินหนึ่ง action อยู่แล้ว
+/// (ประตู `no_single_keypress_can_ever_fire_two_actions` คุมข้อนี้ไว้ทั้งตาราง)
+/// — 14 `if` ที่เรียงกันจึงเป็น `match` เดียวได้โดยไม่เปลี่ยนพฤติกรรม
+///
+/// ★ ส่ง `named_key` เข้าไปเสมอ ต่างจากเดิมที่บางกิ่งส่ง `None`: ปุ่มหนึ่งครั้ง
+/// ให้ **อักขระ หรือ ชื่อ อย่างใดอย่างหนึ่ง** ไม่เคยให้ทั้งคู่ (logical ที่เป็น
+/// `Named` ไม่ผ่าน `logical_ascii` และไม่มีปุ่มชื่อไหนอยู่ในแผนที่ physical)
+/// การส่งครบจึงเป็น superset ที่ว่างเปล่า — พิสูจน์ด้วยเทสต์ที่ยิงทั้ง 45 แถว
+fn requested(
+    logical: &winit::keyboard::Key,
+    physical: winit::keyboard::PhysicalKey,
+    down: bool,
+    repeat: bool,
+    modifiers: ModifiersState,
+) -> Option<keymap::Action> {
+    let pressed = shortcut_char(logical, physical);
+    let action = keymap::active().action(pressed, named_key(logical), modifiers)?;
+    wanted(down, repeat, action).then_some(action)
 }
 
 /// สิ่งที่ต้องทำต่อหลังบันทึกเสร็จ (P4-2)
@@ -724,20 +615,6 @@ enum AfterSave {
     /// "บันทึกแล้วปิด" · ระบุด้วย id ไม่ใช่ดัชนี เพราะแท็บอื่นถูกปิดระหว่างที่
     /// ไฟล์กำลังเขียนได้ แล้วดัชนีจะเลื่อนไปปิดผิดใบ
     CloseTab(refx_core::arena::BoardId),
-}
-
-/// `Delete` / `Backspace` = ลบสิ่งที่เลือก (docs/03 §5)
-///
-/// รับ `Backspace` ด้วยเพราะบนแล็ปท็อปหลายรุ่นไม่มีปุ่ม `Delete` แยก
-fn is_delete(key: &winit::keyboard::Key) -> bool {
-    // ★ ไม่ตรวจ modifier เลยสักตัว — ในตารางคือ `Either` ทั้งสามช่อง
-    //   จึงส่ง `ModifiersState::empty()` เข้าไปได้โดยผลไม่เปลี่ยน
-    keymap::active().action(None, named_key(key), ModifiersState::empty())
-        == Some(keymap::Action::Delete)
-}
-
-fn is_paste(pressed: Option<char>, modifiers: ModifiersState) -> bool {
-    action_for(pressed, modifiers) == Some(keymap::Action::Paste)
 }
 
 /// ★★★ กล้อง/โหมดที่ **ใช้อยู่จริง** ประกอบเป็น `ViewState` ที่จะลงไฟล์ (P4-1)
@@ -4487,6 +4364,47 @@ impl RefxApp {
         self.shell.mode = self.docs.active().board.view().mode;
     }
 
+    /// ★★★ **คืนมุมมองที่ผู้ใช้บันทึกไว้** — โหมด **และ** กล้อง (P4-1 หนี้ §6 แถวแรก)
+    ///
+    /// ## ทำไมมันสำคัญกว่าที่หน้าตาบอก
+    ///
+    /// `ViewState` ถูกเขียนลง `.refx` ทุกครั้งที่บันทึกมาตั้งแต่ P4-1 · การไม่อ่าน
+    /// มันกลับคือ **เก็บของของผู้ใช้ไว้แล้วไม่คืนให้** ซึ่งแย่กว่าไม่เก็บเลย
+    /// เพราะไฟล์อ้างว่ามีมุมมองอยู่ · ใกล้ I-3 มากกว่าที่คำว่า "กล้อง" ทำให้คิด
+    ///
+    /// ## ★★ โหมดกับกล้องเดินทาง **เดียวกัน** ไม่ใช่คนละเส้น
+    ///
+    /// `docs/03 §6` (แก้ 5 ก.ย. 2026): ค่าที่ไหลสองทางต้องระบุให้ชัดว่าเฟรมที่ค่า
+    /// มาจากข้างนอกใครชนะ — **ค่าจากไฟล์ชนะในเฟรมนั้น การซิงค์กลับเริ่มเฟรมถัดไป**
+    /// · แยกสองเส้นเมื่อไหร่ กฎนั้นต้องถูกทำให้ถูกสองรอบ ซึ่งคือรูปที่เพิ่งพลาดมา
+    ///
+    /// ## I-4
+    ///
+    /// ค่าทุกตัวผ่าน [`Camera::new`] ที่ชั้น DTO มาแล้ว (`refx-io::dto`) ซึ่ง
+    /// ปฏิเสธ `NaN`/`inf` และ clamp `zoom` เข้าช่วง — `zoom = 0` จึงกลายเป็น 1.0
+    /// ไม่ใช่จอว่างที่กลับมาไม่ได้ · ระยะเลื่อนของ Arrange ถูก clamp อีกชั้นตอน
+    /// `plan` เพราะแผ่นอาจสั้นลงตั้งแต่บันทึก (ตัวกรอง · หน้าต่างเล็กลง)
+    ///
+    /// ไฟล์เก่าที่ไม่มี `view` ได้ค่าปริยายจาก `ViewState::default()` — **ไม่ใช่ error**
+    ///
+    /// ★ รับ `index` แทนที่จะอ่าน `docs.active()` เอง: วันนี้ทั้งสามกิ่งของ
+    /// [`Self::adopt_into_tab`] ทำให้แท็บที่รับ board กลายเป็นแท็บที่ดูอยู่พอดี
+    /// แต่นั่นเป็นความบังเอิญของโค้ดวันนี้ · ถ้าวันหนึ่งเปิดไฟล์ลงแท็บพื้นหลังได้
+    /// กล้องของมันจะไม่ถูกคืนแล้ว **หายถาวรตอนซิงค์กลับ** โดยไม่มีอะไรฟ้อง
+    fn restore_view(&mut self, index: usize) {
+        let Some(doc) = self.docs.list.get_mut(index) else {
+            return;
+        };
+        let view = *doc.board.view();
+        doc.camera = view.canvas;
+        doc.arrange.restore_from(view.arrange);
+        // โหมดเป็นของ `shell` ซึ่งมีชุดเดียวต่อหน้าต่าง จึงตั้งได้เฉพาะแท็บที่ดูอยู่
+        // — แท็บอื่นเก็บโหมดไว้ใน `Board::view` ของตัวเองและถูกอ่านตอนสลับไป
+        if index == self.docs.active {
+            self.shell.mode = view.mode;
+        }
+    }
+
     /// `Tab` — สลับ Canvas ⇄ Arrange (`docs/03 §5`)
     fn apply_mode_toggle(&mut self) {
         if self.gfx.is_none() {
@@ -5646,17 +5564,20 @@ impl RefxApp {
         if let Some(gfx) = self.gfx.as_mut() {
             Self::rebuild_quads(gfx, &mut self.docs.list[index]);
         }
-        // ★★★ **โหมดที่บันทึกไว้ในไฟล์ต้องกลับมาเดี๋ยวนี้** (`HANDOFF §6` เกณฑ์ผ่าน)
+        // ★★★ **มุมมองที่บันทึกไว้ในไฟล์ต้องกลับมาเดี๋ยวนี้** (`HANDOFF §6` เกณฑ์ผ่าน)
         //
         //   `mode_follows_active_tab` ที่ต้นเฟรมทำงานไป **ก่อน** `poll_open` เอา
         //   board ใบนี้มาวาง · `shell.mode` จึงยังเป็นของ board ใบเก่า แล้วการ
-        //   ซิงค์กลับหลังวาด (`set_view`) จะ **เขียนทับโหมดที่เพิ่งอ่านมาจากไฟล์**
+        //   ซิงค์กลับหลังวาด (`set_view`) จะ **เขียนทับค่าที่เพิ่งอ่านมาจากไฟล์**
         //   ทิ้งในเฟรมเดียวกับที่มันมาถึง
         //
         //   ★ เจอด้วยการรันจริงเท่านั้น: บันทึกในโหมด Arrange → เปิดใหม่ → ได้
         //     Canvas · เทสต์ระดับหน่วยทุกตัวเขียว เพราะแต่ละชิ้นถูกหมด
         //     (`docs/08 §3.9` ข้อ 5 — "ทุกชิ้นถูก ประกอบผิด")
-        self.mode_follows_active_tab();
+        //
+        //   ★★ กล้องเดินเส้นเดียวกับโหมด (`docs/03 §6`) — แยกสองเส้นเมื่อไหร่
+        //      กฎ "ค่าจากไฟล์ชนะในเฟรมนั้น" ต้องถูกทำให้ถูกสองรอบ
+        self.restore_view(index);
         self.request_thumbnails_for(id);
         if let Some(gfx) = self.gfx.as_ref() {
             gfx.window.request_redraw();
@@ -8342,134 +8263,106 @@ impl AppDelegate for RefxApp {
             WindowEvent::KeyboardInput { .. } if gfx.egui_ctx.egui_wants_keyboard_input() => {}
 
             WindowEvent::KeyboardInput { event, .. } => {
-                // ★ ตัดสินว่า "ตัวอักษรอะไร" ครั้งเดียวแล้วส่งต่อให้ทุกตัวจับคู่ —
-                //   logical ก่อน physical เป็นตาข่ายรอง (ดู `shortcut_char`)
-                let pressed = shortcut_char(&event.logical_key, event.physical_key);
-                // ★★★ `repeat` = ผู้ใช้กดค้างไว้ ไม่ใช่เจตนาสั่งหลายรอบ —
-                //     **นโยบายของแต่ละ action มาจากตาราง ไม่ใช่จาก `!event.repeat`
-                //     ที่เคยกระจายอยู่ 8 จุดในบล็อกนี้** (ดู `keymap::RepeatPolicy`)
-                if wanted(event, keymap::Action::Paste) && is_paste(pressed, gfx.modifiers) {
-                    // อ่าน clipboard ที่นี่ไม่ได้ — บล็อกได้ (I-2) ทำที่ต้นเฟรมถัดไป
-                    self.pending_paste = true;
-                    needs_redraw = true;
-                }
-                // ★ undo/redo **ยอมให้กดค้างซ้ำได้** ต่างจาก Ctrl+V โดยตั้งใจ
-                //   กด Ctrl+Z ค้างแล้วย้อนเรื่อย ๆ เป็นสิ่งที่ทุกคนคาดหวัง
-                //   ส่วนการวางซ้ำ ๆ ไม่ใช่ (แถมภาพจาก clipboard ใหญ่ได้เป็นร้อย MB)
-                if let Some(request) = history_shortcut(pressed, gfx.modifiers)
-                    && wanted(event, keymap::Action::History(request))
-                {
-                    self.pending_history = Some(request);
-                    needs_redraw = true;
-                }
-                // ★ ย้ายชั้น — กดค้างซ้ำได้เหมือน undo (กด `]` รัว ๆ จนถึงบนสุดคือท่าปกติ)
-                //   ตัวที่ถึงสุดขอบแล้วจะไม่สร้างคำสั่งเอง (`zorder::reordered` คืน `None`)
-                if let Some(movement) = zorder_shortcut(pressed, gfx.modifiers)
-                    && wanted(event, keymap::Action::ZOrder(movement))
-                {
-                    self.pending_zorder = Some(movement);
-                    needs_redraw = true;
-                }
-                // ★ ลบ — **ห้ามซ้ำตอนกดค้าง** ต่างจากย้ายชั้นโดยตั้งใจ
-                //   กดค้างหนึ่งวินาทีแล้วลบทีละชุดจนหมด board คือหายนะที่ undo
-                //   ต้องกดกลับหลายสิบครั้ง ทั้งที่ผู้ใช้ตั้งใจกดครั้งเดียว
-                if wanted(event, keymap::Action::Delete) && is_delete(&event.logical_key) {
-                    self.pending_delete = true;
-                    needs_redraw = true;
-                }
-                // ★ การแสดงผล (P2-8)
-                if let Some(what) = appearance_shortcut(pressed, gfx.modifiers)
-                    && wanted(event, keymap::Action::Appearance(what))
-                {
-                    self.pending_appearance = Some(what);
-                    needs_redraw = true;
-                }
-                // ★ บันทึก (P4-2) — **ห้ามซ้ำตอนกดค้าง**: กดค้างหนึ่งวินาที
-                //   = เขียนไฟล์หลายสิบรอบ ซึ่งนอกจากเปลืองแล้วยังเปิด dialog
-                //   ซ้อนกันเป็นสิบบานถ้ายังไม่เคยบันทึก
-                if let Some(request) = save_shortcut(pressed, gfx.modifiers)
-                    && wanted(event, keymap::Action::Save(request))
-                {
-                    self.pending_save = Some(request);
-                    needs_redraw = true;
-                }
-                // ★ เปิดกระดาน (P4-4) — ห้ามซ้ำตอนกดค้างด้วยเหตุผลเดียวกับ Ctrl+S
-                //   (กดค้าง = dialog เปิดซ้อนกันเป็นสิบบาน)
-                if wanted(event, keymap::Action::OpenBoard) && open_shortcut(pressed, gfx.modifiers)
-                {
-                    self.pending_open = true;
-                    needs_redraw = true;
-                }
-                // ★★★ คีย์ของแท็บ (P4-7c · `docs/03 §5`) — **ห้ามซ้ำตอนกดค้าง**
-                //     ทั้งสามตัว: `Ctrl+T` ค้าง = แท็บเปล่าสิบใบ · `Ctrl+W` ค้าง =
-                //     ปิดทุกแท็บรวดเดียว ซึ่งคือการทำงานหายจากการกดผิดครั้งเดียว
-                if let Some(which) = tab_shortcut(pressed, &event.logical_key, gfx.modifiers)
-                    && wanted(event, keymap::Action::Tab(which))
-                {
-                    match which {
-                        TabKey::New => self.pending_new_tab = true,
-                        TabKey::Close => self.pending_close_tab = true,
-                        TabKey::Next => self.pending_next_tab = true,
-                    }
-                    needs_redraw = true;
-                }
-                // ★ จัดกลุ่ม / แยกกลุ่ม (P3-7) — **ห้ามซ้ำตอนกดค้าง** เหมือน Delete
-                //   กดค้างหนึ่งวินาที = สร้างกลุ่มใหม่ทับกันหลายสิบชั้นใน undo stack
-                //   ทั้งที่ผู้ใช้ตั้งใจกดครั้งเดียว
-                if let Some(request) = group_shortcut(pressed, gfx.modifiers)
-                    && wanted(event, keymap::Action::Group(request))
-                {
-                    self.pending_group = Some(request);
-                    needs_redraw = true;
-                }
-                // ★★★ `Tab` — สลับโหมด (P5-3b ก้อน c)
+                // ★★★ **ทางเดียวของคีย์บอร์ดทั้งหมด** (หนี้ §6 — ยุบ `on_input`)
                 //
-                //     **ปุ่มนี้เป็นของ egui ก่อนเสมอถ้ามีอะไร focus อยู่** — ด่าน
-                //     `egui_wants_keyboard_input()` ข้างบนกินมันไปแล้วในกรณีนั้น
-                //     (`focused().is_some()` ตรง ๆ) จึงมาถึงที่นี่ได้ก็ต่อเมื่อไม่มี
-                //     widget ไหนถือ focus · ดู `strip_tab_when_it_is_ours` ว่าทำไม
-                //     egui ต้องไม่เห็นปุ่มนี้ในกรณีที่มันเป็นของเรา
-                if mode_shortcut(pressed, &event.logical_key, gfx.modifiers)
-                    && wanted(event, keymap::Action::ToggleMode)
-                {
-                    self.pending_mode_toggle = true;
-                    needs_redraw = true;
-                }
-                // ★ `Ctrl+A` — เลือกทั้งหมด · ในช่องข้อความ egui กินไปก่อนแล้ว
-                //   (ซึ่งเป็นสิ่งที่ควรเกิด: ที่นั่น `Ctrl+A` = เลือกข้อความ)
-                if select_all_shortcut(pressed, gfx.modifiers)
-                    && wanted(event, keymap::Action::SelectAll)
-                {
-                    self.pending_select_all = true;
-                    needs_redraw = true;
-                }
-                // ★★ `Esc` — **ปิดแถบที่ค้างอยู่มาก่อนยกเลิกเลือกเสมอ**
-                //    การตัดสินลำดับอยู่ที่ `apply_clear_selection` เพราะที่นั่นคือ
-                //    ที่เดียวที่รู้ว่ามีแถบไหนเปิดอยู่ (docs/08 §3.9 ข้อ 8.1)
-                if clear_selection_shortcut(pressed, &event.logical_key, gfx.modifiers)
-                    && wanted(event, keymap::Action::ClearSelection)
-                {
-                    self.pending_clear_selection = true;
-                    needs_redraw = true;
-                }
-                // ★ `F` / `1` / `0` — ระดับซูม
-                if let Some(request) = zoom_shortcut(pressed, gfx.modifiers)
-                    && wanted(event, keymap::Action::Zoom(request))
-                {
-                    self.pending_zoom = Some(request);
-                    needs_redraw = true;
-                }
-                // ★ สลับเครื่องมือ (P2-7) — กดค้างซ้ำไม่มีผลอยู่แล้วเพราะตั้งค่าเดิมซ้ำ
-                if let Some(tool) = tool_shortcut(pressed, gfx.modifiers)
-                    && wanted(event, keymap::Action::Tool(tool))
-                    && gfx.tool != tool
-                {
-                    gfx.tool = tool;
-                    // การกดค้างที่ยังอยู่เป็นของเครื่องมือเดิม ใช้ต่อไม่ได้
-                    self.docs.active_mut().select_tool.cancel();
-                    self.docs.active_mut().select_tool.clear_measurement();
-                    self.docs.active_mut().rubber_band = None;
-                    needs_redraw = true;
+                //   เดิมเป็น 14 กิ่ง `if` เรียงกัน · แต่ละกิ่งเรียก wrapper ที่ถาม
+                //   `Keymap::action` **ตัวเดียวกัน** แล้วกรองด้วย variant ของผลลัพธ์
+                //   — ปุ่มหนึ่งชุดจับคู่ได้ไม่เกินหนึ่ง action อยู่แล้ว (ประตู
+                //   `no_single_keypress_can_ever_fire_two_actions` คุมทั้งตาราง)
+                //   ทั้ง 14 กิ่งจึงเป็น `match` เดียวโดยไม่เปลี่ยนพฤติกรรม
+                //
+                //   ★ พิสูจน์ก่อนลบ: `the_single_dispatch_answers_exactly_like_the
+                //   _fourteen_branches` ยิงทั้ง 45 แถวผ่านทั้งสองทางแล้วเทียบผล
+                //   (เขียวก่อน commit ที่ลบ wrapper)
+                //
+                //   ★★ นโยบายกดค้างและลำดับ logical→physical อยู่ใน `requested`
+                //   ทั้งหมดแล้ว — ที่นี่เหลือหน้าที่เดียวคือ *"เก็บคำขอไว้ทำต้นเฟรมหน้า"*
+                if let Some(action) = requested(
+                    &event.logical_key,
+                    event.physical_key,
+                    event.state.is_pressed(),
+                    event.repeat,
+                    gfx.modifiers,
+                ) {
+                    // ★ `match` ไม่มี `_ =>` โดยตั้งใจ: เพิ่ม action ใหม่เมื่อไหร่
+                    //   คอมไพเลอร์บังคับให้มาต่อสายที่นี่ ไม่ใช่ปล่อยให้เงียบ
+                    needs_redraw |= match action {
+                        // อ่าน clipboard ที่นี่ไม่ได้ — บล็อกได้ (I-2) ทำที่ต้นเฟรมถัดไป
+                        keymap::Action::Paste => {
+                            self.pending_paste = true;
+                            true
+                        }
+                        keymap::Action::History(request) => {
+                            self.pending_history = Some(request);
+                            true
+                        }
+                        keymap::Action::ZOrder(movement) => {
+                            self.pending_zorder = Some(movement);
+                            true
+                        }
+                        keymap::Action::Delete => {
+                            self.pending_delete = true;
+                            true
+                        }
+                        keymap::Action::Appearance(what) => {
+                            self.pending_appearance = Some(what);
+                            true
+                        }
+                        keymap::Action::Save(request) => {
+                            self.pending_save = Some(request);
+                            true
+                        }
+                        keymap::Action::OpenBoard => {
+                            self.pending_open = true;
+                            true
+                        }
+                        keymap::Action::Tab(TabKey::New) => {
+                            self.pending_new_tab = true;
+                            true
+                        }
+                        keymap::Action::Tab(TabKey::Close) => {
+                            self.pending_close_tab = true;
+                            true
+                        }
+                        keymap::Action::Tab(TabKey::Next) => {
+                            self.pending_next_tab = true;
+                            true
+                        }
+                        keymap::Action::Group(request) => {
+                            self.pending_group = Some(request);
+                            true
+                        }
+                        keymap::Action::ToggleMode => {
+                            self.pending_mode_toggle = true;
+                            true
+                        }
+                        keymap::Action::SelectAll => {
+                            self.pending_select_all = true;
+                            true
+                        }
+                        keymap::Action::ClearSelection => {
+                            self.pending_clear_selection = true;
+                            true
+                        }
+                        keymap::Action::Zoom(request) => {
+                            self.pending_zoom = Some(request);
+                            true
+                        }
+                        // ★★ ตัวเดียวที่ลงมือทันที ไม่ใช่ตั้งคำขอ — และตัวเดียวที่
+                        //    **ขอเฟรมใหม่เฉพาะเมื่อมีอะไรเปลี่ยนจริง** (I-1):
+                        //    กด `V` ซ้ำตอนอยู่เครื่องมือเลือกอยู่แล้ว ต้องไม่วาดใหม่
+                        keymap::Action::Tool(tool) => {
+                            let changed = gfx.tool != tool;
+                            if changed {
+                                gfx.tool = tool;
+                                // การกดค้างที่ยังอยู่เป็นของเครื่องมือเดิม ใช้ต่อไม่ได้
+                                self.docs.active_mut().select_tool.cancel();
+                                self.docs.active_mut().select_tool.clear_measurement();
+                                self.docs.active_mut().rubber_band = None;
+                            }
+                            changed
+                        }
+                    };
                 }
             }
 
@@ -9804,6 +9697,308 @@ mod tests {
         );
     }
 
+    // ---------- ★★★ ตัวกรองที่ **ย้ายลงมาจาก production** (หนี้ §6 — ยุบ `on_input`) ----------
+    //
+    // ★★ 14 ฟังก์ชันนี้เคยเป็นจุดที่ `on_input` เรียกจริง · ตอนนี้ `on_input`
+    //    เป็น `match` เดียวบนผลของ `requested` แล้ว มันจึงไม่มีคนเรียกใน
+    //    production อีก — แต่ **assertion 94 จุดที่ใช้มันยังมีค่าเท่าเดิม**
+    //    เพราะสิ่งที่มันถามคือ *"ปุ่มชุดนี้แปลว่าอะไร"* ซึ่งเป็นคำถามเดียวกับที่
+    //    `requested` ตอบ
+    //
+    // ★★★ ย้ายลงมา **โดยไม่แก้สักไบต์** โดยตั้งใจ: การไปแก้ 94 assertion พร้อมกัน
+    //     คือจุดที่การอ่อนลงของเทสต์ซ่อนตัวได้ดีที่สุด (`docs/08 §3.9` ข้อ 1)
+    //     — refactor รอบนี้ต้องไม่เปลี่ยนพฤติกรรมและไม่เปลี่ยนสิ่งที่ถูกยืนยัน
+    //
+    // ★ ไม่ใช่ตรรกะเลียนแบบ (ข้อ 9): ทุกตัวเรียก `keymap::active().action()`
+    //   ตัวจริงที่ production ใช้ แล้วแค่คัดตาม variant ของผลลัพธ์ ·
+    //   ★★ สิ่งที่มันครอบไม่ถึงคือ **การต่อสายจาก action ไปยัง `pending_*`**
+    //   ในกิ่ง `match` ของ `on_input` — ข้อนั้นคอมไพเลอร์บังคับให้ครบ (ไม่มี `_`)
+    //   และถูกยืนยันบนแอปจริงทั้ง 45 แถวตอนก้อน c
+
+    /// ★★★ ปุ่มที่เพิ่งกด → สิ่งที่มันสั่ง — **ทางเดียวที่ทุก wrapper ข้างล่างใช้**
+    ///
+    /// การจับคู่ทั้งหมดเป็น **ข้อมูล** อยู่ใน [`crate::keymap`] แล้ว (P5-3b ก้อน a)
+    /// ฟังก์ชันข้างล่างจึงเหลือหน้าที่เดียวคือ *"action ตัวนี้ใช่ของฉันไหม"*
+    ///
+    /// ★ ยังเป็นฟังก์ชันแยกกันอยู่โดยตั้งใจ: **assertion เดิมทั้งชุดคือ oracle**
+    /// ที่พิสูจน์ว่าตารางให้ผลเท่าของเดิมเป๊ะ (`ROADMAP` P5-3b ก้อน a) ·
+    /// การยุบ `on_input` ให้เหลือ dispatch เดียวทำให้ oracle นั้นหายไป จึงเป็นงานของ
+    /// ก้อนถัดไป ไม่ใช่ก้อนนี้
+    fn action_for(pressed: Option<char>, modifiers: ModifiersState) -> Option<keymap::Action> {
+        keymap::active().action(pressed, None, modifiers)
+    }
+
+    /// แปลงปุ่มที่กดเป็นคำขอกับประวัติ
+    ///
+    /// ★ รับ **Ctrl+Shift+Z เป็น redo ด้วย** ไม่ใช่แค่ Ctrl+Y — คนจำนวนมากใช้อันนั้น
+    /// (ติดมาจาก Photoshop/Illustrator) ถ้าไม่รับ เขาจะคิดว่า redo ไม่มีในโปรแกรมนี้
+    fn history_shortcut(
+        pressed: Option<char>,
+        modifiers: ModifiersState,
+    ) -> Option<HistoryRequest> {
+        match action_for(pressed, modifiers)? {
+            keymap::Action::History(request) => Some(request),
+            _ => None,
+        }
+    }
+
+    /// แปลงปุ่มที่กดเป็นคำสั่งย้ายชั้น (P2-6)
+    ///
+    /// `docs/03 §5` ระบุแค่ `[` `]` = ส่งไปหลัง / นำมาหน้า **ไม่ได้ระบุปุ่มของสุดหัว-สุดท้าย**
+    /// เลือก `Shift+[` / `Shift+]` เพราะอยู่ตระกูลเดียวกันและไม่ชนกับอะไรใน keymap
+    fn zorder_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> Option<ZMove> {
+        match action_for(pressed, modifiers)? {
+            keymap::Action::ZOrder(movement) => Some(movement),
+            _ => None,
+        }
+    }
+
+    /// แปลงปุ่มที่กดเป็นการสลับเครื่องมือ (docs/03 §2: `V` = Select/Move · `C` = Crop)
+    fn tool_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> Option<Tool> {
+        match action_for(pressed, modifiers)? {
+            keymap::Action::Tool(tool) => Some(tool),
+            _ => None,
+        }
+    }
+
+    /// `G` = grayscale ทั้ง board · `H` = พลิกแนวนอน (docs/03 §2, §5)
+    ///
+    /// ★ สองปุ่มนี้ทำคนละชั้นกันโดยตั้งใจ: `G` เป็น**สวิตช์การมองเห็น**ของทั้ง board
+    /// (uniform ตัวเดียว ไม่กิน undo ไม่ทำให้ dirty) ส่วน `H` **แก้เอกสาร**
+    /// ของภาพที่เลือก จึงผ่าน `Command` และย้อนได้ตามปกติ
+    fn appearance_shortcut(
+        pressed: Option<char>,
+        modifiers: ModifiersState,
+    ) -> Option<AppearanceKey> {
+        match action_for(pressed, modifiers)? {
+            keymap::Action::Appearance(what) => Some(what),
+            _ => None,
+        }
+    }
+
+    /// `Ctrl+G` = จัดกลุ่ม · `Ctrl+Shift+G` = แยกกลุ่ม (docs/03 §5, P3-7)
+    ///
+    /// ★ `G` เปล่า ๆ เป็น grayscale ของทั้ง board — สองตัวนี้แยกกันด้วย Ctrl ตัวเดียว
+    /// ตอนนี้ความเคร่งครัดนั้นเป็น **ข้อมูล** ([`keymap::Hold`]) ไม่ใช่วินัยของคนเขียน
+    /// และมีประตู `no_single_keypress_can_ever_fire_two_actions` คุมทั้งตาราง
+    fn group_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> Option<GroupRequest> {
+        match action_for(pressed, modifiers)? {
+            keymap::Action::Group(request) => Some(request),
+            _ => None,
+        }
+    }
+
+    /// `Ctrl+S` = บันทึก · `Ctrl+Shift+S` = บันทึกเป็น (docs/03 §5, P4-2)
+    fn save_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> Option<SaveRequest> {
+        match action_for(pressed, modifiers)? {
+            keymap::Action::Save(request) => Some(request),
+            _ => None,
+        }
+    }
+
+    /// `Ctrl+O` = เปิดกระดาน (docs/03 §5, P4-4)
+    ///
+    /// ★ ไม่รับ `Ctrl+Shift+O` เป็นอย่างอื่น — ปุ่มที่ยังไม่มีความหมายควรเงียบ
+    /// ไม่ใช่ทำอะไรที่ผู้ใช้ไม่ได้ขอ (ในตารางคือ `shift: Up` ไม่ใช่ `Either`)
+    fn open_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> bool {
+        action_for(pressed, modifiers) == Some(keymap::Action::OpenBoard)
+    }
+
+    /// ★★★ คีย์ของแท็บ (`docs/03 §5` — P4-7c)
+    ///
+    /// | คีย์ | ทำอะไร |
+    /// |---|---|
+    /// | `Ctrl+T` | board เปล่าใบใหม่ |
+    /// | `Ctrl+W` | ปิดแท็บ — **ถามก่อนถ้ายังไม่บันทึก** |
+    /// | `Ctrl+Tab` | แท็บถัดไป |
+    ///
+    /// (`Ctrl+O` อยู่ที่ [`open_shortcut`] เพราะมันมีความหมายมาก่อนโครงแท็บ)
+    ///
+    /// ★★ ตัวเดียวที่รับ `Key` ดิบด้วย เพราะ `Ctrl+Tab` มาเป็น **named key**
+    /// ซึ่ง `shortcut_char` มองไม่เห็นเลย — คือกิ่ง [`keymap::Chord::Key`] ในตาราง
+    fn tab_shortcut(
+        pressed: Option<char>,
+        key: &winit::keyboard::Key,
+        modifiers: ModifiersState,
+    ) -> Option<TabKey> {
+        match keymap::active().action(pressed, named_key(key), modifiers)? {
+            keymap::Action::Tab(which) => Some(which),
+            _ => None,
+        }
+    }
+
+    /// ★★★ `Tab` — สลับ Canvas ⇄ Arrange (`docs/03 §5` · P5-3b ก้อน c)
+    ///
+    /// ★★ รับ `Key` ดิบด้วยเหตุผลเดียวกับ [`tab_shortcut`]: `Tab` เป็น named key
+    /// ที่ `shortcut_char` มองไม่เห็นเลย
+    fn mode_shortcut(
+        pressed: Option<char>,
+        key: &winit::keyboard::Key,
+        modifiers: ModifiersState,
+    ) -> bool {
+        keymap::active().action(pressed, named_key(key), modifiers)
+            == Some(keymap::Action::ToggleMode)
+    }
+
+    /// `Ctrl+A` — เลือกทั้งหมด (`docs/03 §5` · P5-3b ก้อน c)
+    fn select_all_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> bool {
+        action_for(pressed, modifiers) == Some(keymap::Action::SelectAll)
+    }
+
+    /// `Esc` — ยกเลิกเลือก (`docs/03 §5` · P5-3b ก้อน c) — named key เช่นเดียวกับ `Tab`
+    fn clear_selection_shortcut(
+        pressed: Option<char>,
+        key: &winit::keyboard::Key,
+        modifiers: ModifiersState,
+    ) -> bool {
+        keymap::active().action(pressed, named_key(key), modifiers)
+            == Some(keymap::Action::ClearSelection)
+    }
+
+    /// `F` / `1` / `0` — ระดับซูม (`docs/03 §5` · P5-3b ก้อน c)
+    fn zoom_shortcut(
+        pressed: Option<char>,
+        modifiers: ModifiersState,
+    ) -> Option<keymap::ZoomRequest> {
+        match action_for(pressed, modifiers)? {
+            keymap::Action::Zoom(request) => Some(request),
+            _ => None,
+        }
+    }
+
+    /// `Delete` / `Backspace` = ลบสิ่งที่เลือก (docs/03 §5)
+    ///
+    /// รับ `Backspace` ด้วยเพราะบนแล็ปท็อปหลายรุ่นไม่มีปุ่ม `Delete` แยก
+    fn is_delete(key: &winit::keyboard::Key) -> bool {
+        // ★ ไม่ตรวจ modifier เลยสักตัว — ในตารางคือ `Either` ทั้งสามช่อง
+        //   จึงส่ง `ModifiersState::empty()` เข้าไปได้โดยผลไม่เปลี่ยน
+        keymap::active().action(None, named_key(key), ModifiersState::empty())
+            == Some(keymap::Action::Delete)
+    }
+
+    fn is_paste(pressed: Option<char>, modifiers: ModifiersState) -> bool {
+        action_for(pressed, modifiers) == Some(keymap::Action::Paste)
+    }
+
+    // ---------- ★★★ ยุบ `on_input` เป็น dispatch เดียว (หนี้ §6) ----------
+
+    /// สถานะปุ่มค้างที่ทำให้ chord นี้ **ตรง** — `Either` เลือกทางไหนก็ได้
+    fn modifiers_for(mods: keymap::Mods) -> ModifiersState {
+        let mut state = ModifiersState::empty();
+        if mods.ctrl == keymap::Hold::Down {
+            state |= ModifiersState::CONTROL;
+        }
+        if mods.shift == keymap::Hold::Down {
+            state |= ModifiersState::SHIFT;
+        }
+        if mods.alt == keymap::Hold::Down {
+            state |= ModifiersState::ALT;
+        }
+        state
+    }
+
+    /// ปุ่มที่ผู้ใช้ต้องกดเพื่อให้ได้ binding นี้
+    fn event_for(binding: &keymap::Binding) -> (winit::keyboard::Key, ModifiersState) {
+        let logical = match binding.chord {
+            keymap::Chord::Char { ch, .. } => {
+                winit::keyboard::Key::Character(ch.to_string().into())
+            }
+            keymap::Chord::Key { key, .. } => winit::keyboard::Key::Named(key),
+        };
+        (logical, modifiers_for(binding.chord.mods()))
+    }
+
+    /// ★ physical เป็น `F13` ซึ่ง **ไม่มีในแผนที่ physical** โดยตั้งใจ —
+    /// เทสต์ชุดนี้ถามชั้น logical ไม่ใช่ตาข่ายรอง
+    const NOWHERE: winit::keyboard::PhysicalKey =
+        winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::F13);
+
+    /// ★★★ **ทุกแถวในตารางต้องเดินทางถึงปลายทางของตัวเองผ่าน `requested`**
+    ///
+    /// ## oracle ที่ใช้แล้วปลดไป (หนี้ §6 — ยุบ `on_input`)
+    ///
+    /// ตอนยุบ 14 กิ่งของ `on_input` เป็น dispatch เดียว เทสต์ตัวนี้มีอีกครึ่ง:
+    /// `action_the_old_way` ที่เรียก wrapper ทั้ง 14 ตัวตามลำดับเดิม แล้ว
+    /// **เทียบผลกับ `requested` ทั้ง 45 แถว** · เขียวก่อนแล้วจึงลบ wrapper ทิ้ง
+    /// — ไม่ใช่ลบแล้วหวังว่าเทสต์ที่มีอยู่ครอบคลุมพอ (รูปแบบเดียวกับที่ก้อน a
+    /// ใช้ assertion เดิมเป็น oracle ตอนย้ายการจับคู่มาเป็นตาราง)
+    ///
+    /// ครึ่งที่เหลืออยู่นี้คือครึ่งที่ยัง**มีความหมายหลังลบ**: ปุ่มที่ตารางบอกว่า
+    /// ผูกกับ action ตัวไหน ต้องเดินผ่าน `shortcut_char` → `Keymap::action` →
+    /// [`wanted`] แล้วออกมาเป็น action ตัวนั้นจริง ไม่ใช่แค่ "มีอยู่ในตาราง"
+    #[test]
+    fn every_row_in_the_table_reaches_its_own_action() {
+        let table = keymap::builtin().bindings();
+        assert_eq!(table.len(), 45, "จำนวน binding เปลี่ยน — เทสต์นี้ต้องยิงให้ครบ");
+
+        for binding in table {
+            let (logical, modifiers) = event_for(binding);
+            assert_eq!(
+                requested(&logical, NOWHERE, true, false, modifiers),
+                Some(binding.action),
+                "แถวนี้ยิงแล้วไม่ได้ action ของตัวเอง: {binding:?}"
+            );
+        }
+
+        // ★ ปุ่มที่ไม่มีในตารางต้องเงียบ — ไม่งั้นเทียบแต่ฝั่งที่ตรงกันอยู่แล้ว
+        let stranger = winit::keyboard::Key::Character("\u{7f}".into());
+        assert_eq!(
+            requested(&stranger, NOWHERE, true, false, ModifiersState::empty()),
+            None
+        );
+
+        // ★★★ `Hold::Either` ต้องแปลว่า "ไม่เกี่ยว" **ตลอดเส้นทาง** ไม่ใช่แค่ในตาราง
+        //
+        //     ก่อนยุบ `is_delete` ส่ง `ModifiersState::empty()` เข้าไปเสมอ เพราะ
+        //     modifier ของ `Delete` เป็น `Either` ทั้งสามช่อง · ตอนนี้มันได้รับ
+        //     modifier จริง — ถ้า `Either` ไม่ได้แปลว่าไม่เกี่ยวจริง `Ctrl+Delete`
+        //     จะเงียบไปเฉย ๆ ซึ่งเป็นความต่างที่ `event_for` มองไม่เห็น
+        //     (มันเลือก "ไม่กด" ให้ทุกช่องที่เป็น `Either`)
+        let all = ModifiersState::CONTROL | ModifiersState::SHIFT | ModifiersState::ALT;
+        let delete = winit::keyboard::Key::Named(winit::keyboard::NamedKey::Delete);
+        assert_eq!(
+            requested(&delete, NOWHERE, true, false, all),
+            Some(keymap::Action::Delete),
+            "`Ctrl+Shift+Alt+Delete` ต้องยังลบได้ — modifier ของมันเป็น Either ทั้งชุด"
+        );
+        // และ `Ctrl+Y` ที่ shift เป็น `Either` ต้องติดทั้งกดและไม่กด shift
+        let y = winit::keyboard::Key::Character("y".into());
+        for mods in [
+            ModifiersState::CONTROL,
+            ModifiersState::CONTROL | ModifiersState::SHIFT,
+        ] {
+            assert_eq!(
+                requested(&y, NOWHERE, true, false, mods),
+                Some(keymap::Action::History(HistoryRequest::Redo))
+            );
+        }
+    }
+
+    /// ★★ ปล่อยปุ่ม และ การกดค้าง — สองอย่างที่ `requested` ต้องกรองเหมือนเดิม
+    #[test]
+    fn releasing_a_key_does_nothing_and_holding_it_follows_the_table() {
+        let z = winit::keyboard::Key::Character("z".into());
+        let v = winit::keyboard::Key::Character("v".into());
+        let ctrl = ModifiersState::CONTROL;
+
+        // ปล่อยปุ่ม = ไม่ใช่คำสั่ง
+        assert_eq!(requested(&z, NOWHERE, false, false, ctrl), None);
+        // กดค้าง: undo ซ้ำได้ · วางไม่ซ้ำ — นโยบายมาจากตาราง ไม่ใช่จากที่นี่
+        assert_eq!(
+            requested(&z, NOWHERE, true, true, ctrl),
+            Some(keymap::Action::History(HistoryRequest::Undo))
+        );
+        assert_eq!(
+            requested(&v, NOWHERE, true, true, ctrl),
+            None,
+            "Ctrl+V ค้างต้องไม่วางซ้ำ"
+        );
+        assert_eq!(
+            requested(&v, NOWHERE, true, false, ctrl),
+            Some(keymap::Action::Paste)
+        );
+    }
+
     // ---------- ★★★ P5-3b ก้อน c: หกคีย์ที่ spec สั่งไว้แต่ไม่เคยมี ----------
 
     /// ★★★ **หกคีย์ใหม่ต้องรอดทั้งบน layout ไทยและ Dvorak**
@@ -9996,6 +10191,58 @@ mod tests {
             app.shell.mode,
             Mode::Arrange,
             "เปิด board ที่บันทึกในโหมด Arrange แล้วต้องได้ Arrange กลับมา"
+        );
+    }
+
+    /// ★★★ **กล้องที่บันทึกไว้ต้องกลับมา** — โหมดกับกล้องเดินทางเดียวกัน
+    ///
+    /// `ViewState` ถูกเขียนลง `.refx` ทุกครั้งที่บันทึกมาตั้งแต่ P4-1 แต่ไม่เคยมี
+    /// ใครอ่านกล้องกลับ · เปิดไฟล์มาแล้วได้ zoom ค่าปริยายเสมอ = **เก็บของของ
+    /// ผู้ใช้ไว้แล้วไม่คืนให้** ซึ่งแย่กว่าไม่เก็บ เพราะไฟล์อ้างว่ามีมุมมองอยู่
+    #[test]
+    fn the_view_saved_in_the_file_comes_back_camera_and_all() {
+        let mut app = RefxApp::new(AppArgs::default());
+        let saved = Camera::new(Vec2::new(1234.5, -678.25), 3.5);
+        let arrange = Camera::new(Vec2::new(0.0, 4096.0), 1.0);
+
+        let mut board = Board::new(app.docs.mint(), "saved view");
+        board.set_view(live_view(saved, arrange, Mode::Arrange));
+        app.docs.active_mut().board = board;
+        app.restore_view(app.docs.active);
+
+        assert_eq!(app.docs.active().camera, saved, "กล้อง Canvas ไม่ได้กลับมา");
+        assert_eq!(app.shell.mode, Mode::Arrange);
+        // ★ ระยะเลื่อนของ Arrange ยังไม่ถูกตั้ง — มันแปลงได้ก็ต่อเมื่อรู้ความสูง
+        //   ของช่อง ซึ่ง `plan` เป็นที่แรกที่รู้ · ที่นี่ตรวจแค่ว่า "ค้างไว้แล้ว"
+        assert_eq!(app.docs.active().arrange.scroll(), 0.0);
+    }
+
+    /// ★★★ ค่าที่พังจากไฟล์ต้องไม่ทำให้จอว่างแบบกลับมาไม่ได้ (I-4)
+    ///
+    /// `zoom = 0` แปลว่าทุกอย่างยุบเป็นจุดเดียว · `NaN` แปลว่า transform พัง
+    /// ทั้งจอ · ทั้งสองอ่านว่า "งานหาย" ในสายตาผู้ใช้ ทั้งที่ข้อมูลยังอยู่ครบ
+    ///
+    /// ★ ด่านอยู่ที่ [`Camera::new`] ในชั้น DTO อยู่แล้ว — เทสต์นี้ยืนยันว่า
+    /// **เส้นทางคืนมุมมองเดินผ่านด่านนั้นจริง** ไม่ใช่แค่ว่าด่านมีอยู่
+    #[test]
+    fn a_broken_camera_in_the_file_never_reaches_the_screen() {
+        let mut app = RefxApp::new(AppArgs::default());
+        let mut board = Board::new(app.docs.mint(), "broken view");
+        // `Camera::new` ปฏิเสธค่าพวกนี้ตั้งแต่ตอนสร้าง — เหมือนที่ DTO ทำ
+        board.set_view(live_view(
+            Camera::new(Vec2::new(f32::NAN, 0.0), 0.0),
+            Camera::new(Vec2::new(0.0, f32::INFINITY), f32::NAN),
+            Mode::Canvas,
+        ));
+        app.docs.active_mut().board = board;
+        app.restore_view(app.docs.active);
+
+        let camera = app.docs.active().camera;
+        assert!(camera.center().is_finite(), "จุดกึ่งกลางไม่ใช่ตัวเลข");
+        assert!(
+            camera.zoom() >= Camera::MIN_ZOOM && camera.zoom() <= Camera::MAX_ZOOM,
+            "zoom หลุดช่วง: {}",
+            camera.zoom()
         );
     }
 
