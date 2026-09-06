@@ -1,0 +1,19 @@
+ผลจริงจาก CI run 33979941397 (ubuntu-latest, checkout สะอาด) ผสมกับรูปที่เครื่อง
+dev เห็น — ตัวอ่านผลต้องได้ตัวเลขครบสามแถวจากไฟล์นี้ ไม่ว่าบรรทัดจะถูกผ่าหรือไม่
+
+   Compiling refx-core v0.1.0 (/home/runner/work/RefX/RefX/crates/refx-core)
+    Finished `bench` profile [optimized] target(s) in 20.55s
+     Running benches/core_benches.rs (target/release/deps/core_benches-c210e21172a68eab)
+Gnuplot not found, using plotters backend
+cull_1000: เห็น 27 จาก 1000 ใบ · เปิดดู 15 ช่อง · ทดสอบจริง 59 ใบ
+test cull_1000 ... Criterion.rs ERROR: error: Failed to access file "/home/runner/work/RefX/RefX/target/criterion/cull_1000/base/sample.json": No such file or directory (os error 2)
+bench:         833 ns/iter (+/- 24)
+
+layout_justified_1000: จัดวาง 1000 ใบใน 12 แถว
+test layout_justified_1000 ... Criterion.rs ERROR: error: Failed to access file "/home/runner/work/RefX/RefX/target/criterion/layout_justified_1000/base/sample.json": No such file or directory (os error 2)
+bench:        8090 ns/iter (+/- 45)
+
+     Running benches/instances.rs (target/release/deps/instances-6894ff78ae715d9b)
+build_instances_1000: สร้าง 975 instance จาก 1000 ใบ (ที่เหลือถูกซ่อนไว้)
+test build_instances_1000 ... bench:       20032 ns/iter (+/- 990)
+

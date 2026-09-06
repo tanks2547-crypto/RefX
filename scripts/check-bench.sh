@@ -23,6 +23,38 @@
 
 set -uo pipefail
 
+DIR=$(cd "$(dirname "$0")" && pwd)
+PARSER="$DIR/bench-parse.awk"
+
+# ---------------------------------------------------------------------------
+# ★ ตัวอ่านผลต้องพิสูจน์ตัวเองก่อนที่เราจะเชื่อมัน (docs/08 §3.9 ข้อ 9)
+#
+# ประตูนี้เขียวบนเครื่อง dev แต่แดงบน CI สามรอบติด เพราะรูปของ output ต่างกัน:
+# runner ที่ยังไม่มี `target/criterion/` โดน "Criterion.rs ERROR" แทรกผ่าบรรทัด
+# `test NAME ... bench:` ออกเป็นสองท่อน ตัวอ่านผลเดิมจึงไม่เจอสักแถว
+#
+# ทางแก้ไม่ใช่ "แก้ regex แล้วหวังว่ารอบหน้าถูก" — เก็บ output จริงจาก CI ไว้เป็น
+# ตัวอย่าง แล้วให้สคริปต์ตรวจตัวเองกับมันทุกครั้งที่รัน เครื่อง dev จึงเห็นรูปที่
+# ตัวเองไม่มีวันสร้างได้
+# ---------------------------------------------------------------------------
+PARSE_EXPECT="cull_1000 833
+layout_justified_1000 8090
+build_instances_1000 20032"
+
+PARSE_GOT=$(awk -f "$PARSER" < "$DIR/testdata/bench-bencher-output.txt")
+if [ "$PARSE_GOT" != "$PARSE_EXPECT" ]; then
+  echo "ได้:"; echo "$PARSE_GOT"
+  echo "ควรได้:"; echo "$PARSE_EXPECT"
+  echo "::error::ตัวอ่านผล bench อ่านตัวอย่างจาก CI ไม่ถูก — ยังไม่ต้องรัน bench เพราะผลจะเชื่อไม่ได้"
+  exit 1
+fi
+
+awk -f "$PARSER" < "$DIR/testdata/bench-bencher-orphan.txt" > /dev/null 2>&1
+if [ $? -ne 3 ]; then
+  echo "::error::ตัวอ่านผล bench ยอมรับตัวเลขที่ไม่มีชื่อ test นำหน้า — มันจะจับคู่ตัวเลขผิดแถวแล้วผ่านฟรี"
+  exit 1
+fi
+
 # ---------------------------------------------------------------------------
 # เพดานจาก docs/08 §2 (แปลงเป็น ns) — ★ ห้ามขยับเพื่อให้ผ่าน
 #
@@ -59,13 +91,16 @@ done
 # เสมอ — มันคือสิ่งที่บอกว่าเราวัดของจริง ไม่ใช่วัดกรอบว่าง/กิ่งที่ถูกที่สุด
 echo "$OUT" | grep -E '^(cull_1000|layout|build_instances)' || true
 
-# `test NAME ... bench:  N ns/iter (+/- M)` → "NAME N"
-MEASURED=$(echo "$OUT" | awk '
-  /^test .* bench:/ {
-    for (i = 1; i <= NF; i++) {
-      if ($i == "ns/iter") { print $2, $(i - 1) }
-    }
-  }')
+# `test NAME ... bench:  N ns/iter (+/- M)` → "NAME N" (ดูหัวไฟล์ bench-parse.awk
+# ว่าทำไมมันไม่ใช่ regex บรรทัดเดียว)
+MEASURED=$(echo "$OUT" | awk -f "$PARSER")
+PARSE_STATUS=$?
+
+if [ "$PARSE_STATUS" -ne 0 ]; then
+  echo "$OUT"
+  echo "::error::ตัวอ่านผลเจอตัวเลข bench ที่ไม่มีชื่อ test นำหน้า — ไม่รู้ว่ามันเป็นของแถวไหน"
+  exit 1
+fi
 
 if [ -z "$MEASURED" ]; then
   echo "$OUT"
