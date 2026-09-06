@@ -3029,25 +3029,58 @@ mod tests {
                 used: 134_217_728,
                 ram_gb: 8,
             }],
-            status: text::t(Lang::Th, Key::SettingsProblemsStatus).to_owned(),
             status_warn: true,
             ..ShellState::default()
         };
 
+        // ★★ ข้อความสถานะที่ **ไม่มีทางโผล่พร้อมกัน** ต้องถูกวาดคนละรอบ — ไม่งั้น
+        //    ประตูจะตรวจแค่ตัวที่บังเอิญค้างอยู่ตอนเขียนเทสต์ · หกคีย์ของก้อน c
+        //    เพิ่มสามข้อความใหม่เข้ามาที่นี่ ทั้งอังกฤษและไทย
+        let statuses: Vec<String> = [
+            Key::SettingsProblemsStatus,
+            Key::SelectionCleared,
+            Key::NothingToFit,
+            Key::ZoomIsCanvasOnly,
+        ]
+        .into_iter()
+        .flat_map(|key| {
+            [Lang::En, Lang::Th]
+                .into_iter()
+                .map(move |lang| text::t(lang, key).to_owned())
+        })
+        .chain([
+            text::fill(Lang::En, Template::ZoomSet, &[("percent", "250")]),
+            text::fill(Lang::Th, Template::ZoomSet, &[("percent", "250")]),
+            text::fill(Lang::En, Template::SelectedAll, &[("n", "42")]),
+            text::fill(Lang::Th, Template::SelectedAll, &[("n", "42")]),
+            text::fill(Lang::En, Template::SwitchedMode, &[("mode", "Arrange")]),
+            text::fill(Lang::Th, Template::SwitchedMode, &[("mode", "Arrange")]),
+        ])
+        .collect();
+
         // สองเฟรม: egui ใช้ layout ของรอบก่อน รอบแรกขนาด panel ยังไม่นิ่ง
         let mut drawn: Vec<(egui::FontId, String)> = Vec::new();
-        for _ in 0..2 {
-            let input = egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(
-                    egui::Pos2::ZERO,
-                    egui::vec2(1280.0, 800.0),
-                )),
-                ..Default::default()
-            };
-            let output = ctx.run_ui(input, |ui| {
-                let _ = draw_in_ui(ui, &mut state, |_, _| {});
-            });
-            drawn = drawn_runs(&output);
+        for status in &statuses {
+            state.status = status.clone();
+            let mut last = Vec::new();
+            for _ in 0..2 {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1280.0, 800.0),
+                    )),
+                    ..Default::default()
+                };
+                let output = ctx.run_ui(input, |ui| {
+                    let _ = draw_in_ui(ui, &mut state, |_, _| {});
+                });
+                last = drawn_runs(&output);
+            }
+            assert!(
+                last.iter().any(|(_, text)| text.contains(status.as_str())),
+                "ข้อความ {status:?} ไม่ได้ถูกวาดจริง — ประตูจะเขียวโดยไม่ได้ตรวจมัน                  (docs/08 §3.9 ข้อ 1b)"
+            );
+            drawn.extend(last);
         }
         assert!(!drawn.is_empty(), "ไม่มีอะไรถูกวาดเลย — ประตูนี้ไม่ได้ตรวจอะไร");
 

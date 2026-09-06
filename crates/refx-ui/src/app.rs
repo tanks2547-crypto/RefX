@@ -422,6 +422,22 @@ fn physical_char(physical: winit::keyboard::PhysicalKey) -> Option<char> {
         KeyCode::KeyZ => 'z',
         KeyCode::BracketLeft => '[',
         KeyCode::BracketRight => ']',
+        // ★★★ แถวตัวเลขต้องอยู่ที่นี่ด้วย ไม่งั้น `1`/`0` (P5-3b ก้อน c) ตายบน
+        //     layout ไทยเงียบ ๆ: ปุ่ม `1` ของไทยส่ง `ๅ` ซึ่งไม่ใช่ ASCII จึงตกมา
+        //     ชั้นนี้ทันที — ถ้าชั้นนี้ไม่รู้จัก `Digit1` ผลคือ `None` แล้วไม่มี
+        //     อะไรเกิดขึ้นเลย เป็นบั๊กรูปเดียวกับ `Ctrl+Shift+Z` ของ §2.40ก เป๊ะ
+        // ★ ใส่ครบสิบตัวไม่ใช่เฉพาะสองตัวที่ผูกไว้ — ตารางนี้ตอบ "ปุ่มตำแหน่งนี้
+        //   คืออักขระอะไร" ซึ่งไม่ขึ้นกับว่าวันนี้เราผูกอะไรไว้บ้าง
+        KeyCode::Digit0 => '0',
+        KeyCode::Digit1 => '1',
+        KeyCode::Digit2 => '2',
+        KeyCode::Digit3 => '3',
+        KeyCode::Digit4 => '4',
+        KeyCode::Digit5 => '5',
+        KeyCode::Digit6 => '6',
+        KeyCode::Digit7 => '7',
+        KeyCode::Digit8 => '8',
+        KeyCode::Digit9 => '9',
         _ => return None,
     })
 }
@@ -557,6 +573,121 @@ fn tab_shortcut(
         keymap::Action::Tab(which) => Some(which),
         _ => None,
     }
+}
+
+/// ★★★ `Tab` — สลับ Canvas ⇄ Arrange (`docs/03 §5` · P5-3b ก้อน c)
+///
+/// ★★ รับ `Key` ดิบด้วยเหตุผลเดียวกับ [`tab_shortcut`]: `Tab` เป็น named key
+/// ที่ `shortcut_char` มองไม่เห็นเลย
+fn mode_shortcut(
+    pressed: Option<char>,
+    key: &winit::keyboard::Key,
+    modifiers: ModifiersState,
+) -> bool {
+    keymap::active().action(pressed, named_key(key), modifiers) == Some(keymap::Action::ToggleMode)
+}
+
+/// `Ctrl+A` — เลือกทั้งหมด (`docs/03 §5` · P5-3b ก้อน c)
+fn select_all_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> bool {
+    action_for(pressed, modifiers) == Some(keymap::Action::SelectAll)
+}
+
+/// `Esc` — ยกเลิกเลือก (`docs/03 §5` · P5-3b ก้อน c) — named key เช่นเดียวกับ `Tab`
+fn clear_selection_shortcut(
+    pressed: Option<char>,
+    key: &winit::keyboard::Key,
+    modifiers: ModifiersState,
+) -> bool {
+    keymap::active().action(pressed, named_key(key), modifiers)
+        == Some(keymap::Action::ClearSelection)
+}
+
+/// `F` / `1` / `0` — ระดับซูม (`docs/03 §5` · P5-3b ก้อน c)
+fn zoom_shortcut(pressed: Option<char>, modifiers: ModifiersState) -> Option<keymap::ZoomRequest> {
+    match action_for(pressed, modifiers)? {
+        keymap::Action::Zoom(request) => Some(request),
+        _ => None,
+    }
+}
+
+/// สิ่งที่ `Esc` ควรทำในสถานะนี้ (P5-3b ก้อน c)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EscapeTarget {
+    /// ยกเลิกคำถาม "ปิดทั้งที่ยังไม่บันทึก"
+    CancelClose,
+    /// ยกเลิกคำถาม "บันทึกเป็นแบบไหน"
+    CancelSaveAs,
+    /// เก็บงานที่กู้ได้ไว้ก่อน — **ไม่ใช่ลบ**
+    PostponeRecovery,
+    /// ปิดแผงตั้งค่า
+    CloseSettings,
+    /// ยกเลิกการเลือก
+    ClearSelection,
+    /// ไม่มีอะไรให้ทำ
+    Nothing,
+}
+
+/// ★★★ `Esc` — **ปิดสิ่งที่ค้างอยู่ก่อนเสมอ แล้วค่อยยกเลิกเลือก** (`docs/03 §5`)
+///
+/// ★ แยกเป็นฟังก์ชันบริสุทธิ์เพื่อ **เทสต์ลำดับได้โดยไม่ต้องเปิดหน้าต่าง** —
+/// ลำดับคือทั้งหมดของกฎนี้ และเป็นสิ่งเดียวที่พังได้เงียบ ๆ
+///
+/// ★★ ช่องข้อความไม่อยู่ในลำดับนี้โดยตั้งใจ: ตอนนั้น egui ถือ focus อยู่ ด่าน
+/// `egui_wants_keyboard_input()` ใน `on_input` จึงกิน `Esc` ไปก่อนถึงที่นี่เลย
+fn escape_target(shell: &crate::shell::ShellState, has_selection: bool) -> EscapeTarget {
+    // ★ เรียงตาม "อันไหนบังหน้าจอมากที่สุด" — แถบถามอยู่บนสุดเสมอ
+    if shell.close_prompt {
+        EscapeTarget::CancelClose
+    } else if shell.save_as_prompt {
+        EscapeTarget::CancelSaveAs
+    } else if shell.recover_prompt.is_some() {
+        // ★★ `Later` ไม่ใช่ `Discard` — `Esc` ต้องไม่มีทางลบงานของผู้ใช้
+        //    (`docs/07 §4`: "ผู้ใช้ที่ไม่แน่ใจต้องไม่ถูกบังคับให้ตัดสินใจ
+        //    แบบทำลายข้อมูล") · ปุ่มที่กดพลาดง่ายที่สุดต้องเป็นปุ่มที่ปลอดภัยที่สุด
+        EscapeTarget::PostponeRecovery
+    } else if shell.settings_open {
+        EscapeTarget::CloseSettings
+    } else if has_selection {
+        EscapeTarget::ClearSelection
+    } else {
+        EscapeTarget::Nothing
+    }
+}
+
+/// ★★★ `Tab` เป็นของใคร — **มีอะไรถือ focus อยู่ = ของ egui · ไม่มี = ของเรา**
+///
+/// ## ปัญหาที่มันแก้ (P5-3b ก้อน c)
+///
+/// egui ใช้ `Tab` ย้าย focus ระหว่าง widget และมันเห็น event **ก่อนเราเสมอ**
+/// (`on_window_event` ถูกเรียกที่บรรทัดแรกของ `on_input`) · ถ้าปล่อยไว้ การกด
+/// `Tab` หนึ่งครั้งจะ **ทั้งสลับโหมดและย้าย focus ไปปุ่มแรก** พร้อมกัน แล้ว
+/// ครั้งที่สองจะสลับโหมดไม่ได้อีกเลย เพราะตอนนั้นมี widget ถือ focus อยู่แล้ว
+/// ด่าน `egui_wants_keyboard_input()` จึงกินมันไป — อาการคือ *"กด Tab ได้ครั้งเดียว"*
+///
+/// ## กฎที่ตัดสิน
+///
+/// | สถานะ | `Tab` เป็นของ |
+/// |---|---|
+/// | มี widget ถือ focus (ช่องข้อความ · ปุ่ม) | **egui** — พิมพ์/ย้าย focus ตามปกติ |
+/// | ไม่มีอะไรถือ focus | **RefX** — สลับโหมด และ egui ต้องไม่เห็นปุ่มนี้ |
+///
+/// ★★ สองฝั่งถามคำถามเดียวกัน (`focused().is_some()` ซึ่งคือสิ่งที่
+/// `egui_wants_keyboard_input` เป็นจริง ๆ ใน egui 0.34) และถามในช่วงเวลาที่
+/// คำตอบคงที่ (ระหว่างจบ `run_ui` ของเฟรมก่อน กับเริ่ม `run_ui` ของเฟรมนี้) —
+/// จึงเป็นไปไม่ได้ที่ทั้งคู่จะทำงาน หรือทั้งคู่จะไม่ทำงาน
+fn strip_tab_when_it_is_ours(ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+    if ctx.egui_wants_keyboard_input() {
+        return;
+    }
+    raw_input.events.retain(|event| {
+        !matches!(
+            event,
+            egui::Event::Key {
+                key: egui::Key::Tab,
+                ..
+            }
+        )
+    });
 }
 
 /// ปุ่มที่มีชื่อของ event นี้ — `None` ถ้าเป็นตัวอักษร
@@ -1733,6 +1864,14 @@ pub struct RefxApp {
     pending_appearance: Option<AppearanceKey>,
     /// ผู้ใช้กด `Ctrl+G` / `Ctrl+Shift+G` ในรอบ event ที่ผ่านมา (P3-7)
     pending_group: Option<GroupRequest>,
+    /// ผู้ใช้กด `Tab` — สลับโหมดของ **แท็บที่ดูอยู่** (P5-3b ก้อน c)
+    pending_mode_toggle: bool,
+    /// ผู้ใช้กด `Ctrl+A` (P5-3b ก้อน c)
+    pending_select_all: bool,
+    /// ผู้ใช้กด `Esc` — ปิดแถบที่ค้าง หรือยกเลิกเลือก (P5-3b ก้อน c)
+    pending_clear_selection: bool,
+    /// ผู้ใช้กด `F` / `1` / `0` (P5-3b ก้อน c) — รวบการกดค้างเหมือน `pending_zorder`
+    pending_zoom: Option<keymap::ZoomRequest>,
     /// ผู้ใช้กด `Ctrl+S` / `Ctrl+Shift+S` ในรอบ event ที่ผ่านมา (P4-2)
     pending_save: Option<SaveRequest>,
     /// ★★★ **แท็บทั้งหมดที่เปิดอยู่** — อยู่ที่นี่ **ไม่ใช่ใน [`Gfx`]** (ดู [`Doc`])
@@ -2690,7 +2829,7 @@ impl RefxApp {
         //   และตอนสร้าง pool — สองที่นี้ต้องเห็นเลขเดียวกัน ไม่งั้นค่าที่แผง
         //   Settings บอกว่า "สูงสุดเท่านี้" จะไม่ใช่เพดานที่ decode ใช้จริง
         let caps = machine_caps();
-        Self {
+        let mut app = Self {
             gfx: None,
             args,
             stats: FrameStats::default(),
@@ -2726,6 +2865,10 @@ impl RefxApp {
             pending_delete: false,
             pending_appearance: None,
             pending_group: None,
+            pending_mode_toggle: false,
+            pending_select_all: false,
+            pending_clear_selection: false,
+            pending_zoom: None,
             pending_save: None,
             // ★ แท็บเปล่าหนึ่งใบ พร้อม id และ recovery slot ของตัวเองตั้งแต่แรก
             docs: Docs::default(),
@@ -2773,7 +2916,18 @@ impl RefxApp {
             keymap_problem: None,
             keymap_from_file: false,
             config_dir: None,
+        };
+        // ★★★ `--mode=arrange` ต้องไปถึง **`Board::view` ของแท็บแรก** ไม่ใช่แค่
+        //     `shell.mode` — ตั้งแต่ก้อน c โหมดถูกอ่านกลับจากแท็บทุกเฟรม
+        //     (`mode_follows_active_tab`) ค่าที่เขียนไว้แค่ใน `shell` จึงอยู่ได้
+        //     ไม่ถึงเฟรมแรก · ★ ตัวเลือกนี้มีไว้ให้สคริปต์ถ่ายภาพโหมด Arrange ได้
+        //     โดยไม่ต้องกดปุ่มก่อน ถ้ามันเงียบไป หลักฐานทุกใบของโหมดนั้นจะเป็นภาพ
+        //     ของโหมด Canvas ที่ตั้งชื่อไฟล์ว่า arrange
+        {
+            let Self { docs, shell, .. } = &mut app;
+            Self::write_mode(docs.active_mut(), shell, mode);
         }
+        app
     }
 
     /// ★★★ อ่าน `keymap.toml` — **เรียกก่อนหน้าต่างจะมี** (แตะดิสก์ — I-2)
@@ -4293,11 +4447,202 @@ impl RefxApp {
         Self::rebuild_quads(gfx, self.docs.active_mut());
         // ★ พาผู้ใช้ไปดูผลด้วย — ปุ่มชื่อ "ส่งเข้า canvas" แล้วอยู่ที่เดิมคือ
         //   การกดที่ไม่มีอะไรเกิดขึ้นในสายตาเขา (ผลอยู่อีกโหมดหนึ่ง)
-        self.shell.mode = Mode::Canvas;
+        // ★★ ต้องผ่าน `write_mode` ไม่ใช่เขียน `shell.mode` ตรง ๆ — ตั้งแต่ก้อน c
+        //    แหล่งความจริงของโหมดคือ `Board::view` ของแท็บนี้ ถ้าเขียนแค่ `shell`
+        //    เฟรมถัดไปจะอ่านค่าเก่ากลับมาทับทันที
+        Self::write_mode(self.docs.active_mut(), &mut self.shell, Mode::Canvas);
         self.shell.status = text::fill(
             lang,
             Template::LayoutApplied,
             &[("n", &moved.len().to_string())],
+        );
+        self.shell.status_warn = false;
+        gfx.window.request_redraw();
+    }
+
+    // ---------- ★★★ P5-3b ก้อน c: หกคีย์ที่ `docs/03 §5` สั่งไว้แต่ไม่เคยมี ----------
+
+    /// ★★★ **ทางเดียวที่โหมดเปลี่ยนได้** — เขียนลง `Board::view` ของแท็บนั้น
+    ///
+    /// ## ทำไมไม่ใช่ `shell.mode = …` เฉย ๆ (`HANDOFF §6` · `docs/03 §5`)
+    ///
+    /// โหมดเป็นของ **แท็บ** ไม่ใช่ของหน้าต่าง — `ViewState::mode` persist ลง
+    /// `.refx` อยู่แล้วตั้งแต่ P2-1 · `ShellState::mode` ที่เป็นของหน้าต่างคือ
+    /// **แหล่งความจริงที่สอง** ที่จะขัดกับไฟล์ทันทีที่มีคนอ่านไฟล์กลับมาใช้
+    ///
+    /// ★ ตอนนี้ `shell.mode` เป็นแค่ **สำเนาสำหรับวาด** ที่ถูกเติมใหม่จากแท็บที่
+    /// ดูอยู่ทุกเฟรม (ดู [`Self::mode_follows_active_tab`]) — เขียนมันตรง ๆ
+    /// เมื่อไหร่ ค่าจะอยู่ได้แค่เฟรมเดียว
+    ///
+    /// **ไม่ผ่าน `Command` · ไม่ทำให้ `dirty`** ตามข้อยกเว้นของ `docs/02 §2.9`
+    /// และ `docs/03 §4.3` ("สลับ mode ห้ามแก้ข้อมูล")
+    fn write_mode(doc: &mut Doc, shell: &mut crate::shell::ShellState, mode: Mode) {
+        shell.mode = mode;
+        doc.board
+            .set_view(live_view(doc.camera, doc.arrange.camera(), mode));
+    }
+
+    /// ★★ โหมดที่จะวาดในเฟรมนี้ = โหมดของ **แท็บที่ดูอยู่** — สลับแท็บแล้วตามไปเอง
+    fn mode_follows_active_tab(&mut self) {
+        self.shell.mode = self.docs.active().board.view().mode;
+    }
+
+    /// `Tab` — สลับ Canvas ⇄ Arrange (`docs/03 §5`)
+    fn apply_mode_toggle(&mut self) {
+        if self.gfx.is_none() {
+            return;
+        }
+        let next = match self.shell.mode {
+            Mode::Canvas => Mode::Arrange,
+            Mode::Arrange => Mode::Canvas,
+        };
+        Self::write_mode(self.docs.active_mut(), &mut self.shell, next);
+        self.shell.status = text::fill(
+            self.shell.lang,
+            Template::SwitchedMode,
+            &[("mode", next.label())],
+        );
+        self.shell.status_warn = false;
+        if let Some(gfx) = self.gfx.as_ref() {
+            gfx.window.request_redraw();
+        }
+    }
+
+    /// `Ctrl+A` — เลือกทุกใบบน board ใบนี้ (`docs/03 §5`)
+    ///
+    /// ★ การเลือก **ไม่ใช่เอกสาร** (`docs/02 §2.9`) จึงไม่ผ่าน `Command`
+    /// ไม่กิน undo และไม่ทำให้ `dirty` — เหมือนคลิกเลือกด้วยเมาส์ทุกประการ
+    fn apply_select_all(&mut self) {
+        if self.gfx.is_none() {
+            return;
+        }
+        let ids: Vec<ItemId> = self
+            .docs
+            .active()
+            .board
+            .items_in_z_order()
+            .map(|(id, _)| id)
+            .collect();
+        let count = ids.len();
+        self.docs.active_mut().selection.set_all(ids);
+        self.shell.status = text::fill(
+            self.shell.lang,
+            Template::SelectedAll,
+            &[("n", &count.to_string())],
+        );
+        self.shell.status_warn = false;
+        if let Some(gfx) = self.gfx.as_ref() {
+            gfx.window.request_redraw();
+        }
+    }
+
+    /// ★★★ `Esc` — **ปิดแถบที่ค้างอยู่ก่อนเสมอ** แล้วค่อยยกเลิกเลือก
+    ///
+    /// ผู้ใช้ที่กด `Esc` ตอนมีคำถามค้างอยู่หมายถึง *"ไม่เอาคำถามนี้"* ไม่ใช่
+    /// *"ยกเลิกการเลือกของฉัน"* — และการทำอย่างหลังคือการตอบสิ่งที่เขาไม่ได้ถาม
+    /// ทั้งที่คำถามยังค้างอยู่บนจอ
+    ///
+    /// ★ ช่องข้อความไม่ต้องอยู่ในลำดับนี้: egui ถือ focus อยู่ตอนนั้น ด่าน
+    /// `egui_wants_keyboard_input()` ใน `on_input` จึงกิน `Esc` ไปก่อนถึงที่นี่
+    ///
+    /// ★★ ตอบทีละอย่างต่อการกดหนึ่งครั้ง — กดสามทีปิดสามชั้น ไม่ใช่ทีเดียวหายหมด
+    fn apply_clear_selection(&mut self) {
+        if self.gfx.is_none() {
+            return;
+        }
+        match escape_target(&self.shell, !self.docs.active().selection.is_empty()) {
+            EscapeTarget::CancelClose => {
+                self.shell.close_choice = Some(crate::shell::CloseChoice::Cancel);
+            }
+            EscapeTarget::CancelSaveAs => {
+                self.shell.save_as_choice = Some(crate::shell::SaveAsChoice::Cancel);
+            }
+            EscapeTarget::PostponeRecovery => {
+                self.shell.recover_choice = Some(crate::shell::RecoverChoice::Later);
+            }
+            EscapeTarget::CloseSettings => self.shell.settings_open = false,
+            EscapeTarget::ClearSelection => {
+                self.docs.active_mut().selection.clear();
+                self.shell.status = text::t(self.shell.lang, Key::SelectionCleared).to_owned();
+                self.shell.status_warn = false;
+            }
+            EscapeTarget::Nothing => {}
+        }
+        if let Some(gfx) = self.gfx.as_ref() {
+            gfx.window.request_redraw();
+        }
+    }
+
+    /// ★★★ กรอบที่ `F` / `0` จะจัดให้พอดี — `None` = ไม่มีอะไรให้จัด
+    ///
+    /// ★★ `FitSelection` **ตกไปเป็นทั้ง board เองเมื่อไม่ได้เลือกอะไร** ตามที่
+    /// `docs/03 §5` เขียนไว้ ("ถ้าไม่เลือก = พอดีทั้ง board") — กฎอยู่ที่นี่
+    /// ไม่ใช่ที่ผู้เรียก จึงเป็นไปไม่ได้ที่ `0` กับ `F`-ไม่เลือก จะให้ผลต่างกัน
+    ///
+    /// ★ ไม่คัดตามตัวกรองของ Arrange: `F`/`0` ทำงานบน Canvas ซึ่งวาดทุกใบ
+    /// การจัดให้พอดีเฉพาะใบที่ผ่านตัวกรองของอีกโหมดหนึ่งจะทิ้งภาพไว้นอกจอ
+    fn fit_bounds(doc: &Doc, request: keymap::ZoomRequest) -> Option<refx_core::geom::Rect> {
+        let mut bounds = refx_core::geom::Rect::EMPTY;
+        let mut found = false;
+        let mut cover = |canvas: &refx_core::board::ItemCanvas| {
+            bounds = bounds.union(canvas.world_bounds());
+            found = true;
+        };
+        if request == keymap::ZoomRequest::FitSelection && !doc.selection.is_empty() {
+            for id in doc.selection.iter() {
+                if let Some(item) = doc.board.item(id) {
+                    cover(&item.canvas);
+                }
+            }
+        } else {
+            for (_, item) in doc.board.items_in_z_order() {
+                cover(&item.canvas);
+            }
+        }
+        found.then_some(bounds).filter(|rect| rect.is_finite())
+    }
+
+    /// `F` / `1` / `0` — ระดับซูม (`docs/03 §5`)
+    ///
+    /// ★★ ทำงานกับกล้องของ **Canvas** เท่านั้น · Arrange เป็นแผ่นที่จัดเองและ
+    /// เลื่อนด้วยการ scroll ล้วน ๆ (P3-3) การ "ซูม 100%" ที่นั่นไม่มีความหมาย
+    /// — บอกตรง ๆ ดีกว่าเงียบ ไม่งั้นผู้ใช้อ่านว่าคีย์ลัดเสีย
+    fn apply_zoom(&mut self, request: keymap::ZoomRequest) {
+        let Some(gfx) = self.gfx.as_ref() else {
+            return;
+        };
+        let lang = self.shell.lang;
+        if self.shell.mode != Mode::Canvas {
+            self.shell.status = text::t(lang, Key::ZoomIsCanvasOnly).to_owned();
+            self.shell.status_warn = false;
+            gfx.window.request_redraw();
+            return;
+        }
+        // ★ ขนาดช่อง canvas จริงเป็น **พิกเซลจริง** ซึ่งเป็นหน่วยที่ `Camera` ใช้
+        //   (ถ้าใช้ขนาดหน้าต่างทั้งบาน กรอบจะเลยไปอยู่ใต้ panel — ดู `CanvasRect`)
+        let viewport = gfx.canvas.size;
+        match request {
+            keymap::ZoomRequest::Actual => {
+                self.docs.active_mut().camera.set_zoom(1.0);
+            }
+            keymap::ZoomRequest::FitSelection | keymap::ZoomRequest::FitBoard => {
+                let Some(bounds) = Self::fit_bounds(self.docs.active(), request) else {
+                    // ★ board ว่าง = ไม่มีอะไรให้จัด · บอกแล้วจบ ไม่ขยับกล้อง
+                    self.shell.status = text::t(lang, Key::NothingToFit).to_owned();
+                    self.shell.status_warn = false;
+                    gfx.window.request_redraw();
+                    return;
+                };
+                self.docs.active_mut().camera.fit_to(bounds, viewport);
+            }
+        }
+        self.shell.status = text::fill(
+            lang,
+            Template::ZoomSet,
+            &[(
+                "percent",
+                &format!("{:.0}", self.docs.active().camera.zoom() * 100.0),
+            )],
         );
         self.shell.status_warn = false;
         gfx.window.request_redraw();
@@ -5301,6 +5646,17 @@ impl RefxApp {
         if let Some(gfx) = self.gfx.as_mut() {
             Self::rebuild_quads(gfx, &mut self.docs.list[index]);
         }
+        // ★★★ **โหมดที่บันทึกไว้ในไฟล์ต้องกลับมาเดี๋ยวนี้** (`HANDOFF §6` เกณฑ์ผ่าน)
+        //
+        //   `mode_follows_active_tab` ที่ต้นเฟรมทำงานไป **ก่อน** `poll_open` เอา
+        //   board ใบนี้มาวาง · `shell.mode` จึงยังเป็นของ board ใบเก่า แล้วการ
+        //   ซิงค์กลับหลังวาด (`set_view`) จะ **เขียนทับโหมดที่เพิ่งอ่านมาจากไฟล์**
+        //   ทิ้งในเฟรมเดียวกับที่มันมาถึง
+        //
+        //   ★ เจอด้วยการรันจริงเท่านั้น: บันทึกในโหมด Arrange → เปิดใหม่ → ได้
+        //     Canvas · เทสต์ระดับหน่วยทุกตัวเขียว เพราะแต่ละชิ้นถูกหมด
+        //     (`docs/08 §3.9` ข้อ 5 — "ทุกชิ้นถูก ประกอบผิด")
+        self.mode_follows_active_tab();
         self.request_thumbnails_for(id);
         if let Some(gfx) = self.gfx.as_ref() {
             gfx.window.request_redraw();
@@ -5356,6 +5712,10 @@ impl RefxApp {
             leaving.guides.clear();
         }
         self.docs.active = index;
+        // ★★★ โหมดตามแท็บไปด้วย (P5-3b ก้อน c · `HANDOFF §6` จุดที่สาม) — ที่นี่คือ
+        //     ประตูเดียวที่สลับแท็บได้ · ต้นเฟรมถัดไปก็อ่านค่าเดียวกันนี้อยู่แล้ว
+        //     แต่ระหว่างนี้ยังมีโค้ดที่อ่าน `shell.mode` ต่อในเฟรมเดียวกัน
+        self.mode_follows_active_tab();
         if let Some(gfx) = self.gfx.as_mut() {
             // ★ ภาพของใบใหม่ · และแผ่น Arrange ต้องคำนวณใหม่ด้วย (คนละ board)
             Self::rebuild_quads(gfx, self.docs.active_mut());
@@ -7042,6 +7402,12 @@ impl AppDelegate for RefxApp {
 
         let frame_start = std::time::Instant::now();
 
+        // ★★★ โหมดที่จะวาดในเฟรมนี้มาจาก **แท็บที่ดูอยู่** ไม่ใช่จากหน้าต่าง
+        //     (P5-3b ก้อน c · `HANDOFF §6` · `docs/03 §5`) — `Board::view` ถูกเขียน
+        //     ทุกเฟรมมาตั้งแต่ P4-1 แต่ **ไม่เคยมีใครอ่านกลับมาใช้** บรรทัดนี้คือ
+        //     คนแรก · ทำที่ต้นเฟรมเพื่อให้ทุกอย่างข้างล่างเห็นค่าเดียวกันหมด
+        self.mode_follows_active_tab();
+
         // ไฟล์ที่ลากเข้ามาในรอบ event ที่ผ่านมา — ส่งเป็นชุดเดียวเพื่อจับเวลาได้ถูก
         if !self.pending_drops.is_empty() {
             let batch = std::mem::take(&mut self.pending_drops);
@@ -7075,6 +7441,23 @@ impl AppDelegate for RefxApp {
         // `Ctrl+G` / `Ctrl+Shift+G` ที่กดไปเมื่อกี้ (P3-7)
         if let Some(request) = self.pending_group.take() {
             self.apply_group_request(request);
+        }
+        // ★★★ หกคีย์ของก้อน c (P5-3b · `docs/03 §5`)
+        //
+        //   ★ `Tab` มาก่อน zoom เสมอ: กด `Tab` แล้ว `0` ในเฟรมเดียวกันต้องได้
+        //     "สลับโหมดแล้วค่อยจัดให้พอดี" ไม่ใช่จัดในโหมดเก่าแล้วสลับทิ้ง
+        if std::mem::take(&mut self.pending_mode_toggle) {
+            self.apply_mode_toggle();
+        }
+        if std::mem::take(&mut self.pending_select_all) {
+            self.apply_select_all();
+        }
+        if std::mem::take(&mut self.pending_clear_selection) {
+            self.apply_clear_selection();
+        }
+        // ★ zoom หลังการเลือก: `Ctrl+A` แล้ว `F` ในเฟรมเดียวกัน = พอดีกับทั้งหมด
+        if let Some(request) = self.pending_zoom.take() {
+            self.apply_zoom(request);
         }
         // ★ การบันทึก (P4-2) — เก็บผลก่อน แล้วค่อยรับคำสั่งใหม่
         self.poll_save();
@@ -7233,7 +7616,8 @@ impl AppDelegate for RefxApp {
             .create_view(&wgpu::TextureViewDescriptor::default());
 
         // ---- UI pass ----
-        let raw_input = gfx.egui_winit.take_egui_input(&gfx.window);
+        let mut raw_input = gfx.egui_winit.take_egui_input(&gfx.window);
+        strip_tab_when_it_is_ours(&gfx.egui_ctx, &mut raw_input);
         shell.item_count = doc.board.len();
         shell.zoom = doc.camera.zoom();
         // ★★★ สภาวะ "ภาพเก็บไว้ที่ไหน" (P4-5 · `docs/07 §2`) — เติมทุกเฟรมเหมือน
@@ -7410,17 +7794,6 @@ impl AppDelegate for RefxApp {
                 }
             }
         };
-        // ★★★ ซิงค์กล้อง/โหมดที่ใช้อยู่จริงเข้า `Board` (P4-1 — หนี้ §6 แถวแรก)
-        //
-        //   **ไม่ผ่าน `Command` · ไม่ทำให้ `dirty` · ไม่บวก `revision`** ตาม
-        //   ข้อยกเว้นที่ docs/02 §2.9 อนุญาตไว้ (ดู `Board::set_view`)
-        //
-        //   ★ ทำ **ทุกเฟรม** ไม่ใช่ตอน save เพราะ "ถูกเฉพาะถ้าผู้เรียกเรียก
-        //     ถูกจังหวะ" คือกับดักที่ docs/08 §3.9 ข้อ 8 บันทึกไว้ (เคสจริง:
-        //     `take_forgotten` ของ P2-6) · ราคาคือคัดลอก float ห้าตัว ไม่มี
-        //     การจองหน่วยความจำ และ **ไม่ขอเฟรมเพิ่ม** จึงไม่แตะ I-1
-        doc.board
-            .set_view(live_view(doc.camera, doc.arrange.camera(), shell.mode));
         shell.vram_used = gfx.textures.budget().used();
         shell.working_used = gfx.working.used();
         shell.working_limit = gfx.working.limit();
@@ -7489,6 +7862,24 @@ impl AppDelegate for RefxApp {
         if canvas_outcome.redraw {
             gfx.window.request_redraw();
         }
+        // ★★★ ซิงค์กล้อง/โหมดที่ใช้อยู่จริงเข้า `Board` (P4-1 — หนี้ §6 แถวแรก)
+        //
+        //   **ไม่ผ่าน `Command` · ไม่ทำให้ `dirty` · ไม่บวก `revision`** ตาม
+        //   ข้อยกเว้นที่ docs/02 §2.9 อนุญาตไว้ (ดู `Board::set_view`)
+        //
+        //   ★ ทำ **ทุกเฟรม** ไม่ใช่ตอน save เพราะ "ถูกเฉพาะถ้าผู้เรียกเรียก
+        //     ถูกจังหวะ" คือกับดักที่ docs/08 §3.9 ข้อ 8 บันทึกไว้ (เคสจริง:
+        //     `take_forgotten` ของ P2-6) · ราคาคือคัดลอก float ห้าตัว ไม่มี
+        //     การจองหน่วยความจำ และ **ไม่ขอเฟรมเพิ่ม** จึงไม่แตะ I-1
+        //
+        //   ★★★ **ต้องอยู่หลัง `run_ui` + `apply_canvas_input`** (ย้ายมาตอนก้อน c)
+        //     เดิมอยู่ก่อนวาด ซึ่งแปลว่าค่าที่เขียนลงไฟล์ช้ากว่าของจริงหนึ่งเฟรมเสมอ
+        //     · ที่สำคัญกว่านั้น: ตั้งแต่โหมดถูกอ่าน**กลับ**จาก `Board::view`
+        //     ที่ต้นเฟรม การกดปุ่มสลับโหมดบน toolbar (ซึ่งเขียน `shell.mode`
+        //     ระหว่าง `run_ui`) จะถูกอ่านทับหายไปทันทีในเฟรมถัดไปถ้าไม่เขียนกลับ
+        //     ตรงนี้ — ปุ่มจะกดไม่ติดโดยไม่มี error ที่ไหนเลย
+        doc.board
+            .set_view(live_view(doc.camera, doc.arrange.camera(), shell.mode));
         // ★ ผู้ใช้จิ้มขอสี — ไปอ่าน **ไฟล์ต้นฉบับบน worker** ไม่ใช่ thumbnail
         //   ที่อยู่ในมือแล้ว (ROADMAP P2-10) · ผลกลับมาทีหลังผ่าน `JobResult::Sampled`
         if let Some(request) = canvas_outcome.pick {
@@ -8029,6 +8420,43 @@ impl AppDelegate for RefxApp {
                     && wanted(event, keymap::Action::Group(request))
                 {
                     self.pending_group = Some(request);
+                    needs_redraw = true;
+                }
+                // ★★★ `Tab` — สลับโหมด (P5-3b ก้อน c)
+                //
+                //     **ปุ่มนี้เป็นของ egui ก่อนเสมอถ้ามีอะไร focus อยู่** — ด่าน
+                //     `egui_wants_keyboard_input()` ข้างบนกินมันไปแล้วในกรณีนั้น
+                //     (`focused().is_some()` ตรง ๆ) จึงมาถึงที่นี่ได้ก็ต่อเมื่อไม่มี
+                //     widget ไหนถือ focus · ดู `strip_tab_when_it_is_ours` ว่าทำไม
+                //     egui ต้องไม่เห็นปุ่มนี้ในกรณีที่มันเป็นของเรา
+                if mode_shortcut(pressed, &event.logical_key, gfx.modifiers)
+                    && wanted(event, keymap::Action::ToggleMode)
+                {
+                    self.pending_mode_toggle = true;
+                    needs_redraw = true;
+                }
+                // ★ `Ctrl+A` — เลือกทั้งหมด · ในช่องข้อความ egui กินไปก่อนแล้ว
+                //   (ซึ่งเป็นสิ่งที่ควรเกิด: ที่นั่น `Ctrl+A` = เลือกข้อความ)
+                if select_all_shortcut(pressed, gfx.modifiers)
+                    && wanted(event, keymap::Action::SelectAll)
+                {
+                    self.pending_select_all = true;
+                    needs_redraw = true;
+                }
+                // ★★ `Esc` — **ปิดแถบที่ค้างอยู่มาก่อนยกเลิกเลือกเสมอ**
+                //    การตัดสินลำดับอยู่ที่ `apply_clear_selection` เพราะที่นั่นคือ
+                //    ที่เดียวที่รู้ว่ามีแถบไหนเปิดอยู่ (docs/08 §3.9 ข้อ 8.1)
+                if clear_selection_shortcut(pressed, &event.logical_key, gfx.modifiers)
+                    && wanted(event, keymap::Action::ClearSelection)
+                {
+                    self.pending_clear_selection = true;
+                    needs_redraw = true;
+                }
+                // ★ `F` / `1` / `0` — ระดับซูม
+                if let Some(request) = zoom_shortcut(pressed, gfx.modifiers)
+                    && wanted(event, keymap::Action::Zoom(request))
+                {
+                    self.pending_zoom = Some(request);
                     needs_redraw = true;
                 }
                 // ★ สลับเครื่องมือ (P2-7) — กดค้างซ้ำไม่มีผลอยู่แล้วเพราะตั้งค่าเดิมซ้ำ
@@ -9373,6 +9801,271 @@ mod tests {
             history_shortcut(dvorak, ModifiersState::CONTROL),
             None,
             "ตำแหน่งปุ่มแย่ง `Ctrl+V` ไปเป็น undo — Dvorak พังแบบเดียวกับที่ §2.12 ห้าม"
+        );
+    }
+
+    // ---------- ★★★ P5-3b ก้อน c: หกคีย์ที่ spec สั่งไว้แต่ไม่เคยมี ----------
+
+    /// ★★★ **หกคีย์ใหม่ต้องรอดทั้งบน layout ไทยและ Dvorak**
+    ///
+    /// `F` `1` `0` เป็น binding **ไม่มี modifier** ซึ่งเป็นรูปเดียวกับที่บั๊ก
+    /// `Ctrl+Shift+Z` ของ `§2.40ก` เกิดขึ้น — และมันเกือบเกิดซ้ำจริงในก้อนนี้:
+    /// `physical_char` ไม่เคยรู้จัก `Digit0`–`Digit9` มาก่อน ปุ่ม `1` ของไทย
+    /// (ที่ส่ง `ๅ`) จึงตกถึงชั้น physical แล้ว **ได้ `None` กลับมา** = ตายเงียบ
+    ///
+    /// ★ `Tab` กับ `Esc` เป็น named key จึงไม่ผ่าน `shortcut_char` เลย —
+    /// พวกมันไม่ขึ้นกับ layout โดยธรรมชาติ แต่ยืนยันไว้ให้เห็นว่าคิดถึงแล้ว
+    #[test]
+    fn the_six_new_keys_survive_a_thai_and_a_dvorak_layout() {
+        use winit::keyboard::KeyCode;
+        let none = ModifiersState::empty();
+        let ctrl = ModifiersState::CONTROL;
+
+        // ---- layout ไทย (Kedmanee): logical เป็นอักษรไทย · physical คือตำแหน่งเดิม ----
+        assert!(
+            select_all_shortcut(pressed_thai("ฟ", KeyCode::KeyA), ctrl),
+            "Ctrl+A บน layout ไทย ต้องเลือกทั้งหมดได้"
+        );
+        assert_eq!(
+            zoom_shortcut(pressed_thai("ด", KeyCode::KeyF), none),
+            Some(keymap::ZoomRequest::FitSelection),
+            "`F` บน layout ไทย"
+        );
+        assert_eq!(
+            zoom_shortcut(pressed_thai("ๅ", KeyCode::Digit1), none),
+            Some(keymap::ZoomRequest::Actual),
+            "`1` บน layout ไทย — ปุ่มตัวเลขต้องอยู่ในแผนที่ physical ด้วย"
+        );
+        assert_eq!(
+            zoom_shortcut(pressed_thai("จ", KeyCode::Digit0), none),
+            Some(keymap::ZoomRequest::FitBoard),
+            "`0` บน layout ไทย"
+        );
+
+        // ---- Dvorak: logical เป็นละตินอยู่แล้ว จึงต้องชนะตำแหน่งปุ่มเสมอ ----
+        //
+        // ★ กด `f` ที่ตำแหน่งปุ่ม `Y` ของ QWERTY (ซึ่งคือที่ที่ `f` อยู่บน Dvorak)
+        assert_eq!(
+            zoom_shortcut(pressed_thai("f", KeyCode::KeyY), none),
+            Some(keymap::ZoomRequest::FitSelection),
+            "Dvorak ต้องยึด logical — ไม่งั้นจะไปโดนปุ่มที่ตำแหน่งนั้นแทน"
+        );
+        assert!(select_all_shortcut(pressed_thai("a", KeyCode::KeyA), ctrl));
+        // ★★ compositor ที่ส่ง `Ctrl+A` มาเป็นอักขระควบคุมแทนตัวอักษร
+        assert!(select_all_shortcut(pressed("\u{1}"), ctrl));
+
+        // ---- named key: ไม่ขึ้นกับ layout ----
+        let tab = winit::keyboard::Key::Named(winit::keyboard::NamedKey::Tab);
+        let esc = winit::keyboard::Key::Named(winit::keyboard::NamedKey::Escape);
+        assert!(mode_shortcut(None, &tab, none), "`Tab` เปล่า ๆ ต้องสลับโหมด");
+        assert!(clear_selection_shortcut(None, &esc, none));
+
+        // ★★★ `Tab` เปล่า ๆ **ต้องไม่** ไปเป็นคีย์แท็บ และ `Ctrl+Tab` ต้องไม่สลับโหมด
+        //     ทั้งคู่คือปุ่มเดียวกันเป๊ะ ต่างกันแค่ ctrl — ถ้าปนกันเมื่อไหร่ ผู้ใช้
+        //     ที่กด `Tab` จะกระโดดข้ามแท็บแทนที่จะสลับโหมด
+        assert_eq!(tab_shortcut(None, &tab, none), None);
+        assert!(!mode_shortcut(None, &tab, ctrl));
+        assert_eq!(tab_shortcut(None, &tab, ctrl), Some(TabKey::Next));
+    }
+
+    /// ★★★ **`Tab` เป็นของ egui ตอนมีอะไร focus อยู่ · ของเราตอนไม่มี**
+    ///
+    /// ถ้าปล่อยให้ egui เห็น `Tab` ตอนที่มันเป็นของเรา การกดครั้งเดียวจะทั้งสลับ
+    /// โหมด **และ** ย้าย focus ไปปุ่มแรก แล้วครั้งที่สองจะสลับโหมดไม่ได้อีกเลย —
+    /// อาการที่ผู้ใช้เห็นคือ *"กด Tab ได้ครั้งเดียว"* ซึ่งไม่มี error ที่ไหน
+    ///
+    /// ★ ข้อ 1b ของ `docs/08 §3.9`: ยืนยันว่า focus **ติดจริง** ก่อนวัดกิ่งที่สอง
+    /// ไม่งั้นเทสต์นี้จะทดสอบกิ่งเดิมสองรอบแล้วเขียวโดยไม่ได้ตรวจอะไร
+    #[test]
+    fn tab_belongs_to_egui_only_while_something_holds_focus() {
+        let tab = || egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::Tab,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+            ..egui::RawInput::default()
+        };
+
+        let ctx = egui::Context::default();
+        assert!(
+            !ctx.egui_wants_keyboard_input(),
+            "context ใหม่ต้องยังไม่มีอะไร focus"
+        );
+        let mut ours = tab();
+        strip_tab_when_it_is_ours(&ctx, &mut ours);
+        assert!(
+            ours.events.is_empty(),
+            "ไม่มีอะไร focus แล้ว egui ยังเห็น `Tab` — มันจะย้าย focus แข่งกับการสลับโหมด"
+        );
+
+        // ★ ทำให้ช่องข้อความถือ focus จริง ๆ — `request_focus` มีผลเฟรมถัดไป
+        let mut text = String::new();
+        for _ in 0..2 {
+            let _ = ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.text_edit_singleline(&mut text).request_focus();
+            });
+        }
+        assert!(
+            ctx.egui_wants_keyboard_input(),
+            "ตั้ง focus ไม่ติด — กิ่งที่สองไม่เคยถูกยิง (docs/08 §3.9 ข้อ 1b)"
+        );
+        let mut theirs = tab();
+        strip_tab_when_it_is_ours(&ctx, &mut theirs);
+        assert_eq!(
+            theirs.events.len(),
+            1,
+            "มี widget ถือ focus อยู่ `Tab` ต้องเป็นของ egui ทั้งดุ้น"
+        );
+    }
+
+    /// ★★★ **`Esc` ปิดสิ่งที่ค้างอยู่ก่อน แล้วค่อยยกเลิกเลือก** (`docs/03 §5`)
+    ///
+    /// ผู้ใช้ที่กด `Esc` ตอนมีคำถามค้างอยู่หมายถึง *"ไม่เอาคำถามนี้"* ·
+    /// การไปล้าง selection แทนคือการตอบสิ่งที่เขาไม่ได้ถาม ทั้งที่คำถามยังอยู่บนจอ
+    ///
+    /// ★ ลำดับคือ **ทั้งหมด** ของกฎนี้ และเป็นสิ่งเดียวที่พังได้โดยไม่มีอะไรฟ้อง
+    #[test]
+    fn escape_closes_what_is_in_the_way_before_it_touches_the_selection() {
+        let mut shell = crate::shell::ShellState::default();
+
+        // ไม่มีอะไรค้าง + มีของเลือกอยู่ → ยกเลิกเลือก
+        assert_eq!(escape_target(&shell, true), EscapeTarget::ClearSelection);
+        // ไม่มีอะไรค้าง + ไม่ได้เลือกอะไร → เงียบ (ไม่ใช่ "ทำอะไรสักอย่าง")
+        assert_eq!(escape_target(&shell, false), EscapeTarget::Nothing);
+
+        // แผงตั้งค่าเปิดอยู่ → ปิดแผงก่อน **ทั้งที่มีของเลือกอยู่**
+        shell.settings_open = true;
+        assert_eq!(escape_target(&shell, true), EscapeTarget::CloseSettings);
+
+        // ★ แถบถามอยู่เหนือแผงตั้งค่าอีกชั้น
+        shell.recover_prompt = Some(crate::shell::RecoverView {
+            when: None,
+            items: 3,
+            scope: crate::shell::RecoverScope::LastSession,
+        });
+        assert_eq!(escape_target(&shell, true), EscapeTarget::PostponeRecovery);
+        shell.save_as_prompt = true;
+        assert_eq!(escape_target(&shell, true), EscapeTarget::CancelSaveAs);
+        shell.close_prompt = true;
+        assert_eq!(escape_target(&shell, true), EscapeTarget::CancelClose);
+    }
+
+    /// ★★★ **โหมดเป็นของแท็บ อ่านจาก `Board::view`** (`HANDOFF §6` · `docs/03 §5`)
+    ///
+    /// `set_view()` เขียน `Board::view` ทุกเฟรมมาตั้งแต่ P4-1 แต่ **ไม่เคยมีใคร
+    /// อ่านมันกลับมาใช้** — `ShellState::mode` เป็นของหน้าต่างจึงเป็นแหล่งความจริง
+    /// ที่สองที่ขัดกับไฟล์ · เกณฑ์ผ่านที่ `§6` เขียนไว้: *บันทึก board ในโหมด
+    /// Arrange → เปิดใหม่ → ได้ Arrange กลับมา ไม่ใช่โหมดที่แท็บอื่นค้างไว้*
+    #[test]
+    fn each_tab_remembers_its_own_mode_and_the_window_only_borrows_it() {
+        let mut app = RefxApp::new(AppArgs::default());
+        let second = app.docs.mint();
+        app.docs.push(Doc::empty(second));
+
+        // แท็บที่สองอยู่โหมด Arrange · แท็บแรกยัง Canvas
+        {
+            let RefxApp { docs, shell, .. } = &mut app;
+            RefxApp::write_mode(docs.active_mut(), shell, Mode::Arrange);
+        }
+        assert_eq!(app.docs.active().board.view().mode, Mode::Arrange);
+        assert!(
+            !app.docs.active().board.is_dirty(),
+            "สลับโหมดห้ามทำให้เอกสาร dirty (docs/03 §4.3)"
+        );
+
+        app.focus_tab(0);
+        assert_eq!(app.shell.mode, Mode::Canvas, "สลับแท็บแล้วโหมดต้องตามไปด้วย");
+        app.focus_tab(1);
+        assert_eq!(app.shell.mode, Mode::Arrange, "โหมดของแท็บต้องยังอยู่");
+
+        // ★ และ "เปิดไฟล์ที่บันทึกไว้ในโหมด Arrange" คือรูปเดียวกันเป๊ะ:
+        //   board ที่มี view.mode = Arrange ถูกวางลงแท็บ แล้วโหมดต้องตามมา
+        app.focus_tab(0);
+        let mut board = Board::new(app.docs.mint(), "saved in arrange");
+        board.set_view(live_view(
+            Camera::default(),
+            Camera::default(),
+            Mode::Arrange,
+        ));
+        app.docs.active_mut().board = board;
+        app.mode_follows_active_tab();
+        assert_eq!(
+            app.shell.mode,
+            Mode::Arrange,
+            "เปิด board ที่บันทึกในโหมด Arrange แล้วต้องได้ Arrange กลับมา"
+        );
+    }
+
+    /// ★★★ `--mode=arrange` ต้องไปถึง **`Board::view`** ไม่ใช่แค่ `shell.mode`
+    ///
+    /// เกือบพังตอนก้อน c: พอโหมดถูกอ่านกลับจากแท็บทุกเฟรม ค่าที่ตั้งไว้แค่ใน
+    /// `ShellState` จะอยู่ได้ **ไม่ถึงเฟรมแรก** · ตัวเลือกนี้มีไว้ให้สคริปต์
+    /// ถ่ายภาพ/วัดโหมด Arrange ได้โดยไม่ต้องกดปุ่มก่อน — ถ้ามันเงียบไป
+    /// **หลักฐานทุกใบของโหมดนั้นจะเป็นภาพของ Canvas ที่ตั้งชื่อไฟล์ว่า arrange**
+    /// ซึ่งคือเครื่องมือผลิตหลักฐานที่โกหก (`docs/08 §3.9` ข้อ 9)
+    #[test]
+    fn the_mode_flag_reaches_the_board_not_just_the_window() {
+        let mut app = RefxApp::new(AppArgs {
+            mode: Some(Mode::Arrange),
+            ..AppArgs::default()
+        });
+        assert_eq!(
+            app.docs.active().board.view().mode,
+            Mode::Arrange,
+            "`--mode=arrange` ไปไม่ถึง `Board::view`"
+        );
+        // ★ และมันต้องรอดการอ่านกลับที่ต้นเฟรม
+        app.mode_follows_active_tab();
+        assert_eq!(app.shell.mode, Mode::Arrange);
+    }
+
+    /// ★★★ `F` ตอนไม่ได้เลือกอะไร **ต้องได้ผลเท่า `0` เป๊ะ** (`docs/03 §5`)
+    ///
+    /// spec เขียนกฎนี้ไว้ในวงเล็บบรรทัดเดียว ("ถ้าไม่เลือก = พอดีทั้ง board")
+    /// ซึ่งเป็นรูปของกฎที่คนทำจะลืม · กฎอยู่ใน [`RefxApp::fit_bounds`] ไม่ใช่ที่
+    /// ผู้เรียก จึงเป็นไปไม่ได้ที่สองปุ่มจะเพี้ยนออกจากกัน
+    #[test]
+    fn fit_to_selection_with_nothing_selected_is_exactly_fit_to_board() {
+        use refx_core::board::{ItemKind, TextNote};
+        use refx_core::command::{AddItems, Command as _};
+
+        let mut ids = Docs::default();
+        let mut doc = Doc::empty(ids.mint());
+        let items: Vec<refx_core::board::Item> = [0.0_f32, 500.0]
+            .into_iter()
+            .map(|x| {
+                refx_core::board::Item::new(ItemKind::Text(TextNote::default()))
+                    .at(Vec2::new(x, 0.0), Vec2::new(100.0, 100.0))
+            })
+            .collect();
+        AddItems::new(items)
+            .expect("มีสองใบ")
+            .apply(&mut doc.board)
+            .expect("board ว่าง ใส่ได้แน่");
+
+        let all = RefxApp::fit_bounds(&doc, keymap::ZoomRequest::FitBoard);
+        let none_selected = RefxApp::fit_bounds(&doc, keymap::ZoomRequest::FitSelection);
+        assert_eq!(all, none_selected, "`F` ตอนไม่เลือกอะไร ต้องเท่า `0`");
+        assert!(all.is_some(), "board ที่มีสองใบต้องมีกรอบ");
+
+        // ★ เลือกใบเดียว → กรอบต้องแคบลงจริง ไม่ใช่คืนทั้ง board เหมือนเดิม
+        let first = doc.board.items_in_z_order().next().expect("มีใบแรก").0;
+        doc.selection.select(first);
+        let one =
+            RefxApp::fit_bounds(&doc, keymap::ZoomRequest::FitSelection).expect("เลือกไว้หนึ่งใบ");
+        assert!(
+            one.size().x < all.expect("มีกรอบ").size().x,
+            "เลือกใบเดียวแล้วกรอบต้องแคบลง"
+        );
+
+        // board ว่าง = ไม่มีอะไรให้จัด (ผู้เรียกจะบอกผู้ใช้แทนที่จะขยับกล้องมั่ว)
+        let empty = Doc::empty(ids.mint());
+        assert_eq!(
+            RefxApp::fit_bounds(&empty, keymap::ZoomRequest::FitBoard),
+            None
         );
     }
 

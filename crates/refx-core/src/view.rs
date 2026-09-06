@@ -81,6 +81,8 @@ impl Camera {
     pub const MIN_ZOOM: f32 = 0.01;
     /// ซูมเข้าได้มากสุด (ภาพใหญ่ขึ้น 64 เท่า)
     pub const MAX_ZOOM: f32 = 64.0;
+    /// สัดส่วนของจอที่ [`Self::fit_to`] ใช้จริง — ที่เหลือเป็นขอบหายใจ
+    pub const FIT_MARGIN: f32 = 0.9;
 
     /// สร้างกล้องที่จุดและระดับซูมที่กำหนด (ค่าถูก clamp ให้ปลอดภัยเสมอ)
     #[must_use]
@@ -163,6 +165,38 @@ impl Camera {
         self.set_center(self.center + (before - after));
     }
 
+    /// ★★★ ขยับกล้องให้กรอบนี้อยู่ในจอพอดี — `F` / `0` (`docs/03 §5` · P5-3b ก้อน c)
+    ///
+    /// `viewport` เป็น **พิกเซลจริง** (ขนาดของช่อง canvas ไม่ใช่ทั้งหน้าต่าง)
+    ///
+    /// ## ★★ กรอบที่กว้างหรือสูงเป็นศูนย์ **ไม่เปลี่ยนซูม** แค่เลื่อนไปให้อยู่กลางจอ
+    ///
+    /// ภาพเดียวที่ยังไม่รู้ขนาด หรือ item ที่วางเรียงเป็นเส้นตรงพอดี ให้ขนาด 0
+    /// ในแกนหนึ่ง · การหารด้วยศูนย์ได้ `inf` ซึ่ง [`Self::set_zoom`] ปฏิเสธอยู่แล้ว
+    /// **แต่การพึ่งด่านนั้น** แปลว่าผลลัพธ์ขึ้นกับลำดับการ clamp ที่คนอ่านโค้ด
+    /// มองไม่เห็น — ตัดสินที่นี่ให้ชัดแทน
+    ///
+    /// ★ เผื่อขอบไว้ [`Self::FIT_MARGIN`] เพราะภาพที่ชิดขอบจอพอดีอ่านว่า
+    /// "ยังมีของเลยออกไปอีก" ทั้งที่ไม่มี
+    pub fn fit_to(&mut self, bounds: crate::geom::Rect, viewport: Vec2) {
+        if !bounds.is_finite() || !viewport.x.is_finite() || !viewport.y.is_finite() {
+            return;
+        }
+        self.set_center(bounds.center());
+
+        let size = bounds.size();
+        let mut scale = f32::INFINITY;
+        if size.x > 0.0 && viewport.x >= 1.0 {
+            scale = scale.min(viewport.x / size.x);
+        }
+        if size.y > 0.0 && viewport.y >= 1.0 {
+            scale = scale.min(viewport.y / size.y);
+        }
+        if scale.is_finite() {
+            self.set_zoom(scale * Self::FIT_MARGIN);
+        }
+    }
+
     /// affine world→clip สำหรับส่งให้ shader: `[a, b, c, d, tx, ty]`
     ///
     /// clip space ของ wgpu มี y ชี้ **ขึ้น** จึงต้องกลับแกน y
@@ -230,6 +264,58 @@ mod tests {
 
     fn close(a: Vec2, b: Vec2) -> bool {
         (a - b).length() < 1e-3
+    }
+
+    /// ★★★ `F` / `0` — กรอบที่ขอต้องอยู่ในจอครบ **และไม่เล็กจนเสียที่**
+    #[test]
+    fn fitting_puts_the_whole_box_on_screen_with_room_to_breathe() {
+        let bounds =
+            crate::geom::Rect::from_center_size(Vec2::new(1000.0, -500.0), Vec2::new(400.0, 200.0));
+        let mut camera = Camera::new(Vec2::ZERO, 8.0);
+        camera.fit_to(bounds, VIEWPORT);
+
+        assert!(close(camera.center(), bounds.center()), "กล้องไม่ได้ไปที่กรอบ");
+        // แกนที่คับกว่าคือแนวนอน (800/400 = 2) ไม่ใช่แนวตั้ง (600/200 = 3)
+        assert_eq!(camera.zoom(), 2.0 * Camera::FIT_MARGIN);
+
+        // ★ ทุกมุมของกรอบต้องตกอยู่ในจอจริง — ไม่ใช่แค่ตัวเลข zoom ดูถูก
+        for corner in [bounds.min, bounds.max] {
+            let screen = camera.world_to_screen(corner, VIEWPORT);
+            assert!(
+                screen.x >= 0.0 && screen.x <= VIEWPORT.x,
+                "มุม {corner:?} หลุดจอที่ {screen:?}"
+            );
+            assert!(screen.y >= 0.0 && screen.y <= VIEWPORT.y);
+        }
+    }
+
+    /// ★★ กรอบที่แบนสนิท (แกนหนึ่งเป็นศูนย์) — **เลื่อนไป ไม่เปลี่ยนซูม**
+    ///
+    /// เกิดจริงตอนเลือกภาพใบเดียวที่ยังไม่รู้ขนาด หรือ item ที่เรียงเป็นเส้นตรงพอดี
+    #[test]
+    fn a_flat_box_moves_the_camera_but_never_changes_the_zoom() {
+        let flat = crate::geom::Rect::from_center_size(Vec2::new(10.0, 20.0), Vec2::new(0.0, 0.0));
+        let mut camera = Camera::new(Vec2::ZERO, 3.0);
+        camera.fit_to(flat, VIEWPORT);
+        assert!(close(camera.center(), Vec2::new(10.0, 20.0)));
+        assert_eq!(camera.zoom(), 3.0, "กรอบขนาดศูนย์ห้ามลาก zoom ไปเป็น inf/clamp");
+
+        // แบนแค่แกนเดียว → ใช้แกนที่เหลือคิด
+        let line = crate::geom::Rect::from_center_size(Vec2::ZERO, Vec2::new(400.0, 0.0));
+        let mut camera = Camera::new(Vec2::ZERO, 3.0);
+        camera.fit_to(line, VIEWPORT);
+        assert_eq!(camera.zoom(), 2.0 * Camera::FIT_MARGIN);
+    }
+
+    /// ★ ค่าจากไฟล์ที่เสียหายต้องไม่พากล้องไปไหน (I-4)
+    #[test]
+    fn a_box_that_is_not_a_number_moves_nothing() {
+        let broken =
+            crate::geom::Rect::from_center_size(Vec2::new(f32::NAN, 0.0), Vec2::new(10.0, 10.0));
+        let mut camera = Camera::new(Vec2::new(5.0, 5.0), 2.0);
+        camera.fit_to(broken, VIEWPORT);
+        assert_eq!(camera.center(), Vec2::new(5.0, 5.0));
+        assert_eq!(camera.zoom(), 2.0);
     }
 
     #[test]

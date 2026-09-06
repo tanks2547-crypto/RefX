@@ -12,8 +12,11 @@
 //! · ไฟล์ถูกอ่านเป็นสตริงดิบที่ `refx_io::keymap` แล้วแปลงเป็นชนิดจริงด้วย
 //! [`Keymap::from_rows`]
 //!
-//! **ยังไม่ทำ (ก้อน c):** 6 คีย์ที่ `docs/03 §5` สั่งไว้แต่ไม่เคยมี —
-//! `Tab` · `Ctrl+A` · `Esc` · `F` · `1` · `0`
+//! **ก้อน c** เพิ่ม 6 คีย์ที่ `docs/03 §5` สั่งไว้ตั้งแต่วันแรกแต่ไม่เคยมี —
+//! `Tab` · `Ctrl+A` · `Esc` · `F` · `1` · `0` — ปิดช่องว่าง "17 คีย์ใน spec
+//! vs 11 คีย์ที่ทำจริง" ที่กล่อง ⚠️ ของ `docs/03 §5` บันทึกไว้
+//! · ★★ ทั้งหกเข้า **ตารางเดียวกันนี้** ไม่ใช่กิ่ง `if` นอกตาราง มันจึงแก้ได้
+//! ด้วย `keymap.toml` และประตูตรวจการชนมองเห็นมันเหมือนคีย์อื่นทุกประการ
 //!
 //! ## ทำไมไม่ใช่ `HashMap<(Modifiers, Key), Action>` (`docs/03 §5` แก้ 4 ก.ย. 2026)
 //!
@@ -74,6 +77,22 @@ pub enum SaveRequest {
     SaveAs,
 }
 
+/// ผู้ใช้ขออะไรกับระดับซูม (P5-3b ก้อน c · `docs/03 §5`)
+///
+/// ★★ `0` กับ `F`-ตอนไม่ได้เลือกอะไร **ต้องให้ผลเดียวกัน** ตามที่ตารางใน
+/// `docs/03 §5` เขียนไว้ ("ถ้าไม่เลือก = พอดีทั้ง board") — ทำได้ด้วยการให้
+/// [`Self::FitSelection`] ตกไปเป็น [`Self::FitBoard`] เองเมื่อไม่มีอะไรเลือก
+/// ไม่ใช่ให้ผู้เรียกจำกฎนั้นเอง (`docs/08 §3.9` ข้อ 8.1)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZoomRequest {
+    /// `1` — ซูม 100% (1 พิกเซล world = 1 พิกเซลจอ) ไม่ขยับจุดกึ่งกลาง
+    Actual,
+    /// `F` — พอดีกับสิ่งที่เลือก · ไม่ได้เลือกอะไร = พอดีทั้ง board
+    FitSelection,
+    /// `0` — พอดีทั้ง board เสมอ
+    FitBoard,
+}
+
 /// ปุ่มของแท็บที่ผู้ใช้เพิ่งกด (P4-7c)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TabKey {
@@ -87,8 +106,9 @@ pub enum TabKey {
 
 /// สิ่งที่ปุ่มหนึ่งชุดสั่งได้ — **คำศัพท์ทั้งหมดของคีย์ลัดอยู่ที่นี่**
 ///
-/// ★ ไม่มี variant ไหนที่ยังไม่มีคนทำ · การเพิ่ม action ใหม่คือก้อน c ของ P5-3b
-/// (`Tab` · `Ctrl+A` · `Esc` · `F` · `1` · `0`) — ก้อน a **ห้ามเพิ่ม**
+/// ★ ไม่มี variant ไหนที่ยังไม่มีคนทำ · หกตัวสุดท้ายเข้ามาตอนก้อน c ของ P5-3b
+/// (`Tab` · `Ctrl+A` · `Esc` · `F` · `1` · `0`) ซึ่งปิดช่องว่าง 17 คีย์ใน spec
+/// vs 11 คีย์ที่ทำจริง (`docs/03 §5` กล่อง ⚠️)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     /// ย้อน/ทำซ้ำ
@@ -111,6 +131,16 @@ pub enum Action {
     OpenBoard,
     /// คีย์ของแท็บ
     Tab(TabKey),
+
+    // ---------- ★ P5-3b ก้อน c: หกตัวที่ `docs/03 §5` สั่งไว้แต่ไม่เคยมี ----------
+    /// `Tab` — สลับ Canvas ⇄ Arrange · **เป็นของแท็บ ไม่ใช่ของหน้าต่าง**
+    ToggleMode,
+    /// `Ctrl+A` — เลือกทุก item บน board ใบนี้
+    SelectAll,
+    /// `Esc` — ยกเลิกเลือก (หรือปิดแถบที่ค้างอยู่ก่อน ถ้ามี)
+    ClearSelection,
+    /// `F` / `1` / `0` — ระดับซูม
+    Zoom(ZoomRequest),
 }
 
 impl Action {
@@ -146,6 +176,12 @@ impl Action {
             Self::Tab(TabKey::New) => "new-tab",
             Self::Tab(TabKey::Close) => "close-tab",
             Self::Tab(TabKey::Next) => "next-tab",
+            Self::ToggleMode => "toggle-mode",
+            Self::SelectAll => "select-all",
+            Self::ClearSelection => "clear-selection",
+            Self::Zoom(ZoomRequest::Actual) => "zoom-100",
+            Self::Zoom(ZoomRequest::FitSelection) => "zoom-fit-selection",
+            Self::Zoom(ZoomRequest::FitBoard) => "zoom-fit",
         }
     }
 
@@ -177,6 +213,12 @@ impl Action {
         Self::Tab(TabKey::New),
         Self::Tab(TabKey::Close),
         Self::Tab(TabKey::Next),
+        Self::ToggleMode,
+        Self::SelectAll,
+        Self::ClearSelection,
+        Self::Zoom(ZoomRequest::Actual),
+        Self::Zoom(ZoomRequest::FitSelection),
+        Self::Zoom(ZoomRequest::FitBoard),
     ];
 
     /// ชื่อจากไฟล์ → action — `None` ถ้าไม่รู้จัก
@@ -658,6 +700,45 @@ static BUILTIN: &[Binding] = &[
         A::Tab(TabKey::Next),
         Once,
     ),
+    // ---- ★★★ P5-3b ก้อน c: หกคีย์ที่ spec สั่งไว้ตั้งแต่วันแรกแต่ไม่เคยมี ----
+    //
+    // ★ `Tab` เปล่า ๆ vs `Ctrl+Tab`: แยกกันด้วย ctrl ที่บังคับคนละทาง ประตู
+    //   `no_single_keypress_can_ever_fire_two_actions` จึงยืนยันได้ว่าไม่ทับกัน
+    // ★★ `Once` ทั้งหมด: กด `Tab` ค้าง = โหมดสลับ 30 ครั้งต่อวินาที · `Esc` ค้าง
+    //    = ล้างการเลือกซ้ำ ๆ · zoom ค้าง = คำนวณกรอบใหม่ทุกเฟรมเพื่อผลเดิม (I-1)
+    named(NamedKey::Tab, Mods::new(Up, Up, Up), A::ToggleMode, Once),
+    // ★ `Ctrl+A` — `\u{1}` คือ alias ของ compositor ที่ส่งอักขระควบคุมแทน
+    //   (รูปแบบเดียวกับ `Ctrl+Z`/`Ctrl+S`/`Ctrl+G` ข้างบน)
+    ch('a', Mods::new(Down, Up, Up), A::SelectAll, Once),
+    ch('\u{1}', Mods::new(Down, Up, Up), A::SelectAll, Once),
+    // ★★ `Esc` เคร่งครัดกับ modifier: `Ctrl+Esc` เป็นของ Windows (Start menu)
+    //    และ `Shift+Esc` ยังไม่มีความหมาย — ปุ่มที่ยังไม่มีความหมายต้องเงียบ
+    named(
+        NamedKey::Escape,
+        Mods::new(Up, Up, Up),
+        A::ClearSelection,
+        Once,
+    ),
+    // ★ shift เป็น `Either` แบบเดียวกับปุ่มเครื่องมือ: `Shift+F` มาถึงเป็น `f`
+    //   หลัง `to_ascii_lowercase` อยู่แล้ว การบังคับ `Up` จะทำให้มันเงียบโดยไม่มีเหตุ
+    ch(
+        'f',
+        Mods::new(Up, Either, Up),
+        A::Zoom(ZoomRequest::FitSelection),
+        Once,
+    ),
+    ch(
+        '1',
+        Mods::new(Up, Either, Up),
+        A::Zoom(ZoomRequest::Actual),
+        Once,
+    ),
+    ch(
+        '0',
+        Mods::new(Up, Either, Up),
+        A::Zoom(ZoomRequest::FitBoard),
+        Once,
+    ),
 ];
 
 /// ★★★ สอง binding นี้ถูกจุดด้วยการกดปุ่มครั้งเดียวกันได้ไหม
@@ -1012,39 +1093,85 @@ mod tests {
         }
     }
 
-    /// ★★ **ก้อน a ห้ามเพิ่มคีย์ใหม่** — ประตูที่บังคับข้อนั้น
+    /// ★★★ **ช่องว่างระหว่าง spec กับของจริงปิดแล้ว** — 17 คีย์ใน `docs/03 §5`
     ///
-    /// `ROADMAP` P5-3b เขียนว่าก้อน a พิสูจน์ความเท่ากันกับของเดิมได้ก็ต่อเมื่อ
-    /// ไม่มีคีย์ใหม่โผล่มาระหว่างทาง · ตัวเลขนี้จะเปลี่ยนตอนก้อน c เท่านั้น
-    /// และตอนนั้นต้องมีคนมาแก้ตัวเลขพร้อมกับอ่านเหตุผลนี้
+    /// ## ประวัติของเทสต์ตัวนี้
+    ///
+    /// ก้อน a ใช้มันบังคับว่า **ห้ามมีคีย์ใหม่โผล่มา** เพราะการพิสูจน์ว่าตาราง
+    /// ให้ผลเท่าของเดิมเป๊ะทำได้ก็ต่อเมื่อไม่มีอะไรงอกระหว่างทาง · ตัวมันเอง
+    /// เขียนไว้ว่า *"ตัวเลขนี้จะเปลี่ยนตอนก้อน c เท่านั้น และตอนนั้นต้องมีคนมา
+    /// แก้ตัวเลขพร้อมกับอ่านเหตุผลนี้"* — ก้อน c คือตอนนี้
+    ///
+    /// ★ มันจึงกลับด้าน: จาก "หกตัวนี้ต้อง **ไม่** มี" เป็น "หกตัวนี้ต้อง **มี**
+    /// และผูกกับ action ที่ถูกต้อง" · ตัวเลขยังคุมการงอกโดยไม่ตั้งใจเหมือนเดิม
     #[test]
     fn the_table_holds_exactly_what_the_old_functions_held() {
         let table = builtin().bindings();
         // 6 ประวัติ · 2 วาง · 2 ลบ · 6 ย้ายชั้น · 5 เครื่องมือ · 2 การแสดงผล ·
-        // 4 กลุ่ม · 4 บันทึก · 2 เปิด · 5 แท็บ
-        assert_eq!(table.len(), 38, "จำนวน binding เปลี่ยน — ก้อน a ห้ามเพิ่มคีย์ใหม่");
+        // 4 กลุ่ม · 4 บันทึก · 2 เปิด · 5 แท็บ  = 38 (ก้อน a)
+        // + ก้อน c: Tab · Ctrl+A (+alias) · Esc · F · 1 · 0 = 7
+        assert_eq!(table.len(), 45, "จำนวน binding เปลี่ยน — เพิ่มคีย์ต้องมาแก้ที่นี่ด้วย");
 
-        // ★ 6 คีย์ที่ `docs/03 §5` สั่งไว้แต่ **ยังไม่เคยมี** ต้องยังไม่มีในก้อน a
-        for missing in ['f', '1', '0', 'a'] {
-            assert!(
-                !table.iter().any(|binding| matches!(
-                    binding.chord,
-                    Chord::Char { ch, mods }
-                        if ch == missing && mods.ctrl == Up
-                )),
-                "{missing:?} ถูกเพิ่มเข้ามาในก้อน a — ต้องรอก้อน c"
-            );
-        }
-        assert!(
-            !table.iter().any(|binding| matches!(
-                binding.chord,
-                Chord::Key {
-                    key: NamedKey::Escape,
-                    ..
-                }
-            )),
-            "Esc ถูกเพิ่มเข้ามาในก้อน a — ต้องรอก้อน c"
+        // ★★ หกคีย์ที่ `docs/03 §5` สั่งไว้ตั้งแต่วันแรก **และไม่เคยมีจนถึงก้อน c**
+        //    ตรวจว่ามันเดินผ่านเส้นทางเดียวกับที่ผู้ใช้กดจริง ไม่ใช่แค่มีอยู่ในตาราง
+        let map = builtin();
+        let none = ModifiersState::empty();
+        assert_eq!(
+            map.action(None, Some(NamedKey::Tab), none),
+            Some(A::ToggleMode),
+            "`Tab` เปล่า ๆ ต้องสลับโหมด"
         );
+        assert_eq!(
+            map.action(Some('a'), None, ModifiersState::CONTROL),
+            Some(A::SelectAll)
+        );
+        assert_eq!(
+            map.action(None, Some(NamedKey::Escape), none),
+            Some(A::ClearSelection)
+        );
+        assert_eq!(
+            map.action(Some('f'), None, none),
+            Some(A::Zoom(ZoomRequest::FitSelection))
+        );
+        assert_eq!(
+            map.action(Some('1'), None, none),
+            Some(A::Zoom(ZoomRequest::Actual))
+        );
+        assert_eq!(
+            map.action(Some('0'), None, none),
+            Some(A::Zoom(ZoomRequest::FitBoard))
+        );
+
+        // ★★★ `Tab` เปล่า ๆ กับ `Ctrl+Tab` **ต้องไม่ปนกัน** — ปุ่มเดียวกันเป๊ะ
+        //     ต่างกันแค่ ctrl · ประตู `no_single_keypress_can_ever_fire_two_actions`
+        //     พิสูจน์ว่าไม่ทับกัน แต่ตรงนี้พิสูจน์ว่าแต่ละอันไป **ที่ถูก**
+        assert_eq!(
+            map.action(None, Some(NamedKey::Tab), ModifiersState::CONTROL),
+            Some(A::Tab(TabKey::Next))
+        );
+    }
+
+    /// ★★★ **หกคีย์ใหม่ต้องรอดบน layout ที่ไม่ใช่ QWERTY** — กลุ่มเสี่ยงที่สุด
+    ///
+    /// `F` `1` `0` เป็น binding **ไม่มี modifier** ซึ่งคือรูปที่บั๊ก layout ไทย
+    /// (`§2.40ก`) เกิดขึ้นพอดี · เทสต์นี้อยู่ที่ระดับตารางจึงตอบได้แค่ครึ่งเดียว
+    /// — ครึ่งที่เหลือ (`shortcut_char` ต้องแปลงปุ่มไทยให้ถูกก่อนถึงตาราง) อยู่ที่
+    /// `app::tests::the_six_new_keys_survive_a_thai_and_a_dvorak_layout`
+    ///
+    /// ★ ที่นี่ตอบข้อเดียวแต่สำคัญ: **อักขระที่ตารางต้องการต้องเป็น ASCII ล้วน**
+    /// ถ้ามีตัวไหนไม่ใช่ `shortcut_char` จะผลิตมันไม่ได้เลย (`logical_ascii`
+    /// รับเฉพาะ ASCII · `physical_char` คืน ASCII เท่านั้น) แล้ว binding นั้น
+    /// จะเป็นปุ่มที่ไม่มีวันถูกกด
+    #[test]
+    fn every_character_the_table_waits_for_can_actually_be_produced() {
+        for binding in builtin().bindings() {
+            if let Chord::Char { ch, .. } = binding.chord {
+                assert!(
+                    ch.is_ascii(),
+                    "{ch:?} ไม่ใช่ ASCII — `shortcut_char` ผลิตมันไม่ได้ ปุ่มนี้จะตายเงียบ"
+                );
+            }
+        }
     }
 
     // ---------- ก้อน b: keymap.toml ----------
@@ -1196,7 +1323,7 @@ mod tests {
         let before = names.len();
         names.dedup();
         assert_eq!(before, names.len(), "มีชื่อ action ซ้ำกัน");
-        assert_eq!(before, 23, "จำนวน action เปลี่ยน — ก้อน c เท่านั้นที่เพิ่มได้");
+        assert_eq!(before, 29, "จำนวน action เปลี่ยน — เพิ่ม action ต้องมาแก้ที่นี่ด้วย");
 
         // ★ ทุก action ในตารางค่าปริยายต้องเขียนลงไฟล์ได้ ไม่งั้นผู้ใช้ทำ
         //   keymap.toml ที่ได้พฤติกรรมเท่าค่าปริยายไม่ได้เลย
@@ -1271,9 +1398,9 @@ mod tests {
     /// ★★★ **อักขระควบคุมห้ามขึ้นแผง** — มันไม่มี glyph แล้วจะเป็นสี่เหลี่ยม tofu
     ///
     /// บทเรียนนี้โปรเจกต์นี้เจอมาแล้วสองครั้ง (`shell::UNSAVED_MARK` และจุดเตือน
-    /// ของ P5-3a) · ตารางค่าปริยายมี alias อย่าง `Ctrl+Z` = `\u{1a}` อยู่ **11 ใบ**
-    /// — อักขระควบคุม 8 ตัวที่ต่างกัน แต่สามตัว (`Ctrl+Z`/`Ctrl+G`/`Ctrl+S`)
-    /// มีสองใบเพราะแยกตามธง shift
+    /// ของ P5-3a) · ตารางค่าปริยายมี alias อย่าง `Ctrl+Z` = `\u{1a}` อยู่ **12 ใบ**
+    /// — อักขระควบคุม 9 ตัวที่ต่างกัน แต่สามตัว (`Ctrl+Z`/`Ctrl+G`/`Ctrl+S`)
+    /// มีสองใบเพราะแยกตามธง shift · ตัวที่เก้าคือ `Ctrl+A` (ก้อน c)
     #[test]
     fn control_character_aliases_never_reach_the_panel() {
         let hidden = builtin()
@@ -1281,7 +1408,7 @@ mod tests {
             .iter()
             .filter(|b| b.chord.display().is_none())
             .count();
-        assert_eq!(hidden, 11, "จำนวน alias อักขระควบคุมเปลี่ยนไป");
+        assert_eq!(hidden, 12, "จำนวน alias อักขระควบคุมเปลี่ยนไป");
 
         for binding in builtin().bindings() {
             if let Some(shown) = binding.chord.display() {

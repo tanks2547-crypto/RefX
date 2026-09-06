@@ -206,7 +206,7 @@ cargo run --features force-device-lost -p refx-app -- --force-device-lost-after-
 | P5-1 | Benchmark suite ครบ + บังคับใน CI |
 | P5-2 | Manual checklist ครบทุกข้อ (08-testing §3) |
 | P5-3a | Settings — memory budget · theme · present mode · `settings.toml` | ✅ เสร็จ (`d56c281`) |
-| P5-3b | **keymap เป็นตาราง + `keymap.toml` + ตรวจการชน** | |
+| P5-3b | **keymap เป็นตาราง + `keymap.toml` + ตรวจการชน** | ✅ เสร็จ — a (`5a1778e`) · แก้บั๊ก layout ไทย (`a27cefd`) · b (`9017fb6`) · c (ก้อนนี้) |
 
 > ### ★ ทำไม keymap แยกเป็น task ของตัวเอง (แยก 4 ก.ย. 2026)
 >

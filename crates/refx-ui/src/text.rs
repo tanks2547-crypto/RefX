@@ -225,6 +225,14 @@ pub enum Key {
     /// กดส่งเข้า canvas แล้วไม่มีอะไรขยับ
     NothingToApply,
 
+    // ---- P5-3b ก้อน c: หกคีย์ที่ `docs/03 §5` สั่งไว้แต่ไม่เคยมี ----
+    /// `Esc` — ยกเลิกเลือกแล้ว
+    SelectionCleared,
+    /// `F` / `0` — board ว่าง ไม่มีอะไรให้จัดให้พอดี
+    NothingToFit,
+    /// `F` / `1` / `0` ในโหมด Arrange — คีย์ซูมเป็นของ Canvas
+    ZoomIsCanvasOnly,
+
     // ---- P4-2: บันทึกไฟล์ ----
     /// กำลังให้ผู้ใช้เลือกที่เก็บ
     SaveChoosing,
@@ -566,6 +574,9 @@ fn en(key: Key) -> &'static str {
         Key::GroupCollapsedHint => "Show this group as a single tile in Arrange",
         Key::GroupMixed => "Selection spans several groups",
         Key::NothingToApply => "Nothing moved — the images are already arranged like this",
+        Key::SelectionCleared => "Selection cleared",
+        Key::NothingToFit => "Nothing to fit — the board is empty",
+        Key::ZoomIsCanvasOnly => "Zoom shortcuts belong to Canvas mode — press Tab to switch",
 
         Key::SettingsHint => "Settings",
         Key::SettingsTitle => "Settings",
@@ -772,6 +783,9 @@ fn th(key: Key) -> Option<&'static str> {
         Key::GroupCollapsedHint => "ยุบกลุ่มนี้ให้เหลือใบเดียวในโหมด Arrange",
         Key::GroupMixed => "สิ่งที่เลือกอยู่คนละกลุ่มกัน",
         Key::NothingToApply => "ไม่มีอะไรขยับ — ภาพเรียงแบบนี้อยู่แล้ว",
+        Key::SelectionCleared => "ยกเลิกการเลือกแล้ว",
+        Key::NothingToFit => "ไม่มีอะไรให้จัดให้พอดี — board ว่าง",
+        Key::ZoomIsCanvasOnly => "คีย์ซูมเป็นของโหมด Canvas — กด Tab เพื่อสลับ",
 
         Key::SettingsHint => "ตั้งค่า",
         Key::SettingsTitle => "ตั้งค่า",
@@ -903,6 +917,10 @@ pub enum Template {
     BoardFull,
     /// `{mode}` — สลับโหมดแล้ว
     SwitchedMode,
+    /// `{n}` — เลือกทั้งหมดแล้วกี่ใบ (`Ctrl+A` — P5-3b ก้อน c)
+    SelectedAll,
+    /// `{percent}` — ระดับซูมใหม่ (`F` / `1` / `0` — P5-3b ก้อน c)
+    ZoomSet,
     /// `{what}` `{when}` — ฟีเจอร์ที่ยังไม่ได้ทำ
     NotImplemented,
     /// `{mb}` `{limit}` — ไฟล์ใหญ่เกินเพดาน
@@ -1017,6 +1035,8 @@ fn template_en(template: Template) -> &'static str {
             "This board is full at {capacity} images — {rejected} of the {requested} you opened could not be added. Try splitting them across several boards."
         }
         Template::SwitchedMode => "Switched to {mode} mode",
+        Template::SelectedAll => "Selected all {n} images",
+        Template::ZoomSet => "Zoom {percent}%",
         Template::NotImplemented => "{what} is not available yet — planned for {when}",
         Template::ErrFileTooLarge => {
             "This file is too large ({mb} MB, the limit is {limit} MB)\n\
@@ -1166,6 +1186,8 @@ fn template_th(template: Template) -> Option<&'static str> {
             "board นี้เต็มที่ {capacity} ภาพ — เพิ่มอีก {rejected} ใบจาก {requested} ใบที่เปิดเข้ามาไม่ได้ ลองแยกเป็นหลาย board"
         }
         Template::SwitchedMode => "สลับไปโหมด {mode}",
+        Template::SelectedAll => "เลือกทั้งหมด {n} ใบ",
+        Template::ZoomSet => "ซูม {percent}%",
         Template::NotImplemented => "{what} ยังทำไม่ได้ — รอ {when}",
         Template::ErrFileTooLarge => {
             "ไฟล์ใหญ่เกินไป ({mb} MB, รับได้ไม่เกิน {limit} MB)\n\
@@ -1608,6 +1630,9 @@ mod tests {
         Key::FilterPinnedOnly,
         Key::SendToCanvasHint,
         Key::NothingToApply,
+        Key::SelectionCleared,
+        Key::NothingToFit,
+        Key::ZoomIsCanvasOnly,
         Key::SaveChoosing,
         Key::SaveInProgress,
         Key::SaveCancelled,
@@ -1714,6 +1739,8 @@ mod tests {
         Template::FilterShowing,
         Template::BoardFull,
         Template::SwitchedMode,
+        Template::SelectedAll,
+        Template::ZoomSet,
         Template::NotImplemented,
         Template::ErrFileTooLarge,
         Template::ErrImageTooLarge,
