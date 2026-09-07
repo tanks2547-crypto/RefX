@@ -88,9 +88,10 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all
 cargo deny check
 cargo tree -d | grep '^wgpu'     # ต้องว่าง (^ สำคัญ — ไม่งั้นจับ leaf crate อื่นติดมาด้วย)
+cargo tree -d | grep '^png'      # ต้องว่าง — เราตรึง png ตรง ๆ ต้องตรงกับที่ image ใช้
 ```
 
-ครบทั้ง 12 ข้อใน [`docs/08-testing-and-budgets.md`](docs/08-testing-and-budgets.md) §4 จึงจะ merge ได้
+ครบทั้ง 13 ข้อใน [`docs/08-testing-and-budgets.md`](docs/08-testing-and-budgets.md) §4 จึงจะ merge ได้
 
 ---
 

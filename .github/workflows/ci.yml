@@ -238,7 +238,10 @@ jobs:
             exit 1
           fi
 
-  # ห้ามมี wgpu สองเวอร์ชัน (docs/09-crate-versions.md)
+  # ห้ามมี wgpu / png สองเวอร์ชัน (docs/09-crate-versions.md)
+  #
+  # ★ อยู่ใน job เดียวกันโดยตั้งใจ — ทั้งสองข้อถามคำถามเดียวกัน ("ทรีมีของซ้ำไหม")
+  #   บน runner ตัวเดียวกัน · แยก job = จ่ายค่า checkout+toolchain สองรอบเปล่า ๆ
   single-wgpu:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -246,10 +249,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: |
+      - name: ห้ามมี wgpu สองเวอร์ชัน
+        run: |
           dup=$(cargo tree -d 2>/dev/null | grep -c '^wgpu' || true)
           if [ "$dup" -gt 0 ]; then
             echo "::error::มี wgpu หลายเวอร์ชัน — ดู docs/09-crate-versions.md"
             cargo tree -d | grep -A3 '^wgpu'
+            exit 1
+          fi
+      # ★★ P5-4: เราตรึง `png` ตรง ๆ เพื่อเขียน PNG ทีละแถบ · ถ้าเวอร์ชันของเรา
+      #    เลื่อนออกจากที่ `image` ใช้ จะได้ **ตัวเข้ารหัสสองตัวที่อาจให้ผลไม่เหมือนกัน**
+      #    และ binary โตขึ้นฟรี ๆ — `^` สำคัญ ไม่งั้นจับ crate ลูกที่ลงท้ายด้วย png
+      - name: ห้ามมี png สองเวอร์ชัน
+        run: |
+          dup=$(cargo tree -d 2>/dev/null | grep -c '^png' || true)
+          if [ "$dup" -gt 0 ]; then
+            echo "::error::มี png หลายเวอร์ชัน — ดู docs/09-crate-versions.md"
+            cargo tree -d | grep -A3 '^png'
             exit 1
           fi

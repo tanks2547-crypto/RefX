@@ -790,6 +790,7 @@ dependencies = [
  "image",
  "kamadak-exif",
  "parking_lot",
+ "png",
  "refx-core",
  "rusqlite",
  "smallvec",

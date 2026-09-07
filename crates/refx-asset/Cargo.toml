@@ -20,6 +20,9 @@ workspace = true
 #      total_ram   → ผู้เรียกส่งเข้ามาที่ DecodePool::with_defaults
 refx-core.workspace     = true
 image.workspace     = true
+# ★ P5-4 Export — เขียน PNG **ทีละแถบ** (`image` ไม่มี API สตรีมสำหรับ PNG)
+#   ดูเหตุผลเต็มและประตู `cargo tree -d | grep '^png'` ที่ Cargo.toml ราก + docs/09
+png.workspace       = true
 fast_image_resize.workspace = true
 kamadak-exif.workspace = true
 blake3.workspace    = true
