@@ -469,6 +469,23 @@ fn selection_after_history(
     Some(affected.iter().copied().filter(|id| alive(*id)).collect())
 }
 
+/// ชื่อของผู้ขอ redraw ที่แสดงบนแถบสถานะ
+///
+/// ★ ASCII ล้วนและเป็นชื่อ **ทางเทคนิค** โดยตั้งใจ ไม่ผ่านงานแปล: มันคือของที่
+/// ผู้ใช้จะก๊อปมาแปะตอนรายงานปัญหา และเป็นสิ่งที่เราต้องค้นเจอในโค้ด — การแปล
+/// ทำให้มันเป็นคนละคำกับที่ `RedrawReason` เขียนไว้ (เหตุผลเดียวกับชื่อ action
+/// ใน `keymap.toml`) · `docs/03 §0` ยกเว้นค่าให้ ไม่ได้ยกเว้นข้อความ
+const fn reason_name(reason: refx_platform::redraw::RedrawReason) -> &'static str {
+    use refx_platform::redraw::RedrawReason as R;
+    match reason {
+        R::UserInput => "UserInput",
+        R::TextureReady => "TextureReady",
+        R::Animation => "Animation",
+        R::EguiRepaint => "EguiRepaint",
+        R::SurfaceRecovery => "SurfaceRecovery",
+    }
+}
+
 /// สิ่งที่ `Esc` ควรทำในสถานะนี้ (P5-3b ก้อน c)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EscapeTarget {
@@ -8405,6 +8422,25 @@ impl AppDelegate for RefxApp {
             gfx.window.request_redraw();
         }
         false
+    }
+
+    /// ★★★ ตัวจับ I-1 ที่รั่วเป็นครั้งคราว — **เก็บอย่างเดียว ห้ามขอเฟรม**
+    ///
+    /// `docs/08 §3.9` ข้อ 11: เจอ redraw ~1.5 Hz สองครั้งแล้ววัดซ้ำ 13 หน้าต่าง
+    /// ไม่เจออีกเลย · การวัดด้วยมือจับเหตุการณ์แบบนั้นไม่ได้ จึงต้องมีตัวนับที่
+    /// เปิดอยู่ตลอด **พร้อมชื่อคนขอ** — ครั้งหน้าที่มันเกิด ภาพหน้าจอจะบอก
+    /// สาเหตุของตัวเอง
+    ///
+    /// ★ ขึ้นแถบสถานะเฉพาะตอนเกินเพดาน — สภาพปกติภาพหน้าจอไม่เปลี่ยนเลย
+    fn on_quiet_streak(&mut self, quiet: refx_platform::redraw::QuietStreak) {
+        self.shell.quiet_redraws = quiet
+            .is_alarming()
+            .then(|| {
+                quiet
+                    .worst_reason()
+                    .map(|reason| (quiet.len(), reason_name(reason)))
+            })
+            .flatten();
     }
 
     /// ★ ปิดโปรแกรมหลังบันทึกเสร็จ — ดู [`AppDelegate::wants_exit`] ว่าทำไมต้องมี

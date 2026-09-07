@@ -881,6 +881,10 @@ pub enum Template {
     Zoom,
     /// `{n}` — จำนวนเฟรมที่วาดไปแล้ว (ตัวชี้วัด I-1 ที่เห็นด้วยตา)
     FramesDrawn,
+    /// `{n}` `{who}` — ★★★ ขอวาดเฟรมต่อเนื่องทั้งที่ไม่มี input (ตัวจับ I-1)
+    ///
+    /// โผล่เฉพาะตอนเกินเพดาน `QUIET_ALARM` — สภาพปกติแถบสถานะไม่เปลี่ยนเลย
+    QuietRedraws,
     /// `{used}` `{limit}` — RAM ของ decode pool
     Ram,
     /// `{used}` `{limit}` — VRAM ของ texture
@@ -1018,6 +1022,7 @@ fn template_en(template: Template) -> &'static str {
         Template::Opened => "Opened {name}",
         Template::Zoom => "Zoom {pct}%",
         Template::FramesDrawn => "Frames {n}",
+        Template::QuietRedraws => "quiet {n} {who}",
         Template::Ram => "RAM {used} / {limit}",
         Template::Vram => "VRAM {used} / {limit}",
         Template::CacheSummary => "Cache {n} images ({size})",
@@ -1169,6 +1174,7 @@ fn template_th(template: Template) -> Option<&'static str> {
         Template::Opened => "เปิด {name} แล้ว",
         Template::Zoom => "ซูม {pct}%",
         Template::FramesDrawn => "เฟรมที่วาด {n}",
+        Template::QuietRedraws => "วาดเปล่า {n} {who}",
         Template::Ram => "RAM {used} / {limit}",
         Template::Vram => "VRAM {used} / {limit}",
         Template::CacheSummary => "cache {n} ภาพ ({size})",
@@ -1724,6 +1730,7 @@ mod tests {
         Template::Opened,
         Template::Zoom,
         Template::FramesDrawn,
+        Template::QuietRedraws,
         Template::Ram,
         Template::Vram,
         Template::CacheSummary,

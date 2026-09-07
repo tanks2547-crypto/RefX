@@ -113,6 +113,16 @@ pub trait AppDelegate {
     #[must_use]
     fn redraw(&mut self) -> Option<RedrawReason>;
 
+    /// ★★★ ช่วงเงียบเปลี่ยนไป — **ตัวจับ I-1 ที่รั่วเป็นครั้งคราว**
+    ///
+    /// เรียกทุกครั้งที่มีคนขอ redraw · ค่าที่ได้คือ [`RedrawTracker::quiet`]
+    /// หลังบันทึกคำขอนั้นแล้ว (ดู [`crate::redraw::QuietStreak`])
+    ///
+    /// ★ **ห้าม implement ให้มันขอ redraw** ไม่ว่าทางตรงหรือทางอ้อม — ตัวจับที่
+    /// ทำให้เกิดเฟรมเพิ่ม คือตัวจับที่ทำให้สิ่งที่มันวัดผิดไปเอง · ค่าเริ่มต้น
+    /// ไม่ทำอะไรเลย ชั้นบนที่อยากแสดงมันบนแถบสถานะค่อย override
+    fn on_quiet_streak(&mut self, _quiet: crate::redraw::QuietStreak) {}
+
     /// event จากผู้ใช้ (ไม่มี `RedrawRequested` ปนมาแน่นอน)
     ///
     /// คืน `true` ถ้าต้องวาดใหม่เพราะ event นี้
@@ -233,6 +243,9 @@ impl<D: AppDelegate> WindowHost<D> {
         if let Some(window) = self.window.as_ref() {
             self.tracker.record(reason);
             window.request_redraw();
+            // ★ บอกชั้นบนหลังบันทึกแล้ว — ค่าที่ส่งไปคือสภาพหลังคำขอนี้
+            //   ★★ ไม่ขอเฟรมเพิ่มเอง: เราอยู่ในเส้นทางที่กำลังขอเฟรมอยู่แล้ว
+            self.delegate.on_quiet_streak(self.tracker.quiet());
         }
     }
 }
@@ -384,7 +397,13 @@ pub fn run<D: AppDelegate>(
     let mut host = WindowHost::new(delegate, config);
     event_loop.run_app(&mut host).map_err(WindowError::from)?;
 
-    tracing::info!(redraws = %host.tracker().summary(), "shutting down");
+    // ★★ ช่วงเงียบที่ยาวที่สุดต้องอยู่ใน log เสมอ — อาการที่เกิดแล้วหายเอง
+    //    จะไม่มีใครเห็นถ้ารายงานแต่ค่าปัจจุบัน (`docs/08 §3.9` ข้อ 11)
+    tracing::info!(
+        redraws = %host.tracker().summary(),
+        worst_quiet = %host.tracker().worst_quiet().summary(),
+        "shutting down"
+    );
 
     // error ตอน window_ready ต้องไม่เงียบหาย — ผู้ใช้ต้องได้เห็นสาเหตุ
     match host.failure {

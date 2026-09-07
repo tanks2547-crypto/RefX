@@ -366,6 +366,15 @@ pub struct ShellState {
     /// ปล่อยโปรแกรมทิ้งไว้แล้วตัวเลขนี้ต้อง **หยุดนิ่ง** ถ้ายังไต่ขึ้นเรื่อย ๆ
     /// แปลว่ามีที่ไหนสักแห่งขอวาดทุกเฟรม
     pub frames_drawn: u64,
+    /// ★★★ ช่วงที่ **ขอวาดเฟรมต่อเนื่องทั้งที่ไม่มี input** — ตัวจับ I-1 ที่รั่วเป็นครั้งคราว
+    ///
+    /// `None` = ไม่มีอะไรน่าสงสัย (สภาพปกติ) · `Some` = เกินเพดาน
+    /// `refx_platform::redraw::QUIET_ALARM` แล้ว พร้อมชื่อคนที่ขอมากที่สุด
+    ///
+    /// ★★ **โผล่บนแถบสถานะเฉพาะตอนผิดปกติ** — ภาพหน้าจอในสภาพปกติจึงไม่เปลี่ยนเลย
+    /// แต่ครั้งหน้าที่อาการเกิด **ภาพจะบอกสาเหตุของตัวเอง** แทนที่จะต้องไปงมใน log
+    /// (`docs/08 §3.9` ข้อ 11 — เจอ ~1.5 Hz สองครั้งแล้วทำซ้ำไม่ได้อีกเลย)
+    pub quiet_redraws: Option<(u64, &'static str)>,
 
     /// ★ I-6: RAM ที่ decode pool ใช้อยู่ / เพดาน (ไบต์)
     ///
@@ -655,6 +664,7 @@ impl Default for ShellState {
             item_count: 0,
             zoom: 1.0,
             frames_drawn: 0,
+            quiet_redraws: None,
             ram_used: 0,
             ram_limit: 0,
             vram_used: 0,
@@ -1096,6 +1106,19 @@ pub fn draw_in_ui(
                 Template::FramesDrawn,
                 &[("n", &state.frames_drawn.to_string())],
             ));
+            // ★★★ ตัวจับ I-1: โผล่เฉพาะตอนมีคนขอวาดต่อเนื่องทั้งที่ไม่มี input
+            //     ใช้สีเตือนเพราะมันคือ **อาการ** ไม่ใช่ตัวเลขประจำวัน
+            if let Some((len, who)) = state.quiet_redraws {
+                ui.separator();
+                ui.colored_label(
+                    warn_color(ui),
+                    text::fill(
+                        lang,
+                        Template::QuietRedraws,
+                        &[("n", &len.to_string()), ("who", who)],
+                    ),
+                );
+            }
             ui.separator();
 
             // ★ I-6 ให้เห็นกับตา: RAM ที่ decode pool ใช้ เทียบกับเพดานรวมทุก worker
@@ -2544,6 +2567,7 @@ mod tests {
             item_count: _,
             zoom: _,
             frames_drawn: _,
+            quiet_redraws: _, // ตัวจับ I-1 — เป็นตัวเลขที่รายงาน ไม่ใช่คำขอแก้อะไร
             ram_used: _,
             ram_limit: _,
             vram_used: _,
@@ -3029,6 +3053,9 @@ mod tests {
                 used: 134_217_728,
                 ram_gb: 8,
             }],
+            // ★ ตัวจับ I-1 โผล่เฉพาะตอนผิดปกติ — ต้องบังคับให้มันถูกวาดที่นี่
+            //   ไม่งั้นข้อความของมันจะไม่เคยผ่านประตู tofu เลยจนถึงวันที่อาการเกิด
+            quiet_redraws: Some((82, "EguiRepaint")),
             status_warn: true,
             ..ShellState::default()
         };
@@ -3083,6 +3110,10 @@ mod tests {
             drawn.extend(last);
         }
         assert!(!drawn.is_empty(), "ไม่มีอะไรถูกวาดเลย — ประตูนี้ไม่ได้ตรวจอะไร");
+        assert!(
+            drawn.iter().any(|(_, text)| text.contains("EguiRepaint")),
+            "ช่องของตัวจับ I-1 ไม่ได้ถูกวาด — ข้อความของมันจะไม่เคยผ่านประตูนี้"
+        );
 
         // ★★★ ถามด้วย **ฟอนต์ที่ข้อความท่อนนั้นถูกจัดหน้าด้วยจริง ๆ**
         //
