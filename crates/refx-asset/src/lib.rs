@@ -8,6 +8,7 @@ pub mod budget; // MemoryBudget + TextureAllocator — ทางเดียว�
 pub mod cache; // cache.sqlite (IO thread เดียว)
 pub mod decode;
 pub mod encode; // PNG ของภาพที่วาง เพื่อพักลง spool (P4-5) // decode_guarded: limit + catch_unwind (I-7)
+pub mod export; // เขียนไฟล์ export ทีละแถบ + atomic + ยกเลิกได้ (P5-4)
 pub mod hash; // blake3 content hash
 pub mod pool; // decode worker pool + priority queue + cancellation
 pub mod resize; // ★ ทางเดียวที่เรียก fast_image_resize (ดูเหตุผลในไฟล์)

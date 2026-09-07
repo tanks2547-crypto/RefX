@@ -8,6 +8,7 @@ pub mod app; // ต่อสายทุก crate + event loop integration
 pub mod arrange; // ViewportBehavior ของ Arrange mode
 pub mod canvas; // ViewportBehavior ของ Canvas mode
 pub mod copy; // ก๊อปข้อความขึ้น clipboard บนเธรดชั่วคราว (P2-10) — ไม่ใช่ UI thread
+pub mod export; // ต่อฝั่ง GPU เข้ากับฝั่งตัวเข้ารหัส — งาน export หนึ่งงาน (P5-4)
 pub mod fonts; // ฟอนต์ที่ฝังใน binary (docs/03 §0) — ไทย + ละติน ยังไม่มี CJK
 pub mod inspector;
 pub mod instances; // Board → QuadInstance (ฟังก์ชันบริสุทธิ์ · วัดได้จาก benches/)

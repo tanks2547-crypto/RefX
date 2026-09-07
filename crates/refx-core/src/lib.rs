@@ -19,6 +19,7 @@ pub mod arena; // generational arena + ItemId/BoardId/GroupId
 pub mod board; // Board, Item, ItemCanvas, ItemMeta, AssetRef
 pub mod clipboard; // ชนิดข้อมูลกลาง + trait ให้ชั้นบนเสียบตัวอ่านจริง (ไม่มีโค้ด OS)
 pub mod command; // Command trait + History (undo/redo + merge/seal)
+pub mod export; // แผน export ทีละแถบ — สัญญาร่วมของฝั่ง render กับฝั่งเข้ารหัส (P5-4)
 pub mod geom; // Rect / Obb — รูปทรงสำหรับ culling, hit-test, rubber-band
 pub mod hash;
 pub mod interact; // เครื่องสถานะของการเลือกบน canvas (คืน Command ไม่แก้ board เอง)
