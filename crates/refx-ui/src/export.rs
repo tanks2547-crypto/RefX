@@ -18,14 +18,45 @@
 //! spec: docs/07-file-format.md §6
 
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use refx_asset::export::{BandError, BandSource, ExportFormat, ExportStats, RenameFn};
 use refx_core::export::BandPlan;
 use refx_core::geom::Rect;
 use refx_render::export::BandRenderer;
+use refx_render::instance::QuadInstance;
 use refx_render::pipeline::DrawBatch;
 use refx_render::texture::TextureAllocator;
+
+/// สัญญาณสองทางระหว่าง UI กับ worker
+///
+/// ★ อยู่ด้วยกันเพราะมันเป็นของคู่กันเสมอ: ปุ่มยกเลิกจะมีความหมายก็ต่อเมื่อ
+/// ผู้ใช้เห็นว่างานไปถึงไหนแล้ว · แยกกันเมื่อไหร่จะมีจุดเรียกที่ส่งมาแค่ตัวเดียว
+#[derive(Clone, Copy)]
+pub struct JobSignals<'a> {
+    /// ตั้งเป็น `true` = ขอให้หยุด · อ่านใน **ตัวป้อนพิกเซล** ไม่ใช่แค่ระหว่างแถบ
+    pub cancel: &'a AtomicBool,
+    /// แถบที่เขียนเสร็จแล้ว — `None` = ไม่มีใครดู (เทสต์)
+    pub progress: Option<&'a AtomicU32>,
+    /// ★★ ตัวปลุก event loop — เรียกทุกครั้งที่ [`Self::progress`] ขยับ
+    ///
+    /// ถ้าไม่ปลุก แถบความคืบหน้าจะค้างนิ่งจนกว่าผู้ใช้จะขยับเมาส์ ซึ่งอ่านได้ว่า
+    /// โปรแกรมแฮงก์ · **ตัวเลขที่อัปเดตแล้วไม่มีใครวาด เท่ากับไม่ได้อัปเดต**
+    pub waker: Option<&'a refx_platform::window::Waker>,
+}
+
+impl<'a> JobSignals<'a> {
+    /// สัญญาณที่มีแต่ธงยกเลิก
+    #[must_use]
+    pub fn just_cancel(cancel: &'a AtomicBool) -> Self {
+        Self {
+            cancel,
+            progress: None,
+            waker: None,
+        }
+    }
+}
 
 /// สิ่งที่ผู้ใช้เลือกในกล่อง export
 #[derive(Debug, Clone, PartialEq)]
@@ -51,6 +82,18 @@ pub enum ExportJobError {
     /// ★ ไม่มีอะไรให้วาด — **ปฏิเสธ ห้ามเขียนไฟล์ 0 ไบต์** (`docs/07 §6` ข้อ 5)
     #[error("there is nothing on this board to export")]
     NothingToExport,
+    /// ที่ที่จะเขียนไม่ปลอดภัย — ดู [`refx_io::validate::validate_save_target`]
+    #[error(transparent)]
+    BadTarget(#[from] refx_io::validate::SecError),
+    /// ระบบไม่มีเธรดให้แล้ว — ใหญ่กว่าเรื่อง export
+    #[error("the system would not give us a thread to export on")]
+    NoWorker,
+    /// worker หายไปโดยไม่ส่งผลกลับมา (panic ระหว่างทาง)
+    ///
+    /// ★ ต้องมี variant นี้ ไม่งั้น UI จะรอผลที่ไม่มีวันมา **ตลอดกาล**
+    /// แล้วปุ่มยกเลิกก็ไม่ช่วยอะไรเพราะไม่มีใครฟังธงแล้ว
+    #[error("the export worker stopped without saying why — see the log")]
+    Lost,
     /// ขนาดที่ขอ export ไม่ได้
     #[error(transparent)]
     Plan(#[from] refx_core::export::PlanError),
@@ -72,6 +115,8 @@ struct GpuBands<'a> {
     device: &'a wgpu::Device,
     queue: &'a wgpu::Queue,
     batches: &'a [DrawBatch<'a>],
+    progress: Option<&'a AtomicU32>,
+    waker: Option<&'a refx_platform::window::Waker>,
 }
 
 impl BandSource for GpuBands<'_> {
@@ -93,6 +138,13 @@ impl BandSource for GpuBands<'_> {
             return Err(BandError(format!(
                 "the renderer produced {written} rows where {rows} were asked for at row {y0}"
             )));
+        }
+        // ★ นับ **หลัง** วาดเสร็จ — ตัวเลขที่ผู้ใช้เห็นต้องหมายถึงงานที่ทำไปแล้วจริง
+        if let Some(progress) = self.progress {
+            progress.store(y0 / band_rows + 1, Ordering::Release);
+            if let Some(waker) = self.waker {
+                waker.wake();
+            }
         }
         Ok(())
     }
@@ -127,7 +179,7 @@ pub fn export_board(
     gpu: GpuAccess<'_>,
     batches: &[DrawBatch<'_>],
     request: &ExportRequest,
-    cancel: &AtomicBool,
+    signals: JobSignals<'_>,
     rename: RenameFn,
 ) -> Result<ExportStats, ExportJobError> {
     // ★★ ปฏิเสธ**ก่อน**แตะดิสก์ — ไฟล์ 0 ไบต์ที่ชื่อเหมือนงานของผู้ใช้
@@ -136,19 +188,16 @@ pub fn export_board(
         return Err(ExportJobError::NothingToExport);
     }
 
-    // ★★★ **สเปกสองที่ขัดกันตรงนี้ — ยังไม่เรียก `validate_asset_path()`**
+    // ★★★ **ด่านของ path ที่ผู้ใช้เลือกเอง — ไม่ใช่ `validate_asset_path()`**
     //
-    // `docs/07 §6` ข้อ 4 เขียนว่า path ของ export ต้องผ่านด่านนั้น
-    // แต่ `refx_io::validate` (docs/06 §4) เขียนไว้ที่หัวโมดูลตัวเองว่า
-    //   *"เรียกทุกจุดที่ path มาจาก **ไฟล์** ไม่ใช่จากการที่ผู้ใช้เลือกเอง —
-    //     ผู้ใช้ที่กด 'หาไฟล์เอง' แล้วชี้ไปที่ไดรฟ์เครือข่าย **ตั้งใจทำแบบนั้น**"*
+    // สเปกเดิมสั่งให้ใช้ด่านของ path ที่มาจากไฟล์ ซึ่งจะ **ปฏิเสธการ export ลง
+    // ไดรฟ์ที่แชร์ไว้** — งานประจำของนักวาดที่ทำงานเป็นทีม · `docs/06 §4`
+    // แก้แล้ว 8 ก.ย. 2026: อันตรายของ UNC ไม่ใช่ "มันคือเครือข่าย" แต่คือ
+    // **"ใครเป็นคนเลือก path นั้น"** · ที่นี่คนเลือกคือผู้ใช้
     //
-    // path ของ export มาจากกล่องบันทึกไฟล์ = ผู้ใช้เลือกเอง · ถ้าเรียกด่านนั้น
-    // การ export ลงไดรฟ์ที่แชร์ไว้ (งานประจำของนักวาดที่ทำงานเป็นทีม) จะถูก
-    // ปฏิเสธทั้งที่ผู้ใช้ตั้งใจ — เป็นการตัดฟีเจอร์แบบเงียบ ๆ
-    //
-    // → **ไม่เดา** ปล่อยไว้ให้เจ้าของสเปกตัดสินพร้อมกล่อง export รอบหน้า
-    //   (CLAUDE.md: "เจอสิ่งที่ spec ขัดกันเอง → หยุด ถาม ไม่ต้องเดา")
+    // ★★ ด่านอยู่ **ในนี้** ไม่ใช่ในตัวเรียก — ถ้าอยู่ในตัวเรียก ทุกตัวเรียกใหม่
+    //    ต้องจำให้ได้เอง แล้ววันหนึ่งจะมีตัวที่ลืม (`docs/08 §3.9` ข้อ 8)
+    refx_io::validate::validate_save_target(&request.path)?;
 
     let plan = BandPlan::new(request.size.0, request.size.1)?;
 
@@ -172,6 +221,8 @@ pub fn export_board(
         device: gpu.device,
         queue: gpu.queue,
         batches,
+        progress: signals.progress,
+        waker: signals.waker,
     };
 
     let stats = refx_asset::export::export_to_file(
@@ -179,20 +230,198 @@ pub fn export_board(
         request.format,
         plan,
         &mut source,
-        cancel,
+        signals.cancel,
         rename,
     )?;
     Ok(stats)
+}
+
+/// ก้อนที่ worker วาดได้ — **สำเนาที่ถือของเอง** ไม่ใช่ยืมจากสถานะของแอป
+///
+/// ★★★ handle ของ wgpu ทุกตัวเป็น `Arc` อยู่แล้ว การ clone จึงไม่ได้ก๊อป texture
+/// สักไบต์ · สิ่งที่ก๊อปจริงคือ `Vec<QuadInstance>` (64 ไบต์ต่อใบ — 3,072 ใบ = 196 KB)
+/// ซึ่งเป็น **ภาพนิ่งของ board ณ วินาทีที่กด export** · นั่นถูกต้องแล้ว: ผู้ใช้
+/// ที่ลากภาพเพิ่มระหว่าง export คาดหวังไฟล์ที่ตรงกับตอนที่เขากดปุ่ม ไม่ใช่
+/// ไฟล์ที่ครึ่งบนเป็นก่อนลากและครึ่งล่างเป็นหลังลาก
+pub struct OwnedBatch {
+    /// texture ที่ instance ชุดนี้ใช้
+    pub bind_group: wgpu::BindGroup,
+    /// instance ที่ใช้ texture นั้น
+    pub instances: Vec<QuadInstance>,
+}
+
+/// handle ของ GPU ที่ worker ถือไปเอง — [`GpuAccess`] รุ่นที่ไม่ยืมใคร
+///
+/// ★ ทุกตัวเป็น `Arc` อยู่แล้ว การ clone จึงไม่ได้ก๊อป device หรือ texture
+pub struct OwnedGpu {
+    /// device ที่ทุกอย่างผูกอยู่
+    pub device: wgpu::Device,
+    /// คิวคำสั่ง
+    pub queue: wgpu::Queue,
+    /// ทางเดียวที่จอง texture ได้ (I-6)
+    pub allocator: TextureAllocator,
+    /// layout ของ bind group ที่ shader ใช้อ่าน texture
+    pub atlas_layout: wgpu::BindGroupLayout,
+}
+
+/// งาน export ที่กำลังทำอยู่บน worker
+///
+/// ★ `docs/07 §6` ข้อ 1: งาน render + encode อยู่ที่ worker · UI ต้องลากหน้าต่าง
+/// ได้ระหว่าง export · ★★ และ **ปุ่มยกเลิกต้องตอบสนองทันที** ซึ่งเป็นเหตุผล
+/// ที่ธงถูกอ่านในตัวป้อนพิกเซล ไม่ใช่แค่ระหว่างแถบ
+pub struct ExportJob {
+    cancel: Arc<AtomicBool>,
+    done: crossbeam_channel::Receiver<Result<ExportStats, ExportJobError>>,
+    /// แถบที่เขียนไปแล้ว — worker เขียน UI อ่าน
+    progress: Arc<AtomicU32>,
+    bands: u32,
+    started: std::time::Instant,
+    /// ชื่อไฟล์ที่กำลังเขียน (ไว้ทำข้อความบอกผู้ใช้)
+    name: String,
+}
+
+impl ExportJob {
+    /// ยิงงาน export ลง worker แล้วคืนทันที
+    ///
+    /// ★ เธรดนี้ **ไม่ถูก join** ด้วยเหตุผลเดียวกับ dialog: ปิดโปรแกรมทั้งที่
+    /// export ยังไม่จบ ต้องไม่ทำให้การปิดค้าง · `Receiver` ที่ถูก drop ทำให้
+    /// `send` ฝั่งโน้นล้มเงียบ ๆ ซึ่งเป็นพฤติกรรมที่ต้องการพอดี
+    ///
+    /// # Errors
+    /// [`ExportJobError`] เมื่อสร้างเธรดไม่ได้ หรือคำขอไม่ผ่านด่านตั้งแต่ต้น
+    pub fn spawn(
+        gpu: OwnedGpu,
+        batches: Vec<OwnedBatch>,
+        request: ExportRequest,
+        rename: RenameFn,
+        waker: Option<refx_platform::window::Waker>,
+    ) -> Result<Self, ExportJobError> {
+        let OwnedGpu {
+            device,
+            queue,
+            allocator,
+            atlas_layout,
+        } = gpu;
+        // ★★ ตรวจสิ่งที่ตอบได้ทันที **ก่อนสร้างเธรด** — ผู้ใช้ที่พิมพ์ชื่อไฟล์ผิด
+        //    ต้องเห็น error ในเฟรมเดียวกับที่กด ไม่ใช่หลังจากหมุนไปครึ่งวินาที
+        if batches.iter().map(|b| b.instances.len()).sum::<usize>() == 0 {
+            return Err(ExportJobError::NothingToExport);
+        }
+        refx_io::validate::validate_save_target(&request.path)?;
+        let bands = BandPlan::new(request.size.0, request.size.1)?.band_count();
+
+        let cancel = Arc::new(AtomicBool::new(false));
+        let progress = Arc::new(AtomicU32::new(0));
+        let (tx, done) = crossbeam_channel::bounded(1);
+        let name = request
+            .path
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+
+        let worker = {
+            let (cancel, progress) = (Arc::clone(&cancel), Arc::clone(&progress));
+            let tick = waker.clone();
+            std::thread::Builder::new()
+                .name("refx-export".to_owned())
+                .spawn(move || {
+                    let borrowed: Vec<DrawBatch<'_>> = batches
+                        .iter()
+                        .map(|batch| DrawBatch {
+                            bind_group: &batch.bind_group,
+                            instances: &batch.instances,
+                        })
+                        .collect();
+                    let result = export_board(
+                        GpuAccess {
+                            device: &device,
+                            queue: &queue,
+                            allocator: &allocator,
+                            atlas_layout: &atlas_layout,
+                        },
+                        &borrowed,
+                        &request,
+                        JobSignals {
+                            cancel: &cancel,
+                            progress: Some(&progress),
+                            waker: tick.as_ref(),
+                        },
+                        rename,
+                    );
+                    // ★ ปักหมุดว่า "จบแล้ว" ไม่ว่าจะสำเร็จหรือไม่ — แถบความคืบหน้า
+                    //   ที่ค้างอยู่ที่ 30/32 หลังงานล้ม อ่านได้ว่าโปรแกรมค้าง
+                    progress.store(u32::MAX, Ordering::Release);
+                    // ★★★ ปลุก event loop ที่หลับอยู่ ไม่งั้นผู้ใช้จะไม่รู้ว่างานจบ
+                    //     จนกว่าจะขยับเมาส์ (เงื่อนไขข้อ 2 ของ `docs/04 §1`)
+                    if let Some(waker) = &waker {
+                        waker.wake();
+                    }
+                    let _ = tx.send(result);
+                })
+        };
+        if let Err(err) = worker {
+            tracing::error!(%err, "cannot spawn the export worker");
+            return Err(ExportJobError::NoWorker);
+        }
+
+        Ok(Self {
+            cancel,
+            done,
+            progress,
+            bands,
+            started: std::time::Instant::now(),
+            name,
+        })
+    }
+
+    /// ขอให้หยุด — **ไม่บล็อก** · ผลจริงมาถึงทาง [`Self::finished`] เหมือนเดิม
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::Release);
+    }
+
+    /// ผู้ใช้กดยกเลิกไปแล้วหรือยัง (ไว้เปลี่ยนข้อความบนปุ่ม)
+    #[must_use]
+    pub fn cancelling(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+
+    /// แถบที่เขียนไปแล้ว / ทั้งหมด
+    #[must_use]
+    pub fn progress(&self) -> (u32, u32) {
+        (
+            self.progress.load(Ordering::Acquire).min(self.bands),
+            self.bands,
+        )
+    }
+
+    /// ชื่อไฟล์ที่กำลังเขียน
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// เวลาที่ใช้ไปตั้งแต่เริ่ม
+    #[must_use]
+    pub fn elapsed(&self) -> std::time::Duration {
+        self.started.elapsed()
+    }
+
+    /// ★ **ไม่บล็อก** — `None` = ยังทำอยู่
+    ///
+    /// เรียกได้ทุกเฟรมโดยไม่มีราคา · ห้ามใช้ `recv()` ที่นี่เด็ดขาด (I-2)
+    pub fn finished(&self) -> Option<Result<ExportStats, ExportJobError>> {
+        match self.done.try_recv() {
+            Ok(result) => Some(result),
+            // ★ เธรดตายโดยไม่ส่งอะไรมา (panic ระหว่างทาง) = ล้ม ไม่ใช่ค้างตลอดกาล
+            Err(crossbeam_channel::TryRecvError::Disconnected) => Some(Err(ExportJobError::Lost)),
+            Err(crossbeam_channel::TryRecvError::Empty) => None,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-    use std::sync::Arc;
-    use std::sync::atomic::Ordering;
-
-    use refx_core::export::PEAK_CEILING;
     use refx_core::glam::Vec2;
     use refx_render::atlas::ThumbnailAtlas;
     use refx_render::instance::{QuadInstance, pack_tint};
@@ -332,7 +561,7 @@ mod tests {
                     region: Rect::from_corners(Vec2::ZERO, Vec2::new(256.0, 256.0)),
                     background: [0, 0, 0, 0],
                 },
-                &AtomicBool::new(false),
+                JobSignals::just_cancel(&AtomicBool::new(false)),
                 plain_rename,
             )
             .unwrap_err();
@@ -341,129 +570,27 @@ mod tests {
         assert!(!path.exists(), "เขียนไฟล์ทั้งที่ไม่มีอะไรให้ export");
     }
 
-    /// ★★★ **negative control ของการตัดสินใจ "tile ทรงแถบ ไม่ใช่จตุรัส"**
+    /// ★★★ **`NUL.png` ต้องถูกปฏิเสธ ไม่ใช่ "สำเร็จ" แบบเงียบ**
     ///
-    /// สเปกรุ่นแรกเขียนว่า render ทีละ 4096×4096 · ข้อนี้พิสูจน์ว่าทางนั้น
-    /// **พังจริง**: บัฟเฟอร์อ่านกลับของ tile จตุรัสใบเดียวกิน RSS มากกว่าเพดาน
-    /// ของ export ทั้งงาน · ถ้าไม่มีข้อนี้ เราจะมีแค่คำอธิบายว่าทำไมถึงเลือก
-    /// ทรงแถบ ไม่มีหลักฐาน (`docs/08 §3.9` ข้อ 1)
+    /// Windows เขียนลง `NUL.png` **สำเร็จแล้วทิ้งข้อมูล** → ผู้ใช้เชื่อว่า export
+    /// แล้วแต่ไม่มีอะไรเลย = งานหายแบบที่ I-3 ห้าม · ด่านต้องอยู่ใน
+    /// [`export_board`] เอง ไม่ใช่ในตัวเรียก
     #[test]
-    fn a_square_tile_readback_really_does_blow_the_ceiling() {
-        let Some((device, _queue, _allocator, _atlas, _instance)) = scene() else {
-            eprintln!("ข้าม: ไม่มี GPU adapter");
-            return;
-        };
-        let Some(before) = refx_platform::memory::process_memory() else {
-            eprintln!("ข้าม: แพลตฟอร์มนี้ยังตอบ RSS ไม่ได้");
-            return;
-        };
-
-        // tile จตุรัส 4096² RGBA — บัฟเฟอร์อ่านกลับ **ใบเดียว** ของทางที่ไม่ได้เลือก
-        let square = u64::from(refx_core::export::TILE_WIDTH)
-            * u64::from(refx_core::export::TILE_WIDTH)
-            * u64::from(refx_core::export::BYTES_PER_PIXEL);
-        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("refx-nc-square-tile"),
-            size: square,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: true,
-        });
-        // ★ เขียนลงไปจริงเพื่อให้มันเข้า working set ไม่ใช่แค่ถูกจองไว้เฉย ๆ
-        //   (`BufferViewMut` เขียนได้อย่างเดียว อ่านไม่ได้ — หน่วยความจำที่ map
-        //    มาอาจเป็นแบบ write-combining ซึ่งการอ่านกลับช้ามากจน wgpu กันไว้)
-        {
-            let mut mapped = buffer.slice(..).get_mapped_range_mut();
-            let page = vec![1u8; 1 << 20];
-            for chunk in 0..(square / (1 << 20)) {
-                let at = chunk * (1 << 20);
-                mapped
-                    .slice(at as usize..(at as usize + page.len()))
-                    .copy_from_slice(&page);
-            }
-        }
-        let after = refx_platform::memory::process_memory().unwrap().current;
-        let growth = after.saturating_sub(before.current);
-
-        // ทางที่ไม่ได้เลือกต้องถือ **ทั้งสองอย่างพร้อมกัน**: บัฟเฟอร์อ่านกลับของ
-        // tile จตุรัส และบัฟเฟอร์แถบที่ป้อนตัวเข้ารหัส
-        let square_design = growth + refx_core::export::BAND_BUDGET as u64;
-        println!(
-            "NC วิ่งผ่านจริง: บัฟเฟอร์อ่านกลับของ tile จตุรัส 4096² = {} ไบต์ \
-             → RSS +{} ไบต์ · บวกบัฟเฟอร์แถบอีก {} MB = {} MB ซึ่งเกินเพดาน {} MB",
-            square,
-            growth,
-            refx_core::export::BAND_BUDGET >> 20,
-            square_design >> 20,
-            PEAK_CEILING >> 20
-        );
-        assert!(
-            growth >= square * 3 / 4,
-            "NC ไม่แดง — บัฟเฟอร์ {square} ไบต์ควรเข้า working set จริง แต่ RSS ขยับแค่ {growth} \
-             ถ้าวัดไม่เจอ ตัวเลข RSS ของเทสต์ข้างล่างก็เชื่อไม่ได้เหมือนกัน"
-        );
-        assert!(
-            square_design > PEAK_CEILING as u64,
-            "NC ไม่แดง — ทาง tile จตุรัสควรเกินเพดาน แต่รวมแล้วได้แค่ {} MB \
-             ถ้าเป็นแบบนั้นจริง เหตุผลที่เลือกทรงแถบก็ไม่มีหลักฐานรองรับ",
-            square_design >> 20
-        );
-        buffer.unmap();
-    }
-
-    /// ★★★ **ราคาจริงของ export ในหน่วยความจำของโปรเซส**
-    ///
-    /// `docs/07 §6` บังคับข้อนี้ไว้ตรง ๆ: ตัวเลขที่วัดไว้ก่อนหน้าเป็นฝั่ง CPU ล้วน
-    /// **ทางอ่านกลับจาก GPU ยังไม่เคยถูกวัด** — และนั่นคือที่ที่เพดานจะพังจริง
-    /// เพราะ tile จตุรัส 4096² = 67 MB ใหญ่กว่าบัฟเฟอร์แถบทั้งก้อน
-    ///
-    /// ★★ วัดด้วย **เธรดที่คอยอ่าน RSS ระหว่างทาง** ไม่ใช่ค่าก่อน–หลัง
-    /// ยอดดอยเกิดกลางทางแล้วหายไปก่อนเราจะอ่านค่าหลังเสร็จ
-    #[test]
-    fn what_an_export_really_costs_in_process_memory() {
+    fn a_save_target_that_would_silently_swallow_the_file_is_refused() {
         let Some((device, queue, allocator, atlas, _instance)) = scene() else {
             eprintln!("ข้าม: ไม่มี GPU adapter");
             return;
         };
-        if refx_platform::memory::process_memory().is_none() {
-            eprintln!("ข้าม: แพลตฟอร์มนี้ยังตอบ RSS ไม่ได้");
-            return;
-        }
-        let dir = temp_dir("rss");
+        let dir = temp_dir("nul");
+        let instances = quads(Rect::from_corners(Vec2::ZERO, Vec2::new(256.0, 256.0)), 4);
+        let batches = [DrawBatch {
+            bind_group: atlas.bind_group(),
+            instances: &instances,
+        }];
 
-        let run = |side: u32, format: ExportFormat, label: &str| -> u64 {
-            let region = Rect::from_corners(Vec2::ZERO, Vec2::new(side as f32, side as f32));
-            let instances = quads(region, 64);
-            let batches = [DrawBatch {
-                bind_group: atlas.bind_group(),
-                instances: &instances,
-            }];
-            let path = dir.join(format!("{label}-{side}.{}", format.extension()));
-            let request = ExportRequest {
-                path: path.clone(),
-                format,
-                size: (side, side),
-                region,
-                background: [24, 24, 28, 255],
-            };
-
-            let stop = Arc::new(AtomicBool::new(false));
-            let peak = Arc::new(std::sync::atomic::AtomicU64::new(0));
-            let sampler = {
-                let (stop, peak) = (Arc::clone(&stop), Arc::clone(&peak));
-                std::thread::spawn(move || {
-                    while !stop.load(Ordering::Relaxed) {
-                        if let Some(mem) = refx_platform::memory::process_memory() {
-                            peak.fetch_max(mem.current, Ordering::Relaxed);
-                        }
-                        std::thread::sleep(std::time::Duration::from_millis(2));
-                    }
-                })
-            };
-
-            let before = refx_platform::memory::process_memory().unwrap().current;
-            peak.fetch_max(before, Ordering::Relaxed);
-            let start = std::time::Instant::now();
-            let stats = export_board(
+        for evil in ["NUL.png", "nul", "COM1.png"] {
+            let path = dir.join(evil);
+            let err = export_board(
                 GpuAccess {
                     device: &device,
                     queue: &queue,
@@ -471,68 +598,188 @@ mod tests {
                     atlas_layout: atlas.bind_group_layout(),
                 },
                 &batches,
-                &request,
-                &AtomicBool::new(false),
+                &ExportRequest {
+                    path: path.clone(),
+                    format: ExportFormat::Png { transparent: true },
+                    size: (256, 256),
+                    region: Rect::from_corners(Vec2::ZERO, Vec2::new(256.0, 256.0)),
+                    background: [0, 0, 0, 0],
+                },
+                JobSignals::just_cancel(&AtomicBool::new(false)),
                 plain_rename,
             )
-            .unwrap();
-            let elapsed = start.elapsed();
-
-            stop.store(true, Ordering::Relaxed);
-            let _ = sampler.join();
-            let top = peak.load(Ordering::Relaxed);
-            let growth = top.saturating_sub(before);
-
-            println!(
-                "{label} {side}²: RSS {} MB → {} MB (+{} MB) · ไฟล์ {} MB · {} แถบ · {elapsed:?}",
-                before >> 20,
-                top >> 20,
-                growth >> 20,
-                stats.bytes >> 20,
-                stats.bands
-            );
-            let _ = std::fs::remove_file(&path);
-            growth
-        };
-
-        // ★ รอบอุ่นเครื่อง — ครั้งแรกรวมค่าเปิด pipeline/ตัวจัดสรรของ wgpu ไว้ด้วย
-        //   ซึ่งไม่ใช่ราคาของ *ขนาด* ที่ผู้ใช้เลือก
-        run(1024, ExportFormat::Png { transparent: false }, "อุ่นเครื่อง");
-
-        let mut worst = 0u64;
-        for format in [
-            ExportFormat::Png { transparent: false },
-            ExportFormat::Jpeg { quality: 90 },
-        ] {
-            let label = format.name();
-            let at_4k = run(4096, format, label);
-            let at_8k = run(8192, format, label);
-            let at_16k = run(16384, format, label);
-            worst = worst.max(at_4k).max(at_8k).max(at_16k);
-
-            // ★★★ **นี่คือข้อที่ P5-4 มีไว้ทำ**: RAM ต้องไม่ไต่ตามขนาดที่ผู้ใช้เลือก
-            //     16384² มีพิกเซลมากกว่า 4096² ถึง 16 เท่า ถ้า RAM ไต่ตาม
-            //     ส่วนต่างจะเป็นหลัก GB ไม่ใช่หลักสิบ MB
+            .unwrap_err();
             assert!(
-                at_16k <= at_4k + (32 << 20),
-                "{label}: 16384² กิน {} MB ส่วน 4096² กิน {} MB — เพดานไต่ตามขนาด",
-                at_16k >> 20,
-                at_4k >> 20
+                matches!(
+                    err,
+                    ExportJobError::BadTarget(refx_io::validate::SecError::Device)
+                ),
+                "{evil}: ได้ {err:?}"
             );
         }
 
-        let ceiling = (PEAK_CEILING + (32 << 20)) as u64;
+        // ★ negative control ของด่านเดียวกัน: ที่ปกติต้องผ่านได้จริง ไม่งั้น
+        //   ข้อบนพิสูจน์แค่ว่า "ทุกอย่างถูกปฏิเสธ" ซึ่งไม่ใช่สิ่งที่เราต้องการ
+        let fine = dir.join("moodboard.png");
+        export_board(
+            GpuAccess {
+                device: &device,
+                queue: &queue,
+                allocator: &allocator,
+                atlas_layout: atlas.bind_group_layout(),
+            },
+            &batches,
+            &ExportRequest {
+                path: fine.clone(),
+                format: ExportFormat::Png { transparent: true },
+                size: (256, 256),
+                region: Rect::from_corners(Vec2::ZERO, Vec2::new(256.0, 256.0)),
+                background: [0, 0, 0, 0],
+            },
+            JobSignals::just_cancel(&AtomicBool::new(false)),
+            plain_rename,
+        )
+        .expect("ชื่อไฟล์ปกติต้อง export ได้");
+        assert!(fine.exists());
+    }
+
+    /// ★★★ **ปุ่มยกเลิกต้องตอบสนองภายในไม่กี่ร้อย ms ที่ขนาดใหญ่ที่สุด**
+    ///
+    /// `docs/07 §6`: การยกเลิกเกิดที่ **ปลายทาง** ไม่ใช่ที่ลูปของเรา · ข้อนี้คือ
+    /// การวัดว่ากฎนั้นให้ผลจริงเท่าไหร่ · ★ **พิมพ์เวลา ไม่ assert เวลา**
+    /// (`docs/08 §3.9` ข้อ 5b) — สิ่งที่ assert ได้คือ *ผลลัพธ์*: ยกเลิกแล้ว
+    /// ต้องไม่มีไฟล์ปลายทาง และไม่มีไฟล์ครึ่งใบ
+    ///
+    /// ★★ ระหว่างรอ เธรดนี้ (ที่แทน UI thread) **ไม่ถูกบล็อกเลย** — มันวนถาม
+    /// `finished()` ซึ่งเป็น `try_recv` · ถ้าใครเปลี่ยนไปใช้ `recv()` ข้อนี้จะยัง
+    /// เขียวแต่แอปจริงจะค้าง จึงนับจำนวนรอบที่วนได้ไว้เป็นหลักฐานด้วย
+    #[test]
+    fn cancelling_a_big_export_stops_within_a_moment_and_leaves_no_file() {
+        let Some((device, queue, allocator, atlas, _instance)) = scene() else {
+            eprintln!("ข้าม: ไม่มี GPU adapter");
+            return;
+        };
+        let dir = temp_dir("cancel-job");
+        let path = dir.join("huge.jpg");
+        let region = Rect::from_corners(Vec2::ZERO, Vec2::new(16384.0, 16384.0));
+        let job = ExportJob::spawn(
+            OwnedGpu {
+                device: device.clone(),
+                queue: queue.clone(),
+                allocator: allocator.clone(),
+                atlas_layout: atlas.bind_group_layout().clone(),
+            },
+            vec![OwnedBatch {
+                bind_group: atlas.bind_group().clone(),
+                instances: quads(region, 64),
+            }],
+            ExportRequest {
+                path: path.clone(),
+                format: ExportFormat::Jpeg { quality: 90 },
+                size: (16384, 16384),
+                region,
+                background: [24, 24, 28, 255],
+            },
+            plain_rename,
+            // ★ ไม่มีตัวปลุกในเทสต์ — ไม่มี event loop ให้ปลุก
+            None,
+        )
+        .expect("ยิงงานไม่สำเร็จ");
+
+        // ★ ปล่อยให้มันทำงานไปก่อน แล้วค่อยกดยกเลิก — ยกเลิกตั้งแต่ยังไม่เริ่ม
+        //   เป็นคนละเส้นทาง (มีเทสต์ของมันเองใน `refx-asset`)
+        let mut spins = 0u32;
+        while job.progress().0 == 0 && job.elapsed() < std::time::Duration::from_secs(20) {
+            spins += 1;
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        let (done, total) = job.progress();
+        assert!(done > 0, "งานยังไม่ทันเริ่มก็หมดเวลา");
+
+        let pressed = std::time::Instant::now();
+        job.cancel();
+        assert!(job.cancelling());
+
+        let outcome = loop {
+            if let Some(result) = job.finished() {
+                break result;
+            }
+            spins += 1;
+            assert!(
+                pressed.elapsed() < std::time::Duration::from_secs(30),
+                "กดยกเลิกแล้วไม่หยุดสักที"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        };
+        let stopped_in = pressed.elapsed();
+
         println!(
-            "ยอดสูงสุดตลอดการวัด: {} MB (เพดานของเทสต์ {} MB = {} MB ตามสเปก + 32 MB ให้ตัวเข้ารหัส)",
-            worst >> 20,
-            ceiling >> 20,
-            PEAK_CEILING >> 20
+            "16384² JPEG: ทำไป {done}/{total} แถบ แล้วกดยกเลิก → หยุดใน {stopped_in:?} \
+             (เธรดที่รออยู่วนได้ {spins} รอบ = ไม่เคยถูกบล็อก)"
         );
         assert!(
-            worst <= ceiling,
-            "export กิน RSS สูงสุด {} MB เกินเพดาน {} MB",
-            worst >> 20,
-            ceiling >> 20
+            matches!(
+                outcome,
+                Err(ExportJobError::Write(
+                    refx_asset::export::ExportError::Cancelled
+                ))
+            ),
+            "ได้ {outcome:?}"
         );
+        assert!(!path.exists(), "ยกเลิกแล้วยังมีไฟล์ปลายทาง");
+        assert!(!dir.join("huge.jpg.tmp").exists(), "ยกเลิกแล้วเหลือไฟล์ครึ่งใบ");
+        assert!(spins > 10, "วนได้แค่ {spins} รอบ — เธรดถูกบล็อกอยู่หรือเปล่า");
+    }
+
+    /// งานที่ปล่อยให้จบต้องได้ไฟล์จริง และขนาดต้องตรงกับที่รายงาน
+    #[test]
+    fn a_job_that_runs_to_completion_reports_the_file_it_wrote() {
+        let Some((device, queue, allocator, atlas, _instance)) = scene() else {
+            eprintln!("ข้าม: ไม่มี GPU adapter");
+            return;
+        };
+        let dir = temp_dir("job-done");
+        let path = dir.join("board.png");
+        let region = Rect::from_corners(Vec2::ZERO, Vec2::new(1024.0, 768.0));
+        let job = ExportJob::spawn(
+            OwnedGpu {
+                device: device.clone(),
+                queue: queue.clone(),
+                allocator: allocator.clone(),
+                atlas_layout: atlas.bind_group_layout().clone(),
+            },
+            vec![OwnedBatch {
+                bind_group: atlas.bind_group().clone(),
+                instances: quads(region, 8),
+            }],
+            ExportRequest {
+                path: path.clone(),
+                format: ExportFormat::Png { transparent: false },
+                size: (1024, 768),
+                region,
+                background: [255, 255, 255, 255],
+            },
+            plain_rename,
+            // ★ ไม่มีตัวปลุกในเทสต์ — ไม่มี event loop ให้ปลุก
+            None,
+        )
+        .unwrap();
+        assert_eq!(job.name(), "board.png");
+
+        let stats = loop {
+            if let Some(result) = job.finished() {
+                break result.expect("export ล้ม");
+            }
+            assert!(
+                job.elapsed() < std::time::Duration::from_secs(30),
+                "ไม่จบสักที"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        };
+        assert!(stats.bytes > 0);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), stats.bytes);
+        assert_eq!(job.progress(), (stats.bands, stats.bands), "แถบไม่ครบ");
+        // ★ ถามซ้ำหลังรับผลไปแล้วต้องไม่ค้าง — UI ถามทุกเฟรม
+        assert!(matches!(job.finished(), Some(Err(ExportJobError::Lost))));
     }
 }

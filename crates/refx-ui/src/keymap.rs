@@ -141,6 +141,9 @@ pub enum Action {
     ClearSelection,
     /// `F` / `1` / `0` — ระดับซูม
     Zoom(ZoomRequest),
+
+    /// `Ctrl+E` — เปิดกล่องส่งออกภาพ (P5-4 · `docs/07 §6`)
+    Export,
 }
 
 impl Action {
@@ -179,6 +182,7 @@ impl Action {
             Self::ToggleMode => "toggle-mode",
             Self::SelectAll => "select-all",
             Self::ClearSelection => "clear-selection",
+            Self::Export => "export",
             Self::Zoom(ZoomRequest::Actual) => "zoom-100",
             Self::Zoom(ZoomRequest::FitSelection) => "zoom-fit-selection",
             Self::Zoom(ZoomRequest::FitBoard) => "zoom-fit",
@@ -216,6 +220,7 @@ impl Action {
         Self::ToggleMode,
         Self::SelectAll,
         Self::ClearSelection,
+        Self::Export,
         Self::Zoom(ZoomRequest::Actual),
         Self::Zoom(ZoomRequest::FitSelection),
         Self::Zoom(ZoomRequest::FitBoard),
@@ -682,6 +687,12 @@ static BUILTIN: &[Binding] = &[
     //   ความหมายต้องเงียบ ไม่ใช่ทำอะไรที่ผู้ใช้ไม่ได้ขอ
     ch('o', Mods::new(Down, Up, Up), A::OpenBoard, Once),
     ch('\u{f}', Mods::new(Down, Up, Up), A::OpenBoard, Once),
+    // ---- ★ ส่งออกภาพ (Ctrl+E) — P5-4 ----
+    //
+    // ★★ `Once` เสมอ: กดค้าง = เปิดกล่อง export ซ้ำ ๆ ทุกเฟรม ซึ่งนอกจากไร้ผล
+    //    แล้วยังทำให้ค่าที่ผู้ใช้เพิ่งปรับในกล่องถูกรีเซ็ตทิ้งทุกเฟรม
+    ch('e', Mods::new(Down, Up, Up), A::Export, Once),
+    ch('\u{5}', Mods::new(Down, Up, Up), A::Export, Once),
     // ---- แท็บ (Ctrl+T / Ctrl+W / Ctrl+Tab) ----
     //
     // ★ `Ctrl+Tab` shift เป็น `Either` — โค้ดเดิมคืน `Next` ก่อนจะไปถึงด่าน shift
@@ -1110,7 +1121,7 @@ mod tests {
         // 6 ประวัติ · 2 วาง · 2 ลบ · 6 ย้ายชั้น · 5 เครื่องมือ · 2 การแสดงผล ·
         // 4 กลุ่ม · 4 บันทึก · 2 เปิด · 5 แท็บ  = 38 (ก้อน a)
         // + ก้อน c: Tab · Ctrl+A (+alias) · Esc · F · 1 · 0 = 7
-        assert_eq!(table.len(), 45, "จำนวน binding เปลี่ยน — เพิ่มคีย์ต้องมาแก้ที่นี่ด้วย");
+        assert_eq!(table.len(), 47, "จำนวน binding เปลี่ยน — เพิ่มคีย์ต้องมาแก้ที่นี่ด้วย");
 
         // ★★ หกคีย์ที่ `docs/03 §5` สั่งไว้ตั้งแต่วันแรก **และไม่เคยมีจนถึงก้อน c**
         //    ตรวจว่ามันเดินผ่านเส้นทางเดียวกับที่ผู้ใช้กดจริง ไม่ใช่แค่มีอยู่ในตาราง
@@ -1323,7 +1334,7 @@ mod tests {
         let before = names.len();
         names.dedup();
         assert_eq!(before, names.len(), "มีชื่อ action ซ้ำกัน");
-        assert_eq!(before, 29, "จำนวน action เปลี่ยน — เพิ่ม action ต้องมาแก้ที่นี่ด้วย");
+        assert_eq!(before, 30, "จำนวน action เปลี่ยน — เพิ่ม action ต้องมาแก้ที่นี่ด้วย");
 
         // ★ ทุก action ในตารางค่าปริยายต้องเขียนลงไฟล์ได้ ไม่งั้นผู้ใช้ทำ
         //   keymap.toml ที่ได้พฤติกรรมเท่าค่าปริยายไม่ได้เลย
@@ -1408,7 +1419,7 @@ mod tests {
             .iter()
             .filter(|b| b.chord.display().is_none())
             .count();
-        assert_eq!(hidden, 12, "จำนวน alias อักขระควบคุมเปลี่ยนไป");
+        assert_eq!(hidden, 13, "จำนวน alias อักขระควบคุมเปลี่ยนไป");
 
         for binding in builtin().bindings() {
             if let Some(shown) = binding.chord.display() {

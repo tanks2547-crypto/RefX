@@ -286,6 +286,109 @@ pub enum MetaRequest {
     RemoveTag(String),
 }
 
+/// รูปแบบไฟล์ที่กล่อง export ให้เลือก (P5-4)
+///
+/// ★ **สำเนาของ `refx_asset::export::ExportFormat` โดยตั้งใจ** — ตัวโน้นถือ
+/// ค่าที่ตัวเข้ารหัสต้องใช้ (คุณภาพ · โปร่งใส) ส่วนตัวนี้ถือแค่ *ปุ่มที่ถูกกด*
+/// ค่าที่เหลือมีช่องของตัวเองใน [`ExportView`] เพราะผู้ใช้ปรับมันแยกกัน
+/// และต้องไม่หายเมื่อสลับรูปแบบไปกลับ
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExportKind {
+    /// PNG — ไม่สูญเสีย · โปร่งใสได้
+    #[default]
+    Png,
+    /// JPEG — ไฟล์เล็กกว่ามาก แต่สูญเสียและไม่มี alpha
+    Jpeg,
+}
+
+/// สิ่งที่กล่อง export แสดงและให้ผู้ใช้ปรับ (P5-4 · `docs/07 §6`)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportView {
+    /// ★★ **ด้านที่ยาวที่สุดของภาพปลายทาง — ค่าเดียวที่ผู้ใช้ปรับ**
+    ///
+    /// ให้ปรับกว้างกับสูงแยกกันได้ = ให้เขาทำภาพที่ยืดผิดสัดส่วนได้โดยไม่ตั้งใจ
+    /// ซึ่งไม่มีใครอยากได้ · สัดส่วนมาจาก board ชั้น `app` เป็นคนคำนวณอีกด้านให้
+    pub long_side: u32,
+    /// ความกว้างที่จะได้จริง — **ค่าสำหรับแสดง** ชั้น `app` เป็นคนเติม
+    pub width: u32,
+    /// ความสูงที่จะได้จริง — ค่าสำหรับแสดง
+    pub height: u32,
+    /// ประมาณขนาดไฟล์ (ไบต์) — ค่าสำหรับแสดง
+    pub estimate: u64,
+    /// รูปแบบที่เลือกอยู่
+    pub kind: ExportKind,
+    /// PNG: เก็บพื้นโปร่งใสไหม
+    pub transparent: bool,
+    /// JPEG: คุณภาพ 1..=100
+    pub quality: u8,
+    /// สีพื้นหลัง sRGB — JPEG ไม่มี alpha จึงต้องมีเสมอ
+    pub background: [u8; 3],
+    /// จำนวน item ที่จะถูกวาด
+    pub items: usize,
+    /// ★★★ จำนวนใบที่หาไฟล์ไม่เจอ — **ต้องเตือนก่อนกดจริง** (`docs/07 §6`)
+    pub missing: usize,
+    /// ชื่อไฟล์ปลายทางที่เลือกไว้ — `None` = ยังไม่ได้เลือก
+    pub target: Option<String>,
+    /// ไฟล์ปลายทางมีอยู่แล้ว → ต้องถามก่อนทับ (`docs/07 §6` ข้อ 4)
+    pub overwrite: bool,
+    /// กำลังรอผู้ใช้เลือกไฟล์อยู่ (กล่องของ OS เปิดค้าง)
+    pub choosing: bool,
+    /// เหตุผลที่ export ล่าสุดไม่สำเร็จ (แปลแล้ว) — `None` = ไม่มีอะไรผิด
+    pub problem: Option<String>,
+}
+
+impl Default for ExportView {
+    fn default() -> Self {
+        Self {
+            long_side: 2048,
+            width: 2048,
+            height: 2048,
+            estimate: 0,
+            kind: ExportKind::default(),
+            transparent: false,
+            quality: 90,
+            // ★ ขาวเป็นค่าปริยาย ไม่ใช่ดำ — นักวาดส่ง mood board ไปให้คนอื่นดู
+            //   บนพื้นขาวเป็นส่วนใหญ่ และพื้นดำที่ไม่ได้ตั้งใจคือสิ่งที่
+            //   `docs/07 §6` เตือนไว้ตรง ๆ
+            background: [255, 255, 255],
+            items: 0,
+            missing: 0,
+            target: None,
+            overwrite: false,
+            choosing: false,
+            problem: None,
+        }
+    }
+}
+
+/// สิ่งที่ผู้ใช้ขอให้ทำกับ export ในเฟรมนี้ — **`None` = ไม่ได้แตะอะไร**
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportRequest {
+    /// เปิดกล่องส่งออก (ปุ่มบนแถบเครื่องมือ — เส้นทางเดียวกับ `Ctrl+E`)
+    Open,
+    /// เปิดกล่องของ OS ให้เลือกที่บันทึก
+    ChooseTarget,
+    /// เริ่ม export ได้แล้ว
+    Start,
+    /// ปิดกล่อง (ยังไม่ได้เริ่ม)
+    Close,
+    /// หยุดงานที่กำลังทำอยู่
+    Cancel,
+}
+
+/// ความคืบหน้าของ export ที่กำลังทำอยู่ (P5-4)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExportProgress {
+    /// ชื่อไฟล์ที่กำลังเขียน
+    pub name: String,
+    /// แถบที่เสร็จแล้ว
+    pub done: u32,
+    /// แถบทั้งหมด
+    pub total: u32,
+    /// ผู้ใช้กดยกเลิกไปแล้ว กำลังรอให้มันหยุด
+    pub cancelling: bool,
+}
+
 /// สิ่งที่ปุ่มจัดเรียงขอให้ทำ (P2-9)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArrangeRequest {
@@ -480,6 +583,12 @@ pub struct ShellState {
     pub save_as_prompt: bool,
     /// ผู้ใช้ตอบแล้วในเฟรมนี้ — `None` = ยังไม่ตอบ
     pub save_as_choice: Option<SaveAsChoice>,
+    /// ★★ กล่อง export เปิดอยู่ไหม (P5-4) — `None` = ปิด
+    pub export_prompt: Option<ExportView>,
+    /// ผู้ใช้กดอะไรในกล่อง export เฟรมนี้ — `None` = ไม่ได้แตะ
+    pub export_request: Option<ExportRequest>,
+    /// ★ งาน export ที่กำลังทำอยู่บน worker — `None` = ไม่มีงาน
+    pub export_progress: Option<ExportProgress>,
     /// ★★★ เจองานที่ยังไม่ได้บันทึกจาก session ก่อน (P4-4) — `None` = ไม่มีอะไรค้าง
     pub recover_prompt: Option<RecoverView>,
     /// ผู้ใช้ตอบแล้วในเฟรมนี้ — `None` = ยังไม่ตอบ
@@ -627,7 +736,7 @@ impl LoadProgress {
 }
 
 /// แปลงไบต์เป็นข้อความสั้น ๆ ที่คนอ่านรู้เรื่อง
-fn human_bytes(bytes: u64) -> String {
+pub(crate) fn human_bytes(bytes: u64) -> String {
     const MB: u64 = 1 << 20;
     const KB: u64 = 1 << 10;
     if bytes >= MB {
@@ -696,6 +805,9 @@ impl Default for ShellState {
             storage_request: None,
             save_as_prompt: false,
             save_as_choice: None,
+            export_prompt: None,
+            export_request: None,
+            export_progress: None,
             recover_prompt: None,
             recover_choice: None,
             group_request: None,
@@ -876,6 +988,176 @@ pub fn draw_in_ui(
         });
     }
 
+    // ---- ★★ แถบส่งออกภาพ (P5-4 · `docs/07 §6`) ----
+    //
+    //   วางที่เดียวกับแถบอื่นด้วยเหตุผลเดียวกัน: เห็นแน่ แต่ยังเห็นกระดานข้างหลัง
+    //   ซึ่งสำคัญเป็นพิเศษที่นี่ — ผู้ใช้ต้องเห็นสิ่งที่กำลังจะถูกส่งออก
+    // ★ เก็บคำขอไว้ในตัวแปรก่อน แล้วค่อยเขียนกลับหลังจบบล็อก — `view` ยืม
+    //   `state` แบบ mut อยู่ การเขียน `state.export_request` ข้างในจึงยืมซ้อน
+    let mut export_request = None;
+    if let Some(view) = state.export_prompt.as_mut() {
+        egui::Panel::top("refx-export").show_inside(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new(text::t(lang, Key::ExportTitle)).strong());
+                ui.separator();
+
+                ui.label(text::t(lang, Key::ExportSize));
+                // ★ ปรับ "ด้านยาวสุด" ตัวเดียว — สัดส่วนมาจาก board เสมอ
+                ui.add(
+                    egui::DragValue::new(&mut view.long_side)
+                        .speed(16.0)
+                        .range(64..=refx_core::export::MAX_SIDE),
+                );
+                ui.label(text::fill(
+                    lang,
+                    Template::ExportPixels,
+                    &[
+                        ("w", &view.width.to_string()),
+                        ("h", &view.height.to_string()),
+                    ],
+                ));
+                ui.label(text::fill(
+                    lang,
+                    Template::ExportEstimate,
+                    &[("size", &human_bytes(view.estimate))],
+                ));
+
+                ui.separator();
+                ui.label(text::t(lang, Key::ExportFormat));
+                if ui
+                    .selectable_label(view.kind == ExportKind::Png, text::t(lang, Key::ExportPng))
+                    .on_hover_text(text::t(lang, Key::ExportPngHint))
+                    .clicked()
+                {
+                    view.kind = ExportKind::Png;
+                }
+                if ui
+                    .selectable_label(
+                        view.kind == ExportKind::Jpeg,
+                        text::t(lang, Key::ExportJpeg),
+                    )
+                    .on_hover_text(text::t(lang, Key::ExportJpegHint))
+                    .clicked()
+                {
+                    view.kind = ExportKind::Jpeg;
+                }
+
+                match view.kind {
+                    // ★ ช่องติ๊ก "โปร่งใส" มีเฉพาะ PNG — JPEG ไม่มี alpha
+                    //   การแสดงตัวเลือกที่ไม่มีผลคือการโกหกผู้ใช้
+                    ExportKind::Png => {
+                        ui.checkbox(&mut view.transparent, text::t(lang, Key::ExportTransparent));
+                    }
+                    ExportKind::Jpeg => {
+                        ui.label(text::t(lang, Key::ExportQuality));
+                        ui.add(egui::DragValue::new(&mut view.quality).range(1..=100));
+                    }
+                }
+                // ★★ สีพื้นยังต้องเลือกได้แม้ตอนติ๊กโปร่งใส — ภาพที่มีส่วนโปร่ง
+                //    บางส่วนยังต้องรู้ว่าอีกส่วนผสมลงสีอะไร
+                ui.label(text::t(lang, Key::ExportBackground));
+                ui.color_edit_button_srgb(&mut view.background);
+            });
+
+            ui.horizontal_wrapped(|ui| {
+                if view.choosing {
+                    ui.label(text::t(lang, Key::ExportChoosing));
+                } else if ui.button(text::t(lang, Key::ExportChoose)).clicked() {
+                    export_request = Some(ExportRequest::ChooseTarget);
+                }
+                if let Some(target) = &view.target {
+                    ui.label(target);
+                }
+                ui.separator();
+
+                // ★★★ ปุ่มเริ่มมีได้ก็ต่อเมื่อรู้แล้วว่าจะเขียนลงไฟล์ไหน —
+                //     ไม่งั้นผู้ใช้จะกด "ส่งออก" แล้วไม่มีอะไรเกิดขึ้น
+                let ready = view.target.is_some() && !view.choosing;
+                if view.overwrite {
+                    // ★★ "ทับไฟล์ที่มีอยู่ = ถามก่อน" (`docs/07 §6` ข้อ 4)
+                    //    ถามด้วยการ **เปลี่ยนสิ่งที่ปุ่มพูด** ไม่ใช่กล่องซ้อนอีกชั้น
+                    //    ที่คนกดผ่านโดยไม่อ่าน
+                    if ui
+                        .add_enabled(
+                            ready,
+                            egui::Button::new(
+                                egui::RichText::new(text::t(lang, Key::ExportOverwrite))
+                                    .color(warn_color(ui)),
+                            ),
+                        )
+                        .on_hover_text(text::t(lang, Key::ExportOverwriteHint))
+                        .clicked()
+                    {
+                        export_request = Some(ExportRequest::Start);
+                    }
+                } else if ui
+                    .add_enabled(ready, egui::Button::new(text::t(lang, Key::ExportStart)))
+                    .clicked()
+                {
+                    export_request = Some(ExportRequest::Start);
+                }
+                if ui.button(text::t(lang, Key::ExportClose)).clicked() {
+                    export_request = Some(ExportRequest::Close);
+                }
+            });
+
+            // ★★★ **คำเตือน `Missing` ต้องอยู่ก่อนปุ่ม ไม่ใช่หลังจากกดไปแล้ว**
+            //
+            //   export คือสิ่งที่ผู้ใช้ส่งให้คนอื่น · ถ้าภาพหายไปสามใบแล้วรู้ทีหลัง
+            //   คือความเสียหายที่ย้อนไม่ได้ (`docs/07 §6`)
+            if view.missing > 0 {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        egui::RichText::new(text::fill(
+                            lang,
+                            Template::ExportMissingCount,
+                            &[("n", &view.missing.to_string())],
+                        ))
+                        .strong()
+                        .color(warn_color(ui)),
+                    );
+                    ui.label(text::t(lang, Key::ExportMissingWarning));
+                });
+            }
+            if let Some(problem) = &view.problem {
+                ui.label(
+                    egui::RichText::new(problem.as_str())
+                        .strong()
+                        .color(warn_color(ui)),
+                );
+            }
+        });
+    }
+    if export_request.is_some() {
+        state.export_request = export_request;
+    }
+
+    // ---- ★ แถบความคืบหน้าของ export ที่กำลังทำอยู่ (P5-4) ----
+    //
+    //   ★★ **ไม่บล็อกอะไรเลย** — งานอยู่บน worker ผู้ใช้ยังลากภาพ ซูม
+    //   สลับโหมดได้ตามปกติ (I-2 · `docs/07 §6` ข้อ 1)
+    if let Some(progress) = state.export_progress.clone() {
+        egui::Panel::top("refx-export-progress").show_inside(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(text::fill(
+                    lang,
+                    Template::ExportRunning,
+                    &[
+                        ("name", &progress.name),
+                        ("done", &progress.done.to_string()),
+                        ("total", &progress.total.to_string()),
+                    ],
+                ));
+                ui.separator();
+                if progress.cancelling {
+                    ui.label(text::t(lang, Key::ExportCancelling));
+                } else if ui.button(text::t(lang, Key::ExportCancel)).clicked() {
+                    state.export_request = Some(ExportRequest::Cancel);
+                }
+            });
+        });
+    }
+
     // ---- ★★★ แถบกู้คืนงานที่ยังไม่ได้บันทึกจากรอบก่อน (P4-4) ----
     //
     //   วางไว้ที่เดียวกับแถบยืนยันตอนปิด ด้วยเหตุผลเดียวกัน (เห็นแน่ แต่ยัง
@@ -997,6 +1279,21 @@ pub fn draw_in_ui(
                     .clicked()
                 {
                     state.settings_open = !state.settings_open;
+                }
+                // ★★ ปุ่มส่งออก (P5-4) — **ข้อความล้วน ไม่ใช่สัญลักษณ์**
+                //    บทเรียนสามครั้งในไฟล์นี้: สัญลักษณ์ตัวใหม่ทุกตัวคือโอกาส
+                //    ได้สี่เหลี่ยม tofu อีกครั้ง · คำว่า "ส่งออก" อ่านออกแน่นอน
+                //    และเป็นปุ่มที่กดปีละหลายครั้ง ไม่ใช่ทุกนาที จึงไม่เปลืองที่
+                //    ★ ปิดระหว่างมีงานอยู่ — export สองงานพร้อมกันแย่ง VRAM กันเปล่า ๆ
+                if ui
+                    .add_enabled(
+                        state.export_progress.is_none(),
+                        egui::Button::new(text::t(lang, Key::ExportTitle)),
+                    )
+                    .on_hover_text(text::t(lang, Key::ExportHint))
+                    .clicked()
+                {
+                    state.export_request = Some(ExportRequest::Open);
                 }
             });
         });
@@ -2521,6 +2818,13 @@ mod tests {
             close_prompt: _,    // บอกแค่ว่าแถบยืนยันโผล่อยู่ไหม ไม่ใช่คำขอแก้อะไร
             recover_prompt: _,  // เหมือนกัน — แค่ "มีอะไรค้างให้ถามไหม"
             save_as_prompt: _,  // แถบถามโหมดโผล่อยู่ไหม — ไม่ใช่คำขอแก้อะไร
+            // ★★ กล่อง export (P5-4) — **ไม่แตะเอกสารเลยแม้แต่ทางเดียว**
+            //    มันผลิต *ไฟล์ภาพใบใหม่* ไม่ได้แก้ `Board` ไม่แตะธง `dirty`
+            //    และไม่ผ่าน `Command` · ★ ถ้าวันหนึ่งมีคนเพิ่ม "export แล้วจำ
+            //    ค่าที่เลือกไว้ในเอกสาร" ต้องย้ายสามช่องนี้ขึ้นไปกลุ่มบน
+            export_prompt: _,
+            export_request: _,
+            export_progress: _,
             storage: _,         // ★ ตัวบ่งชี้สภาวะของ **ไฟล์** ไม่ใช่ของเอกสารในหน่วยความจำ
             appearance: _,      // ค่าสำหรับแสดงของ inspector
             board_grayscale: _, // สวิตช์การมองเห็นทั้ง board (P2-8) ไม่ลงไฟล์
@@ -3056,6 +3360,23 @@ mod tests {
             // ★ ตัวจับ I-1 โผล่เฉพาะตอนผิดปกติ — ต้องบังคับให้มันถูกวาดที่นี่
             //   ไม่งั้นข้อความของมันจะไม่เคยผ่านประตู tofu เลยจนถึงวันที่อาการเกิด
             quiet_redraws: Some((82, "EguiRepaint")),
+            // ★★★ กล่องส่งออก (P5-4) — **บังคับให้ทุกสถานะที่นาน ๆ โผล่ ถูกวาด**
+            //     (`docs/03 §0`) · คำเตือน `Missing` · ปุ่ม "ทับไฟล์เดิม" ·
+            //     ข้อความ error — สามอย่างนี้ผู้ใช้เห็นเฉพาะวันที่มีอะไรผิด
+            //     ซึ่งเป็นวันที่แย่ที่สุดที่จะเจอสี่เหลี่ยม tofu
+            export_prompt: Some(ExportView {
+                target: Some("moodboard.png".to_owned()),
+                overwrite: true,
+                missing: 3,
+                problem: Some(text::t(Lang::Th, Key::ExportBadTarget).to_owned()),
+                ..ExportView::default()
+            }),
+            export_progress: Some(ExportProgress {
+                name: "moodboard.png".to_owned(),
+                done: 7,
+                total: 32,
+                cancelling: false,
+            }),
             status_warn: true,
             ..ShellState::default()
         };
@@ -3114,6 +3435,19 @@ mod tests {
             drawn.iter().any(|(_, text)| text.contains("EguiRepaint")),
             "ช่องของตัวจับ I-1 ไม่ได้ถูกวาด — ข้อความของมันจะไม่เคยผ่านประตูนี้"
         );
+        // ★★ ยืนยันว่าสามสถานะของกล่องส่งออกถูกวาดจริง ไม่ใช่แค่ตั้งค่าไว้
+        //    (`docs/08 §3.9` ข้อ 1b — input ต้องไปถึงกิ่งที่กำลังตรวจ)
+        for expected in [
+            text::t(Lang::Th, Key::ExportOverwrite),
+            text::t(Lang::Th, Key::ExportMissingWarning),
+            text::t(Lang::Th, Key::ExportBadTarget),
+            text::t(Lang::Th, Key::ExportCancel),
+        ] {
+            assert!(
+                drawn.iter().any(|(_, text)| text.contains(expected)),
+                "{expected:?} ไม่ได้ถูกวาด — ประตูจะเขียวโดยไม่ได้ตรวจมัน"
+            );
+        }
 
         // ★★★ ถามด้วย **ฟอนต์ที่ข้อความท่อนนั้นถูกจัดหน้าด้วยจริง ๆ**
         //

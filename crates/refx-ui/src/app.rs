@@ -495,6 +495,10 @@ enum EscapeTarget {
     CancelSaveAs,
     /// เก็บงานที่กู้ได้ไว้ก่อน — **ไม่ใช่ลบ**
     PostponeRecovery,
+    /// ปิดกล่องส่งออก (ยังไม่ได้เริ่ม) — P5-4
+    CloseExport,
+    /// ★★ หยุด export ที่กำลังทำอยู่ — **ไม่ใช่ปิดหน้าต่างเฉย ๆ**
+    StopExport,
     /// ปิดแผงตั้งค่า
     CloseSettings,
     /// ยกเลิกการเลือก
@@ -521,6 +525,13 @@ fn escape_target(shell: &crate::shell::ShellState, has_selection: bool) -> Escap
         //    (`docs/07 §4`: "ผู้ใช้ที่ไม่แน่ใจต้องไม่ถูกบังคับให้ตัดสินใจ
         //    แบบทำลายข้อมูล") · ปุ่มที่กดพลาดง่ายที่สุดต้องเป็นปุ่มที่ปลอดภัยที่สุด
         EscapeTarget::PostponeRecovery
+    } else if shell.export_progress.is_some() {
+        // ★★★ งานที่กำลังเขียนไฟล์อยู่มาก่อนกล่องตั้งค่า — `Esc` ระหว่าง export
+        //     ต้องหมายถึง "หยุดเถอะ" ซึ่งเป็นสิ่งที่ผู้ใช้ต้องการจริง ๆ ตอนนั้น
+        //     · ปลอดภัยเสมอ: ยกเลิกไม่แตะไฟล์ปลายทางเลย (`docs/07 §6` ข้อ 2-3)
+        EscapeTarget::StopExport
+    } else if shell.export_prompt.is_some() {
+        EscapeTarget::CloseExport
     } else if shell.settings_open {
         EscapeTarget::CloseSettings
     } else if has_selection {
@@ -658,6 +669,43 @@ fn live_view(canvas: Camera, arrange: Camera, mode: Mode) -> refx_core::view::Vi
         canvas,
         arrange,
         mode,
+    }
+}
+
+/// อีกด้านของภาพ export เมื่อรู้ด้านยาวสุดกับสัดส่วน (P5-4)
+///
+/// ★ ผลลัพธ์ **อย่างน้อย 1 จุดเสมอ** — board ที่เรียงเป็นเส้นตรงพอดีให้สัดส่วน 0
+/// ซึ่งจะกลายเป็นภาพสูง 0 จุดที่ `BandPlan` ปฏิเสธ แล้วผู้ใช้จะเห็นแค่ error
+/// ที่เขาไม่รู้ว่าเกิดจากอะไร
+fn scale_side(long: u32, ratio: f32) -> u32 {
+    if !ratio.is_finite() || ratio <= 0.0 {
+        return long;
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        reason = "ค่าถูก clamp เข้าช่วง 1..=MAX_SIDE ทันทีหลังแปลง"
+    )]
+    let side = (long as f32 * ratio).round() as u32;
+    side.clamp(1, refx_core::export::MAX_SIDE)
+}
+
+/// ประมาณขนาดไฟล์ที่จะได้ — **ตัวเลขสำหรับตัดสินใจ ไม่ใช่คำสัญญา**
+///
+/// ★★ อัตราที่ใช้มาจากการวัดจริงตอน P5-4 (`docs/07 §6`): PNG ของภาพที่มี
+/// รายละเอียดแบบภาพถ่ายอยู่ราว 30–40% ของ RGBA ดิบ ส่วน JPEG ขึ้นกับคุณภาพ
+/// · ★ ประมาณ **สูงไว้ก่อน** — ผู้ใช้ที่เห็น "ประมาณ 40 MB" แล้วได้ 25 MB
+/// ไม่เดือดร้อน แต่คนที่เห็น 5 MB แล้วได้ 40 MB บนไดรฟ์ที่เหลือ 10 MB เดือดร้อน
+fn estimate_file_size(width: u32, height: u32, kind: crate::shell::ExportKind, quality: u8) -> u64 {
+    let pixels = u64::from(width) * u64::from(height);
+    match kind {
+        crate::shell::ExportKind::Png => pixels * 4 / 3,
+        crate::shell::ExportKind::Jpeg => {
+            // คุณภาพ 90 ≈ 1 ไบต์ต่อ 3 พิกเซล · ไล่ขึ้นลงแบบเชิงเส้นรอบจุดนั้น
+            let per_1000 = u64::from(quality.clamp(1, 100)) * 4;
+            pixels * per_1000 / 1000
+        }
     }
 }
 
@@ -1766,6 +1814,17 @@ pub struct RefxApp {
     pending_clear_selection: bool,
     /// ผู้ใช้กด `F` / `1` / `0` (P5-3b ก้อน c) — รวบการกดค้างเหมือน `pending_zorder`
     pending_zoom: Option<keymap::ZoomRequest>,
+    /// ผู้ใช้กด `Ctrl+E` — เปิดกล่องส่งออก (P5-4)
+    pending_export: bool,
+    /// กล่องเลือกไฟล์ของ OS ที่เปิดค้างอยู่ — `None` = ไม่ได้เปิด
+    export_target_rx: Option<crossbeam_channel::Receiver<Option<std::path::PathBuf>>>,
+    /// ไฟล์ปลายทางที่ผู้ใช้เลือกไว้แล้ว
+    export_target: Option<std::path::PathBuf>,
+    /// ★★ งาน export ที่กำลังทำอยู่บน worker — `None` = ไม่มีงาน
+    ///
+    /// ★ ตัวเดียวโดยตั้งใจ: export สองงานพร้อมกันแย่ง VRAM กันแล้วทั้งคู่ช้าลง
+    /// โดยไม่มีใครได้อะไรเพิ่ม · ปุ่มถูกปิดระหว่างมีงานอยู่แล้ว
+    export_job: Option<crate::export::ExportJob>,
     /// ผู้ใช้กด `Ctrl+S` / `Ctrl+Shift+S` ในรอบ event ที่ผ่านมา (P4-2)
     pending_save: Option<SaveRequest>,
     /// ★★★ **แท็บทั้งหมดที่เปิดอยู่** — อยู่ที่นี่ **ไม่ใช่ใน [`Gfx`]** (ดู [`Doc`])
@@ -2763,6 +2822,10 @@ impl RefxApp {
             pending_select_all: false,
             pending_clear_selection: false,
             pending_zoom: None,
+            pending_export: false,
+            export_target_rx: None,
+            export_target: None,
+            export_job: None,
             pending_save: None,
             // ★ แท็บเปล่าหนึ่งใบ พร้อม id และ recovery slot ของตัวเองตั้งแต่แรก
             docs: Docs::default(),
@@ -3100,6 +3163,16 @@ impl RefxApp {
     /// TODO(P1-4): worker ต้องปลุก event loop ด้วย `EventLoopProxy` เมื่อมีผลใหม่
     ///   (เงื่อนไขข้อ 2 ใน docs/04 §1) ตอนนี้ผลจะถูกเก็บตอนวาดเฟรมถัดไปเท่านั้น
     fn drain_decode_results(&mut self) -> bool {
+        // ★★★ **ระหว่าง export ห้ามแตะ atlas** — worker กำลังอ่าน texture ใบนั้น
+        //     อยู่ทีละแถบ · การอัปช่องใหม่ทับลงไปกลางทางทำให้ครึ่งบนของภาพที่
+        //     ส่งออกเป็นก่อนอัป และครึ่งล่างเป็นหลังอัป โดยไม่มี error ที่ไหนเลย
+        //
+        //     ★ ผลที่ถูกถอดรหัสแล้ว **ไม่หายไปไหน** — มันรออยู่ในช่องของ pool
+        //     แล้วไหลเข้ามาเองในเฟรมถัดจากที่ export จบ · export กินเวลาไม่กี่วินาที
+        //     ส่วนภาพที่รออยู่ยังขึ้นเป็นช่องสีเด่นตามปกติระหว่างนั้น
+        if self.export_job.is_some() {
+            return false;
+        }
         let Some(assets) = self.assets.as_ref() else {
             return false;
         };
@@ -4495,6 +4568,15 @@ impl RefxApp {
             EscapeTarget::PostponeRecovery => {
                 self.shell.recover_choice = Some(crate::shell::RecoverChoice::Later);
             }
+            EscapeTarget::StopExport => {
+                if let Some(job) = self.export_job.as_ref() {
+                    job.cancel();
+                }
+            }
+            EscapeTarget::CloseExport => {
+                self.shell.export_prompt = None;
+                self.export_target = None;
+            }
             EscapeTarget::CloseSettings => self.shell.settings_open = false,
             EscapeTarget::ClearSelection => {
                 self.docs.active_mut().selection.clear();
@@ -4535,6 +4617,311 @@ impl RefxApp {
             }
         }
         found.then_some(bounds).filter(|rect| rect.is_finite())
+    }
+
+    // ================= ★★★ ส่งออกภาพ (P5-4 · `docs/07 §6`) =================
+
+    /// ขอเฟรมใหม่ถ้ามีหน้าต่างอยู่ — **ไม่ปลุกอะไรเลยถ้าไม่มี** (I-1)
+    fn request_redraw(&self) {
+        if let Some(gfx) = self.gfx.as_ref() {
+            gfx.window.request_redraw();
+        }
+    }
+
+    /// `Ctrl+E` / ปุ่มในเมนู — เปิดกล่องส่งออก
+    ///
+    /// ★★ **ปฏิเสธตั้งแต่ตรงนี้ถ้าไม่มีอะไรให้ส่งออก** ไม่ใช่เปิดกล่องให้ผู้ใช้
+    /// ตั้งค่าไปสามอย่างแล้วค่อยบอกว่าทำไม่ได้ (`docs/07 §6` ข้อ 5)
+    fn open_export_dialog(&mut self) {
+        let lang = self.shell.lang;
+        if Self::fit_bounds(self.docs.active(), keymap::ZoomRequest::FitBoard).is_none() {
+            self.shell.status = text::t(lang, Key::ExportNothing).to_owned();
+            self.shell.status_warn = true;
+            self.request_redraw();
+            return;
+        }
+        // ★ เปิดซ้ำตอนเปิดอยู่แล้ว = ไม่ทำอะไร · ค่าที่ผู้ใช้เพิ่งปรับต้องไม่หาย
+        if self.shell.export_prompt.is_none() {
+            self.shell.export_prompt = Some(crate::shell::ExportView::default());
+            self.export_target = None;
+        }
+        self.request_redraw();
+    }
+
+    /// เติมค่าที่ **คำนวณได้** ลงในกล่อง export ทุกเฟรมที่มันเปิดอยู่
+    ///
+    /// ★★★ ขนาดจริงมาจาก **สัดส่วนของ board** เสมอ — ผู้ใช้ปรับได้แค่ด้านยาวสุด
+    /// การให้ปรับกว้าง/สูงแยกกันคือการเปิดทางให้เขาทำภาพยืดผิดสัดส่วนโดยไม่ตั้งใจ
+    fn refresh_export_view(&mut self) {
+        let Some(bounds) = Self::fit_bounds(self.docs.active(), keymap::ZoomRequest::FitBoard)
+        else {
+            return;
+        };
+        let items = self.docs.active().board.len();
+        let missing = self
+            .docs
+            .active()
+            .board
+            .items_in_z_order()
+            .filter(|(_, item)| matches!(item.kind, refx_core::board::ItemKind::Missing { .. }))
+            .count();
+        let Some(view) = self.shell.export_prompt.as_mut() else {
+            return;
+        };
+
+        let size = bounds.size();
+        let long = view.long_side.clamp(64, refx_core::export::MAX_SIDE).max(1);
+        // ★ ด้านที่สั้นกว่าคำนวณจากสัดส่วน แล้ว clamp ให้อย่างน้อย 1 จุด —
+        //   board ที่เรียงเป็นเส้นตรงพอดีให้ขนาด 0 ในแกนหนึ่งได้จริง
+        let (width, height) = if size.x >= size.y {
+            let ratio = if size.x > 0.0 { size.y / size.x } else { 1.0 };
+            (long, scale_side(long, ratio))
+        } else {
+            let ratio = if size.y > 0.0 { size.x / size.y } else { 1.0 };
+            (scale_side(long, ratio), long)
+        };
+        view.long_side = long;
+        view.width = width;
+        view.height = height;
+        view.items = items;
+        view.missing = missing;
+        view.estimate = estimate_file_size(width, height, view.kind, view.quality);
+    }
+
+    /// ผู้ใช้กดปุ่มอะไรในกล่อง export เฟรมที่แล้ว
+    fn apply_export_request(&mut self) {
+        let Some(request) = self.shell.export_request.take() else {
+            return;
+        };
+        match request {
+            // ★ ปุ่มบนแถบเครื่องมือกับ `Ctrl+E` เดินทางเดียวกันเป๊ะ — ถ้าแยกทาง
+            //   วันหนึ่งจะมีทางหนึ่งที่ลืมตรวจว่า board ว่างหรือเปล่า
+            crate::shell::ExportRequest::Open => self.open_export_dialog(),
+            crate::shell::ExportRequest::Close => {
+                self.shell.export_prompt = None;
+                self.export_target = None;
+            }
+            crate::shell::ExportRequest::ChooseTarget => self.choose_export_target(),
+            crate::shell::ExportRequest::Start => self.start_export(),
+            crate::shell::ExportRequest::Cancel => {
+                if let Some(job) = self.export_job.as_ref() {
+                    job.cancel();
+                }
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// เปิดกล่องของ OS ให้เลือกที่บันทึก — **ไม่บล็อก UI thread** (I-2)
+    fn choose_export_target(&mut self) {
+        let Some(view) = self.shell.export_prompt.as_ref() else {
+            return;
+        };
+        if view.choosing {
+            return;
+        }
+        let extension = match view.kind {
+            crate::shell::ExportKind::Png => "png",
+            crate::shell::ExportKind::Jpeg => "jpg",
+        };
+        // ★ ชื่อที่แนะนำมาจากชื่อเอกสาร — ผู้ใช้ที่ export บ่อยจะได้ไม่ต้องพิมพ์ใหม่
+        let stem = self
+            .docs
+            .active()
+            .path
+            .as_deref()
+            .and_then(std::path::Path::file_stem)
+            .map_or_else(|| "board".to_owned(), |s| s.to_string_lossy().into_owned());
+        let waker = self.waker.clone();
+        self.export_target_rx = Some(refx_platform::dialog::pick_export_location(
+            &format!("{stem}.{extension}"),
+            extension,
+            waker,
+        ));
+        if let Some(view) = self.shell.export_prompt.as_mut() {
+            view.choosing = true;
+            view.problem = None;
+        }
+    }
+
+    /// รับผลจากกล่องของ OS — เรียกทุกเฟรม **ไม่บล็อก**
+    fn poll_export_target(&mut self) {
+        let Some(rx) = self.export_target_rx.as_ref() else {
+            return;
+        };
+        let picked = match rx.try_recv() {
+            Ok(picked) => picked,
+            // ★ ช่องปิดโดยไม่ส่งอะไร = เธรด dialog ตายไป · ต้องเลิกรอ ไม่ใช่ค้าง
+            Err(crossbeam_channel::TryRecvError::Disconnected) => None,
+            Err(crossbeam_channel::TryRecvError::Empty) => return,
+        };
+        self.export_target_rx = None;
+        if let Some(view) = self.shell.export_prompt.as_mut() {
+            view.choosing = false;
+            match &picked {
+                Some(path) => {
+                    view.target = path.file_name().map(|n| n.to_string_lossy().into_owned());
+                    // ★★ "ทับไฟล์ที่มีอยู่ = ถามก่อน" — ตรวจที่นี่ครั้งเดียว
+                    //    แล้วปุ่มจะเปลี่ยนเป็น "ทับไฟล์เดิม" พร้อมสีเตือน
+                    view.overwrite = path.exists();
+                }
+                None => view.target = None,
+            }
+        }
+        self.export_target = picked;
+        self.request_redraw();
+    }
+
+    /// ยิงงาน export ลง worker
+    fn start_export(&mut self) {
+        let lang = self.shell.lang;
+        let (Some(path), Some(view)) = (
+            self.export_target.clone(),
+            self.shell.export_prompt.as_ref(),
+        ) else {
+            return;
+        };
+        let Some(region) = Self::fit_bounds(self.docs.active(), keymap::ZoomRequest::FitBoard)
+        else {
+            return;
+        };
+        let format = match view.kind {
+            crate::shell::ExportKind::Png => refx_asset::export::ExportFormat::Png {
+                transparent: view.transparent,
+            },
+            crate::shell::ExportKind::Jpeg => refx_asset::export::ExportFormat::Jpeg {
+                quality: view.quality,
+            },
+        };
+        let request = crate::export::ExportRequest {
+            path,
+            format,
+            size: (view.width, view.height),
+            region,
+            // ★★★ JPEG ไม่มี alpha · PNG ที่ไม่ติ๊กโปร่งใสก็ต้องทึบ
+            //     `export_board` บังคับ alpha ของ JPEG ให้อีกชั้นหนึ่งด้วย
+            background: [
+                view.background[0],
+                view.background[1],
+                view.background[2],
+                if view.transparent && view.kind == crate::shell::ExportKind::Png {
+                    0
+                } else {
+                    255
+                },
+            ],
+        };
+
+        // ★★★ **ภาพนิ่งของสิ่งที่วาดอยู่ ณ วินาทีที่กด** — ไม่ใช่การยืมสถานะสด
+        //     ผู้ใช้ที่ลากภาพเพิ่มระหว่าง export คาดหวังไฟล์ที่ตรงกับตอนที่กดปุ่ม
+        let Some(gfx) = self.gfx.as_ref() else {
+            return;
+        };
+        let batches = vec![crate::export::OwnedBatch {
+            bind_group: gfx.atlas.bind_group().clone(),
+            instances: gfx.quads.clone(),
+        }];
+        let job = crate::export::ExportJob::spawn(
+            crate::export::OwnedGpu {
+                device: gfx.render.device().clone(),
+                queue: gfx.render.queue().clone(),
+                allocator: gfx.textures.clone(),
+                atlas_layout: gfx.atlas.bind_group_layout().clone(),
+            },
+            batches,
+            request,
+            refx_platform::fsops::rename_durable,
+            self.waker.clone(),
+        );
+        match job {
+            Ok(job) => {
+                let (done, total) = job.progress();
+                self.shell.export_progress = Some(crate::shell::ExportProgress {
+                    name: job.name().to_owned(),
+                    done,
+                    total,
+                    cancelling: false,
+                });
+                self.export_job = Some(job);
+                // กล่องตั้งค่าปิดไปได้แล้ว — แถบความคืบหน้าเข้ามาแทน
+                self.shell.export_prompt = None;
+                self.export_target = None;
+            }
+            Err(err) => self.report_export_failure(lang, &err.to_string(), None),
+        }
+    }
+
+    /// ถามงานที่กำลังทำอยู่ว่าเสร็จหรือยัง — **ไม่บล็อก** เรียกทุกเฟรม
+    fn poll_export_job(&mut self) {
+        let Some(job) = self.export_job.as_ref() else {
+            return;
+        };
+        let (done, total) = job.progress();
+        let cancelling = job.cancelling();
+        let name = job.name().to_owned();
+
+        let Some(outcome) = job.finished() else {
+            // ★ อัปเดตตัวเลขเฉพาะตอนมันขยับจริง — เขียนทุกเฟรมทั้งที่ค่าเท่าเดิม
+            //   จะทำให้เกิดคำขอวาดใหม่ต่อเนื่องซึ่งชน I-1
+            let current = crate::shell::ExportProgress {
+                name,
+                done,
+                total,
+                cancelling,
+            };
+            if self.shell.export_progress.as_ref() != Some(&current) {
+                self.shell.export_progress = Some(current);
+                self.request_redraw();
+            }
+            return;
+        };
+
+        self.export_job = None;
+        self.shell.export_progress = None;
+        let lang = self.shell.lang;
+        match outcome {
+            Ok(stats) => {
+                self.shell.status = text::fill(
+                    lang,
+                    Template::ExportDone,
+                    &[
+                        ("name", &name),
+                        ("size", &crate::shell::human_bytes(stats.bytes)),
+                    ],
+                );
+                self.shell.status_warn = false;
+                tracing::info!(bytes = stats.bytes, bands = stats.bands, "export finished");
+            }
+            Err(crate::export::ExportJobError::Write(
+                refx_asset::export::ExportError::Cancelled,
+            )) => {
+                self.shell.status = text::t(lang, Key::ExportCancelled).to_owned();
+                self.shell.status_warn = false;
+            }
+            Err(err) => self.report_export_failure(lang, &err.to_string(), Some(&name)),
+        }
+        self.request_redraw();
+    }
+
+    /// ข้อความเดียวสำหรับทุกทางที่ export ล้ม — **บอกสิ่งที่ทำได้ต่อเสมอ**
+    fn report_export_failure(&mut self, lang: Lang, reason: &str, name: Option<&str>) {
+        // ★ ที่ที่เขียนไม่ได้มีทางออกที่ชัด (ตั้งชื่อใหม่) จึงบอกทางออกนั้นตรง ๆ
+        //   แทนข้อความของระบบที่ผู้ใช้ทำอะไรกับมันไม่ได้
+        let message = if reason.contains("names a device") {
+            text::t(lang, Key::ExportBadTarget).to_owned()
+        } else {
+            text::fill(
+                lang,
+                Template::ExportFailed,
+                &[("name", name.unwrap_or("-")), ("reason", reason)],
+            )
+        };
+        tracing::error!(%reason, "export failed");
+        if let Some(view) = self.shell.export_prompt.as_mut() {
+            view.problem = Some(message.clone());
+        }
+        self.shell.status = message;
+        self.shell.status_warn = true;
     }
 
     /// `F` / `1` / `0` — ระดับซูม (`docs/03 §5`)
@@ -7397,6 +7784,18 @@ impl AppDelegate for RefxApp {
         if let Some(request) = self.pending_zoom.take() {
             self.apply_zoom(request);
         }
+        // ★★ ส่งออกภาพ (P5-4) — ตามลำดับนี้เสมอ: เปิดกล่อง → รับผลจาก dialog
+        //    ของ OS → ทำตามปุ่มที่กด → เติมค่าที่คำนวณได้ → ถามงานที่ทำอยู่
+        //
+        //    ★ `refresh_export_view` ต้องอยู่ **หลัง** `apply_export_request`
+        //      เพราะการสลับรูปแบบเปลี่ยนตัวเลขประมาณขนาดไฟล์ในเฟรมเดียวกัน
+        if std::mem::take(&mut self.pending_export) {
+            self.open_export_dialog();
+        }
+        self.poll_export_target();
+        self.apply_export_request();
+        self.refresh_export_view();
+        self.poll_export_job();
         // ★ การบันทึก (P4-2) — เก็บผลก่อน แล้วค่อยรับคำสั่งใหม่
         self.poll_save();
         // ★ การเปิดไฟล์ + งานค้างจาก session ก่อน (P4-4) — ลำดับเดียวกับข้างบน
@@ -8363,6 +8762,10 @@ impl AppDelegate for RefxApp {
                         }
                         keymap::Action::Zoom(request) => {
                             self.pending_zoom = Some(request);
+                            true
+                        }
+                        keymap::Action::Export => {
+                            self.pending_export = true;
                             true
                         }
                         // ★★ ตัวเดียวที่ลงมือทันที ไม่ใช่ตั้งคำขอ — และตัวเดียวที่
@@ -9965,7 +10368,7 @@ mod tests {
     #[test]
     fn every_row_in_the_table_reaches_its_own_action() {
         let table = keymap::builtin().bindings();
-        assert_eq!(table.len(), 45, "จำนวน binding เปลี่ยน — เทสต์นี้ต้องยิงให้ครบ");
+        assert_eq!(table.len(), 47, "จำนวน binding เปลี่ยน — เทสต์นี้ต้องยิงให้ครบ");
 
         for binding in table {
             let (logical, modifiers) = event_for(binding);
@@ -10157,6 +10560,56 @@ mod tests {
     /// ผู้ใช้ที่กด `Esc` ตอนมีคำถามค้างอยู่หมายถึง *"ไม่เอาคำถามนี้"* ·
     /// การไปล้าง selection แทนคือการตอบสิ่งที่เขาไม่ได้ถาม ทั้งที่คำถามยังอยู่บนจอ
     ///
+    /// ★★★ **ขนาดที่ export ต้องรักษาสัดส่วนของ board เสมอ**
+    ///
+    /// ผู้ใช้ปรับได้แค่ด้านยาวสุด · ถ้าสูตรผิด ภาพที่ส่งให้คนอื่นจะยืดผิดสัดส่วน
+    /// ซึ่งเป็นข้อผิดที่เห็นทันทีแต่เกิดขึ้นเงียบ ๆ ตอนกด
+    #[test]
+    fn the_export_size_keeps_the_shape_of_the_board() {
+        // จัตุรัส → เท่ากันสองด้าน
+        assert_eq!(scale_side(2048, 1.0), 2048);
+        // กว้าง 2 เท่าของสูง → ด้านสั้นได้ครึ่งหนึ่ง
+        assert_eq!(scale_side(2048, 0.5), 1024);
+        // ★ ปัดเศษ ไม่ใช่ตัดทิ้ง — 1000 × 0.3335 = 333.5 ต้องได้ 334
+        assert_eq!(scale_side(1000, 0.3335), 334);
+        // ★★ board ที่เรียงเป็นเส้นตรงพอดีให้สัดส่วน 0 — ต้องได้ **อย่างน้อย 1 จุด**
+        //    ไม่ใช่ 0 ซึ่ง `BandPlan` จะปฏิเสธแล้วผู้ใช้ไม่รู้ว่าเกิดจากอะไร
+        assert_eq!(scale_side(2048, 0.0), 2048, "สัดส่วนศูนย์ = ไม่รู้ ให้จัตุรัส");
+        assert_eq!(scale_side(2048, f32::NAN), 2048);
+        assert!(scale_side(2048, 0.000_01) >= 1);
+        // ★ ห้ามทะลุเพดานของ `BandPlan` ไม่ว่าสัดส่วนจะบ้าแค่ไหน
+        assert!(scale_side(16384, 1000.0) <= refx_core::export::MAX_SIDE);
+    }
+
+    /// ประมาณขนาดไฟล์ต้องขยับตามสิ่งที่ผู้ใช้ปรับ — ตัวเลขที่ไม่ขยับคือตัวเลข
+    /// ที่ไม่มีประโยชน์และทำให้เขาเชื่อผิด
+    #[test]
+    fn the_size_estimate_moves_with_what_the_user_changes() {
+        use crate::shell::ExportKind;
+        let png = estimate_file_size(4096, 4096, ExportKind::Png, 90);
+        let jpeg = estimate_file_size(4096, 4096, ExportKind::Jpeg, 90);
+        let jpeg_low = estimate_file_size(4096, 4096, ExportKind::Jpeg, 40);
+        println!(
+            "4096²: PNG ~{} · JPEG q90 ~{} · JPEG q40 ~{}",
+            crate::shell::human_bytes(png),
+            crate::shell::human_bytes(jpeg),
+            crate::shell::human_bytes(jpeg_low)
+        );
+        assert!(png > jpeg, "PNG ต้องประมาณว่าใหญ่กว่า JPEG");
+        assert!(jpeg > jpeg_low, "คุณภาพสูงกว่าต้องประมาณว่าไฟล์ใหญ่กว่า");
+        // ใหญ่ขึ้นสี่เท่าของพิกเซล = ประมาณสี่เท่า (คลาดได้ไม่กี่ไบต์จากการหารลงตัว)
+        let bigger = estimate_file_size(8192, 8192, ExportKind::Png, 90);
+        assert!(
+            bigger.abs_diff(png * 4) < 16,
+            "ประมาณต้องเป็นสัดส่วนกับจำนวนพิกเซล: {bigger} vs {}",
+            png * 4
+        );
+        // ★ และต้องไม่ต่ำกว่าความจริงจนพาไปตัดสินใจผิด — PNG ของภาพที่มี
+        //   รายละเอียดจริงวัดได้ราว 30–40% ของ RGBA ดิบ (`docs/07 §6`)
+        let raw = 4096u64 * 4096 * 4;
+        assert!(png >= raw / 4, "ประมาณต่ำเกินไป: {png} จาก RGBA ดิบ {raw}");
+    }
+
     /// ★ ลำดับคือ **ทั้งหมด** ของกฎนี้ และเป็นสิ่งเดียวที่พังได้โดยไม่มีอะไรฟ้อง
     #[test]
     fn escape_closes_what_is_in_the_way_before_it_touches_the_selection() {
@@ -10170,6 +10623,21 @@ mod tests {
         // แผงตั้งค่าเปิดอยู่ → ปิดแผงก่อน **ทั้งที่มีของเลือกอยู่**
         shell.settings_open = true;
         assert_eq!(escape_target(&shell, true), EscapeTarget::CloseSettings);
+
+        // ★★ กล่องส่งออกอยู่เหนือแผงตั้งค่า (P5-4)
+        shell.export_prompt = Some(crate::shell::ExportView::default());
+        assert_eq!(escape_target(&shell, true), EscapeTarget::CloseExport);
+        // ★★★ และงานที่ **กำลังเขียนไฟล์อยู่** มาก่อนทุกอย่างในกลุ่มนี้ —
+        //     `Esc` ตอนนั้นแปลว่า "หยุดเถอะ" ไม่ใช่ "ปิดกล่องตั้งค่า"
+        shell.export_progress = Some(crate::shell::ExportProgress {
+            name: "board.png".to_owned(),
+            done: 3,
+            total: 32,
+            cancelling: false,
+        });
+        assert_eq!(escape_target(&shell, true), EscapeTarget::StopExport);
+        shell.export_progress = None;
+        shell.export_prompt = None;
 
         // ★ แถบถามอยู่เหนือแผงตั้งค่าอีกชั้น
         shell.recover_prompt = Some(crate::shell::RecoverView {

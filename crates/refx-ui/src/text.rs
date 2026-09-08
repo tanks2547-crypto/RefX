@@ -233,6 +233,58 @@ pub enum Key {
     /// `F` / `1` / `0` ในโหมด Arrange — คีย์ซูมเป็นของ Canvas
     ZoomIsCanvasOnly,
 
+    // ---- P5-4: ส่งออกภาพ (`docs/07 §6`) ----
+    /// หัวข้อของกล่อง export
+    ExportTitle,
+    /// ปุ่ม/เมนู "ส่งออกภาพ"
+    ExportHint,
+    /// ป้ายช่องขนาด
+    ExportSize,
+    /// ป้ายกลุ่มปุ่มเลือกรูปแบบ
+    ExportFormat,
+    /// ปุ่มเลือก PNG
+    ExportPng,
+    /// คำอธิบาย PNG
+    ExportPngHint,
+    /// ปุ่มเลือก JPEG
+    ExportJpeg,
+    /// คำอธิบาย JPEG
+    ExportJpegHint,
+    /// ช่องติ๊ก "พื้นโปร่งใส"
+    ExportTransparent,
+    /// ป้ายสไลเดอร์คุณภาพ
+    ExportQuality,
+    /// ป้ายสีพื้นหลัง
+    ExportBackground,
+    /// ปุ่มเลือกที่บันทึก
+    ExportChoose,
+    /// กำลังรอผู้ใช้เลือกไฟล์
+    ExportChoosing,
+    /// ปุ่มเริ่ม export
+    ExportStart,
+    /// ปุ่มเริ่ม export ทับไฟล์เดิม
+    ExportOverwrite,
+    /// คำอธิบายปุ่มทับไฟล์เดิม
+    ExportOverwriteHint,
+    /// ปุ่มปิดกล่องส่งออกโดยยังไม่ได้เริ่ม
+    ///
+    /// ★ **ไม่ใช้ `CloseCancel` ซ้ำ** — ข้อความของมันคือ "ทำงานต่อ" ซึ่งเป็น
+    /// คำตอบของคำถาม "จะปิดทั้งที่ยังไม่บันทึกไหม" · อ่านบนกล่องส่งออกแล้ว
+    /// ไม่ได้ความ (เห็นบนแอปจริงตอน P5-4 ครึ่งหลัง)
+    ExportClose,
+    /// ปุ่มยกเลิกงานที่กำลังทำอยู่
+    ExportCancel,
+    /// กดยกเลิกแล้ว กำลังรอให้หยุด
+    ExportCancelling,
+    /// export ถูกยกเลิกแล้ว — ไฟล์เดิมไม่ถูกแตะ
+    ExportCancelled,
+    /// board ว่าง ไม่มีอะไรให้ส่งออก
+    ExportNothing,
+    /// ที่ที่เลือกไว้เขียนไม่ได้ (ชื่ออุปกรณ์ / device namespace)
+    ExportBadTarget,
+    /// ★★★ เตือนว่ามีภาพที่หาไฟล์ไม่เจอ **ก่อน**กดจริง
+    ExportMissingWarning,
+
     // ---- P4-2: บันทึกไฟล์ ----
     /// กำลังให้ผู้ใช้เลือกที่เก็บ
     SaveChoosing,
@@ -578,6 +630,36 @@ fn en(key: Key) -> &'static str {
         Key::NothingToFit => "Nothing to fit — the board is empty",
         Key::ZoomIsCanvasOnly => "Zoom shortcuts belong to Canvas mode — press Tab to switch",
 
+        Key::ExportTitle => "Export image",
+        Key::ExportHint => "Export the board as a PNG or JPEG file",
+        Key::ExportSize => "Size",
+        Key::ExportFormat => "Format",
+        Key::ExportPng => "PNG",
+        Key::ExportPngHint => "Lossless, larger file, can keep a transparent background",
+        Key::ExportJpeg => "JPEG",
+        Key::ExportJpegHint => "Much smaller file, slight quality loss, no transparency",
+        Key::ExportTransparent => "Transparent background",
+        Key::ExportQuality => "Quality",
+        Key::ExportBackground => "Background",
+        Key::ExportChoose => "Choose file...",
+        Key::ExportChoosing => "Waiting for you to choose where to save",
+        Key::ExportStart => "Export",
+        Key::ExportOverwrite => "Replace the existing file",
+        Key::ExportOverwriteHint => {
+            "A file with this name is already there — exporting replaces it"
+        }
+        Key::ExportClose => "Close",
+        Key::ExportCancel => "Stop",
+        Key::ExportCancelling => "Stopping...",
+        Key::ExportCancelled => "Export stopped — nothing was written",
+        Key::ExportNothing => "Nothing to export — this board is empty",
+        Key::ExportBadTarget => {
+            "That name cannot hold a file. Pick an ordinary name such as board.png"
+        }
+        Key::ExportMissingWarning => {
+            "Images that could not be found are drawn as empty boxes in the exported file"
+        }
+
         Key::SettingsHint => "Settings",
         Key::SettingsTitle => "Settings",
         Key::SettingsClose => "Close",
@@ -786,6 +868,30 @@ fn th(key: Key) -> Option<&'static str> {
         Key::SelectionCleared => "ยกเลิกการเลือกแล้ว",
         Key::NothingToFit => "ไม่มีอะไรให้จัดให้พอดี — board ว่าง",
         Key::ZoomIsCanvasOnly => "คีย์ซูมเป็นของโหมด Canvas — กด Tab เพื่อสลับ",
+
+        Key::ExportTitle => "ส่งออกภาพ",
+        Key::ExportHint => "ส่งออกกระดานเป็นไฟล์ PNG หรือ JPEG",
+        Key::ExportSize => "ขนาด",
+        Key::ExportFormat => "รูปแบบ",
+        Key::ExportPng => "PNG",
+        Key::ExportPngHint => "ไม่สูญเสีย ไฟล์ใหญ่กว่า เก็บพื้นโปร่งใสได้",
+        Key::ExportJpeg => "JPEG",
+        Key::ExportJpegHint => "ไฟล์เล็กกว่ามาก คุณภาพลดลงเล็กน้อย ไม่มีพื้นโปร่งใส",
+        Key::ExportTransparent => "พื้นโปร่งใส",
+        Key::ExportQuality => "คุณภาพ",
+        Key::ExportBackground => "สีพื้น",
+        Key::ExportChoose => "เลือกไฟล์...",
+        Key::ExportChoosing => "กำลังรอให้เลือกที่บันทึก",
+        Key::ExportStart => "ส่งออก",
+        Key::ExportOverwrite => "ทับไฟล์เดิม",
+        Key::ExportOverwriteHint => "มีไฟล์ชื่อนี้อยู่แล้ว การส่งออกจะเขียนทับ",
+        Key::ExportClose => "ปิด",
+        Key::ExportCancel => "หยุด",
+        Key::ExportCancelling => "กำลังหยุด...",
+        Key::ExportCancelled => "หยุดส่งออกแล้ว — ไม่มีอะไรถูกเขียน",
+        Key::ExportNothing => "ไม่มีอะไรให้ส่งออก — กระดานนี้ว่าง",
+        Key::ExportBadTarget => "ชื่อนี้เก็บไฟล์ไม่ได้ ลองตั้งชื่อธรรมดาเช่น board.png",
+        Key::ExportMissingWarning => "ภาพที่หาไฟล์ไม่เจอจะออกมาเป็นช่องว่างในไฟล์ที่ส่งออก",
 
         Key::SettingsHint => "ตั้งค่า",
         Key::SettingsTitle => "ตั้งค่า",
@@ -1010,6 +1116,20 @@ pub enum Template {
     KeymapProblemConflict,
     /// `{n}` — จำนวนคีย์ลัดที่ใช้อยู่
     SettingsKeymapCount,
+
+    // ---- P5-4: ส่งออกภาพ ----
+    /// `{w}` `{h}` — ขนาดพิกเซลที่จะได้
+    ExportPixels,
+    /// `{size}` — ประมาณขนาดไฟล์
+    ExportEstimate,
+    /// ★★★ `{n}` — จำนวนภาพที่หาไฟล์ไม่เจอ **ต้องเห็นก่อนกดจริง**
+    ExportMissingCount,
+    /// `{name}` `{done}` `{total}` — กำลังเขียนไฟล์ไหน ไปถึงแถบที่เท่าไหร่
+    ExportRunning,
+    /// `{name}` `{size}` — เขียนเสร็จแล้ว
+    ExportDone,
+    /// `{name}` `{reason}` — เขียนไม่สำเร็จ
+    ExportFailed,
 }
 
 /// เทมเพลตภาษาอังกฤษ — ต้องมีครบทุกตัว
@@ -1161,6 +1281,12 @@ Drag in a PNG, JPEG, WebP, GIF, BMP, TGA or TIFF instead."
              their order in the file"
         }
         Template::SettingsKeymapCount => "{n} shortcuts",
+        Template::ExportPixels => "{w} x {h} px",
+        Template::ExportEstimate => "about {size}",
+        Template::ExportMissingCount => "{n} images cannot be found",
+        Template::ExportRunning => "Exporting {name} - band {done} of {total}",
+        Template::ExportDone => "Exported {name} ({size})",
+        Template::ExportFailed => "Could not export {name}: {reason}",
     }
 }
 
@@ -1309,6 +1435,12 @@ fn template_th(template: Template) -> Option<&'static str> {
              ถูกจุดด้วยการกดครั้งเดียวกันได้ ตัวไหนชนะจึงขึ้นกับลำดับในไฟล์"
         }
         Template::SettingsKeymapCount => "คีย์ลัด {n} ปุ่ม",
+        Template::ExportPixels => "{w} x {h} จุด",
+        Template::ExportEstimate => "ประมาณ {size}",
+        Template::ExportMissingCount => "มีภาพที่หาไฟล์ไม่เจอ {n} ใบ",
+        Template::ExportRunning => "กำลังส่งออก {name} - แถบที่ {done} จาก {total}",
+        Template::ExportDone => "ส่งออก {name} แล้ว ({size})",
+        Template::ExportFailed => "ส่งออก {name} ไม่สำเร็จ: {reason}",
     })
 }
 
@@ -1639,6 +1771,29 @@ mod tests {
         Key::SelectionCleared,
         Key::NothingToFit,
         Key::ZoomIsCanvasOnly,
+        Key::ExportTitle,
+        Key::ExportHint,
+        Key::ExportSize,
+        Key::ExportFormat,
+        Key::ExportPng,
+        Key::ExportPngHint,
+        Key::ExportJpeg,
+        Key::ExportJpegHint,
+        Key::ExportTransparent,
+        Key::ExportQuality,
+        Key::ExportBackground,
+        Key::ExportChoose,
+        Key::ExportChoosing,
+        Key::ExportStart,
+        Key::ExportOverwrite,
+        Key::ExportOverwriteHint,
+        Key::ExportClose,
+        Key::ExportCancel,
+        Key::ExportCancelling,
+        Key::ExportCancelled,
+        Key::ExportNothing,
+        Key::ExportBadTarget,
+        Key::ExportMissingWarning,
         Key::SaveChoosing,
         Key::SaveInProgress,
         Key::SaveCancelled,

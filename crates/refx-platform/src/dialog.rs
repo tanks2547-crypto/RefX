@@ -94,6 +94,51 @@ pub fn pick_document_to_open() -> crossbeam_channel::Receiver<Option<PathBuf>> {
     rx
 }
 
+/// ให้ผู้ใช้เลือกที่จะ export ภาพลง — **ไม่บล็อก UI thread** (P5-4)
+///
+/// เหตุผลของรูปร่าง API เหมือน [`pick_save_location`] เป๊ะ · ต่างแค่ตัวกรอง
+/// และ **ตัวปลุก**
+///
+/// ★ ตัวกรองมีนามสกุลเดียวตามรูปแบบที่ผู้ใช้เลือกไว้ในกล่อง export แล้ว —
+/// ให้เลือกได้สองแบบตรงนี้จะกลายเป็นสองที่ที่ตัดสินรูปแบบไฟล์ แล้ววันหนึ่ง
+/// ผู้ใช้จะเลือก JPEG ในกล่องแต่ตั้งชื่อ `.png` แล้วได้ไฟล์ที่ชื่อโกหก
+///
+/// ★★★ **`waker` ไม่ใช่ของประดับ** — แอปหลับด้วย `ControlFlow::Wait` (I-1)
+/// ถ้าไม่ปลุก ผลที่ส่งกลับมาจะไม่มีใครอ่านจนกว่าผู้ใช้จะขยับเมาส์ · เห็นบนแอป
+/// จริงตอน P5-4: เลือกไฟล์เสร็จแล้วกล่องยังเขียนว่า "กำลังรอให้เลือกที่บันทึก"
+/// อยู่อย่างนั้นจนขยับเมาส์ · `None` = ผู้เรียกยอมรับความหน่วงนั้น (เทสต์)
+#[must_use]
+pub fn pick_export_location(
+    suggested_name: &str,
+    extension: &'static str,
+    waker: Option<crate::window::Waker>,
+) -> crossbeam_channel::Receiver<Option<PathBuf>> {
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    let name = suggested_name.to_owned();
+    std::thread::Builder::new()
+        .name("refx-export-dialog".to_owned())
+        .spawn(move || {
+            let picked = std::panic::catch_unwind(|| {
+                rfd::FileDialog::new()
+                    .set_title("ส่งออกภาพเป็น")
+                    .set_file_name(&name)
+                    .add_filter(extension.to_uppercase(), &[extension])
+                    .save_file()
+            })
+            .unwrap_or(None);
+            let _ = tx.send(picked);
+            // ★ ปลุก **หลัง** ส่งเสมอ — ปลุกก่อนส่งแล้วเฟรมที่ตื่นมาจะยังไม่เห็นอะไร
+            if let Some(waker) = waker {
+                waker.wake();
+            }
+        })
+        .map_or_else(
+            |err| tracing::error!(%err, "cannot spawn the export dialog thread"),
+            drop,
+        );
+    rx
+}
+
 /// ★★★ ให้ผู้ใช้ชี้ไฟล์ภาพที่หายไป — ขั้นที่ 5 ของ relink (`docs/07 §2`, P4-6)
 ///
 /// ★ **ไม่บล็อก UI thread** ด้วยเหตุผลเดียวกับ [`pick_document_to_open`] เป๊ะ:
