@@ -116,6 +116,20 @@ pub enum ExportError {
         /// ต้นเหตุ
         reason: String,
     },
+    /// ★★★ ไฟล์บนดิสก์ไม่เท่ากับจำนวนไบต์ที่เราเขียน
+    ///
+    /// การเขียนลงไดรฟ์ที่แชร์ไว้ล้มเหลวในแบบที่ดิสก์ในเครื่องไม่ล้ม (ลิงก์หลุด
+    /// กลางคัน · โควตาเต็ม · สิทธิ์หาย) และ **บางทางรายงานว่าสำเร็จ**
+    /// — นี่คือราคาของการอนุญาต UNC (`docs/06 §4`)
+    #[error("only {actual} of {expected} bytes reached {}", path.display())]
+    Truncated {
+        /// ไฟล์ที่ขนาดไม่ตรง
+        path: PathBuf,
+        /// จำนวนไบต์ที่ตัวเข้ารหัสเขียนออกไป
+        expected: u64,
+        /// ขนาดที่อ่านกลับมาได้จริง
+        actual: u64,
+    },
     /// ล้มระหว่างแตะดิสก์ — บอกด้วยว่าล้มที่ขั้นไหนและไฟล์ไหน
     #[error("could not {step} {}: {source}", path.display())]
     Io {
@@ -195,11 +209,26 @@ pub fn export_to_file(
 
     match result {
         Ok(stats) => {
+            // ★★★ **ยืนยันก่อน rename ตอนที่ไฟล์เดิมยังอยู่ครบ** (`docs/06 §4`)
+            //
+            //   การเขียนลง share ล้มเหลวในแบบที่ดิสก์ในเครื่องไม่ล้ม และบางทาง
+            //   **รายงานว่าสำเร็จ** · ถ้าจับได้ตอนนี้ ผู้ใช้ยังมีไฟล์เดิมอยู่
+            //   ถ้าปล่อยไป rename ก่อนแล้วค่อยตรวจ ของเดิมหายไปแล้วตอนที่รู้ตัว
+            verify_size(&tmp, stats.bytes).inspect_err(|_| {
+                let _ = std::fs::remove_file(&tmp);
+            })?;
+
             rename(&tmp, path).map_err(|err| {
                 // สลับไม่สำเร็จ — เก็บกวาดแล้วปล่อยไฟล์เดิมไว้เหมือนเดิม
                 let _ = std::fs::remove_file(&tmp);
                 ExportError::io("replace", path, err)
             })?;
+
+            // ★ ตรวจซ้ำที่ปลายทาง — `rename` เองก็ล้มแบบเงียบได้บน share
+            //   ★★ ที่นี่ **ไม่ลบไฟล์ปลายทาง**: ของเดิมหายไปแล้ว การลบซ้ำทำให้
+            //      ผู้ใช้ไม่เหลืออะไรเลย · รายงานให้ชัดว่าไฟล์ไหนน่าสงสัยดีกว่า
+            verify_size(path, stats.bytes)?;
+
             tracing::info!(
                 bands = stats.bands,
                 bytes = stats.bytes,
@@ -232,6 +261,24 @@ fn tmp_path(path: &Path) -> Result<PathBuf, ExportError> {
     Ok(path.with_file_name(tmp))
 }
 
+/// อ่านขนาดไฟล์กลับมาเทียบกับจำนวนไบต์ที่เราเขียนออกไป
+///
+/// # Errors
+/// [`ExportError::Truncated`] เมื่อไม่ตรง · [`ExportError::Io`] เมื่อถามขนาดไม่ได้
+fn verify_size(path: &Path, expected: u64) -> Result<(), ExportError> {
+    let actual = std::fs::metadata(path)
+        .map_err(|err| ExportError::io("check the size of", path, err))?
+        .len();
+    if actual == expected {
+        return Ok(());
+    }
+    Err(ExportError::Truncated {
+        path: path.to_path_buf(),
+        expected,
+        actual,
+    })
+}
+
 fn write_tmp(
     tmp: &Path,
     format: ExportFormat,
@@ -244,6 +291,7 @@ fn write_tmp(
         inner: std::io::BufWriter::new(file),
         cancel,
         stopped: false,
+        written: 0,
     };
 
     let mut stats = ExportStats {
@@ -263,6 +311,13 @@ fn write_tmp(
     }
     outcome?;
 
+    // ★★★ **นับจากสิ่งที่ตัวเข้ารหัสส่งให้เรา ไม่ใช่จากขนาดไฟล์**
+    //
+    //   ถ้าเอาขนาดไฟล์มาเป็นตัวตั้ง แล้วเอาไปเทียบกับขนาดไฟล์อีกที มันจะตรงเสมอ
+    //   ต่อให้ดิสก์กลืนไบต์ไปครึ่งหนึ่ง — ด่านที่เทียบของกับตัวมันเองคือด่านที่
+    //   ผ่านตลอดกาลโดยไม่ได้ตรวจอะไรเลย (`docs/08 §3.9` ข้อ 9)
+    stats.bytes = sink.written;
+
     let mut file = sink
         .inner
         .into_inner()
@@ -272,7 +327,6 @@ fn write_tmp(
     // ★ ขั้นที่แยก "เขียนแล้ว" ออกจาก "อยู่บนดิสก์แล้ว" — เหมือน `refx_io::save`
     file.sync_all()
         .map_err(|err| ExportError::io("flush", tmp, err))?;
-    stats.bytes = file.metadata().map(|meta| meta.len()).unwrap_or_default();
     Ok(stats)
 }
 
@@ -286,6 +340,8 @@ struct GuardedWriter<'a, W> {
     inner: W,
     cancel: &'a AtomicBool,
     stopped: bool,
+    /// ไบต์ที่ตัวเข้ารหัสส่งผ่านมาจริง — ตัวตั้งของการยืนยันขนาดหลังเขียนเสร็จ
+    written: u64,
 }
 
 impl<W: std::io::Write> std::io::Write for GuardedWriter<'_, W> {
@@ -294,7 +350,9 @@ impl<W: std::io::Write> std::io::Write for GuardedWriter<'_, W> {
             self.stopped = true;
             return Err(std::io::Error::other("the export was cancelled"));
         }
-        self.inner.write(buf)
+        let n = self.inner.write(buf)?;
+        self.written += n as u64;
+        Ok(n)
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
@@ -876,6 +934,77 @@ mod tests {
 
         let back = image::open(&path).unwrap().to_rgba8();
         assert_eq!(back.get_pixel(5, 5).0[3], 255, "alpha ไม่ถูกบังคับให้ทึบ");
+    }
+
+    /// ★★★ **ไฟล์ที่ลงดิสก์ไม่ครบต้องถูกแจ้ง ไม่ใช่รายงานว่าสำเร็จ**
+    ///
+    /// `docs/06 §4`: การเขียนลงไดรฟ์ที่แชร์ไว้ล้มเหลวในแบบที่ดิสก์ในเครื่องไม่ล้ม
+    /// (ลิงก์หลุด · โควตาเต็ม · สิทธิ์หาย) และ **บางทางรายงานว่าสำเร็จ**
+    ///
+    /// จำลองด้วยการสลับไฟล์ที่ตัดท้ายทิ้ง — ถ้าด่านไม่ทำงาน export จะตอบ `Ok`
+    /// แล้วผู้ใช้จะส่งไฟล์เสียให้คนอื่นโดยไม่มีใครรู้
+    #[test]
+    fn a_file_that_did_not_fully_reach_the_disk_is_reported_not_silently_accepted() {
+        let dir = temp_dir("truncated");
+        let path = dir.join("short.png");
+
+        /// สลับแล้ว "ทำไบต์หาย" แบบที่ share ทำได้จริง
+        fn rename_then_lose_bytes(from: &Path, to: &Path) -> std::io::Result<()> {
+            std::fs::rename(from, to)?;
+            let len = std::fs::metadata(to)?.len();
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(to)?
+                .set_len(len.saturating_sub(16))
+        }
+
+        let err = export_to_file(
+            &path,
+            ExportFormat::Png { transparent: true },
+            BandPlan::new(64, 64).unwrap(),
+            &mut Pattern::new(64, 64),
+            &never_cancel(),
+            rename_then_lose_bytes,
+        )
+        .unwrap_err();
+
+        match err {
+            ExportError::Truncated {
+                expected, actual, ..
+            } => {
+                println!(
+                    "NC วิ่งผ่านจริง: เขียนออกไป {expected} ไบต์ ลงดิสก์ {actual} ไบต์ → แจ้ง Truncated"
+                );
+                assert_eq!(actual + 16, expected);
+            }
+            other => panic!("ไบต์หายไป 16 ตัวแล้วยังตอบว่าสำเร็จ: {other:?}"),
+        }
+    }
+
+    /// ตัวด่านเองต้องตอบถูกทั้งสองทาง — ขนาดตรง = ผ่าน · ไม่ตรง = ไม่ผ่าน
+    #[test]
+    fn the_size_gate_compares_against_what_was_written_not_against_itself() {
+        let dir = temp_dir("verify");
+        let path = dir.join("ten.bin");
+        std::fs::write(&path, [0u8; 10]).unwrap();
+
+        assert!(verify_size(&path, 10).is_ok());
+        assert!(
+            matches!(
+                verify_size(&path, 20),
+                Err(ExportError::Truncated {
+                    expected: 20,
+                    actual: 10,
+                    ..
+                })
+            ),
+            "ด่านที่เทียบของกับตัวมันเองคือด่านที่ผ่านตลอดกาล"
+        );
+        // ไฟล์ที่ไม่มีอยู่ต้องเป็น Io ไม่ใช่ panic
+        assert!(matches!(
+            verify_size(&dir.join("nope.bin"), 1),
+            Err(ExportError::Io { .. })
+        ));
     }
 
     /// ที่ที่ไม่มีชื่อไฟล์ต้องเป็น error ไม่ใช่ panic

@@ -125,6 +125,66 @@ pub fn validate_asset_path(candidate: &Path) -> Result<(), SecError> {
     Ok(())
 }
 
+/// ★★★ ด่านที่สอง — path ที่ **ผู้ใช้เลือกเอง** จากกล่องบันทึกไฟล์ (`docs/06 §4`)
+///
+/// ## ทำไมต้องมีสองด่าน ไม่ใช่ด่านเดียว
+///
+/// **อันตรายของ UNC ไม่ใช่ "มันคือเครือข่าย" แต่คือ "ใครเป็นคนเลือก path นั้น"**
+///
+/// | ที่มาของ path | UNC | เหตุผล |
+/// |---|---|---|
+/// | ไฟล์ (`.refx` ที่เปิดมา) | ปฏิเสธ | ผู้โจมตีเลือก → บังคับให้เครื่องยืนยันตัวตนออกไปข้างนอกโดยผู้ใช้ไม่รู้ |
+/// | ผู้ใช้ (กล่องบันทึกไฟล์) | **อนุญาต** | เขาเดินไปที่นั่นเอง เห็นกับตา และตั้งใจ |
+///
+/// ★★ **ไม่ขัด I-8** — I-8 ห้าม *โค้ดของเรา* เปิดการเชื่อมต่อ (จึงมีประตู
+/// `cargo tree`) · การที่ OS เขียนไฟล์ลง share ที่ผู้ใช้ชี้เอง ไม่ใช่เครือข่ายของเรา
+///
+/// ★ ถ้าใช้ [`validate_asset_path`] กับ path ของ export แทน **การ export ลงไดรฟ์
+/// ที่แชร์ไว้จะถูกปฏิเสธ** ซึ่งเป็นงานประจำของนักวาดที่ทำงานเป็นทีม
+/// (สเปกเดิมสั่งแบบนั้นจริง ๆ แล้วถูกจับได้ตอน P5-4 — `docs/06 §4` แก้ 8 ก.ย. 2026)
+///
+/// ## ชื่อสงวนถูกปฏิเสธเพราะ **I-3 ไม่ใช่เพราะความปลอดภัย**
+///
+/// เขียนลง `NUL.png` **สำเร็จแล้วทิ้งข้อมูลเงียบ ๆ** ผู้ใช้เชื่อว่า export แล้ว
+/// แต่ไม่มีอะไรเลย = งานหายแบบที่ I-3 ห้าม · และ **ไม่มีใครตั้งใจตั้งชื่อนี้**
+/// การปฏิเสธจึงไม่ตัดอะไรของใครทิ้ง
+///
+/// `..` ไม่ต้องตรวจ — กล่องบันทึกไฟล์คืน path ที่คลี่แล้ว
+///
+/// # Errors
+/// [`SecError::Empty`] เมื่อ path ว่าง · [`SecError::Device`] เมื่อชี้ไปยัง
+/// ชื่ออุปกรณ์หรือ device namespace
+pub fn validate_save_target(candidate: &Path) -> Result<(), SecError> {
+    if candidate.as_os_str().is_empty() {
+        return Err(SecError::Empty);
+    }
+
+    // ★ ตรวจจากไบต์ดิบก่อน `components()` ด้วยเหตุผลเดียวกับ `validate_asset_path`:
+    //   บน Linux ตัวคั่น `\` ไม่ถูกแยกให้ · คำตอบต้องไม่ขึ้นกับแพลตฟอร์มที่คอมไพล์
+    let raw = candidate.to_string_lossy();
+    // ★★ `\\?\` ข้ามการ normalise ของ Win32 ทั้งชุด · `\\.\` เป็น device namespace
+    //    ทั้งคู่ไม่ใช่สิ่งที่กล่องบันทึกไฟล์คืนมา — ถ้าโผล่มาแปลว่ามีคนพิมพ์เอง
+    if raw.starts_with(r"\\?\") || raw.starts_with(r"\\.\") {
+        return Err(SecError::Device);
+    }
+    if raw.split(['/', '\\']).any(names_a_device) {
+        return Err(SecError::Device);
+    }
+
+    for component in candidate.components() {
+        if let Component::Prefix(prefix) = component {
+            match prefix.kind() {
+                Prefix::DeviceNS(..) | Prefix::Verbatim(..) | Prefix::VerbatimDisk(_) => {
+                    return Err(SecError::Device);
+                }
+                // ★ UNC ผ่านได้ที่นี่ — ต่างจาก `validate_asset_path` โดยตั้งใจ
+                Prefix::UNC(..) | Prefix::VerbatimUNC(..) | Prefix::Disk(_) => {}
+            }
+        }
+    }
+    Ok(())
+}
+
 /// segment นี้เป็นชื่ออุปกรณ์สงวนหรือไม่ — `nul.png` ยังเป็น `NUL`
 fn names_a_device(part: &str) -> bool {
     let stem = part.split('.').next().unwrap_or("");
@@ -250,6 +310,105 @@ mod tests {
     #[test]
     fn an_empty_path_is_refused() {
         assert_eq!(validate_asset_path(Path::new("")), Err(SecError::Empty));
+        assert_eq!(validate_save_target(Path::new("")), Err(SecError::Empty));
+    }
+
+    // ---------- ★★★ ด่านที่สอง: path ที่ผู้ใช้เลือกเอง (`docs/06 §4`) ----------
+
+    /// ★★★ **หัวใจของการมีสองด่าน** — path เดียวกันได้คำตอบต่างกันตามที่มา
+    ///
+    /// ถ้าข้อนี้พัง แปลว่ามีคนรวมสองด่านเป็นด่านเดียว แล้วอย่างใดอย่างหนึ่งจะพัง:
+    /// ไม่ export ลง share ไม่ได้ ก็เอกสารที่ผู้โจมตีส่งมาบังคับเครื่องต่อออกไปได้
+    #[test]
+    fn the_same_unc_path_is_refused_from_a_file_but_allowed_from_the_user() {
+        for share in [
+            r"\\studio-nas\refs\moodboard.png",
+            r"\\192.0.2.1\team\hero.jpg",
+            "//studio-nas/refs/moodboard.png",
+        ] {
+            assert_eq!(
+                validate_asset_path(Path::new(share)),
+                Err(SecError::Unc),
+                "{share} มาจากไฟล์ = ผู้โจมตีเลือก ต้องปฏิเสธ"
+            );
+            assert_eq!(
+                validate_save_target(Path::new(share)),
+                Ok(()),
+                "{share} ผู้ใช้เดินไปเลือกเอง ห้ามปฏิเสธ — นั่นคือการตัดฟีเจอร์"
+            );
+        }
+    }
+
+    /// ★★★ **`NUL.png` เขียนสำเร็จแล้วทิ้งข้อมูลเงียบ ๆ = งานหายแบบที่ I-3 ห้าม**
+    ///
+    /// ไม่ใช่เรื่องความปลอดภัย แต่เป็นเรื่องความเสถียร ซึ่งอยู่เหนือกว่าในลำดับ
+    /// ของโปรเจกต์นี้ · และไม่มีใครตั้งใจตั้งชื่อไฟล์งานว่า `NUL`
+    #[test]
+    fn a_save_target_that_names_a_device_is_refused() {
+        for evil in [
+            r"C:\refs\NUL.png",
+            r"C:\refs\nul",
+            r"C:\refs\CON.jpg",
+            r"C:\refs\com1.png",
+            r"C:\refs\LPT9.jpg",
+            "PRN",
+            r"\\.\PhysicalDrive0",
+            r"\\?\C:\refs\out.png",
+            r"\\?\UNC\server\share\out.png",
+        ] {
+            assert_eq!(
+                validate_save_target(Path::new(evil)),
+                Err(SecError::Device),
+                "{evil} ควรถูกปฏิเสธ"
+            );
+        }
+    }
+
+    /// ★★ **negative control ของด่านที่สอง** — ถ้ามันแน่นเกินไป ผู้ใช้จะ export
+    /// ไม่ได้ในที่ที่เขาทำงานอยู่จริง ซึ่งแย่กว่าไม่มีด่าน
+    #[test]
+    fn the_places_users_really_export_to_are_allowed() {
+        for ok in [
+            r"C:\Users\kitsa\Desktop\moodboard.png",
+            r"D:\งานอ้างอิง\ส่งลูกค้า\v3.jpg",
+            r"\\studio-nas\ทีม\hero.png",
+            "/home/kitsa/Pictures/board.png",
+            "board.png",
+            r"E:\refs\CONCEPT\hero.png", // ขึ้นต้นด้วย CON แต่ไม่ใช่ CON
+            r"E:\refs\NULL_island.png",
+            "COM10.png", // COM10 ไม่ใช่ชื่อสงวน (มีถึง COM9)
+        ] {
+            assert_eq!(
+                validate_save_target(Path::new(ok)),
+                Ok(()),
+                "{ok} เป็นที่ที่ผู้ใช้ export จริง ห้ามถูกปฏิเสธ"
+            );
+        }
+    }
+
+    /// ด่านที่สอง **ห้ามแตะระบบไฟล์** เหมือนกัน — ถ้าแตะ การตอบว่า UNC ใช้ได้ไหม
+    /// จะต้องต่อออกไปหาเซิร์ฟเวอร์ก่อน ซึ่งช้าและเป็นสิ่งที่เรากำลังจะเลี่ยง
+    #[test]
+    fn the_save_gate_never_touches_the_filesystem() {
+        assert_eq!(
+            validate_save_target(Path::new(r"\\nowhere.invalid\share\x.png")),
+            Ok(()),
+            "ต้องตอบได้โดยไม่ต้องไปถามเซิร์ฟเวอร์"
+        );
+        assert_eq!(
+            validate_save_target(Path::new(r"C:\no\such\folder\x.png")),
+            Ok(())
+        );
+    }
+
+    /// คำตอบต้องไม่ขึ้นกับแพลตฟอร์มที่คอมไพล์ — เหตุผลเดียวกับด่านแรก
+    #[test]
+    fn a_windows_save_target_is_judged_the_same_on_every_platform() {
+        assert_eq!(
+            validate_save_target(Path::new(r"C:\refs\NUL.png")),
+            Err(SecError::Device),
+            r"`\` ต้องเป็นตัวคั่นเสมอ ไม่ใช่เฉพาะตอนคอมไพล์บน Windows"
+        );
     }
 
     /// ★ ด่านนี้ **ห้ามแตะระบบไฟล์** — สเปกเดิมสั่งให้ `canonicalize` ซึ่งบน UNC
