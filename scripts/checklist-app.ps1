@@ -166,24 +166,60 @@ Report "media-removed" ($vanished -and $stillAlive) `
 # Built from a real save so that everything except the flipped bytes is valid;
 # a hand-assembled file would be rejected at the magic check and prove nothing
 # (docs/08 s3.9 item 1b).
+#
+# ! THE CHECK MAKES ITS OWN FIXTURE (docs/08 s3.9 item 17, 8 Sep 2026).
+#   This step used to grab the first *.refx it could find on E:\ and report a
+#   FAIL when there was none.  That is a check whose result depends on what
+#   happens to be lying around on ONE developer's disk: green here, red on every
+#   other machine and on CI, for a reason nobody can see from the output.
+#   Same shape as item 13.  So: drive the real app through a real Ctrl+S into
+#   our own scratch folder, then flip bytes in THAT.
+$source = Join-Path $Work "source.refx"
+Remove-Item $source -Force -ErrorAction SilentlyContinue
+$drive = Join-Path $PSScriptRoot "ui-drive.ps1"
+& $drive -Steps @(
+    "launch|$ExePath|--open-dir=$Images",
+    "sleep|4000",
+    "keydn|17", "key|83", "keyup|17",   # Ctrl+S
+    "sleep|900",
+    # ! a board that has never been saved asks HOW to store the images first
+    #   ("Link to the image files" / "Store the images inside") -- the OS dialog
+    #   only opens after that answer.  Driving Ctrl+S straight into 'dlgtype'
+    #   fails with "NO DIALOG", which is what this line exists to prevent.
+    "click|271|33",
+    "sleep|1500",
+    "dlgtype|$source",
+    # ! the write happens on a worker and its RESULT is collected on the next
+    #   frame -- and the app sleeps in ControlFlow::Wait (I-1), so with no input
+    #   there is no next frame.  Nudging the mouse is what produces one.  Killing
+    #   at this point without the nudge leaves no file at all, which reads as
+    #   "Ctrl+S is broken" when the only thing broken is the test's timing.
+    "move|600|400", "sleep|400", "move|620|420", "sleep|1500",
+    "kill") | Out-Null
+Stop-Refx $null
+
 $refx = Join-Path $Work "damaged.refx"
-$r = Run-Refx @("--open-dir=$usb") 2   # folder is gone: a tiny board, saved below
-Stop-Refx $r
-# reuse the hostile/valid document the io tests can produce; if absent, skip
-$src = @(Get-ChildItem -Path "E:/" -Filter "*.refx" -File -ErrorAction SilentlyContinue)[0]
-if ($null -eq $src) {
-    Report "damaged-refx" $false "no .refx available to damage -- skipped, which is NOT a pass"
+if (-not (Test-Path $source)) {
+    Report "damaged-refx" $false "the app did not write $source -- Ctrl+S itself is broken"
 } else {
-    $bytes = [System.IO.File]::ReadAllBytes($src.FullName)
-    if ($bytes.Length -gt 80) { $bytes[60] = $bytes[60] -bxor 0xFF; $bytes[70] = $bytes[70] -bxor 0xFF }
-    [System.IO.File]::WriteAllBytes($refx, $bytes)
-    $r = Run-Refx @("--open=$refx") 4
-    $alive = $r.Alive
-    $panicked = ($r.Stderr -match "panicked")
-    Stop-Refx $r
-    Report "damaged-refx" ($alive -and (-not $panicked)) `
-        ("app alive: $alive, panic on stderr: $panicked")
+    $bytes = [System.IO.File]::ReadAllBytes($source)
+    if ($bytes.Length -le 80) {
+        Report "damaged-refx" $false "the saved file is only $($bytes.Length) bytes -- nothing to damage"
+    } else {
+        # ! flip bytes INSIDE the document body, past the 20-byte header, so the
+        #   file still passes the magic/version check and fails at the checksum.
+        #   Flipping the header would test a different branch entirely.
+        $bytes[60] = $bytes[60] -bxor 0xFF; $bytes[70] = $bytes[70] -bxor 0xFF
+        [System.IO.File]::WriteAllBytes($refx, $bytes)
+        $r = Run-Refx @("--open=$refx") 4
+        $alive = $r.Alive
+        $panicked = ($r.Stderr -match "panicked")
+        Stop-Refx $r
+        Report "damaged-refx" ($alive -and (-not $panicked)) `
+            ("saved $($bytes.Length) bytes, flipped 2, app alive: $alive, panic on stderr: $panicked")
+    }
 }
+Remove-Item $source, $refx -Force -ErrorAction SilentlyContinue
 
 Write-Output ""
 if ($script:failures -gt 0) {
