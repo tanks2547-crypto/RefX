@@ -54,7 +54,24 @@
 ❌ panic = "abort" ใน release profile          // ทำให้ catch_unwind พัง
 ❌ เพิ่ม dependency ที่มี C codec หรือ network
 ❌ ControlFlow::Poll
+❌ ส่งผลจากเธรดอื่นโดยไม่มีคนปลุก event loop   // docs/08 §3.9 ข้อ 18
 ```
+
+### ★★★ ห้ามใช้ PowerShell `Get-Content` / `Set-Content` แก้ไฟล์ซอร์ส
+
+Windows PowerShell 5.1 อ่านไฟล์ที่ไม่มี BOM ด้วย **codepage ANSI** และเขียนกลับ
+เป็น UTF-8 → ข้อความไทยทั้งไฟล์ถูกเข้ารหัสซ้อนสองชั้น และได้ CRLF + BOM แถมมา
+(เกิดจริง 8 ก.ย. 2026 กับ `crates/refx-ui/src/export.rs` ทั้งไฟล์)
+
+```powershell
+❌ (Get-Content f.rs) -replace 'a','b' | Set-Content f.rs
+❌ Set-Content / Out-File / Add-Content  กับไฟล์ .rs .md .toml .wgsl
+✅ ใช้เครื่องมือแก้ไฟล์ของ editor  หรือ  awk/sed ผ่าน Bash
+```
+
+**ถ้าพลาดไปแล้ว:** อ่านไฟล์เป็น UTF-8 → เข้ารหัสสตริงนั้นกลับด้วย CP1252 →
+เขียนเป็นไบต์ดิบ · แล้ว **ยืนยันด้วย `git diff` ว่าเหลือแต่การแก้ที่ตั้งใจ**
+และ `git ls-files --eol` ต้องไม่มี `w/crlf`
 
 ### ต้องทำเสมอ
 
