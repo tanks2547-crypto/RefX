@@ -315,6 +315,11 @@ pub struct ExportView {
     pub height: u32,
     /// ประมาณขนาดไฟล์ (ไบต์) — ค่าสำหรับแสดง
     pub estimate: u64,
+    /// ★★★ เพดานด้านยาวสุดที่ **พิกเซลที่มีจริงรองรับได้** (`docs/07 §6`)
+    ///
+    /// ตัวเลือกที่เกินค่านี้ **ไม่มีให้เลือก** ไม่ใช่เลือกได้แล้วเตือน —
+    /// ปุ่มที่กดแล้วได้ผลแย่เสมอ ไม่ควรมีให้กด · ชั้น `app` เป็นคนคำนวณ
+    pub max_side: u32,
     /// รูปแบบที่เลือกอยู่
     pub kind: ExportKind,
     /// PNG: เก็บพื้นโปร่งใสไหม
@@ -344,6 +349,7 @@ impl Default for ExportView {
             width: 2048,
             height: 2048,
             estimate: 0,
+            max_side: refx_core::export::MAX_SIDE,
             kind: ExportKind::default(),
             transparent: false,
             quality: 90,
@@ -1003,10 +1009,12 @@ pub fn draw_in_ui(
 
                 ui.label(text::t(lang, Key::ExportSize));
                 // ★ ปรับ "ด้านยาวสุด" ตัวเดียว — สัดส่วนมาจาก board เสมอ
+                // ★★★ ช่วงจบที่ **พิกเซลที่มีจริงรองรับได้** ไม่ใช่ที่เพดานของ GPU
+                //     (`docs/07 §6`) — ลากเกินไปกว่านั้นไม่ได้เลย ไม่ใช่ลากได้แล้วเตือน
                 ui.add(
                     egui::DragValue::new(&mut view.long_side)
                         .speed(16.0)
-                        .range(64..=refx_core::export::MAX_SIDE),
+                        .range(refx_core::export::MIN_EXPORT_SIDE..=view.max_side),
                 );
                 ui.label(text::fill(
                     lang,
@@ -1021,6 +1029,20 @@ pub fn draw_in_ui(
                     Template::ExportEstimate,
                     &[("size", &human_bytes(view.estimate))],
                 ));
+                // ★★★ **บอกเหตุผล ไม่ใช่จำกัดเงียบ ๆ** (`docs/07 §6`)
+                //     ผู้ใช้ที่ลากตัวเลขแล้วมันหยุด ต้องรู้ว่าหยุดเพราะอะไร
+                //     ไม่งั้นเขาจะอ่านว่าโปรแกรมพัง · ขึ้นเฉพาะตอนที่เพดานจริง
+                //     ต่ำกว่าเพดานของทางเขียน — board ที่ไม่ติดขีดจะไม่เห็นบรรทัดนี้
+                if view.max_side < refx_core::export::MAX_SIDE {
+                    ui.label(
+                        egui::RichText::new(text::fill(
+                            lang,
+                            Template::ExportCeiling,
+                            &[("n", &view.max_side.to_string())],
+                        ))
+                        .color(warn_color(ui)),
+                    );
+                }
 
                 ui.separator();
                 ui.label(text::t(lang, Key::ExportFormat));
@@ -3368,6 +3390,10 @@ mod tests {
                 target: Some("moodboard.png".to_owned()),
                 overwrite: true,
                 missing: 3,
+                // ★ เพดานที่ต่ำกว่าเพดานของทางเขียน — บังคับให้บรรทัดบอกเหตุผล
+                //   ถูกวาด · board ปกติจะไม่ติดขีด แล้วประตูจะไม่เคยเห็นข้อความนี้
+                max_side: 2760,
+                long_side: 2048,
                 problem: Some(text::t(Lang::Th, Key::ExportBadTarget).to_owned()),
                 ..ExportView::default()
             }),
@@ -3407,28 +3433,40 @@ mod tests {
         .collect();
 
         // สองเฟรม: egui ใช้ layout ของรอบก่อน รอบแรกขนาด panel ยังไม่นิ่ง
+        //
+        // ★★★ **วาดทั้งสองภาษา** — รุ่นก่อนตรึง `lang` ไว้ที่ไทยแล้ววนแต่ข้อความ
+        //     สถานะ · ผลคือ **ข้อความบนแผงทุกตัวถูกตรวจเฉพาะภาษาไทย** ส่วน
+        //     ภาษาอังกฤษไม่เคยผ่านประตูนี้เลย (เจอตอนเพิ่มบรรทัดเพดานของ P5-4a)
         let mut drawn: Vec<(egui::FontId, String)> = Vec::new();
-        for status in &statuses {
-            state.status = status.clone();
-            let mut last = Vec::new();
-            for _ in 0..2 {
-                let input = egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(1280.0, 800.0),
-                    )),
-                    ..Default::default()
-                };
-                let output = ctx.run_ui(input, |ui| {
-                    let _ = draw_in_ui(ui, &mut state, |_, _| {});
-                });
-                last = drawn_runs(&output);
+        for lang in [Lang::En, Lang::Th] {
+            state.lang = lang;
+            // ★ `problem` เก็บข้อความที่ **แปลแล้ว** — ต้องเปลี่ยนตามภาษาที่กำลังวาด
+            //   ไม่งั้นครึ่งหนึ่งของภาษาไม่เคยผ่านประตู
+            if let Some(view) = state.export_prompt.as_mut() {
+                view.problem = Some(text::t(lang, Key::ExportBadTarget).to_owned());
             }
-            assert!(
-                last.iter().any(|(_, text)| text.contains(status.as_str())),
-                "ข้อความ {status:?} ไม่ได้ถูกวาดจริง — ประตูจะเขียวโดยไม่ได้ตรวจมัน                  (docs/08 §3.9 ข้อ 1b)"
-            );
-            drawn.extend(last);
+            for status in &statuses {
+                state.status = status.clone();
+                let mut last = Vec::new();
+                for _ in 0..2 {
+                    let input = egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(1280.0, 800.0),
+                        )),
+                        ..Default::default()
+                    };
+                    let output = ctx.run_ui(input, |ui| {
+                        let _ = draw_in_ui(ui, &mut state, |_, _| {});
+                    });
+                    last = drawn_runs(&output);
+                }
+                assert!(
+                    last.iter().any(|(_, text)| text.contains(status.as_str())),
+                    "ข้อความ {status:?} ไม่ได้ถูกวาดจริง — ประตูจะเขียวโดยไม่ได้ตรวจมัน                  (docs/08 §3.9 ข้อ 1b)"
+                );
+                drawn.extend(last);
+            }
         }
         assert!(!drawn.is_empty(), "ไม่มีอะไรถูกวาดเลย — ประตูนี้ไม่ได้ตรวจอะไร");
         assert!(
@@ -3437,15 +3475,26 @@ mod tests {
         );
         // ★★ ยืนยันว่าสามสถานะของกล่องส่งออกถูกวาดจริง ไม่ใช่แค่ตั้งค่าไว้
         //    (`docs/08 §3.9` ข้อ 1b — input ต้องไปถึงกิ่งที่กำลังตรวจ)
-        for expected in [
-            text::t(Lang::Th, Key::ExportOverwrite),
-            text::t(Lang::Th, Key::ExportMissingWarning),
-            text::t(Lang::Th, Key::ExportBadTarget),
-            text::t(Lang::Th, Key::ExportCancel),
-        ] {
+        for lang in [Lang::En, Lang::Th] {
+            for expected in [
+                text::t(lang, Key::ExportOverwrite),
+                text::t(lang, Key::ExportMissingWarning),
+                text::t(lang, Key::ExportBadTarget),
+                text::t(lang, Key::ExportCancel),
+            ] {
+                assert!(
+                    drawn.iter().any(|(_, text)| text.contains(expected)),
+                    "{expected:?} ไม่ได้ถูกวาด — ประตูจะเขียวโดยไม่ได้ตรวจมัน"
+                );
+            }
+        }
+        // ★★ บรรทัดบอกเหตุผลของเพดานขึ้นเฉพาะตอน board ติดขีด — ต้องบังคับให้วาด
+        //    ไม่งั้นข้อความนี้จะไม่เคยผ่านประตู tofu เลย (`docs/03 §0`)
+        for lang in [Lang::En, Lang::Th] {
+            let ceiling = text::fill(lang, Template::ExportCeiling, &[("n", "2760")]);
             assert!(
-                drawn.iter().any(|(_, text)| text.contains(expected)),
-                "{expected:?} ไม่ได้ถูกวาด — ประตูจะเขียวโดยไม่ได้ตรวจมัน"
+                drawn.iter().any(|(_, text)| text.contains(&ceiling)),
+                "{ceiling:?} ไม่ได้ถูกวาด"
             );
         }
 

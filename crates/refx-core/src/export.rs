@@ -23,7 +23,67 @@
 use crate::geom::Rect;
 
 /// ด้านที่ยาวที่สุดที่ export ได้ (พิกเซล) — `docs/07 §6`
+///
+/// ★ นี่คือเพดานของ **ทางเขียน** (RAM/GPU) · เพดานที่ผู้ใช้เจอจริงมักต่ำกว่านี้
+/// เพราะถูกจำกัดด้วยพิกเซลที่มีจริง — ดู [`max_export_side`]
 pub const MAX_SIDE: u32 = 16384;
+
+/// ด้านยาวสุดที่เล็กที่สุดที่ยังยอมให้เลือก
+///
+/// ★ ต่ำกว่านี้ภาพเล็กจนไม่มีใครใช้ · board ที่มีภาพใหญ่มากเมื่อเทียบกับผังทั้งหมด
+/// จะคำนวณเพดานได้ต่ำกว่านี้ — ในกรณีนั้นเรายอมให้ขยายเล็กน้อยดีกว่าให้กล่อง
+/// ที่เลือกอะไรไม่ได้เลย (สภาพที่ผู้ใช้ทำอะไรต่อไม่ได้ แย่กว่าภาพที่นุ่มนิดหน่อย)
+pub const MIN_EXPORT_SIDE: u32 = 256;
+
+/// ★★★ เพดานด้านยาวสุดที่ **พิกเซลที่มีจริงรองรับได้** (`docs/07 §6` · ตัดสิน 9 ก.ย. 2026)
+///
+/// ## ทำไมต้องมี
+///
+/// ภาพที่ส่งออกถูกวาดจากแหล่งพิกเซลที่มีความละเอียดจำกัด · ถ้าปล่อยให้เลือก
+/// ขนาดใหญ่กว่าที่แหล่งนั้นให้ได้ ผลคือ **การขยายภาพ** ซึ่งนักวาดแยกออกจาก
+/// "ต้นฉบับความละเอียดต่ำ" ด้วยตาไม่ได้ · และเขาจะรู้ว่าพลาดหลังรอ export
+/// เสร็จแล้วส่งไฟล์ให้ลูกค้าไปแล้ว → **ปุ่มที่กดแล้วได้ผลแย่เสมอ ไม่ควรมีให้กด**
+///
+/// ## สูตร
+///
+/// อัตราขยายของ export คือ `s = ด้านยาวของภาพ / ด้านยาวของกรอบ world` ·
+/// item ที่กว้างที่สุด `biggest` จะกินพื้นที่ `biggest × s` จุดในภาพปลายทาง
+/// ซึ่งต้องไม่เกินพิกเซลที่แหล่งมีให้ (`source_px`)
+///
+/// ```text
+/// biggest × (long / region_long) ≤ source_px
+/// long ≤ region_long × source_px / biggest
+/// ```
+///
+/// ★★ **คำนวณ ไม่ใช่ค่าคงที่** — วันที่แหล่งพิกเซลดีขึ้น (P5-4b) เพดานยกขึ้นเอง
+/// โดยไม่ต้องแตะ UI เลย เพราะมันเป็นคุณสมบัติของแหล่ง ไม่ใช่ตัวเลขที่เขียนตายไว้
+///
+/// `biggest_item_side` = ด้านที่ยาวที่สุดของ item ที่ **มีพิกเซลจริง** ใน world
+/// (`Missing`/ข้อความไม่นับ — มันเป็นสี่เหลี่ยมสีล้วน ขยายแล้วไม่เสียอะไร)
+/// · `0` หรือค่าที่ไม่ finite = ไม่มีอะไรจำกัด → ได้ [`MAX_SIDE`]
+#[must_use]
+pub fn max_export_side(region_long: f32, biggest_item_side: f32, source_px: u32) -> u32 {
+    if !region_long.is_finite()
+        || !biggest_item_side.is_finite()
+        || region_long <= 0.0
+        || biggest_item_side <= 0.0
+        || source_px == 0
+    {
+        return MAX_SIDE;
+    }
+    let allowed = region_long / biggest_item_side * source_px as f32;
+    if !allowed.is_finite() || allowed <= 0.0 {
+        return MAX_SIDE;
+    }
+    // ★ ปัดลง — ปัดขึ้นแปลว่ายอมให้เกินเพดานที่เพิ่งคำนวณมาหนึ่งจุด
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "clamp เข้าช่วง MIN..=MAX ทันทีหลังแปลง"
+    )]
+    let allowed = allowed.floor() as u32;
+    allowed.clamp(MIN_EXPORT_SIDE, MAX_SIDE)
+}
 
 /// งบของบัฟเฟอร์แถบหนึ่งแถบ (ไบต์) — `docs/07 §6`
 pub const BAND_BUDGET: usize = 32 << 20;
@@ -285,6 +345,73 @@ mod tests {
     use glam::Vec2;
 
     use super::*;
+
+    // ---------- ★★★ เพดานที่มาจากพิกเซลที่มีจริง (`docs/07 §6`) ----------
+
+    /// ★★★ **NC ของสูตร: ปลอมให้แหล่งพิกเซลดีขึ้น → เพดานต้องขยับตาม**
+    ///
+    /// ถ้าเพดานไม่ขยับ แปลว่ามันเป็นค่าคงที่ที่แต่งหน้าเป็นสูตร — และวันที่
+    /// P5-4b ลงจอด เราจะยังติดอยู่ที่เพดานเดิมโดยไม่มีใครรู้ว่าทำไม
+    #[test]
+    fn the_ceiling_rises_when_the_pixel_source_gets_better() {
+        // board ที่ item ใหญ่สุดกิน 1/10 ของผัง
+        let (region_long, biggest) = (5000.0_f32, 500.0_f32);
+
+        let today = max_export_side(region_long, biggest, 128); // atlas 128 px
+        let with_512 = max_export_side(region_long, biggest, 512);
+        let with_2048 = max_export_side(region_long, biggest, 2048);
+
+        println!("แหล่ง 128 → {today} px · 512 → {with_512} px · 2048 → {with_2048} px");
+        assert_eq!(today, 1280, "128 × (5000/500) = 1280");
+        assert_eq!(with_512, 5120, "ดีขึ้นสี่เท่า เพดานต้องขึ้นสี่เท่า");
+        assert_eq!(with_2048, 16384, "ดีพอจนชนเพดานของทางเขียน");
+        assert!(
+            with_512 > today && with_2048 > with_512,
+            "เพดานไม่ขยับตามแหล่งพิกเซล = เป็นค่าคงที่ที่แต่งหน้าเป็นสูตร"
+        );
+    }
+
+    /// ★★ ผังของ board ก็เป็นตัวแปร ไม่ใช่แค่ความละเอียดของแหล่ง
+    ///
+    /// board ที่ภาพใบเดียวกินเต็มผัง ขยายไม่ได้เลย · board ที่ภาพเล็กกระจายกว้าง
+    /// ขยายได้มาก — ทั้งที่แหล่งพิกเซลเท่ากันเป๊ะ
+    #[test]
+    fn the_ceiling_follows_the_layout_too() {
+        let fills_everything = max_export_side(1000.0, 1000.0, 128);
+        let spread_out = max_export_side(10_000.0, 500.0, 128);
+        println!("ภาพเดียวเต็มผัง → {fills_everything} px · กระจายกว้าง → {spread_out} px");
+        assert_eq!(fills_everything, MIN_EXPORT_SIDE, "128 ถูกดันขึ้นเป็นพื้นล่าง");
+        assert_eq!(spread_out, 2560);
+        assert!(spread_out > fills_everything);
+    }
+
+    /// ★ ไม่มีอะไรจำกัด (board ที่มีแต่ `Missing`) → ได้เพดานของทางเขียน
+    #[test]
+    fn a_board_with_no_real_pixels_is_not_limited_by_them() {
+        assert_eq!(max_export_side(5000.0, 0.0, 128), MAX_SIDE);
+        assert_eq!(max_export_side(5000.0, f32::NAN, 128), MAX_SIDE);
+        assert_eq!(max_export_side(f32::INFINITY, 100.0, 128), MAX_SIDE);
+        // แหล่งที่ไม่มีพิกเซลเลยเป็นสภาพที่เป็นไปไม่ได้ — อย่าไปจำกัดผู้ใช้เพราะมัน
+        assert_eq!(max_export_side(5000.0, 100.0, 0), MAX_SIDE);
+    }
+
+    /// ★★ เพดานต้องอยู่ในช่วงที่ `BandPlan` รับได้เสมอ ไม่ว่าตัวเลขจะบ้าแค่ไหน
+    #[test]
+    fn the_ceiling_is_always_a_size_the_writer_can_actually_produce() {
+        for (region, biggest) in [
+            (1.0_f32, 1_000_000.0_f32),
+            (1_000_000.0, 1.0),
+            (0.001, 0.001),
+            (f32::MAX, f32::MIN_POSITIVE),
+        ] {
+            let side = max_export_side(region, biggest, 128);
+            assert!(
+                (MIN_EXPORT_SIDE..=MAX_SIDE).contains(&side),
+                "{region} / {biggest} → {side} ซึ่งอยู่นอกช่วงที่เขียนได้"
+            );
+            assert!(BandPlan::new(side, side).is_ok(), "{side} วางแผนไม่ได้");
+        }
+    }
 
     #[test]
     fn a_size_with_no_pixels_is_refused() {

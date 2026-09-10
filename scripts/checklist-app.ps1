@@ -189,12 +189,15 @@ $drive = Join-Path $PSScriptRoot "ui-drive.ps1"
     "click|271|33",
     "sleep|1500",
     "dlgtype|$source",
-    # ! the write happens on a worker and its RESULT is collected on the next
-    #   frame -- and the app sleeps in ControlFlow::Wait (I-1), so with no input
-    #   there is no next frame.  Nudging the mouse is what produces one.  Killing
-    #   at this point without the nudge leaves no file at all, which reads as
-    #   "Ctrl+S is broken" when the only thing broken is the test's timing.
-    "move|600|400", "sleep|400", "move|620|420", "sleep|1500",
+    # ! NO MOUSE NUDGE HERE, AND THAT IS THE POINT.
+    #
+    #   This step used to need one: the app sleeps in ControlFlow::Wait (I-1),
+    #   and the path the OS dialog returns was delivered with nobody to wake the
+    #   loop, so the save never started until the mouse moved.  That was
+    #   docs/08 s3.9 item 18 -- the same bug as the export dialog -- and the
+    #   nudge was hiding it.  pick_save_location() now carries a waker.
+    #   If someone removes that waker, this step goes back to writing no file.
+    "sleep|2500",
     "kill") | Out-Null
 Stop-Refx $null
 

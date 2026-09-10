@@ -1130,6 +1130,8 @@ pub enum Template {
     ExportDone,
     /// `{name}` `{reason}` — เขียนไม่สำเร็จ
     ExportFailed,
+    /// ★★★ `{n}` — เพดานขนาดของ board นี้ **พร้อมเหตุผล** (`docs/07 §6`)
+    ExportCeiling,
 }
 
 /// เทมเพลตภาษาอังกฤษ — ต้องมีครบทุกตัว
@@ -1287,6 +1289,9 @@ Drag in a PNG, JPEG, WebP, GIF, BMP, TGA or TIFF instead."
         Template::ExportRunning => "Exporting {name} - band {done} of {total}",
         Template::ExportDone => "Exported {name} ({size})",
         Template::ExportFailed => "Could not export {name}: {reason}",
+        Template::ExportCeiling => {
+            "up to {n} px for this board - limited by the resolution of the previews"
+        }
     }
 }
 
@@ -1441,6 +1446,7 @@ fn template_th(template: Template) -> Option<&'static str> {
         Template::ExportRunning => "กำลังส่งออก {name} - แถบที่ {done} จาก {total}",
         Template::ExportDone => "ส่งออก {name} แล้ว ({size})",
         Template::ExportFailed => "ส่งออก {name} ไม่สำเร็จ: {reason}",
+        Template::ExportCeiling => "สูงสุด {n} px สำหรับ board นี้ — จำกัดโดยความละเอียดของภาพตัวอย่าง",
     })
 }
 
