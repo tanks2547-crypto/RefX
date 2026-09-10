@@ -3144,7 +3144,10 @@ impl RefxApp {
         // (ถ้าขอเป็นระยะจะปลุก event loop ตลอด แล้วพัง I-1)
         if let Some(tx) = io_tx.as_ref() {
             let (reply, rx) = crossbeam_channel::bounded(4);
-            let _ = tx.send(IoRequest::Stats { reply });
+            let _ = tx.send(IoRequest::Stats {
+                reply,
+                wake: pool.wake_handle(),
+            });
             self.cache_stats_rx = Some(rx);
         }
 
@@ -3767,7 +3770,8 @@ impl RefxApp {
             // ถ้าขอเป็นระยะจะปลุก event loop ตลอดแล้วพัง I-1)
             if let Some(tx) = assets.io_tx.as_ref() {
                 let (reply, rx) = crossbeam_channel::bounded(4);
-                if tx.send(IoRequest::Stats { reply }).is_ok() {
+                let wake = assets.pool.wake_handle();
+                if tx.send(IoRequest::Stats { reply, wake }).is_ok() {
                     self.cache_stats_rx = Some(rx);
                 }
             }
@@ -4665,12 +4669,36 @@ impl RefxApp {
             .items_in_z_order()
             .filter(|(_, item)| matches!(item.kind, refx_core::board::ItemKind::Missing { .. }))
             .count();
+        // ★★★ ด้านที่ยาวที่สุดของ item ที่ **มีพิกเซลจริง** — ตัวที่จำกัดเพดาน
+        //     `Missing` กับโน้ตข้อความไม่นับ: อันแรกเป็นสี่เหลี่ยมสีล้วน อันหลัง
+        //     egui วาดเป็นเวกเตอร์ — ทั้งคู่ขยายแล้วไม่เสียอะไร
+        let biggest = self
+            .docs
+            .active()
+            .board
+            .items_in_z_order()
+            .filter(|(_, item)| matches!(item.kind, refx_core::board::ItemKind::Image(_)))
+            .map(|(_, item)| item.canvas.size.x.max(item.canvas.size.y))
+            .fold(0.0_f32, f32::max);
         let Some(view) = self.shell.export_prompt.as_mut() else {
             return;
         };
 
         let size = bounds.size();
-        let long = view.long_side.clamp(64, refx_core::export::MAX_SIDE).max(1);
+        // ★★★ เพดานมาจาก **พิกเซลที่มีจริง** ไม่ใช่จากขีดจำกัดของ GPU (`docs/07 §6`)
+        //
+        //     แหล่งพิกเซลวันนี้คือ atlas ซึ่งเป็น thumbnail ด้านละ `SLOT_SIZE`
+        //     ★★ วันที่ P5-4b ให้แหล่งที่ดีกว่า **แก้บรรทัดนี้บรรทัดเดียว**
+        //        แล้วเพดานยกขึ้นเองทั้งกล่อง — ไม่ต้องแตะ UI เลย
+        view.max_side = refx_core::export::max_export_side(
+            size.x.max(size.y),
+            biggest,
+            refx_render::atlas::SLOT_SIZE,
+        );
+        let long = view
+            .long_side
+            .clamp(refx_core::export::MIN_EXPORT_SIDE, view.max_side)
+            .max(1);
         // ★ ด้านที่สั้นกว่าคำนวณจากสัดส่วน แล้ว clamp ให้อย่างน้อย 1 จุด —
         //   board ที่เรียงเป็นเส้นตรงพอดีให้ขนาด 0 ในแกนหนึ่งได้จริง
         let (width, height) = if size.x >= size.y {
@@ -5122,17 +5150,26 @@ impl RefxApp {
             docs,
             recovery_dir,
             gfx,
+            waker,
             ..
         } = self;
         // ★ ต้องมีหน้าต่างแล้วเท่านั้น (เงื่อนไขเดิม) — เอกสารอยู่คนละที่กับ `Gfx` แล้ว
         let has_window = gfx.is_some();
         for doc in docs.iter_mut() {
-            Self::tick_autosave_one(doc, recovery_dir.as_deref(), has_window);
+            Self::tick_autosave_one(doc, recovery_dir.as_deref(), has_window, waker.as_ref());
         }
     }
 
     /// autosave หนึ่งจังหวะของ **แท็บใบเดียว** — ตรรกะเดิมทั้งหมด แค่ผูกกับ `doc`
-    fn tick_autosave_one(doc: &mut Doc, recovery_dir: Option<&std::path::Path>, has_window: bool) {
+    ///
+    /// ★ `waker` เป็นพารามิเตอร์ **ไม่ใช่ค่าที่หยิบเองข้างใน** เพราะฟังก์ชันนี้
+    /// ไม่มี `self` (มันวนทีละแท็บ) — ดูเหตุผลที่ต้องมีเลยที่จุดสร้างเธรด
+    fn tick_autosave_one(
+        doc: &mut Doc,
+        recovery_dir: Option<&std::path::Path>,
+        has_window: bool,
+        waker: Option<&refx_platform::window::Waker>,
+    ) {
         // เก็บผลของรอบก่อน (ถ้ามี) — autosave ที่ล้มไม่ใช่เรื่องที่ผู้ใช้ต้องเห็น
         if let Some(rx) = doc.autosave_job.as_ref() {
             match rx.try_recv() {
@@ -5182,6 +5219,18 @@ impl RefxApp {
         let board = doc.board.clone();
         let session = doc.session.clone();
         let (tx, rx) = crossbeam_channel::bounded(1);
+        // ★★★ **ช่องนี้ถูกปลุกด้วยนาฬิกาของ autosave เอง ไม่ใช่ด้วยตัวปลุก**
+        //     (`docs/08 §3.9` ข้อ 18 · ดู `next_autosave_across_tabs`)
+        //
+        //     ลองใช้ `Waker` มาก่อนแล้ว **แล้ววัดได้ว่ามันทำให้ตัวนับเฟรมไต่**:
+        //     แก้ board แล้วปล่อยไว้ 60 วินาที → `Frames 516 → 517` เพราะทาง
+        //     ของตัวปลุกจบที่ `request_redraw` เสมอ · การวาดใหม่ไม่ได้ทำให้
+        //     snapshot ขึ้นดิสก์ และประตู `ui-idle-diff` จะแดงให้กับพฤติกรรม
+        //     ที่ถูกต้อง ซึ่งฝึกให้คนเลิกเชื่อประตู
+        //
+        //     → ผลถูกเก็บโดยนาฬิกาแทน: **ตื่นโดยไม่วาด** ตามรูปเดียวกับที่
+        //       `on_wake` ใช้เขียน snapshot อยู่แล้ว
+        let _ = waker;
         let spawned = std::thread::Builder::new()
             .name("refx-autosave".to_owned())
             .spawn(move || {
@@ -5239,16 +5288,35 @@ impl RefxApp {
         docs: &Docs,
         recovery_dir: Option<&std::path::Path>,
     ) -> Option<std::time::Instant> {
+        /// นานแค่ไหนถึงกลับมาดูว่า snapshot ที่ส่งไปเธรดเขียนเสร็จหรือยัง
+        ///
+        /// ★ สั้นพอที่ผู้ใช้จะได้ข้อความ "เขียน snapshot ไม่สำเร็จ" ทันเวลา
+        /// ยาวพอที่จะไม่กลายเป็นการวนถาม · การเขียนจริงใช้เวลาไม่กี่มิลลิวินาที
+        /// จึงเจอผลตั้งแต่ครั้งแรกเกือบเสมอ
+        const COLLECT_SNAPSHOT_AFTER: std::time::Duration = std::time::Duration::from_millis(250);
+
         docs.iter()
             .filter_map(|doc| {
-                // ★★★ งานที่ส่งไปเธรดแล้วยังไม่กลับ = **อย่าเพิ่งตั้งนาฬิกา**
+                // ★★★ งานที่ส่งไปเธรดแล้วยังไม่กลับ = **ตั้งนาฬิกาไว้ข้างหน้า**
+                //     ไม่ใช่ปล่อยว่าง และไม่ใช่ชี้เวลาที่ผ่านมาแล้ว
                 //
-                //   ไม่งั้นจะได้วงจรนี้: ตื่นตามเวลา → `tick_autosave` เห็นว่ามีงาน
-                //   ค้างแล้วออกทันทีโดยไม่เขียน → นาฬิกายังชี้เวลาที่ผ่านมาแล้ว →
-                //   ตื่นอีกทันที → วนแบบนี้จนกว่าเธรดจะเขียนเสร็จ ซึ่งก็คือ
-                //   `ControlFlow::Poll` ที่ I-1 ห้ามไว้ตรง ๆ แค่สะกดด้วยชื่ออื่น
+                //   เดิมที่นี่คืน `None` เพราะกลัววงจรนี้: ตื่นตามเวลา →
+                //   `tick_autosave` เห็นว่ามีงานค้างแล้วออกทันที → นาฬิกายังชี้
+                //   เวลาที่ผ่านมาแล้ว → ตื่นอีกทันที = `ControlFlow::Poll`
+                //   ที่ I-1 ห้ามไว้ แค่สะกดด้วยชื่ออื่น
+                //
+                //   ★★ แต่ `None` มีราคาที่แพงกว่า: **ไม่มีใครกลับมาเก็บผลเลย**
+                //   แอปหลับยาว → `autosave_job` ค้าง → งวดถัดไปไม่มีวันเกิด
+                //   → **autosave หยุดทำงานถาวร** จนกว่าผู้ใช้จะขยับเมาส์
+                //   (`docs/08 §3.9` ข้อ 18 — ผลจากเธรดอื่นต้องมีคนมาเก็บ)
+                //
+                //   ★★★ ทางที่ถูกคือชี้ไป **ข้างหน้า** — หลับจริงจนถึงตอนนั้น
+                //   แล้วตื่นมาเก็บผล · ไม่ใช่ลูป: การเขียน snapshot ใช้เวลาระดับ
+                //   มิลลิวินาที (3,072 ใบ = 29 KB) จึงตื่นเพิ่มครั้งเดียวก็เจอผลแล้ว
+                //   · และ **ไม่ขอเฟรม** — ต่างจากทางของ `Waker` ซึ่งจบที่
+                //   `request_redraw` เสมอ แล้วทำให้ตัวนับเฟรมไต่ทั้งที่จอไม่เปลี่ยน
                 if doc.autosave_job.is_some() {
-                    return None;
+                    return Some(std::time::Instant::now() + COLLECT_SNAPSHOT_AFTER);
                 }
                 Self::snapshot_target(doc, recovery_dir)?;
                 doc.autosaver
@@ -5281,10 +5349,18 @@ impl RefxApp {
         //     ให้ "กู้คืน" งานที่อยู่ตรงหน้าเขา (ดู `refx_io::recovery::scan`)
         let live = self.docs.live_sessions();
         let (tx, rx) = crossbeam_channel::bounded(1);
+        // ★★ **ต้องปลุก** (ข้อ 18) — ผลของการสแกนคือแถบ "งานค้างจากรอบที่แล้ว"
+        //    ซึ่งเป็นสิ่งเดียวที่บอกผู้ใช้ว่างานของเขายังกู้ได้ · ไม่ปลุก = แถบนั้น
+        //    ไม่โผล่จนกว่าเขาจะขยับเมาส์ ซึ่งเป็นวินาทีที่เขากำลังตัดสินใจว่า
+        //    "โปรแกรมทำงานหายไปหรือเปล่า"
+        let wake = self.waker.clone();
         let spawned = std::thread::Builder::new()
             .name("refx-recovery-scan".to_owned())
             .spawn(move || {
                 let _ = tx.send(scan_for_recovery(&dir, &live));
+                if let Some(wake) = wake {
+                    wake.wake();
+                }
             });
         if spawned.is_ok() {
             self.recovery_scan = Some(rx);
@@ -5739,7 +5815,9 @@ impl RefxApp {
         if self.open_dialog.is_some() || self.load_job.is_some() {
             return;
         }
-        self.open_dialog = Some(refx_platform::dialog::pick_document_to_open());
+        self.open_dialog = Some(refx_platform::dialog::pick_document_to_open(
+            self.waker.clone(),
+        ));
         // ★ บอกด้วยว่ากำลังรออะไรอยู่ — native dialog เปิดหลังหน้าต่างหลักได้
         //   (เกิดจริงตอนขับด้วยสคริปต์) ถ้าไม่มีข้อความนี้ ผู้ใช้ที่ไม่เห็น dialog
         //   จะสรุปว่า `Ctrl+O` ไม่ทำงาน แล้วกดซ้ำอีกสิบครั้ง
@@ -6516,7 +6594,10 @@ impl RefxApp {
             })
             .unwrap_or_default();
         self.relink_for = Some((self.docs.active().id, id));
-        self.relink_pick = Some(refx_platform::dialog::pick_missing_image(&name));
+        self.relink_pick = Some(refx_platform::dialog::pick_missing_image(
+            &name,
+            self.waker.clone(),
+        ));
         // ★ ข้อความของ **การหาไฟล์ภาพ** ไม่ใช่ของการเปิด board — เคยใช้
         //   `OpenChoosing` ซ้ำแล้วบนจอขึ้นว่า "Choose a board to open"
         //   ซึ่งบอกผู้ใช้ผิดเรื่องทั้งประโยค (เห็นตอนถ่ายภาพยืนยัน 21 ส.ค. 2026)
@@ -6772,7 +6853,10 @@ impl RefxApp {
                 |name| name.to_string_lossy().into_owned(),
             );
         self.save_as_mode = mode;
-        self.save_dialog = Some(refx_platform::dialog::pick_save_location(&name));
+        self.save_dialog = Some(refx_platform::dialog::pick_save_location(
+            &name,
+            self.waker.clone(),
+        ));
         self.shell.status = text::t(self.shell.lang, Key::SaveChoosing).to_owned();
         self.shell.status_warn = false;
     }
@@ -11831,11 +11915,29 @@ mod tests {
         assert_eq!(app.autosave_deadline(), None);
         assert!(!RefxApp::doc_has_unsnapshotted_work(app.docs.active()));
 
-        // ★ งานที่ส่งไปเธรดแล้วยังไม่กลับ ต้องไม่ตั้งนาฬิกาเช่นกัน —
-        //   ตื่นมาแล้วทำอะไรไม่ได้ = ตั้งเวลาในอดีตซ้ำ = `Poll` ที่ I-1 ห้าม
+        // ★★★ งานที่ส่งไปเธรดแล้วยังไม่กลับ ต้องตั้งนาฬิกาไว้ **ข้างหน้า**
+        //     (`docs/08 §3.9` ข้อ 18 — ผลจากเธรดอื่นต้องมีคนมาเก็บ)
+        //
+        //     เดิมที่นี่คืน `None` เพราะกลัวลูป · ราคาของ `None` คือ **ไม่มีใคร
+        //     กลับมาเก็บผลเลย** แล้ว autosave หยุดถาวรจนกว่าผู้ใช้จะขยับเมาส์
+        //
+        //   ★★ ถาม `next_autosave_across_tabs` ตรง ๆ ไม่ใช่ `autosave_deadline`
+        //      — ตัวหลังคืน `None` ตั้งแต่บรรทัดแรกเพราะไม่มี `gfx` ในเทสต์
+        //      **input จึงไม่เคยไปถึงกิ่งที่เทสต์นี้อ้างว่าตรวจ** (`§3.9` ข้อ 1b)
+        //      · รุ่นก่อนของเทสต์นี้เขียวมาตลอดโดยไม่ได้ตรวจอะไรเลย
         let (_tx, rx) = crossbeam_channel::bounded::<Result<(), String>>(1);
         app.docs.active_mut().autosave_job = Some(rx);
-        assert_eq!(app.autosave_deadline(), None, "มีงานค้างแล้วยังตั้งนาฬิกา");
+        let before = std::time::Instant::now();
+        let deadline = RefxApp::next_autosave_across_tabs(&app.docs, app.recovery_dir.as_deref())
+            .expect("มีงานค้างแล้วต้องตั้งนาฬิกามาเก็บผล ไม่ใช่ปล่อยให้หลับยาว");
+        assert!(
+            deadline > before,
+            "นาฬิกาชี้ไปอดีต = ตื่นทันทีวนไม่รู้จบ ซึ่งคือ `Poll` ที่ I-1 ห้าม"
+        );
+        assert!(
+            deadline < before + std::time::Duration::from_secs(2),
+            "ตั้งไว้ไกลเกินไป — ข้อความ 'เขียน snapshot ไม่สำเร็จ' จะมาช้ากว่าที่ควร"
+        );
     }
 
     // ---------- ★★★ P4-4 ครึ่งหลัง: dialog 3 ตัวเลือก + เปิดไฟล์ ----------
@@ -12295,7 +12397,7 @@ mod tests {
             assert!(RefxApp::doc_has_unsnapshotted_work(doc));
         }
         for doc in docs.iter_mut() {
-            RefxApp::tick_autosave_one(doc, Some(dir.as_path()), true);
+            RefxApp::tick_autosave_one(doc, Some(dir.as_path()), true, None);
         }
         // รอเธรดเขียนจบทั้งสองใบ — ผ่านช่องเดิมที่ `tick_autosave` ใช้เก็บผล
         for doc in docs.iter_mut() {
@@ -12339,7 +12441,7 @@ mod tests {
 
         for doc in docs.iter_mut() {
             add_note(doc, "งานที่ยังไม่เคยบันทึก");
-            RefxApp::tick_autosave_one(doc, Some(dir.as_path()), true);
+            RefxApp::tick_autosave_one(doc, Some(dir.as_path()), true, None);
         }
         for doc in docs.iter_mut() {
             if let Some(rx) = doc.autosave_job.take() {

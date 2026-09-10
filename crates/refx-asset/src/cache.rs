@@ -534,6 +534,13 @@ pub enum IoRequest {
     Stats {
         /// ช่องส่งคำตอบกลับ
         reply: crossbeam_channel::Sender<CacheStats>,
+        /// ★★★ ตัวปลุก UI หลังส่งคำตอบ — `docs/08 §3.9` ข้อ 18
+        ///
+        /// ตัวเลขบน status bar ที่อัปเดตแล้วไม่มีใครวาด **เท่ากับไม่ได้อัปเดต**
+        /// · แอปหลับด้วย `ControlFlow::Wait` (I-1) จึงต้องมีคนปลุก
+        /// · ★ เป็น [`crate::pool::WakeHandle`] ไม่ใช่ชนิดของ winit —
+        ///   `refx-asset` ห้ามรู้จัก windowing (ARCHITECTURE §2)
+        wake: crate::pool::WakeHandle,
     },
 }
 
@@ -690,12 +697,14 @@ fn io_loop(db: &CacheDb, rx: &crossbeam_channel::Receiver<IoRequest>) {
                 });
                 let _ = reply.send(removed);
             }
-            IoRequest::Stats { reply } => {
+            IoRequest::Stats { reply, wake } => {
                 let stats = CacheStats {
                     thumb_count: db.thumb_count().unwrap_or(0),
                     size_bytes: db.size_bytes().unwrap_or(0),
                 };
                 let _ = reply.send(stats);
+                // ★ ปลุก **หลัง** ส่ง — ปลุกก่อนแล้วเฟรมที่ตื่นมาจะยังไม่เห็นตัวเลขใหม่
+                wake.wake();
             }
         }
     }
@@ -1053,7 +1062,11 @@ mod tests {
 
         // ต้องยังตอบคำสั่งถัดไปได้ตามปกติ
         let (reply, rx) = crossbeam_channel::bounded(1);
-        tx.send(IoRequest::Stats { reply }).unwrap();
+        tx.send(IoRequest::Stats {
+            reply,
+            wake: crate::pool::WakeHandle::default(),
+        })
+        .unwrap();
         let stats = rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
         assert_eq!(stats.thumb_count, 0);
     }
@@ -1070,7 +1083,11 @@ mod tests {
             .unwrap();
         }
         let (reply, rx) = crossbeam_channel::bounded(1);
-        tx.send(IoRequest::Stats { reply }).unwrap();
+        tx.send(IoRequest::Stats {
+            reply,
+            wake: crate::pool::WakeHandle::default(),
+        })
+        .unwrap();
         let stats = rx.recv_timeout(std::time::Duration::from_secs(30)).unwrap();
         assert_eq!(stats.thumb_count, 3);
         assert!(stats.size_bytes > 0, "ต้องรายงานขนาดจริงให้ status bar");

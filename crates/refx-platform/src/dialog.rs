@@ -9,6 +9,22 @@
 
 use std::path::PathBuf;
 
+/// ★★★ ปลุก event loop **หลังส่งผลแล้ว** — `docs/08 §3.9` ข้อ 18
+///
+/// แอปหลับด้วย `ControlFlow::Wait` ตาม I-1 · ผลที่ส่งกลับมาโดยไม่มีใครปลุก
+/// จะนอนอยู่ในช่องจนกว่าผู้ใช้จะบังเอิญขยับเมาส์ — อาการคือ *"เลือกไฟล์เสร็จ
+/// แล้วไม่มีอะไรเกิดขึ้น"* ซึ่งเกิดจริงมาแล้วสามครั้งในโปรเจกต์นี้
+///
+/// ★ **ต้องปลุกหลัง `send` เสมอ** — ปลุกก่อนส่ง เฟรมที่ตื่นมาจะยังไม่เห็นอะไร
+/// แล้วก็หลับต่อ กลายเป็นการปลุกที่ไม่ได้ผลอะไรเลย
+///
+/// `None` = ผู้เรียกยอมรับความหน่วงนั้น (เทสต์ที่ไม่มี event loop)
+fn wake_after_send(waker: Option<&crate::window::Waker>) {
+    if let Some(waker) = waker {
+        waker.wake();
+    }
+}
+
 /// เปิด dialog ไม่สำเร็จ
 #[derive(Debug, thiserror::Error)]
 pub enum DialogError {
@@ -39,8 +55,13 @@ pub fn pick_images() -> Result<Vec<PathBuf>, DialogError> {
 /// ★ เธรดนี้ **ไม่ถูก join** โดยตั้งใจ: ถ้าผู้ใช้ปิดโปรแกรมทั้งที่ dialog
 /// ยังเปิดอยู่ เราไม่อยากให้การปิดค้างรอเขากดปุ่ม · `Receiver` ที่ถูก drop
 /// ทำให้ `send` ฝั่งโน้นล้มเงียบ ๆ ซึ่งเป็นพฤติกรรมที่ต้องการพอดี
+///
+/// ★★★ `waker` — ดู [`wake_after_send`] · **ไม่มีตัวปลุก = ผลนอนรอ**
 #[must_use]
-pub fn pick_save_location(suggested_name: &str) -> crossbeam_channel::Receiver<Option<PathBuf>> {
+pub fn pick_save_location(
+    suggested_name: &str,
+    waker: Option<crate::window::Waker>,
+) -> crossbeam_channel::Receiver<Option<PathBuf>> {
     let (tx, rx) = crossbeam_channel::bounded(1);
     let name = suggested_name.to_owned();
     std::thread::Builder::new()
@@ -56,6 +77,7 @@ pub fn pick_save_location(suggested_name: &str) -> crossbeam_channel::Receiver<O
             })
             .unwrap_or(None);
             let _ = tx.send(picked);
+            wake_after_send(waker.as_ref());
         })
         // spawn ล้ม = ระบบไม่มีเธรดให้แล้ว ซึ่งใหญ่กว่าเรื่องบันทึกไฟล์
         // — ผู้เรียกจะเห็นว่า channel ปิดทันที แล้วรายงานว่าเปิด dialog ไม่ได้
@@ -73,7 +95,9 @@ pub fn pick_save_location(suggested_name: &str) -> crossbeam_channel::Receiver<O
 ///
 /// `None` = ผู้ใช้กดยกเลิก ซึ่งไม่ใช่ error
 #[must_use]
-pub fn pick_document_to_open() -> crossbeam_channel::Receiver<Option<PathBuf>> {
+pub fn pick_document_to_open(
+    waker: Option<crate::window::Waker>,
+) -> crossbeam_channel::Receiver<Option<PathBuf>> {
     let (tx, rx) = crossbeam_channel::bounded(1);
     std::thread::Builder::new()
         .name("refx-open-dialog".to_owned())
@@ -86,6 +110,7 @@ pub fn pick_document_to_open() -> crossbeam_channel::Receiver<Option<PathBuf>> {
             })
             .unwrap_or(None);
             let _ = tx.send(picked);
+            wake_after_send(waker.as_ref());
         })
         .map_or_else(
             |err| tracing::error!(%err, "cannot spawn the open dialog thread"),
@@ -127,10 +152,7 @@ pub fn pick_export_location(
             })
             .unwrap_or(None);
             let _ = tx.send(picked);
-            // ★ ปลุก **หลัง** ส่งเสมอ — ปลุกก่อนส่งแล้วเฟรมที่ตื่นมาจะยังไม่เห็นอะไร
-            if let Some(waker) = waker {
-                waker.wake();
-            }
+            wake_after_send(waker.as_ref());
         })
         .map_or_else(
             |err| tracing::error!(%err, "cannot spawn the export dialog thread"),
@@ -147,7 +169,10 @@ pub fn pick_export_location(
 /// ★★ ตัวกรองเป็นนามสกุลชุดเดียวกับที่ `decode_guarded` รับได้ — ถ้ากว้างกว่านั้น
 /// ผู้ใช้จะชี้ไฟล์ที่โปรแกรมเปิดไม่ได้แล้วได้ error ที่เขาทำอะไรกับมันไม่ได้
 #[must_use]
-pub fn pick_missing_image(file_name: &str) -> crossbeam_channel::Receiver<Option<PathBuf>> {
+pub fn pick_missing_image(
+    file_name: &str,
+    waker: Option<crate::window::Waker>,
+) -> crossbeam_channel::Receiver<Option<PathBuf>> {
     let (tx, rx) = crossbeam_channel::bounded(1);
     let title = if file_name.is_empty() {
         "หาไฟล์ภาพที่หายไป".to_owned()
@@ -170,6 +195,7 @@ pub fn pick_missing_image(file_name: &str) -> crossbeam_channel::Receiver<Option
             })
             .unwrap_or(None);
             let _ = tx.send(picked);
+            wake_after_send(waker.as_ref());
         })
         .map_or_else(
             |err| tracing::error!(%err, "cannot spawn the relink dialog thread"),
