@@ -323,6 +323,20 @@ pub fn path_for(dir: &Path) -> PathBuf {
     dir.join(SIDECAR_NAME)
 }
 
+/// ★★★ ไฟล์นี้เป็น sidecar ของเราเองไหม — **ทางเข้าภาพทุกเส้นต้องถาม**
+///
+/// เจอบนแอปจริง 11 ก.ย. 2026: ตั้งแต่วันที่เราเริ่มเขียนไฟล์ลงโฟลเดอร์ภาพ
+/// การ "เปิดทั้งโฟลเดอร์" จะ **ดูดไฟล์ของตัวเองกลับเข้ามาเป็นภาพใบที่สี่**
+/// แล้วขึ้นเป็นภาพเสียบน board ของผู้ใช้ (3 ไฟล์ → 4 items)
+///
+/// ★ ทางเข้าไม่ได้กรองนามสกุลโดยตั้งใจ — ไฟล์อะไรก็ลากเข้ามาได้และกลายเป็น
+///   `Missing` ถ้าเปิดไม่ออก ซึ่งถูกตาม I-7 · แต่ **ไฟล์ที่เราสร้างเอง**
+///   ไม่ใช่ของที่ผู้ใช้ลากเข้ามา และไม่ควรโผล่บน board เลยสักครั้ง
+#[must_use]
+pub fn is_sidecar(path: &Path) -> bool {
+    path.file_name().is_some_and(|name| name == SIDECAR_NAME)
+}
+
 // ---------------------------------------------------------------------------
 // การจับคู่ — หัวใจของ §5
 // ---------------------------------------------------------------------------
@@ -858,6 +872,21 @@ mod tests {
         let back = decode(&encode(&sidecar).unwrap()).unwrap();
         assert!(back.entries[0].note.len() <= MAX_NOTE_LEN);
         assert!(!back.entries[0].note.is_empty(), "ตัดจนหมดก็ผิด");
+    }
+
+    /// ★★★ ไฟล์ของเราเองต้องไม่โผล่บน board ของผู้ใช้ (เจอบนแอปจริง)
+    #[test]
+    fn our_own_file_is_never_mistaken_for_a_picture() {
+        assert!(is_sidecar(Path::new("E:/ภาพ/.refx-meta")));
+        assert!(is_sidecar(&path_for(Path::new("E:/ภาพ"))));
+        // ★ ประตูของประตู: ต้องปฏิเสธได้จริง ไม่ใช่ตอบ true เสมอ
+        assert!(!is_sidecar(Path::new("E:/ภาพ/cat.png")));
+        assert!(!is_sidecar(Path::new("E:/ภาพ/.refx-meta.bak")));
+        assert!(!is_sidecar(Path::new("E:/ภาพ/my.refx")));
+        assert!(
+            !is_sidecar(Path::new("E:/.refx-meta/cat.png")),
+            "โฟลเดอร์ชื่อนี้ไม่ใช่ไฟล์นี้"
+        );
     }
 
     // ---------- การจับคู่: หัวใจของ §5 ----------

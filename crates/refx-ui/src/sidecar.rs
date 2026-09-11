@@ -46,8 +46,30 @@ struct Folder {
     orphans: Vec<Entry>,
     /// มีอะไรเปลี่ยนตั้งแต่เขียนครั้งล่าสุด
     dirty: bool,
+    /// ★★★ โฟลเดอร์นี้ **มี `.refx-meta` อยู่แล้วตอนเราเปิด**
+    ///
+    /// ไฟล์ที่มีอยู่ **คือบันทึกการอนุญาต**ของผู้ใช้เอง — เขาเคยตอบตกลงไปแล้ว
+    /// จึงไม่ต้องถามซ้ำทุกครั้งที่เปิดโปรแกรม
+    had_file: bool,
+    /// ★★★ ผู้ใช้เพิ่งตอบตกลงในเซสชันนี้
+    granted: bool,
     /// บอกผู้ใช้ไปแล้วว่าโฟลเดอร์นี้เขียนไม่ได้ — ★ ห้ามบ่นซ้ำทุกครั้งที่ติดดาว
     told: bool,
+}
+
+impl Folder {
+    /// ★★★ เขียนลงโฟลเดอร์นี้ได้หรือยัง — **opt-in คือกฎ ไม่ใช่มารยาท**
+    ///
+    /// เจอบนแอปจริง 11 ก.ย. 2026: นาฬิกาเขียนไฟล์ไป **ระหว่างที่คำถามยังอยู่บนจอ**
+    /// ผู้ใช้กด "ไม่ต้องตอนนี้" แล้วไฟล์ก็อยู่ในโฟลเดอร์เขาแล้ว — คำถามที่ถามไป
+    /// หลังลงมือทำ ไม่ใช่การขออนุญาต
+    fn may_write(&self, policy: SidecarPolicy) -> bool {
+        match policy {
+            SidecarPolicy::Never => false,
+            SidecarPolicy::Always => true,
+            SidecarPolicy::Ask => self.had_file || self.granted,
+        }
+    }
 }
 
 /// ผลของการโหลดหนึ่งโฟลเดอร์ ที่เดินทางข้ามเธรดกลับมา
@@ -162,9 +184,13 @@ impl Folders {
 
         let mut restore = Restore::default();
         for Loaded { dir, load } in batch {
+            let mut had_file = false;
             let (permit, locked, sidecar) = match load {
                 sidecar::Load::Fresh(permit) => (Some(permit), None, Sidecar::default()),
-                sidecar::Load::Opened(sidecar, permit) => (Some(permit), None, sidecar),
+                sidecar::Load::Opened(sidecar, permit) => {
+                    had_file = true;
+                    (Some(permit), None, sidecar)
+                }
                 sidecar::Load::HandsOff(reason) => {
                     restore.say.push(Say::HandsOff {
                         dir: dir.clone(),
@@ -202,13 +228,37 @@ impl Folders {
                 }
             }
 
+            // ★★★ **มีใบไหนถูกจับคู่ด้วย hash ไม่ใช่ด้วยชื่อ = ผู้ใช้เปลี่ยนชื่อไฟล์**
+            //
+            //   ถ้าไม่เขียนกลับ ชื่อใน `.refx-meta` จะค้างของเก่าไปเรื่อย ๆ แล้ว
+            //   วันที่ผู้ใช้ **แก้เนื้อไฟล์ด้วย** (ชื่อไม่ตรง + hash ไม่ตรง)
+            //   แท็กจะหายทั้งที่แต่ละอย่างแยกกันยังหาเจอ
+            //
+            //   ★ ทำเฉพาะโฟลเดอร์ที่ **มีไฟล์อยู่แล้ว** (เขาเคยตอบตกลงไปแล้ว) —
+            //     โฟลเดอร์เปล่าต้องไม่ถูกทำเครื่องหมายว่าต้องเขียน ไม่งั้น
+            //     แค่เปิดโฟลเดอร์ก็จะมีคำถามเด้งขึ้นมาโดยที่ผู้ใช้ยังไม่ได้ทำอะไร
+            //   ★★ และ **hash ก็เหมือนกัน**: ผู้ใช้ที่แก้ภาพใน Photoshop วันนี้
+            //     แล้วเปลี่ยนชื่อมันเดือนหน้า จะเสียแท็กถ้าเราปล่อยพยานให้เก่าค้าง
+            //     — สองกติกาของ `docs/07 §5` ต้องใช้ได้ทั้งคู่เสมอ ไม่ใช่ทีละอย่าง
+            let moved = !sidecar.entries.is_empty()
+                && here.iter().zip(&matched).any(|((_, name, hash), at)| {
+                    at.is_some_and(|at| {
+                        sidecar
+                            .entries
+                            .get(at)
+                            .is_some_and(|e| &e.file_name != name || &e.hash != hash)
+                    })
+                });
+
             self.known.insert(
                 dir,
                 Folder {
                     permit,
                     locked,
                     orphans: sidecar::orphans(&sidecar, &matched),
-                    dirty: false,
+                    dirty: moved,
+                    had_file,
+                    granted: false,
                     told: false,
                 },
             );
@@ -249,12 +299,20 @@ impl Folders {
         say
     }
 
-    /// โฟลเดอร์แรกที่ยังไม่เคยมี `.refx-meta` และมีของรอเขียน — ใช้ตั้งคำถาม
+    /// โฟลเดอร์แรกที่มีของรอเขียนแต่ **ยังไม่ได้รับอนุญาต** — ใช้ตั้งคำถาม
+    ///
+    /// ★ โฟลเดอร์ที่มี `.refx-meta` อยู่แล้วไม่ถูกถามซ้ำ — ไฟล์นั้นคือคำตอบ
+    /// ที่ผู้ใช้เคยให้ไว้ · ถามทุกครั้งที่เปิดโปรแกรมคือการไม่ฟังคำตอบเดิม
     #[must_use]
-    pub fn first_needing_an_answer(&self) -> Option<&Path> {
+    pub fn first_needing_an_answer(&self, policy: SidecarPolicy) -> Option<&Path> {
+        if policy != SidecarPolicy::Ask {
+            return None;
+        }
         self.known
             .iter()
-            .find(|(_, folder)| folder.dirty && folder.permit.is_some())
+            .find(|(_, folder)| {
+                folder.dirty && folder.permit.is_some() && !folder.may_write(policy)
+            })
             .map(|(dir, _)| dir.as_path())
     }
 
@@ -269,6 +327,11 @@ impl Folders {
         let mut jobs: Vec<(PathBuf, Sidecar, WritePermit)> = Vec::new();
         for (dir, folder) in &mut self.known {
             if !folder.dirty {
+                continue;
+            }
+            // ★★★ ยังไม่ได้รับอนุญาต = **ไม่เขียน และไม่ล้างธง** — รอคำตอบ
+            //     ล้างธงตรงนี้จะทำให้การติดดาวระหว่างรอคำตอบหายไปเงียบ ๆ
+            if !folder.may_write(policy) {
                 continue;
             }
             let Some(permit) = folder.permit else {
@@ -361,8 +424,15 @@ impl Folders {
         let Some(dir) = self.asking.take() else {
             return;
         };
-        if !write_it && let Some(folder) = self.known.get_mut(&dir) {
-            // ★ "ไม่" ถูกจำไว้ที่ `settings.toml` — **ห้ามเขียนคำว่าไม่ลงโฟลเดอร์นั้น**
+        let Some(folder) = self.known.get_mut(&dir) else {
+            return;
+        };
+        if write_it {
+            folder.granted = true;
+        } else {
+            // ★ "ไม่" ถูกจำไว้ **ในหน่วยความจำของเซสชันนี้เท่านั้น** —
+            //   ห้ามเขียนคำว่าไม่ลงโฟลเดอร์นั้น (`docs/07 §5`) · ค่าถาวรอยู่ที่
+            //   `settings.toml` ซึ่งผู้ใช้ตั้งเองจากแผง Settings
             folder.permit = None;
             folder.dirty = false;
             folder.told = true;
@@ -584,6 +654,114 @@ mod tests {
         assert!(
             !folders.has_work_outstanding(),
             "ยังไม่ได้อ่านไฟล์เลยแต่จะเขียนทับแล้ว"
+        );
+    }
+
+    /// ★★★ ชื่อที่เปลี่ยนไปต้องถูกเขียนกลับ — ไม่งั้นแท็กจะหายในวันที่
+    /// ผู้ใช้ทั้งเปลี่ยนชื่อ **และ** แก้เนื้อไฟล์
+    #[test]
+    fn a_rename_is_written_back_so_the_name_stops_being_stale() {
+        let mut board = Board::default();
+        let mut h = history();
+        put(&mut board, &mut h, vec![image("/photos/new-name.png", 7)]);
+
+        let stored = Sidecar::new(vec![Entry {
+            file_name: "old-name.png".to_owned(),
+            hash: hash_of(7),
+            rating: 5,
+            color_label: None,
+            note: String::new(),
+            pinned: false,
+            tags: Vec::new(),
+        }]);
+        let present = [Present {
+            file_name: "new-name.png".to_owned(),
+            hash: hash_of(7),
+        }];
+        let matched = sidecar::resolve(&stored, &present);
+        assert_eq!(matched, vec![Some(0)], "hash ต้องจับคู่ให้ได้ก่อน");
+
+        // ★ ประตูของประตู: ชื่อที่ **ไม่ได้** เปลี่ยน ต้องไม่ถูกนับว่าต้องเขียน
+        let same = [Present {
+            file_name: "old-name.png".to_owned(),
+            hash: hash_of(7),
+        }];
+        let matched_same = sidecar::resolve(&stored, &same);
+        let changed = |names: &[Present], m: &[Option<usize>]| {
+            names.iter().zip(m).any(|(p, at)| {
+                at.is_some_and(|at| {
+                    stored
+                        .entries
+                        .get(at)
+                        .is_some_and(|e| e.file_name != p.file_name)
+                })
+            })
+        };
+        assert!(changed(&present, &matched), "เปลี่ยนชื่อแล้วต้องรู้ว่าต้องเขียนกลับ");
+        assert!(
+            !changed(&same, &matched_same),
+            "ชื่อเดิมต้องไม่ทำให้เขียนไฟล์ทุกครั้งที่เปิด"
+        );
+
+        // ★★ เนื้อไฟล์ที่เปลี่ยน (Photoshop) ก็ต้องทำให้พยานถูกเขียนใหม่ —
+        //    ไม่งั้นวันที่เขาเปลี่ยนชื่อมันเดือนหน้า แท็กจะหาย
+        let edited = [Present {
+            file_name: "old-name.png".to_owned(),
+            hash: hash_of(99),
+        }];
+        let matched_edited = sidecar::resolve(&stored, &edited);
+        assert_eq!(matched_edited, vec![Some(0)], "ชื่อตรงต้องจับคู่แม้ hash ไม่ตรง");
+        let witness_stale = edited.iter().zip(&matched_edited).any(|(p, at)| {
+            at.is_some_and(|at| stored.entries.get(at).is_some_and(|e| e.hash != p.hash))
+        });
+        assert!(witness_stale, "พยานที่เก่าแล้วต้องถูกเขียนใหม่");
+    }
+
+    /// ★★★ **ตอบว่าไม่ แล้วต้องไม่มีไฟล์เกิดขึ้นเลย** — และระหว่างที่ยังไม่ตอบ
+    /// ก็ต้องไม่เขียน · เจอบนแอปจริง 11 ก.ย. 2026: นาฬิกาเขียนไปก่อนผู้ใช้ตอบ
+    /// แล้วคำถามกลายเป็นการแจ้งให้ทราบหลังลงมือทำ
+    #[test]
+    fn nothing_is_written_until_the_user_has_actually_said_yes() {
+        let waiting = Folder {
+            permit: None,
+            locked: None,
+            orphans: Vec::new(),
+            dirty: true,
+            had_file: false,
+            granted: false,
+            told: false,
+        };
+        assert!(
+            !waiting.may_write(SidecarPolicy::Ask),
+            "เขียนทั้งที่ยังไม่ได้ถาม — opt-in พัง"
+        );
+        assert!(!waiting.may_write(SidecarPolicy::Never));
+        // ★ ประตูของประตู: ต้องอนุญาตได้จริงด้วย ไม่ใช่ห้ามทุกกรณี
+        assert!(waiting.may_write(SidecarPolicy::Always), "Always ต้องเขียนได้");
+
+        let answered = Folder {
+            granted: true,
+            ..waiting
+        };
+        assert!(
+            answered.may_write(SidecarPolicy::Ask),
+            "ตอบตกลงแล้วต้องเขียนได้"
+        );
+
+        // ★★ ไฟล์ที่มีอยู่แล้ว **คือคำตอบเดิมของผู้ใช้** — ห้ามถามซ้ำทุกครั้งที่เปิด
+        let known_folder = Folder {
+            had_file: true,
+            granted: false,
+            dirty: true,
+            permit: None,
+            locked: None,
+            orphans: Vec::new(),
+            told: false,
+        };
+        assert!(known_folder.may_write(SidecarPolicy::Ask));
+        assert!(
+            !known_folder.may_write(SidecarPolicy::Never),
+            "Never ต้องชนะทุกอย่าง"
         );
     }
 

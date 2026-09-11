@@ -16,6 +16,9 @@ workspace = true
 [dependencies]
 refx-ui.workspace       = true
 refx-core.workspace     = true
+# ★ ใช้ตัวเดียว: `sidecar::is_sidecar` — ตัวกรองไฟล์ของเราเองที่ทางเข้าภาพ
+#   ทุกเส้นต้องถาม · นิยามอยู่ข้าง ๆ ชื่อไฟล์ ไม่ใช่ทำสำเนามาไว้ที่นี่
+refx-io.workspace       = true
 refx-platform.workspace = true
 winit.workspace         = true
 anyhow.workspace        = true

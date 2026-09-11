@@ -98,6 +98,11 @@ fn scan_images(dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>, String>
         .filter_map(Result::ok)
         .map(|e| e.path())
         .filter(|p| p.is_file())
+        // ★★★ ไม่ใช่การกรองนามสกุล — ไฟล์อะไรก็เปิดได้และกลายเป็น `Missing`
+        //     ถ้าเปิดไม่ออก (I-7) · แต่ `.refx-meta` เป็น **ไฟล์ที่เราเขียนเอง**
+        //     ตั้งแต่ P5-5 การไม่กรองมันแปลว่าเปิดโฟลเดอร์เดิมซ้ำแล้วได้ภาพเสีย
+        //     แถมมาหนึ่งใบทุกครั้ง (เจอจริงบนแอปจริง 11 ก.ย. 2026: 3 ไฟล์ → 4 items)
+        .filter(|p| !refx_io::sidecar::is_sidecar(p))
         .collect();
     // เรียงชื่อให้ผลลัพธ์คงที่ทุกครั้ง (วัดผลเทียบกันได้)
     files.sort();

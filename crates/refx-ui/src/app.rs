@@ -2994,6 +2994,12 @@ impl RefxApp {
         if self.assets.is_none() {
             return;
         }
+        // ★★★ ไฟล์ที่ **เราเขียนเอง** ไม่ใช่ภาพของผู้ใช้ (P5-5) — ตัดออกที่ทางเข้า
+        //     ทุกเส้น ไม่ใช่เฉพาะ `--open-dir` · ดู `refx_io::sidecar::is_sidecar`
+        let paths: Vec<std::path::PathBuf> = paths
+            .into_iter()
+            .filter(|path| !refx_io::sidecar::is_sidecar(path))
+            .collect();
         if paths.is_empty() {
             return;
         }
@@ -7295,7 +7301,7 @@ impl RefxApp {
                     .docs
                     .active()
                     .sidecar
-                    .first_needing_an_answer()
+                    .first_needing_an_answer(self.settings.sidecar)
                     .map(std::path::Path::to_path_buf)
             {
                 self.shell.sidecar_prompt = Some(dir.display().to_string());
