@@ -837,6 +837,13 @@ struct Doc {
     /// ที่ระดับแอปเมื่อไหร่ ภาพของแท็บหนึ่งจะไปโผล่ทับ item ของอีกแท็บที่บังเอิญ
     /// ได้ `ItemId` เดียวกัน (ซึ่งเกิดแทบทุกครั้ง เพราะ arena เริ่มนับจาก 0 เสมอ)
     relink_targets: std::collections::HashMap<refx_asset::hash::ContentHash, ItemId>,
+    /// ★★★ `.refx-meta` ของทุกโฟลเดอร์ที่ภาพบนแท็บนี้อยู่ (P5-5)
+    ///
+    /// ต่อแท็บด้วยเหตุผลเดียวกับ `relink_targets` — มันถือ `ItemId` ซึ่งไม่ผูก
+    /// กับ board · และ "เจ้าของเดียว" ของ `docs/07 §5` เป็นสมบัติของ *เอกสาร*
+    /// ไม่ใช่ของหน้าต่าง: แท็บที่บันทึกเป็น `.refx` แล้วเลิกเขียน sidecar
+    /// ต้องไม่ทำให้แท็บข้าง ๆ ที่ยังเปิดโฟลเดอร์อยู่เลิกตามไปด้วย
+    sidecar: crate::sidecar::Folders,
 }
 
 impl Doc {
@@ -867,6 +874,7 @@ impl Doc {
             pending_snapshot: None,
             pending_kept: None,
             relink_targets: std::collections::HashMap::new(),
+            sidecar: crate::sidecar::Folders::default(),
         }
     }
 
@@ -1781,6 +1789,11 @@ pub struct RefxApp {
     copier: Option<crate::copy::Copier>,
     /// ตัวปลุก event loop — ส่งต่อให้ worker หลังหน้าต่างพร้อม
     waker: Option<refx_platform::window::Waker>,
+    /// ★ ภาพที่ meta เพิ่งเปลี่ยนในเฟรมนี้ — `tick_sidecar` กินแล้วล้าง (P5-5)
+    ///
+    /// เป็นของแอปไม่ใช่ของ `Doc` เพราะมันมีอายุ **หนึ่งเฟรม** และถูกผลิต
+    /// กับถูกกินในเฟรมเดียวกันเสมอ — เก็บลง `Doc` จะดูเหมือนสถานะที่ค้างได้
+    sidecar_touched: Vec<ItemId>,
     /// เวลาที่ผู้ใช้ปล่อยไฟล์ลงหน้าต่าง (ใช้วัด "ลากเข้ามา → ภาพขึ้นจอ")
     drop_started: Option<std::time::Instant>,
     /// ผลของงวดที่ลากเข้ามารอบล่าสุด — ★ **ต้องบวกกันได้ครบเสมอ** ดู [`DropBatch`]
@@ -2805,6 +2818,7 @@ impl RefxApp {
                 refx_platform::clipboard::SystemClipboard,
             ))),
             waker: None,
+            sidecar_touched: Vec::new(),
             drop_started: None,
             // งวดว่างที่รายงานไปแล้ว = ไม่มีอะไรค้างตั้งแต่เปิดโปรแกรม
             drop: DropBatch {
@@ -3688,6 +3702,19 @@ impl RefxApp {
 
         // ★ เวลาจริงที่ผู้ใช้รู้สึก: ลากเข้ามา → ภาพขึ้นจอ
         //   ★ เงื่อนไขเดิมทุกประการ: รายงานเฉพาะเฟรมที่มีผล decode กลับมาจริง
+        // ★★★ ภาพชุดนี้ขึ้นจอครบแล้ว → ไปเปิด `.refx-meta` ของโฟลเดอร์ที่ยังไม่เคยอ่าน
+        //
+        //   ★ ต้องรอให้ settle ก่อน เพราะการจับคู่ด้วย hash ของ `docs/07 §5`
+        //     ต้องเห็น **ทุกใบในโฟลเดอร์พร้อมกัน** — ถามทีละใบตอบคำถาม
+        //     "hash นี้ไม่ซ้ำในรายการที่เหลือไหม" ไม่ได้เลย
+        //   ★★★ และ **เอกสารที่มีไฟล์ `.refx` แล้วห้ามอ่าน sidecar เด็ดขาด**
+        //       (`docs/07 §5` เจ้าของเดียว) · เขียนเป็นเงื่อนไขตรงนี้ ไม่ใช่
+        //       ปล่อยให้ถูกเพราะบังเอิญไม่มีใครเรียกจากเส้นทางเปิดเอกสาร
+        if had_results && self.drop.settled() && self.docs.active().path.is_none() {
+            let waker = self.waker.clone();
+            let doc = self.docs.active_mut();
+            doc.sidecar.start_load(&doc.board, waker.as_ref());
+        }
         if had_results
             && self.gfx.is_some()
             && !self.drop.reported
@@ -5158,6 +5185,20 @@ impl RefxApp {
         for doc in docs.iter_mut() {
             Self::tick_autosave_one(doc, recovery_dir.as_deref(), has_window, waker.as_ref());
         }
+        // ★★★ `.refx-meta` ใช้ **นาฬิกาเดียวกัน** ไม่ใช่ตัวปลุก (P5-5)
+        //
+        //   ผลของการเขียนคือไฟล์ลงดิสก์ — ไม่มีอะไรให้วาด · ปลุกให้วาดคือทำให้
+        //   `ui-idle-diff` แดงกับพฤติกรรมที่ถูก (`docs/08 §3.9` ข้อ 18 ชนิด `OwnTimer`)
+        //   ★ และการเก็บผลต้องอยู่ที่นี่ด้วย ไม่ใช่แค่ในเฟรม: แอปที่หลับอยู่
+        //     ไม่มีเฟรม ผลจึงค้างตลอดกาลถ้ามีแต่ทางของเฟรม
+        let policy = self.settings.sidecar;
+        for doc in self.docs.iter_mut() {
+            let say = doc.sidecar.collect_write();
+            if !say.is_empty() {
+                tracing::warn!(count = say.len(), "a sidecar could not be written");
+            }
+            doc.sidecar.start_write(&doc.board, policy);
+        }
     }
 
     /// autosave หนึ่งจังหวะของ **แท็บใบเดียว** — ตรรกะเดิมทั้งหมด แค่ผูกกับ `doc`
@@ -5315,7 +5356,9 @@ impl RefxApp {
                 //   มิลลิวินาที (3,072 ใบ = 29 KB) จึงตื่นเพิ่มครั้งเดียวก็เจอผลแล้ว
                 //   · และ **ไม่ขอเฟรม** — ต่างจากทางของ `Waker` ซึ่งจบที่
                 //   `request_redraw` เสมอ แล้วทำให้ตัวนับเฟรมไต่ทั้งที่จอไม่เปลี่ยน
-                if doc.autosave_job.is_some() {
+                // ★ `.refx-meta` เดินกฎข้อเดียวกันเป๊ะ (P5-5) — ช่องผลของมัน
+                //   ก็ไม่มีตัวปลุกด้วยเหตุผลเดียวกัน
+                if doc.autosave_job.is_some() || doc.sidecar.has_work_outstanding() {
                     return Some(std::time::Instant::now() + COLLECT_SNAPSHOT_AFTER);
                 }
                 Self::snapshot_target(doc, recovery_dir)?;
@@ -7019,6 +7062,14 @@ impl RefxApp {
                 //     มีภาพอยู่ข้างใน ทั้งที่การเขียนล้มไปแล้ว
                 doc.save_mode = mode;
                 doc.assets = assets;
+                // ★★★ **เจ้าของเดียว** (`docs/07 §5`): เอกสารนี้มีไฟล์ `.refx` แล้ว
+                //     meta จึงย้ายเข้าไปอยู่ข้างใน → เลิกเขียน sidecar ทันที
+                //
+                //   ★ `disown` **ไม่ลบ `.refx-meta` ที่มีอยู่** — เครื่องมืออื่น
+                //     หรือ board ใบอื่นอาจใช้มันอยู่ (`docs/07 §5`: Save As แล้ว
+                //     ห้ามลบไฟล์เดิมทิ้ง)
+                doc.sidecar.disown();
+                self.shell.sidecar_prompt = None;
                 let name = file_label_of(&path);
                 self.shell.status = text::fill(lang, text::Template::Saved, &[("name", &name)]);
                 self.shell.status_warn = false;
@@ -7164,6 +7215,9 @@ impl RefxApp {
         if targets.is_empty() {
             return;
         }
+        // ★ สำเนาไว้ก่อนที่คำสั่งจะกลืน `targets` ไป — ใช้บอก `.refx-meta` ว่า
+        //   โฟลเดอร์ไหนต้องเขียนใหม่ (P5-5)
+        let touched = targets.clone();
 
         // แท็กแตะทั้ง `ItemMeta` และตารางชื่อของ board จึงเป็นคำสั่งของตัวเอง
         let command: Option<Box<dyn refx_core::command::Command>> = match request {
@@ -7192,11 +7246,126 @@ impl RefxApp {
         };
         if let Err(err) = self.docs.active_mut().apply(command) {
             tracing::error!(%err, "cannot edit the item metadata");
+        } else {
+            // ★ meta ของภาพพวกนี้เปลี่ยนจริง → `.refx-meta` ของโฟลเดอร์มันต้องเขียนใหม่
+            self.sidecar_touched.extend_from_slice(&touched);
         }
         if sealed {
             self.docs.active_mut().history.seal();
         }
         gfx.window.request_redraw();
+    }
+
+    /// ★★★ วงจรของ `.refx-meta` หนึ่งเฟรม (P5-5 · `docs/07 §5`)
+    ///
+    /// ไม่แตะดิสก์เลยแม้แต่ครั้งเดียวบน UI thread (I-2) — ที่นี่มีแค่การส่งงาน
+    /// ออกไปและการเก็บผลที่กลับมา · งานจริงอยู่ใน [`crate::sidecar`]
+    fn tick_sidecar(&mut self) {
+        // ---- 1. ผู้ใช้ตอบคำถามเมื่อเฟรมที่แล้วหรือยัง ----
+        if let Some(write_it) = self.shell.sidecar_choice.take() {
+            self.shell.sidecar_prompt = None;
+            self.docs.active_mut().sidecar.answer(write_it);
+        }
+
+        // ---- 2. เก็บผลการโหลด แล้วคืนค่าผ่าน `Command` ----
+        let restore = {
+            let doc = self.docs.active_mut();
+            doc.sidecar.collect_load(&doc.board)
+        };
+        if let Some(restore) = restore
+            && !restore.is_empty()
+        {
+            self.apply_sidecar_restore(restore);
+        }
+
+        // ---- 3. meta ที่เพิ่งเปลี่ยนในเฟรมนี้ ----
+        let touched = std::mem::take(&mut self.sidecar_touched);
+        if !touched.is_empty() {
+            let say = {
+                let doc = self.docs.active_mut();
+                doc.sidecar.touched(&doc.board, &touched)
+            };
+            self.say_about_sidecar(say);
+
+            // ★★★ opt-in: ห้ามเขียนไฟล์ลงโฟลเดอร์ผู้ใช้โดยไม่ได้ขอ (`docs/07 §5`)
+            if self.settings.sidecar == refx_io::settings::SidecarPolicy::Ask
+                && self.shell.sidecar_prompt.is_none()
+                && self.docs.active().sidecar.asking.is_none()
+                && let Some(dir) = self
+                    .docs
+                    .active()
+                    .sidecar
+                    .first_needing_an_answer()
+                    .map(std::path::Path::to_path_buf)
+            {
+                self.shell.sidecar_prompt = Some(dir.display().to_string());
+                self.docs.active_mut().sidecar.asking = Some(dir);
+            }
+        }
+
+        // ---- 4. เก็บผลการเขียนของรอบก่อน ----
+        let say = self.docs.active_mut().sidecar.collect_write();
+        self.say_about_sidecar(say);
+    }
+
+    /// คืนค่าที่อ่านมาได้ — ★ ผ่าน `Command` เสมอ (`Board::set_meta` เป็น `pub(crate)`)
+    fn apply_sidecar_restore(&mut self, restore: crate::sidecar::Restore) {
+        use refx_core::command::{EditMeta, MetaField, TagItems};
+
+        let items = restore.items();
+        if !restore.meta.is_empty()
+            && let Ok(command) = EditMeta::new(MetaField::Restored, restore.meta)
+            && let Err(err) = self.docs.active_mut().apply(Box::new(command))
+        {
+            tracing::warn!(%err, "cannot bring the sidecar metadata back");
+        }
+        for (tag, targets) in restore.tags {
+            let Ok(command) = TagItems::attach(&tag, targets) else {
+                continue; // ชื่อแท็กที่ normalize แล้วว่าง — ทิ้งไป ไม่ใช่เหตุให้ล้ม
+            };
+            if let Err(err) = self.docs.active_mut().apply(Box::new(command)) {
+                tracing::warn!(%err, "cannot bring a tag back from the sidecar");
+            }
+        }
+        // ★ ปิดหน้าต่าง merge — การคืนค่าต้องไม่กลืนสิ่งที่ผู้ใช้ทำต่อจากนี้
+        self.docs.active_mut().history.seal();
+
+        self.say_about_sidecar(restore.say);
+        if items > 0 {
+            self.shell.status = text::fill(
+                self.shell.lang,
+                Template::SidecarRestored,
+                &[("n", &items.to_string())],
+            );
+            self.shell.status_warn = false;
+        }
+        if let Some(gfx) = self.gfx.as_ref() {
+            gfx.window.request_redraw();
+        }
+    }
+
+    /// แปลสิ่งที่ชั้น `.refx-meta` รายงานเป็นข้อความบนแถบสถานะ (`docs/03 §0`)
+    ///
+    /// ★ ตัวที่ **เขียนไม่ได้** ขึ้นเป็นคำเตือน ไม่ใช่ข้อความปกติ — ผู้ใช้ต้องรู้
+    /// ว่าแท็กที่เพิ่งใส่จะไม่ถูกบันทึก (`docs/07 §5`: เขียนไม่ได้ ≠ เงียบ)
+    fn say_about_sidecar(&mut self, say: Vec<crate::sidecar::Say>) {
+        use crate::sidecar::Say;
+        for one in say {
+            let (template, dir) = match one {
+                Say::Restored { .. } => continue, // มีทางของตัวเองใน `apply_sidecar_restore`
+                Say::CannotWrite { dir } => (Template::SidecarCannotWrite, dir),
+                Say::HandsOff { dir, reason } => {
+                    tracing::warn!(?reason, dir = %dir.display(), "leaving a sidecar untouched");
+                    (Template::SidecarHandsOff, dir)
+                }
+            };
+            self.shell.status = text::fill(
+                self.shell.lang,
+                template,
+                &[("dir", &dir.display().to_string())],
+            );
+            self.shell.status_warn = true;
+        }
     }
 
     /// ประกอบ `ItemMeta` ชุดใหม่ตามคำขอ — คืนเฉพาะตัวที่ **เปลี่ยนจริง**
@@ -7947,6 +8116,9 @@ impl AppDelegate for RefxApp {
         self.apply_note_edit();
         // tag / rating / color label / pinned / note ฝั่ง Arrange (P3-1)
         self.apply_meta_request();
+        // ★ `.refx-meta` ของโฟลเดอร์ที่เปิดดูเฉย ๆ (P5-5) — ต้องมาหลัง
+        //   `apply_meta_request` เพื่อให้การติดดาวในเฟรมนี้ถูกนับเป็น "ต้องเขียน"
+        self.tick_sidecar();
         // เปลี่ยนชื่อ / ยุบกลุ่มที่ผู้ใช้แตะในแผง Arrange เมื่อเฟรมที่แล้ว (P3-7)
         self.apply_group_panel_request();
         // ★ ผู้ใช้กด "ส่งเข้า canvas" เมื่อเฟรมที่แล้ว (P3-5)
@@ -8069,6 +8241,7 @@ impl AppDelegate for RefxApp {
             max_pixels: settings.max_pixels,
             theme: settings.theme,
             present: settings.present,
+            sidecar: settings.sidecar,
             max_pixels_ceiling: caps.max_pixels_ceiling,
             needs_restart: *settings_restart_pending,
         };
@@ -8341,6 +8514,7 @@ impl AppDelegate for RefxApp {
                 max_pixels: edit.max_pixels,
                 theme: edit.theme,
                 present: edit.present,
+                sidecar: edit.sidecar,
             };
             if asked != *settings {
                 // ★★ ธีมเห็นผลทันที — `set_visuals` มีผลตั้งแต่เฟรมถัดไป

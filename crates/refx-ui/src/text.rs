@@ -415,6 +415,22 @@ pub enum Key {
     SettingsPresentUncapped,
     /// คำอธิบายของ "ไม่รอรอบจอ" — ต้องบอกราคาที่ต้องจ่าย ไม่ใช่แค่ชื่อ
     SettingsPresentUncappedHint,
+    /// หัวข้อย่อย: จำ tag ของโฟลเดอร์ที่เปิดดูเฉย ๆ (P5-5)
+    SettingsSidecar,
+    /// คำอธิบาย — ★ ต้องบอกว่า **เราจะเขียนไฟล์ลงโฟลเดอร์ของเขา**
+    SettingsSidecarHint,
+    /// ถามก่อนทุกครั้ง
+    SettingsSidecarAsk,
+    /// เขียนเสมอ
+    SettingsSidecarAlways,
+    /// ไม่เขียนเลย
+    SettingsSidecarNever,
+    /// หัวข้อของคำถาม "จะจำ tag ของโฟลเดอร์นี้ไหม"
+    SidecarAskTitle,
+    /// ★ ตอบตกลง = อนุญาตให้เขียนไฟล์ลงโฟลเดอร์ภาพ
+    SidecarAskYes,
+    /// ตอบไม่ — tag ยังใช้ได้ในเซสชันนี้
+    SidecarAskNo,
     /// หัวข้อย่อย: หน่วยความจำ
     SettingsMemory,
     /// เพดาน RAM ของ decode
@@ -672,6 +688,18 @@ fn en(key: Key) -> &'static str {
         Key::SettingsPresentUncappedHint => {
             "Lower delay while panning, but the image can tear. Uses more GPU."
         }
+        Key::SettingsSidecar => "Remember tags for folders",
+        Key::SettingsSidecarHint => {
+            "RefX writes a small .refx-meta file next to your images so tags and ratings \
+             survive. Only for folders you browse - a board saved as .refx keeps \
+             everything inside the document."
+        }
+        Key::SettingsSidecarAsk => "Ask me",
+        Key::SettingsSidecarAlways => "Always",
+        Key::SettingsSidecarNever => "Never",
+        Key::SidecarAskTitle => "Remember these tags for next time?",
+        Key::SidecarAskYes => "Write .refx-meta here",
+        Key::SidecarAskNo => "Not this time",
         Key::SettingsMemory => "Memory",
         Key::SettingsRamLimit => "RAM for decoding",
         Key::SettingsRamLimitHint => {
@@ -903,6 +931,17 @@ fn th(key: Key) -> Option<&'static str> {
         Key::SettingsPresentVsync => "ตามรอบจอ",
         Key::SettingsPresentUncapped => "ไม่รอรอบจอ",
         Key::SettingsPresentUncappedHint => "หน่วงน้อยลงตอนเลื่อนภาพ แต่ภาพฉีกได้ และกินการ์ดจอมากขึ้น",
+        Key::SettingsSidecar => "จำแท็กของโฟลเดอร์ที่เปิดดู",
+        Key::SettingsSidecarHint => {
+            "RefX จะเขียนไฟล์เล็ก ๆ ชื่อ .refx-meta ไว้ข้างภาพ เพื่อให้แท็กและดาวไม่หาย\n\
+             ทำเฉพาะโฟลเดอร์ที่เปิดดูเฉย ๆ — board ที่บันทึกเป็น .refx เก็บทุกอย่างไว้ในเอกสารแล้ว"
+        }
+        Key::SettingsSidecarAsk => "ถามก่อน",
+        Key::SettingsSidecarAlways => "เขียนเสมอ",
+        Key::SettingsSidecarNever => "ไม่เขียนเลย",
+        Key::SidecarAskTitle => "จำแท็กชุดนี้ไว้ใช้ครั้งหน้าไหม",
+        Key::SidecarAskYes => "เขียน .refx-meta ที่นี่",
+        Key::SidecarAskNo => "ไม่ต้องตอนนี้",
         Key::SettingsMemory => "หน่วยความจำ",
         Key::SettingsRamLimit => "RAM สำหรับถอดรหัสภาพ",
         Key::SettingsRamLimitHint => {
@@ -1132,6 +1171,14 @@ pub enum Template {
     ExportFailed,
     /// ★★★ `{n}` — เพดานขนาดของ board นี้ **พร้อมเหตุผล** (`docs/07 §6`)
     ExportCeiling,
+    /// `{n}` — คืนแท็กจาก `.refx-meta` ให้ภาพกี่ใบ (P5-5)
+    SidecarRestored,
+    /// ★★ `{dir}` — เขียน `.refx-meta` ไม่ได้ · **ต้องบอกว่าทำอะไรต่อได้**
+    SidecarCannotWrite,
+    /// ★★★ `{dir}` — มี `.refx-meta` ที่อ่านไม่ได้อยู่ · เราไม่แตะมัน
+    SidecarHandsOff,
+    /// `{dir}` — คำถามว่าจะเขียน `.refx-meta` ลงโฟลเดอร์นี้ไหม
+    SidecarAskIn,
 }
 
 /// เทมเพลตภาษาอังกฤษ — ต้องมีครบทุกตัว
@@ -1292,6 +1339,16 @@ Drag in a PNG, JPEG, WebP, GIF, BMP, TGA or TIFF instead."
         Template::ExportCeiling => {
             "up to {n} px for this board - limited by the resolution of the previews"
         }
+        Template::SidecarRestored => "Brought back tags for {n} pictures",
+        Template::SidecarCannotWrite => {
+            "Cannot write .refx-meta in {dir}. Your tags work now but will be lost \
+             when RefX closes - save the board as a .refx file to keep them."
+        }
+        Template::SidecarHandsOff => {
+            "{dir} already holds a .refx-meta that this version of RefX cannot read. \
+             It was left untouched, and tags here will not be saved."
+        }
+        Template::SidecarAskIn => "Images in {dir}",
     }
 }
 
@@ -1447,6 +1504,16 @@ fn template_th(template: Template) -> Option<&'static str> {
         Template::ExportDone => "ส่งออก {name} แล้ว ({size})",
         Template::ExportFailed => "ส่งออก {name} ไม่สำเร็จ: {reason}",
         Template::ExportCeiling => "สูงสุด {n} px สำหรับ board นี้ — จำกัดโดยความละเอียดของภาพตัวอย่าง",
+        Template::SidecarRestored => "คืนแท็กให้ภาพ {n} ใบแล้ว",
+        Template::SidecarCannotWrite => {
+            "เขียน .refx-meta ใน {dir} ไม่ได้ — แท็กยังใช้ได้ตอนนี้ แต่จะหายเมื่อปิดโปรแกรม\n\
+             บันทึก board เป็นไฟล์ .refx เพื่อเก็บไว้"
+        }
+        Template::SidecarHandsOff => {
+            "{dir} มี .refx-meta ที่ RefX รุ่นนี้อ่านไม่ได้อยู่แล้ว — ไม่แตะไฟล์นั้น\n\
+             และจะไม่บันทึกแท็กลงโฟลเดอร์นี้"
+        }
+        Template::SidecarAskIn => "ภาพในโฟลเดอร์ {dir}",
     })
 }
 
@@ -1599,6 +1666,7 @@ fn settings_field(lang: Lang, field: refx_io::settings::Field) -> &'static str {
             Field::MaxPixels => Key::SettingsMaxPixels,
             Field::Theme => Key::SettingsTheme,
             Field::Present => Key::SettingsPresent,
+            Field::Sidecar => Key::SettingsSidecar,
         },
     )
 }
@@ -1860,6 +1928,14 @@ mod tests {
         Key::SettingsPresentVsync,
         Key::SettingsPresentUncapped,
         Key::SettingsPresentUncappedHint,
+        Key::SettingsSidecar,
+        Key::SettingsSidecarHint,
+        Key::SettingsSidecarAsk,
+        Key::SettingsSidecarAlways,
+        Key::SettingsSidecarNever,
+        Key::SidecarAskTitle,
+        Key::SidecarAskYes,
+        Key::SidecarAskNo,
         Key::SettingsMemory,
         Key::SettingsRamLimit,
         Key::SettingsRamLimitHint,
@@ -1884,6 +1960,10 @@ mod tests {
     ];
 
     const ALL_TEMPLATES: &[Template] = &[
+        Template::SidecarRestored,
+        Template::SidecarCannotWrite,
+        Template::SidecarHandsOff,
+        Template::SidecarAskIn,
         Template::ItemCount,
         Template::GroupMembers,
         Template::Saved,

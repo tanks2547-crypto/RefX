@@ -13,6 +13,7 @@
 use refx_core::align::{Align as A, Distribute as D};
 use refx_core::board::SortKey;
 use refx_core::view::Mode;
+use refx_io::settings::SidecarPolicy;
 
 use crate::text::{self, Key, Lang, Template};
 
@@ -595,6 +596,12 @@ pub struct ShellState {
     pub export_request: Option<ExportRequest>,
     /// ★ งาน export ที่กำลังทำอยู่บน worker — `None` = ไม่มีงาน
     pub export_progress: Option<ExportProgress>,
+    /// ★★★ ถามว่าจะเขียน `.refx-meta` ลงโฟลเดอร์นี้ไหม (P5-5) — `None` = ไม่ถาม
+    ///
+    /// เก็บเป็นข้อความที่แสดงได้แล้ว เพราะชั้นนี้ไม่ควรถือ `PathBuf` ของใคร
+    pub sidecar_prompt: Option<String>,
+    /// ผู้ใช้ตอบคำถาม `.refx-meta` แล้วในเฟรมนี้ — `Some(true)` = ให้เขียน
+    pub sidecar_choice: Option<bool>,
     /// ★★★ เจองานที่ยังไม่ได้บันทึกจาก session ก่อน (P4-4) — `None` = ไม่มีอะไรค้าง
     pub recover_prompt: Option<RecoverView>,
     /// ผู้ใช้ตอบแล้วในเฟรมนี้ — `None` = ยังไม่ตอบ
@@ -684,6 +691,8 @@ pub struct SettingsView {
     pub theme: refx_io::settings::Theme,
     /// จังหวะการแสดงเฟรม
     pub present: refx_io::settings::Present,
+    /// ★ เขียน `.refx-meta` ลงโฟลเดอร์ภาพหรือไม่ (P5-5)
+    pub sidecar: SidecarPolicy,
     /// ★ เพดานของ **เครื่องนี้** — แสดงอย่างเดียว แก้ไม่ได้ (`HANDOFF §4` ข้อ 3)
     pub max_pixels_ceiling: u64,
     /// ★★ มีค่าที่เปลี่ยนแล้วยังไม่มีผลจนกว่าจะเปิดโปรแกรมใหม่
@@ -701,6 +710,7 @@ impl Default for SettingsView {
             max_pixels: refx_asset::decode::MAX_PIXELS_ABS,
             theme: refx_io::settings::Theme::default(),
             present: refx_io::settings::Present::default(),
+            sidecar: SidecarPolicy::default(),
             max_pixels_ceiling: refx_asset::decode::MAX_PIXELS_ABS,
             needs_restart: false,
         }
@@ -814,6 +824,8 @@ impl Default for ShellState {
             export_prompt: None,
             export_request: None,
             export_progress: None,
+            sidecar_prompt: None,
+            sidecar_choice: None,
             recover_prompt: None,
             recover_choice: None,
             group_request: None,
@@ -1175,6 +1187,32 @@ pub fn draw_in_ui(
                     ui.label(text::t(lang, Key::ExportCancelling));
                 } else if ui.button(text::t(lang, Key::ExportCancel)).clicked() {
                     state.export_request = Some(ExportRequest::Cancel);
+                }
+            });
+        });
+    }
+
+    // ---- ★★★ ถามก่อนเขียนไฟล์ลงโฟลเดอร์ของผู้ใช้ (P5-5 · `docs/07 §5`) ----
+    //
+    //   opt-in คือกฎ ไม่ใช่มารยาท: โปรแกรมห้ามเขียนไฟล์ลงโฟลเดอร์ผู้ใช้โดยไม่ได้ขอ
+    //   ★ คำตอบถูกจำที่ `settings.toml` **ไม่ใช่ในโฟลเดอร์นั้น** — การจำคำว่า "ไม่"
+    //     ด้วยการเขียนไฟล์ คือการทำสิ่งที่เขาเพิ่งห้าม
+    if let Some(dir) = state.sidecar_prompt.clone() {
+        egui::Panel::top("refx-sidecar-ask").show_inside(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new(text::t(lang, Key::SidecarAskTitle)).strong());
+                ui.label(text::fill(lang, Template::SidecarAskIn, &[("dir", &dir)]));
+                ui.separator();
+                // ★★ ทางที่ **ไม่แตะดิสก์** มาก่อนเสมอ สำหรับคนที่กดเร็วโดยไม่อ่าน
+                if ui.button(text::t(lang, Key::SidecarAskNo)).clicked() {
+                    state.sidecar_choice = Some(false);
+                }
+                if ui
+                    .button(text::t(lang, Key::SidecarAskYes))
+                    .on_hover_text(text::t(lang, Key::SettingsSidecarHint))
+                    .clicked()
+                {
+                    state.sidecar_choice = Some(true);
                 }
             });
         });
@@ -1716,6 +1754,26 @@ fn settings_panel(ui: &mut egui::Ui, state: &mut ShellState) {
             }
             if button.clicked() {
                 edit.present = present;
+                sealed = true;
+            }
+        }
+    });
+    ui.add_space(6.0);
+
+    // ---- ★ จำแท็กของโฟลเดอร์ที่เปิดดูเฉย ๆ (P5-5) ----
+    ui.label(egui::RichText::new(text::t(lang, Key::SettingsSidecar)).strong());
+    ui.horizontal(|ui| {
+        for (policy, key) in [
+            (SidecarPolicy::Ask, Key::SettingsSidecarAsk),
+            (SidecarPolicy::Always, Key::SettingsSidecarAlways),
+            (SidecarPolicy::Never, Key::SettingsSidecarNever),
+        ] {
+            if ui
+                .selectable_label(edit.sidecar == policy, text::t(lang, key))
+                .on_hover_text(text::t(lang, Key::SettingsSidecarHint))
+                .clicked()
+            {
+                edit.sidecar = policy;
                 sealed = true;
             }
         }
@@ -2839,7 +2897,13 @@ mod tests {
             close_scope_tab: _, // คำถามที่ค้างอยู่พูดถึงแท็บหรือทั้งหน้าต่าง
             close_prompt: _,    // บอกแค่ว่าแถบยืนยันโผล่อยู่ไหม ไม่ใช่คำขอแก้อะไร
             recover_prompt: _,  // เหมือนกัน — แค่ "มีอะไรค้างให้ถามไหม"
-            save_as_prompt: _,  // แถบถามโหมดโผล่อยู่ไหม — ไม่ใช่คำขอแก้อะไร
+            // ★ คำถามเรื่อง `.refx-meta` ไม่แตะเอกสารเลย — มันตัดสินว่าจะเขียน
+            //   **ไฟล์ในโฟลเดอร์ภาพ** ซึ่งอยู่คนละที่กับ `Board` ทั้งก้อน
+            sidecar_prompt: _,
+            // ★ เป็น "คำขอ" แต่ **ไม่แตะเอกสาร** — มันตัดสินว่าจะเขียนไฟล์ใน
+            //   โฟลเดอร์ภาพหรือไม่ ซึ่งอยู่คนละที่กับ `Board` ทั้งก้อน
+            sidecar_choice: _,
+            save_as_prompt: _, // แถบถามโหมดโผล่อยู่ไหม — ไม่ใช่คำขอแก้อะไร
             // ★★ กล่อง export (P5-4) — **ไม่แตะเอกสารเลยแม้แต่ทางเดียว**
             //    มันผลิต *ไฟล์ภาพใบใหม่* ไม่ได้แก้ `Board` ไม่แตะธง `dirty`
             //    และไม่ผ่าน `Command` · ★ ถ้าวันหนึ่งมีคนเพิ่ม "export แล้วจำ
@@ -3207,6 +3271,7 @@ mod tests {
                 max_pixels: 100_000_000,
                 theme: refx_io::settings::Theme::Light,
                 present: refx_io::settings::Present::Uncapped,
+                sidecar: SidecarPolicy::Never,
                 max_pixels_ceiling: 268_435_456,
                 needs_restart: true,
             },
@@ -3403,6 +3468,10 @@ mod tests {
                 total: 32,
                 cancelling: false,
             }),
+            // ★★★ แถบถามเรื่อง `.refx-meta` (P5-5) — โผล่ครั้งเดียวตอนผู้ใช้ติด
+            //     แท็กแรกในโฟลเดอร์ใหม่ · ถ้าไม่บังคับให้วาด ข้อความของมันจะ
+            //     ไม่เคยผ่านประตูนี้เลยจนถึงวันที่ผู้ใช้เห็นมันจริง (`docs/03 §0`)
+            sidecar_prompt: Some("E:/ภาพอ้างอิง/มังกร".to_owned()),
             status_warn: true,
             ..ShellState::default()
         };
@@ -3430,6 +3499,19 @@ mod tests {
             text::fill(Lang::En, Template::SwitchedMode, &[("mode", "Arrange")]),
             text::fill(Lang::Th, Template::SwitchedMode, &[("mode", "Arrange")]),
         ])
+        // ★★★ สามข้อความของ `.refx-meta` (P5-5) — ผู้ใช้เห็นเฉพาะวันที่มีอะไรผิด
+        //     ซึ่งเป็นวันที่แย่ที่สุดที่จะเจอสี่เหลี่ยม tofu
+        .chain([Lang::En, Lang::Th].into_iter().flat_map(|lang| {
+            [
+                text::fill(lang, Template::SidecarRestored, &[("n", "42")]),
+                text::fill(
+                    lang,
+                    Template::SidecarCannotWrite,
+                    &[("dir", "E:/ภาพอ้างอิง")],
+                ),
+                text::fill(lang, Template::SidecarHandsOff, &[("dir", "E:/ภาพอ้างอิง")]),
+            ]
+        }))
         .collect();
 
         // สองเฟรม: egui ใช้ layout ของรอบก่อน รอบแรกขนาด panel ยังไม่นิ่ง
@@ -3495,6 +3577,29 @@ mod tests {
             assert!(
                 drawn.iter().any(|(_, text)| text.contains(&ceiling)),
                 "{ceiling:?} ไม่ได้ถูกวาด"
+            );
+        }
+
+        // ★★ แถบถามเรื่อง `.refx-meta` และแถวในแผง Settings (P5-5) — ทั้งสองภาษา
+        for lang in [Lang::En, Lang::Th] {
+            for expected in [
+                text::t(lang, Key::SidecarAskTitle),
+                text::t(lang, Key::SidecarAskYes),
+                text::t(lang, Key::SidecarAskNo),
+                text::t(lang, Key::SettingsSidecar),
+                text::t(lang, Key::SettingsSidecarAsk),
+                text::t(lang, Key::SettingsSidecarAlways),
+                text::t(lang, Key::SettingsSidecarNever),
+            ] {
+                assert!(
+                    drawn.iter().any(|(_, text)| text.contains(expected)),
+                    "{expected:?} ไม่ได้ถูกวาด — ประตูจะเขียวโดยไม่ได้ตรวจมัน"
+                );
+            }
+            let asked = text::fill(lang, Template::SidecarAskIn, &[("dir", "E:/ภาพอ้างอิง/มังกร")]);
+            assert!(
+                drawn.iter().any(|(_, text)| text.contains(&asked)),
+                "{asked:?} ไม่ได้ถูกวาด"
             );
         }
 

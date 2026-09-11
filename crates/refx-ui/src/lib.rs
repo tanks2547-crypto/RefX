@@ -14,6 +14,7 @@ pub mod inspector;
 pub mod instances; // Board → QuadInstance (ฟังก์ชันบริสุทธิ์ · วัดได้จาก benches/)
 pub mod keymap; // ★ ตาราง data ของคีย์ลัด — ห้าม hard-code `if key == …` (docs/03 §5)
 pub mod shell; // โครง UI กลาง: tabs, toolbar, library, inspector, status bar
+pub mod sidecar; // .refx-meta ฝั่ง UI — โหลด/เขียน tag ของโฟลเดอร์ (P5-5)
 pub mod text; // ★ ประตูเดียวของข้อความที่ผู้ใช้เห็น (docs/03 §0) — ห้ามเขียนสตริงตรงใน widget
 pub mod theme;
 pub mod tools;
