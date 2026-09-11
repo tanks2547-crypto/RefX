@@ -54,7 +54,23 @@ enum Wake {
     /// ใช้เมื่อผลที่กลับมา **ไม่เปลี่ยนอะไรบนจอ** · ทางของ `Waker` จบที่
     /// `request_redraw` เสมอ ซึ่งทำให้ตัวนับเฟรมไต่ทั้งที่จอเหมือนเดิม
     /// แล้วประตู `ui-idle-diff` จะแดงให้กับพฤติกรรมที่ถูกต้อง
-    OwnTimer(&'static str),
+    ///
+    /// ★★★ **ต้องชี้ว่านาฬิกาอยู่ที่ไหนและพิสูจน์ยังไง** (แก้ 11 ก.ย. 2026)
+    ///
+    /// รุ่นแรกตรวจแค่ว่า *ไฟล์เดียวกัน* มีคำว่า `_deadline(` อยู่ — ซึ่ง (ก)
+    /// ผ่านได้ด้วยฟังก์ชันนาฬิกาตัวไหนก็ได้ที่ไม่เกี่ยวกัน และ (ข) **ตกกับ
+    /// นาฬิกาที่อยู่คนละไฟล์** ทั้งที่นั่นเป็นรูปที่ถูกต้องพอ ๆ กัน
+    /// → รูปเดียวกับ `Elsewhere`: ระบุให้เจาะจงแล้วให้ประตูไปดูของจริง
+    OwnTimer {
+        /// ไฟล์ที่นาฬิกาอยู่
+        clock_in: &'static str,
+        /// ฟังก์ชันนาฬิกาในไฟล์นั้น
+        clock_fn: &'static str,
+        /// ★ สิ่งที่ต้องเจอ **ในตัวฟังก์ชันนาฬิกา** — หลักฐานว่ามันดูช่องนี้อยู่จริง
+        proof: &'static str,
+        /// ทำไมไม่ใช้ตัวปลุก
+        why: &'static str,
+    },
     /// ไม่ต้องปลุก — **ต้องมีเหตุผล** และเหตุผลถูกพิมพ์ออกมาทุกครั้งที่รัน
     NotNeeded(&'static str),
 }
@@ -101,9 +117,12 @@ const CROSSINGS: &[Crossing] = &[
     Crossing {
         file: "crates/refx-ui/src/app.rs",
         func: "tick_autosave_one",
-        wake: Wake::OwnTimer(
-            "นาฬิกาของ autosave เอง (`next_autosave_across_tabs` ตั้งเวลาไว้ข้างหน้าระหว่างที่งานยังค้าง) — วัดแล้วว่าทางของ `Waker` ทำให้ Frames 516→517 ทั้งที่จอไม่เปลี่ยน",
-        ),
+        wake: Wake::OwnTimer {
+            clock_in: "crates/refx-ui/src/app.rs",
+            clock_fn: "next_autosave_across_tabs",
+            proof: "autosave_job",
+            why: "นาฬิกาของ autosave เอง ตั้งเวลาไว้ข้างหน้าระหว่างที่งานยังค้าง — วัดแล้วว่าทางของ `Waker` ทำให้ Frames 516→517 ทั้งที่จอไม่เปลี่ยน",
+        },
     },
     Crossing {
         file: "crates/refx-ui/src/app.rs",
@@ -206,17 +225,67 @@ const CROSSINGS: &[Crossing] = &[
             "ล้าง cache ตอนปิดโปรแกรม — รอแบบ blocking แล้วโปรแกรมก็จบ ไม่มีเฟรมถัดไปให้ปลุก",
         ),
     },
+    // ---------- .refx-meta (P5-5) — ★ สองช่อง สองวิธีปลุก ----------
+    Crossing {
+        file: "crates/refx-ui/src/sidecar.rs",
+        func: "start_load",
+        // ผลคือ **แท็กโผล่บนจอ** — ผู้ใช้ต้องเห็นทันที ไม่ใช่ตอนขยับเมาส์
+        wake: Wake::InThread,
+    },
+    Crossing {
+        file: "crates/refx-ui/src/sidecar.rs",
+        func: "start_write",
+        wake: Wake::OwnTimer {
+            // ★ นาฬิกาอยู่คนละไฟล์กับช่อง — และนั่นถูกต้อง: `Folders` ไม่รู้จัก
+            //   event loop และไม่ควรรู้ · `app.rs` เป็นที่เดียวที่รู้ทั้งสองฝั่ง
+            clock_in: "crates/refx-ui/src/app.rs",
+            clock_fn: "next_autosave_across_tabs",
+            proof: "has_work_outstanding",
+            why: "ผลคือไฟล์ลงดิสก์ — ไม่มีอะไรให้วาด · เก็บผลบนนาฬิกาเดียวกับ autosave · ปลุกให้วาดจะทำให้ `ui-idle-diff` แดงกับพฤติกรรมที่ถูก",
+        },
+    },
 ];
 
-/// ไฟล์ที่ถูกไล่ตรวจ — **ทุกไฟล์ที่มีสิทธิ์สร้างเธรดที่ส่งผลกลับหา UI**
-const SCANNED: &[&str] = &[
-    "crates/refx-ui/src/app.rs",
-    "crates/refx-ui/src/copy.rs",
-    "crates/refx-ui/src/export.rs",
-    "crates/refx-platform/src/dialog.rs",
-    "crates/refx-asset/src/pool.rs",
-    "crates/refx-asset/src/cache.rs",
-];
+/// ★★★ ไฟล์ที่ถูกไล่ตรวจ — **ค้นเอง ไม่ใช่รายชื่อที่เขียนด้วยมือ** (แก้ 11 ก.ย. 2026)
+///
+/// รุ่นแรกของประตูนี้ถือรายชื่อหกไฟล์ · วันที่ `crates/refx-ui/src/sidecar.rs`
+/// เกิดขึ้นพร้อมช่องข้ามเธรดสองช่อง **ประตูเขียวผ่านไปเงียบ ๆ** เพราะไฟล์ใหม่
+/// ไม่ได้อยู่ในรายชื่อ — ประตูที่รู้จักแต่สิ่งที่มีอยู่แล้ว ไม่ใช่ประตู
+///
+/// → เดินหาเองทุกไฟล์ใต้ `crates/*/src/` · ไฟล์ที่ไม่มีช่องข้ามเธรดไม่เสียอะไร
+///   และไฟล์ใหม่จะ **มองไม่เห็นไม่ได้อีก** (`docs/08 §3.9` ข้อ 18)
+fn scanned() -> Vec<String> {
+    let mut out = Vec::new();
+    let crates = root().join("crates");
+    let mut stack = vec![crates.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                // ★ `tests/` และ `benches/` ไม่มี UI thread ให้ปลุก
+                if path
+                    .file_name()
+                    .is_some_and(|n| n == "tests" || n == "benches")
+                {
+                    continue;
+                }
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs")
+                && let Ok(rel) = path.strip_prefix(root())
+            {
+                out.push(
+                    rel.to_string_lossy()
+                        .replace(std::path::MAIN_SEPARATOR, "/"),
+                );
+            }
+        }
+    }
+    out.sort();
+    out
+}
 
 /// สิ่งที่นับว่าเป็น "ช่องทางข้ามเธรด" ในซอร์ส
 ///
@@ -345,6 +414,19 @@ fn crossings_in(source: &str) -> Vec<String> {
 }
 
 /// ฟังก์ชันนี้มีการปลุกอยู่ข้างในไหม — `None` = ไม่เจอฟังก์ชันชื่อนี้เลย
+/// มี `token` อยู่ **ในตัวฟังก์ชันนี้** ไหม — `None` = ไม่เจอฟังก์ชันเลย
+///
+/// ★ ต่างจาก `source.contains(token)` ตรงที่ตอบคำถามว่า *ฟังก์ชันนั้น*
+/// ทำสิ่งนั้นอยู่ ไม่ใช่ว่า *ไฟล์นั้น* มีคำนั้นอยู่ที่ไหนสักแห่ง
+fn contains_inside(source: &str, func_name: &str, token: &str) -> Option<bool> {
+    let lines: Vec<&str> = source.lines().collect();
+    let func = functions_in(source)
+        .into_iter()
+        .find(|func| func.name == func_name)?;
+    let body = &lines[func.start..func.end.min(lines.len())];
+    Some(body.iter().any(|line| line.contains(token)))
+}
+
 fn wakes_inside(source: &str, func_name: &str) -> Option<bool> {
     let lines: Vec<&str> = source.lines().collect();
     let func = functions_in(source)
@@ -385,11 +467,17 @@ fn every_thread_that_returns_a_result_has_someone_to_wake_the_ui() {
     let mut unregistered: Vec<String> = Vec::new();
     let mut checked = 0usize;
 
-    for file in SCANNED {
+    let scanned = scanned();
+    assert!(
+        scanned.len() > 20,
+        "ตัวเดินหาไฟล์เจอแค่ {} ไฟล์ — มันเดินไม่ถึงซอร์สจริง",
+        scanned.len()
+    );
+    for file in &scanned {
         let source = read(file);
         for func in crossings_in(&source) {
             checked += 1;
-            let known = CROSSINGS.iter().any(|c| c.file == *file && c.func == func);
+            let known = CROSSINGS.iter().any(|c| c.file == file && c.func == func);
             if !known {
                 unregistered.push(format!("{file} :: {func}()"));
             }
@@ -430,17 +518,25 @@ fn every_thread_that_returns_a_result_has_someone_to_wake_the_ui() {
             }
             // ★★ นาฬิกาของตัวเอง — ต้องมีเหตุผล และต้องมี **นาฬิกาอยู่จริง**
             //    ในไฟล์นั้น ไม่ใช่แค่อ้างว่ามี
-            Wake::OwnTimer(why) => {
+            Wake::OwnTimer {
+                clock_in,
+                clock_fn,
+                proof,
+                why,
+            } => {
                 assert!(
                     !why.trim().is_empty(),
                     "{} :: {}() บอกว่าใช้นาฬิกาของตัวเองโดยไม่มีเหตุผล",
                     crossing.file,
                     crossing.func
                 );
-                let source = read(crossing.file);
-                assert!(
-                    source.contains("fn wake_deadline") || source.contains("_deadline("),
-                    "{} :: {}() บอกว่าใช้นาฬิกาของตัวเอง แต่ไฟล์นั้นไม่มีนาฬิกาเลย",
+                // ★★★ ไปดูของจริง: นาฬิกาที่อ้างต้องมีอยู่ **และต้องดูช่องนี้อยู่**
+                let source = read(clock_in);
+                assert_eq!(
+                    contains_inside(&source, clock_fn, proof),
+                    Some(true),
+                    "{} :: {}() บอกว่า {clock_in} :: {clock_fn}() เป็นคนตั้งนาฬิกาให้
+                     แต่ในตัวฟังก์ชันนั้นไม่มี `{proof}` เลย — คำอ้างที่พิสูจน์ไม่ได้",
                     crossing.file,
                     crossing.func
                 );
@@ -581,4 +677,57 @@ mod tests {
         vec!["production".to_owned()],
         "เธรดในเทสต์ถูกนับด้วย — ประตูจะบังคับให้เทสต์มีตัวปลุกทั้งที่ไม่มี event loop"
     );
+    println!("NC วิ่งผ่านจริง (4): เธรดใน `mod tests` ไม่ถูกนับ");
+
+    // ---- 5. ★★★ ตัวเดินหาไฟล์ต้องไปถึงไฟล์ที่ **ไม่เคยอยู่ในรายชื่อเดิม** ----
+    //
+    //   นี่คือบั๊กจริงของวันนี้: `sidecar.rs` เกิดขึ้นพร้อมช่องข้ามเธรดสองช่อง
+    //   แล้วประตู **เขียวผ่านไปเงียบ ๆ** เพราะมันถือรายชื่อหกไฟล์ที่เขียนด้วยมือ
+    let files = scanned();
+    for must in [
+        "crates/refx-ui/src/sidecar.rs", // ไฟล์ที่รายชื่อเดิมมองไม่เห็น
+        "crates/refx-io/src/save.rs",    // ทั้ง crate ที่รายชื่อเดิมไม่เคยแตะเลย
+        "crates/refx-render/src/device.rs",
+    ] {
+        assert!(
+            files.iter().any(|f| f == must),
+            "ตัวเดินหาไปไม่ถึง {must} — ไฟล์ใหม่ในนั้นจะสร้างช่องข้ามเธรดได้โดยไม่มีใครเห็น"
+        );
+    }
+    assert!(
+        !files.iter().any(|f| f.contains("/tests/")),
+        "เดินเข้าไปใน tests/ ด้วย — ประตูจะบังคับให้เทสต์มีตัวปลุก"
+    );
+    println!(
+        "NC วิ่งผ่านจริง (5): ตัวเดินหาเจอ {} ไฟล์ รวมของที่รายชื่อเดิมมองไม่เห็น",
+        files.len()
+    );
+
+    // ---- 6. ★★ คำอ้างเรื่องนาฬิกาต้องพิสูจน์ได้ ไม่ใช่แค่มีคำนั้นอยู่ในไฟล์ ----
+    let clock = "fn unrelated_deadline() {
+    let _ = something_else;
+}
+
+fn real_clock() {
+    if doc.sidecar.has_work_outstanding() {
+        return Some(now + WAIT);
+    }
+}
+";
+    assert_eq!(
+        contains_inside(clock, "unrelated_deadline", "has_work_outstanding"),
+        Some(false),
+        "นาฬิกาตัวอื่นในไฟล์เดียวกันถูกนับเป็นหลักฐาน — ซึ่งคือประตูรุ่นแรกเป๊ะ"
+    );
+    assert_eq!(
+        contains_inside(clock, "real_clock", "has_work_outstanding"),
+        Some(true),
+        "นาฬิกาที่ดูช่องนี้อยู่จริงกลับไม่ถูกนับ — ประตูจะแดงตลอดกาล"
+    );
+    assert_eq!(
+        contains_inside(clock, "no_such_function", "anything"),
+        None,
+        "ฟังก์ชันที่ไม่มีอยู่ต้องตอบว่าไม่มี ไม่ใช่ตอบว่าไม่เจอหลักฐาน"
+    );
+    println!("NC วิ่งผ่านจริง (6): แยก 'ไฟล์นั้นมีคำนี้' ออกจาก 'ฟังก์ชันนั้นทำสิ่งนี้' ได้");
 }
