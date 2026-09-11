@@ -118,6 +118,33 @@ impl Present {
     }
 }
 
+/// ★★★ เขียน `.refx-meta` ลงโฟลเดอร์ภาพของผู้ใช้หรือไม่ (P5-5 · `docs/07 §5`)
+///
+/// **ค่านี้อยู่ที่นี่ ไม่ใช่ในโฟลเดอร์นั้น** — การจำว่าผู้ใช้ตอบ "ไม่"
+/// โดยเขียนไฟล์ลงโฟลเดอร์เดียวกัน คือการทำสิ่งที่เขาเพิ่งห้ามไปหมาด ๆ
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SidecarPolicy {
+    /// ถามครั้งแรกที่ผู้ใช้ใส่ tag/rating ในโฟลเดอร์ที่ยังไม่มี `.refx-meta`
+    #[default]
+    Ask,
+    /// เขียนเสมอ ไม่ต้องถาม
+    Always,
+    /// ไม่เขียนเลย — tag ยังใช้ได้ในเซสชันนี้ แต่หายเมื่อปิดโปรแกรม
+    Never,
+}
+
+impl SidecarPolicy {
+    /// ชื่อที่เขียนลงไฟล์
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::Always => "always",
+            Self::Never => "never",
+        }
+    }
+}
+
 /// ช่องที่ [`Note`] พูดถึง — ชั้น UI แปลชื่อช่องเป็นภาษาผู้ใช้เอง
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
@@ -131,6 +158,8 @@ pub enum Field {
     Theme,
     /// `present`
     Present,
+    /// `sidecar`
+    Sidecar,
 }
 
 impl Field {
@@ -143,6 +172,7 @@ impl Field {
             Self::MaxPixels => "memory.max_pixels",
             Self::Theme => "theme",
             Self::Present => "present",
+            Self::Sidecar => "sidecar",
         }
     }
 }
@@ -211,6 +241,8 @@ pub struct Settings {
     pub theme: Theme,
     /// จังหวะการแสดงเฟรม
     pub present: Present,
+    /// ★ เขียน `.refx-meta` ลงโฟลเดอร์ภาพหรือไม่ (P5-5)
+    pub sidecar: SidecarPolicy,
 }
 
 impl Settings {
@@ -223,6 +255,7 @@ impl Settings {
             max_pixels: caps.max_pixels_ceiling,
             theme: Theme::default(),
             present: Present::default(),
+            sidecar: SidecarPolicy::default(),
         }
     }
 
@@ -252,12 +285,17 @@ impl Settings {
              theme   = \"{theme}\"     # dark | light\n\
              present = \"{present}\"   # vsync | uncapped\n\
              \n\
+             # Remember tags and ratings for folders you only browse, by writing a\n\
+             # .refx-meta file next to the images.  ask | always | never\n\
+             sidecar = \"{sidecar}\"\n\
+             \n\
              [memory]\n\
              ram_limit_mb  = {ram}     # {ram_lo}-{ram_hi}\n\
              {vram}\n\
              max_pixels    = {pixels}  # capped by this machine's RAM\n",
             theme = self.theme.as_str(),
             present = self.present.as_str(),
+            sidecar = self.sidecar.as_str(),
             ram = self.ram_limit >> 20,
             ram_lo = RAM_LIMIT_MB.start(),
             ram_hi = RAM_LIMIT_MB.end(),
@@ -338,6 +376,7 @@ pub fn load(path: &Path, caps: Caps) -> Loaded {
 struct Raw {
     theme: Option<String>,
     present: Option<String>,
+    sidecar: Option<String>,
     memory: Option<RawMemory>,
 }
 
@@ -362,6 +401,8 @@ struct Strict {
     theme: Option<String>,
     #[allow(dead_code)]
     present: Option<String>,
+    #[allow(dead_code)]
+    sidecar: Option<String>,
     #[allow(dead_code)]
     memory: Option<StrictMemory>,
 }
@@ -446,6 +487,20 @@ pub fn parse(text: &str, caps: Caps) -> Loaded {
         }
     };
 
+    let sidecar = match normalised(raw.sidecar.as_deref()).as_deref() {
+        None => SidecarPolicy::default(),
+        Some("ask") => SidecarPolicy::Ask,
+        Some("always") => SidecarPolicy::Always,
+        Some("never") => SidecarPolicy::Never,
+        Some(other) => {
+            notes.push(Note::UnknownValue {
+                field: Field::Sidecar,
+                given: other.to_owned(),
+            });
+            SidecarPolicy::default()
+        }
+    };
+
     Loaded {
         settings: Settings {
             ram_limit: usize::try_from(ram_limit_mb << 20).unwrap_or(usize::MAX),
@@ -453,6 +508,7 @@ pub fn parse(text: &str, caps: Caps) -> Loaded {
             max_pixels,
             theme,
             present,
+            sidecar,
         },
         notes,
     }
@@ -735,6 +791,7 @@ mod tests {
                 max_pixels: 100_000_000,
                 theme: Theme::Light,
                 present: Present::Uncapped,
+                sidecar: SidecarPolicy::Always,
             },
             Settings {
                 ram_limit: 64 << 20,
@@ -742,6 +799,7 @@ mod tests {
                 max_pixels: caps.max_pixels_ceiling,
                 theme: Theme::Dark,
                 present: Present::Vsync,
+                sidecar: SidecarPolicy::Never,
             },
         ] {
             let text = settings.to_toml();

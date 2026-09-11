@@ -18,5 +18,6 @@ pub mod recovery; // งานที่ยังไม่เคยบันท�
 pub mod relink; // หาไฟล์ที่หายด้วย hash (5 ขั้นตอน)
 pub mod save; // atomic save: tmp -> fsync -> rename -> fsync dir
 pub mod settings; // settings.toml — ค่าที่ผู้ใช้ตั้งเอง ห้ามทำให้เปิดโปรแกรมไม่ขึ้น (P5-3)
+pub mod sidecar; // .refx-meta — tag/rating ของโฟลเดอร์ที่เปิดดูเฉย ๆ (P5-5)
 pub mod spool; // ภาพที่ไม่มีไฟล์ต้นทาง: <data_local_dir>/pasted/<hash>.png (P4-5)
 pub mod validate; // validate_path + bound ทุก field ตอน deserialize
