@@ -226,7 +226,7 @@ cargo run --features force-device-lost -p refx-app -- --force-device-lost-after-
 > การเพิ่มคีย์ใหม่ระหว่างนั้นทำให้พิสูจน์ความเท่ากันไม่ได้
 | P5-4a | Export PNG/JPEG แบบ tile — ทางเขียน · กล่อง · worker · ยกเลิก | ✅ เสร็จ (`7ad81d9`) |
 | **P5-4b** | **แหล่งพิกเซลของ export** — ถอดรหัสต้นฉบับที่ความละเอียดจริง | ดูกล่องด้านล่าง |
-| P5-5 | Sidecar `.refx-meta` (opt-in) |
+| P5-5 | Sidecar `.refx-meta` (opt-in) | ✅ เสร็จ (`08349cb`) — ชื่อเป็นกุญแจ hash เป็นพยาน · ห้ามแตะไฟล์ที่อ่านไม่ได้ (คอมไพเลอร์บังคับ) · ยืนยันครบสี่ NC บนแอปจริง |
 | P5-6 | Binary hardening + packaging (MSI/portable zip, AppImage/deb) · **+ ลดขนาด binary (ดูด้านล่าง)** |
 | P5-7 | เอกสารผู้ใช้ + คู่มือคีย์ลัด |
 
