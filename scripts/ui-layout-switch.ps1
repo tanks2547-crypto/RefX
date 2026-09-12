@@ -57,12 +57,28 @@ function Layout-Now {
 # A hung window and a window ignoring input look identical in a screenshot --
 # Windows keeps presenting the last frame.  WM_NULL with SMTO_ABORTIFHUNG is
 # the thing that actually tells them apart.
+# ! Write-Host, NOT Write-Output  (fixed 14 Sep 2026 - HANDOFF 2.42k, queue 3nj)
+#
+# This function reported SURVIVED on a window that was already hung, and the
+# cause was never the timing of the WM_NULL probe.  A PowerShell function
+# returns EVERYTHING it writes to the pipeline, so
+#
+#     Write-Output "..." ; return $ok
+#
+# hands the caller an ARRAY of (string, bool).  `if (-not (Alive ...))` then
+# negates an array, which is truthy whenever it has elements -- so the test
+# could never fail, for any app, ever.  The same bug also swallowed the log
+# lines, which is why the per-round detail never appeared in the output.
+#
+# Write-Host goes to the host instead of the pipeline, so the return value is
+# the bool alone.  Anything in this repo that prints from inside a function
+# that also returns a value has to do the same.
 function Alive($label) {
   $proc.Refresh()
   $res = [IntPtr]::Zero
   $answered = [LP]::SendMessageTimeout($hwnd, 0x0000, [IntPtr]::Zero, [IntPtr]::Zero, 0x0002, 3000, [ref]$res)
   $ok = $proc.Responding -and ($answered -ne [IntPtr]::Zero)
-  Write-Output ("  {0,-20} responding={1,-5} pump_answers={2}" -f $label, $proc.Responding, ($answered -ne [IntPtr]::Zero))
+  Write-Host ("  {0,-20} responding={1,-5} pump_answers={2}" -f $label, $proc.Responding, ($answered -ne [IntPtr]::Zero))
   return $ok
 }
 
