@@ -211,19 +211,20 @@ pub fn pick_missing_image(
 ///
 /// ห้ามให้ฟังก์ชันนี้ panic ซ้ำเด็ดขาด ไม่งั้นจะได้ panic ซ้อน panic แล้ว abort ทันที
 /// จนไม่มีใครได้เห็นข้อความอะไรเลย
+/// ★★★ ภาษาอังกฤษ **และไม่ผ่านระบบแปล** โดยตั้งใจ (`docs/03 §0`: ภาษาหลักคืออังกฤษ)
+///
+/// ข้อความนี้ถูกสร้างขึ้นระหว่าง panic — ตอนนั้นสถานะของโปรแกรมเชื่อไม่ได้แล้ว
+/// การไปหยิบตารางคำแปล (ซึ่งอยู่ในชั้น UI ที่อาจเป็นตัวที่เพิ่ง panic ไป)
+/// คือการเพิ่มโอกาส **panic ซ้อน panic** ซึ่งจะ abort ทันทีและผู้ใช้จะไม่ได้เห็น
+/// ข้อความอะไรเลย · ค่าคงที่ที่ไม่พึ่งอะไรเลยคือสิ่งเดียวที่เชื่อได้บนเส้นทางนี้
 pub fn show_crash_dialog(log_path: &std::path::Path) {
-    let message = format!(
-        "RefX หยุดทำงานกะทันหัน\n\n\
-         รายละเอียดถูกบันทึกไว้ที่:\n{}\n\n\
-         ถ้าแจ้งปัญหา กรุณาแนบไฟล์นี้มาด้วย",
-        log_path.display()
-    );
+    let message = crash_message(log_path);
 
     // rfd อาจล้มได้ถ้าไม่มี display (เช่นรันใน CI) — ห้ามให้ error ตรงนี้ลาม
     let result = std::panic::catch_unwind(|| {
         rfd::MessageDialog::new()
             .set_level(rfd::MessageLevel::Error)
-            .set_title("RefX หยุดทำงาน")
+            .set_title("RefX stopped")
             .set_description(&message)
             .set_buttons(rfd::MessageButtons::Ok)
             .show();
@@ -232,5 +233,35 @@ pub fn show_crash_dialog(log_path: &std::path::Path) {
     if result.is_err() {
         // เหลือทางเดียวคือ stderr
         eprintln!("{message}");
+    }
+}
+
+/// ข้อความที่ผู้ใช้จะได้อ่านตอนโปรแกรมพัง
+///
+/// แยกออกมาเพราะ `show_crash_dialog` เปิดหน้าต่างจริง — เทสต์เรียกไม่ได้
+/// แล้วข้อความที่ผู้ใช้เห็นในนาทีที่แย่ที่สุดก็จะไม่เคยถูกตรวจเลย
+fn crash_message(log_path: &std::path::Path) -> String {
+    format!(
+        "RefX stopped unexpectedly.\n\n\
+         The details were written to:\n{}\n\n\
+         Please attach that file if you report this.",
+        log_path.display()
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ★★★ ข้อความตอนโปรแกรมพังต้องเป็นภาษาอังกฤษ (`docs/03 §0`) และต้อง **บอกที่อยู่
+    /// ของไฟล์ log** — ไม่งั้นผู้ใช้ได้แค่ "โปรแกรมพัง" ซึ่งทำอะไรต่อไม่ได้เลย
+    #[test]
+    fn the_crash_message_is_english_and_says_where_the_log_is() {
+        let message = crash_message(std::path::Path::new("C:/logs/refx.log"));
+        assert!(message.is_ascii(), "ข้อความตอน crash ไม่ใช่ ASCII: {message}");
+        assert!(
+            message.contains("C:/logs/refx.log"),
+            "ไม่ได้บอกว่า log อยู่ไหน — ผู้ใช้แนบไฟล์มาให้ไม่ได้: {message}"
+        );
     }
 }

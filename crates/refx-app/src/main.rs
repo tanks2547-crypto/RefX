@@ -21,19 +21,27 @@ struct Cli {
 }
 
 fn parse_cli() -> Result<Cli, String> {
+    parse_args(std::env::args().skip(1))
+}
+
+/// ★ รับอาร์กิวเมนต์เป็นพารามิเตอร์ **ไม่ใช่อ่าน `std::env` เอง**
+///
+/// ตราบใดที่มันอ่าน environment เอง ไม่มีเทสต์ตัวไหนเดินเข้ากิ่ง error ของมันได้เลย
+/// — ทุกข้อความที่ผู้ใช้เห็นตอนพิมพ์ผิดจึงไม่เคยถูกตรวจสักบรรทัด (`docs/08 §3.9` ข้อ 8)
+fn parse_args<I: Iterator<Item = String>>(args: I) -> Result<Cli, String> {
     let mut cli = Cli {
         args: AppArgs::default(),
         show_help: false,
     };
 
-    for arg in std::env::args().skip(1) {
+    for arg in args {
         if arg == "--help" || arg == "-h" {
             cli.show_help = true;
         } else if let Some(value) = arg.strip_prefix("--force-device-lost-after-ms=") {
             // ★ ต้องเช็คตัวนี้ก่อน --force-device-lost-after= ไม่งั้น prefix สั้นกว่าจะกินไปก่อน
             let ms: u64 = value.parse().map_err(|_| {
                 format!(
-                    "--force-device-lost-after-ms ต้องเป็นจำนวนมิลลิวินาที (ตัวเลขเต็มบวก) แต่ได้ {value:?}"
+                    "--force-device-lost-after-ms needs a whole number of milliseconds, got {value:?}"
                 )
             })?;
             cli.args.force_device_lost_after_ms = Some(ms);
@@ -43,8 +51,8 @@ fn parse_cli() -> Result<Cli, String> {
                 "th" => refx_ui::text::Lang::Th,
                 other => {
                     return Err(format!(
-                        "--lang รู้จักแค่ en กับ th แต่ได้ {other:?}
-                         ไม่ใส่เลย = ใช้ภาษาของระบบ"
+                        "--lang accepts en or th, got {other:?}
+                         leave it out to follow the system language"
                     ));
                 }
             });
@@ -53,7 +61,7 @@ fn parse_cli() -> Result<Cli, String> {
                 "canvas" => refx_core::view::Mode::Canvas,
                 "arrange" => refx_core::view::Mode::Arrange,
                 other => {
-                    return Err(format!("--mode รู้จักแค่ canvas กับ arrange แต่ได้ {other:?}"));
+                    return Err(format!("--mode accepts canvas or arrange, got {other:?}"));
                 }
             });
         } else if let Some(value) = arg.strip_prefix("--open=") {
@@ -67,22 +75,22 @@ fn parse_cli() -> Result<Cli, String> {
             cli.args.open_files = scan_images(std::path::Path::new(value))?;
         } else if let Some(value) = arg.strip_prefix("--demo-quads=") {
             let n: u32 = value.parse().map_err(|_| {
-                format!("--demo-quads ต้องเป็นจำนวนสี่เหลี่ยม (ตัวเลขเต็มบวก) แต่ได้ {value:?}")
+                format!("--demo-quads needs a whole number of quads, got {value:?}")
             })?;
             cli.args.demo_quads = Some(n);
         } else if let Some(value) = arg.strip_prefix("--bench-seconds=") {
             let n: u64 = value.parse().map_err(|_| {
-                format!("--bench-seconds ต้องเป็นจำนวนวินาที (ตัวเลขเต็มบวก) แต่ได้ {value:?}")
+                format!("--bench-seconds needs a whole number of seconds, got {value:?}")
             })?;
             cli.args.bench_seconds = Some(n);
         } else if let Some(value) = arg.strip_prefix("--force-device-lost-after=") {
             let n: u64 = value.parse().map_err(|_| {
-                format!("--force-device-lost-after ต้องเป็นจำนวนเฟรม (ตัวเลขเต็มบวก) แต่ได้ {value:?}")
+                format!("--force-device-lost-after needs a whole number of frames, got {value:?}")
             })?;
             cli.args.force_device_lost_after = Some(n);
         } else {
             return Err(format!(
-                "ไม่รู้จักตัวเลือก {arg:?}\nลองรัน refx --help เพื่อดูรายการที่ใช้ได้"
+                "unknown option {arg:?}\nrun `refx --help` to see what is available"
             ));
         }
     }
@@ -92,7 +100,7 @@ fn parse_cli() -> Result<Cli, String> {
 /// หาไฟล์ภาพในโฟลเดอร์ (ไม่ลงลึกในโฟลเดอร์ย่อย)
 fn scan_images(dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>, String> {
     let entries = std::fs::read_dir(dir)
-        .map_err(|err| format!("เปิดโฟลเดอร์ {} ไม่ได้: {err}", dir.display()))?;
+        .map_err(|err| format!("cannot open the folder {}: {err}", dir.display()))?;
 
     let mut files: Vec<_> = entries
         .filter_map(Result::ok)
@@ -109,28 +117,38 @@ fn scan_images(dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>, String>
     Ok(files)
 }
 
+/// ★★★ ภาษาอังกฤษ **ไม่ใช่ตัวเลือก** — `docs/03 §0` ตัดสินไว้ว่าภาษาหลักของ UI
+/// คืออังกฤษ ไทยเป็นภาษาที่สอง · ข้อความนี้เคยเป็นไทยล้วนตั้งแต่ P0 ซึ่งแปลว่า
+/// **ผู้ใช้ที่ไม่ได้อ่านไทยรัน `refx --help` แล้วอ่านไม่ออกสักบรรทัด**
+///
+/// ★★ และที่นี่ **ไม่แปลตาม `--lang`** โดยตั้งใจ: ข้อความนี้ถูกพิมพ์ระหว่างอ่าน
+/// อาร์กิวเมนต์ ซึ่งเกิด**ก่อน**ที่ระบบภาษาจะถูกตั้งขึ้น · การยกระบบแปลขึ้นมา
+/// ก่อนเวลาเพื่อข้อความเดียวคือการเพิ่มสิ่งที่พังได้บนเส้นทางเริ่มโปรแกรม
+/// เพื่อแลกกับอะไรที่เล็กกว่ามาก — ถ้าวันหนึ่งต้องแปล ให้แปลทั้งชั้น CLI พร้อมกัน
 const HELP: &str = "\
-RefX — โปรแกรมจัดการภาพ reference สำหรับนักวาด
+RefX - reference image manager for artists
 
-การใช้งาน:
-  refx [ตัวเลือก]
+Usage:
+  refx [options]
 
-ตัวเลือก:
-  -h, --help                           แสดงข้อความนี้
-      --lang=en|th                     บังคับภาษาของ UI (ไม่ใส่ = ตามภาษาของระบบ)
-      --open=FILE.refx                 เปิดเอกสารที่บันทึกไว้ (เหมือนดับเบิลคลิกไฟล์)
-      --open-dir=PATH                  เปิดไฟล์ภาพทั้งโฟลเดอร์ (เหมือนลากเข้ามา)
-      --demo-quads=N                   วาดสี่เหลี่ยมสีสุ่ม N อัน (ทดสอบ pipeline/pan-zoom)
-      --bench-seconds=S                วัด frame time ต่อเนื่อง S วินาทีแล้วรายงานผล
-      --mode=canvas|arrange            โหมดที่เปิดขึ้นมา (ไม่ใส่ = Canvas)
-                                       มีไว้ให้วัด/ถ่ายภาพโหมด Arrange ได้โดยไม่ต้องกดปุ่มก่อน
+Options:
+  -h, --help                           show this message
+      --lang=en|th                     force the UI language (default: follow the system)
+      --open=FILE.refx                 open a saved board (same as double-clicking it)
+      --open-dir=PATH                  open every image in a folder (same as dragging it in)
+      --demo-quads=N                   draw N random quads (exercises pipeline / pan-zoom)
+      --bench-seconds=S                measure frame time for S seconds, then report
+      --mode=canvas|arrange            mode to start in (default: Canvas)
+                                       lets Arrange be measured or photographed
+                                       without pressing anything first
 
-ตัวเลือกสำหรับทดสอบ (ต้อง build ด้วย --features force-device-lost):
-      --force-device-lost-after=N      จำลอง GPU device lost หลังวาดครบ N เฟรม
-                                       (จำลองตอนผู้ใช้กำลังลากภาพ)
-      --force-device-lost-after-ms=MS  จำลอง GPU device lost หลังผ่านไป MS มิลลิวินาที
-                                       (จำลองตอนแอปหลับอยู่ — driver อัปเดต/sleep-resume
-                                        ซึ่งเป็นสถานการณ์จริงที่ผู้ใช้เจอบ่อยกว่า)
+Test options (needs a build with --features force-device-lost):
+      --force-device-lost-after=N      simulate a GPU device loss after N frames
+                                       (simulates losing it mid-drag)
+      --force-device-lost-after-ms=MS  simulate a GPU device loss after MS milliseconds
+                                       (simulates losing it while the app sleeps -
+                                        driver update / sleep-resume, which is what
+                                        users actually hit)
 ";
 
 fn main() -> anyhow::Result<()> {
@@ -182,4 +200,75 @@ fn main() -> anyhow::Result<()> {
         paths.config_dir(),
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// ★★★ ทุกบรรทัดที่ **CLI** พิมพ์ออกมาต้องเป็นภาษาอังกฤษ (`docs/03 §0`)
+    ///
+    /// ข้อความช่วยเหลือเป็นไทยล้วนมาตั้งแต่ P0 — ผู้ใช้ที่อ่านไทยไม่ออกจึงรัน
+    /// `refx --help` แล้วไม่ได้อะไรเลย · และมันมองไม่เห็นจากประตู tofu ด้วย
+    /// เพราะประตูนั้นดูสิ่งที่ **egui วาด** ส่วนนี่ออกทาง stdout ของเทอร์มินัล
+    ///
+    /// ★ ตรวจด้วย ASCII เพราะภาษาหลักคืออังกฤษ — ตัวอักษรนอก ASCII โผล่เมื่อไหร่
+    /// แปลว่ามีคนเขียนภาษาที่สองกลับเข้ามาในชั้นที่ไม่มีระบบแปล
+    #[test]
+    fn everything_the_command_line_prints_is_english() {
+        assert!(
+            HELP.is_ascii(),
+            "ข้อความ --help มีอักขระนอก ASCII — ชั้น CLI ไม่มีระบบแปล ภาษาหลักคืออังกฤษ"
+        );
+
+        // ทุกกิ่ง error ที่ผู้ใช้ไปถึงได้ด้วยการพิมพ์ผิด
+        let broken = [
+            vec!["--lang=xx"],
+            vec!["--mode=sideways"],
+            vec!["--demo-quads=lots"],
+            vec!["--bench-seconds=soon"],
+            vec!["--force-device-lost-after=x"],
+            vec!["--force-device-lost-after-ms=x"],
+            vec!["--what-is-this"],
+            vec!["--open-dir=E:/no/such/folder/here"],
+        ];
+        for case in broken {
+            let Err(err) = parse_args(args(&case).into_iter()) else {
+                panic!("{case:?} ควรถูกปฏิเสธ แต่ผ่านไปได้");
+            };
+            assert!(
+                err.is_ascii(),
+                "ข้อความ error ของ {case:?} ไม่ใช่ ASCII: {err}"
+            );
+            assert!(!err.trim().is_empty(), "{case:?} ถูกปฏิเสธแบบเงียบ ๆ");
+        }
+    }
+
+    /// ★ ประตูของประตู: อาร์กิวเมนต์ที่ถูกต้องต้อง **ผ่าน** และมีผลจริง
+    ///
+    /// ไม่มีข้อนี้ เทสต์ข้างบนจะยังเขียวแม้ parser ปฏิเสธทุกอย่างบนโลก
+    #[test]
+    fn the_options_that_should_work_still_do() {
+        let cli = parse_args(args(&["--help"]).into_iter()).unwrap();
+        assert!(cli.show_help);
+
+        let cli = parse_args(args(&["--lang=th", "--mode=arrange", "--demo-quads=8"]).into_iter())
+            .unwrap();
+        assert_eq!(cli.args.lang, Some(refx_ui::text::Lang::Th));
+        assert_eq!(cli.args.mode, Some(refx_core::view::Mode::Arrange));
+        assert_eq!(cli.args.demo_quads, Some(8));
+        assert!(!cli.show_help);
+
+        // ★ prefix ที่ยาวกว่าต้องชนะ ไม่งั้น `--force-device-lost-after-ms=` จะถูก
+        //   `--force-device-lost-after=` กินไปก่อนแล้วได้ error ที่งงมาก
+        let cli = parse_args(args(&["--force-device-lost-after-ms=250"]).into_iter()).unwrap();
+        assert_eq!(cli.args.force_device_lost_after_ms, Some(250));
+        assert_eq!(cli.args.force_device_lost_after, None);
+    }
 }
