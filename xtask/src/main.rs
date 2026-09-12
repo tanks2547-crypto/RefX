@@ -4,11 +4,13 @@
 //!   gen-fuzz-seeds สร้าง corpus ตั้งต้นของ fuzz_packed         (P4-9)
 //!   dump-refx      แปลง .refx (binary) เป็น JSON เพื่อ debug  (P4-8)
 //!   mutation       ประตูข้อ 1b — ทำให้ด่านทำงานทุกครั้งแล้วดูว่าเทสต์ไหนแดง
+//!   licenses       สร้าง THIRD-PARTY-LICENSES.md  (`--check` = ประตู)
 //!   bench          รัน benchmark ทั้งชุดแล้วเทียบกับเพดานใน docs/08
 //!   package        สร้าง installer / portable zip
 
 mod dump;
 mod json;
+mod licenses;
 mod mutation;
 mod seeds;
 
@@ -122,13 +124,14 @@ fn main() -> anyhow::Result<()> {
         "gen-fuzz-seeds" => seeds::gen_fuzz_seeds(),
         "dump-refx" => dump_refx(),
         "mutation" => mutation::run(),
+        "licenses" => licenses::run(),
         "bench" => todo!("P5-1"),
         "package" => todo!("P5-6"),
         other => {
             eprintln!(
                 "ไม่รู้จักคำสั่ง: {other:?}\n\
                  คำสั่งที่มี: gen-testdata · gen-fuzz-seeds · dump-refx · mutation · \
-                 bench (P5-1) · package (P5-6)"
+                 licenses · bench (P5-1) · package (P5-6)"
             );
             Ok(())
         }

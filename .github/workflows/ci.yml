@@ -169,6 +169,19 @@ jobs:
           REFX_REQUIRE_GPU: "1"
         run: cargo nextest run --workspace --all-features
 
+      # ★★★ ประตูใบอนุญาต — **เงื่อนไขทางกฎหมายของการแจกจ่าย ไม่ใช่ของแถม**
+      #
+      #   `THIRD-PARTY-LICENSES.md` ถูกสร้างจาก `Cargo.lock` · dependency ขยับ
+      #   แล้วไฟล์ไม่ขยับ = เราแจกโค้ดของคนอื่นโดยไม่มีใบอนุญาตของเขาในแพ็กเกจ
+      #   ซึ่งเป็นความเสียหายที่ไม่โผล่ตอนคอมไพล์ และโผล่ตอนมีคนมาถามแทน
+      #
+      #   ★ ลินุกซ์อย่างเดียวพอ — ผลลัพธ์ไม่ขึ้นกับ OS ที่รัน เพราะตัวเครื่องมือ
+      #     คำนวณ **ยูเนียนของทั้ง Windows และ Linux** เองอยู่แล้ว · รันสองรอบ
+      #     คือจ่าย Windows ×2 เพื่อผลลัพธ์ตัวเดียวกันเป๊ะ
+      - name: THIRD-PARTY-LICENSES.md ต้องตรงกับ Cargo.lock
+        if: runner.os == 'Linux'
+        run: cargo run -q -p xtask -- licenses --check
+
       - run: cargo build --release --all-features
 
       # ★ เพดาน binary ต้องบังคับอัตโนมัติ ไม่ใช่ความหวัง (docs/08 §6)
