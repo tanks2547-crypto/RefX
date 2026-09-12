@@ -18,6 +18,19 @@ use refx_ui::app::AppArgs;
 struct Cli {
     args: AppArgs,
     show_help: bool,
+    show_version: bool,
+}
+
+/// ★★★ บรรทัดเดียวที่ประตูของแพ็กเกจใช้เทียบเวอร์ชัน
+///
+/// `ROADMAP` ก้อน d บังคับว่าเวอร์ชันต้องตรงกัน **สามที่**: `Cargo.toml` ·
+/// `--version` ของไบนารี · ชื่อ/เมทาดาทาของแพ็กเกจ · ถ้าไบนารีบอกเวอร์ชันเองไม่ได้
+/// ประตูนั้นเทียบได้แค่สองที่ แล้วไฟล์ที่แจกออกไปอาจเป็นบิลด์คนละตัวกับที่กล่องบอก
+///
+/// รูปแบบ `refx <semver>` — ★ ห้ามเปลี่ยนรูปโดยไม่แก้ `xtask/src/package.rs` ด้วย
+#[must_use]
+fn version_line() -> String {
+    format!("refx {}", env!("CARGO_PKG_VERSION"))
 }
 
 fn parse_cli() -> Result<Cli, String> {
@@ -32,11 +45,14 @@ fn parse_args<I: Iterator<Item = String>>(args: I) -> Result<Cli, String> {
     let mut cli = Cli {
         args: AppArgs::default(),
         show_help: false,
+        show_version: false,
     };
 
     for arg in args {
         if arg == "--help" || arg == "-h" {
             cli.show_help = true;
+        } else if arg == "--version" || arg == "-V" {
+            cli.show_version = true;
         } else if let Some(value) = arg.strip_prefix("--force-device-lost-after-ms=") {
             // ★ ต้องเช็คตัวนี้ก่อน --force-device-lost-after= ไม่งั้น prefix สั้นกว่าจะกินไปก่อน
             let ms: u64 = value.parse().map_err(|_| {
@@ -133,6 +149,7 @@ Usage:
 
 Options:
   -h, --help                           show this message
+  -V, --version                        print the version and exit
       --lang=en|th                     force the UI language (default: follow the system)
       --open=FILE.refx                 open a saved board (same as double-clicking it)
       --open-dir=PATH                  open every image in a folder (same as dragging it in)
@@ -159,6 +176,13 @@ fn main() -> anyhow::Result<()> {
             std::process::exit(2);
         }
     };
+
+    // ★ ตอบก่อนแตะอย่างอื่นทั้งหมด — `--version` ต้องใช้ได้แม้เครื่องจะไม่มี
+    //   โฟลเดอร์ config/cache ที่เขียนได้ (ประตูของแพ็กเกจเรียกมันบนเครื่องเปล่า)
+    if cli.show_version {
+        println!("{}", version_line());
+        return Ok(());
+    }
 
     if cli.show_help {
         println!("{HELP}");
@@ -248,6 +272,33 @@ mod tests {
             );
             assert!(!err.trim().is_empty(), "{case:?} ถูกปฏิเสธแบบเงียบ ๆ");
         }
+    }
+
+    /// ★★★ `--version` ต้องพูดเวอร์ชันเดียวกับ `Cargo.toml` เป๊ะ
+    ///
+    /// ประตูของแพ็กเกจเทียบสามที่ (`Cargo.toml` · ไบนารี · ชื่อแพ็กเกจ) โดยอ่าน
+    /// จากบรรทัดนี้ · ถ้ารูปแบบเปลี่ยนโดยไม่มีใครรู้ ประตูจะอ่านไม่ออกแล้วกลายเป็น
+    /// ประตูที่ผ่านตลอด — จึงตรึงทั้ง **รูปแบบ** และ **ค่า** ไว้ที่นี่
+    #[test]
+    fn the_version_the_binary_prints_is_the_one_in_cargo_toml() {
+        let line = version_line();
+        assert_eq!(line, format!("refx {}", env!("CARGO_PKG_VERSION")));
+        assert!(line.starts_with("refx "), "ประตูของแพ็กเกจอ่านรูปนี้อยู่: {line}");
+
+        // ต้องเป็น semver ที่มีตัวเลขจริง ไม่ใช่สตริงว่างหรือ placeholder
+        let version = line.trim_start_matches("refx ").trim();
+        assert!(
+            version.split('.').count() >= 2
+                && version.chars().next().is_some_and(|c| c.is_ascii_digit()),
+            "เวอร์ชันไม่ใช่ semver: {version:?}"
+        );
+
+        let cli = parse_args(args(&["--version"]).into_iter()).unwrap();
+        assert!(cli.show_version, "--version ไม่ถูกอ่าน");
+        let short = parse_args(args(&["-V"]).into_iter()).unwrap();
+        assert!(short.show_version, "-V ไม่ถูกอ่าน");
+        // ★ และต้องไม่ไปทับ --help
+        assert!(!cli.show_help);
     }
 
     /// ★ ประตูของประตู: อาร์กิวเมนต์ที่ถูกต้องต้อง **ผ่าน** และมีผลจริง

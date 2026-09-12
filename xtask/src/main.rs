@@ -6,12 +6,13 @@
 //!   mutation       ประตูข้อ 1b — ทำให้ด่านทำงานทุกครั้งแล้วดูว่าเทสต์ไหนแดง
 //!   licenses       สร้าง THIRD-PARTY-LICENSES.md  (`--check` = ประตู)
 //!   bench          รัน benchmark ทั้งชุดแล้วเทียบกับเพดานใน docs/08
-//!   package        สร้าง installer / portable zip
+//!   package        สร้าง portable zip ของ Windows + ตรวจจากตัวแพ็กเกจเอง
 
 mod dump;
 mod json;
 mod licenses;
 mod mutation;
+mod package;
 mod seeds;
 
 /// สร้าง dataset สำหรับ benchmark (P5-1 บางส่วน)
@@ -126,7 +127,7 @@ fn main() -> anyhow::Result<()> {
         "mutation" => mutation::run(),
         "licenses" => licenses::run(),
         "bench" => todo!("P5-1"),
-        "package" => todo!("P5-6"),
+        "package" => package::run(),
         other => {
             eprintln!(
                 "ไม่รู้จักคำสั่ง: {other:?}\n\
