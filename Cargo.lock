@@ -3043,6 +3043,7 @@ name = "refx-asset"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "crc32fast",
  "crossbeam-channel",
  "directories",
  "fast_image_resize",

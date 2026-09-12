@@ -1622,6 +1622,161 @@ mod tests {
         assert_eq!(rgba, [128, 64, 7, 255], "ต้องเป็นสีของ pixel ต้นฉบับเป๊ะ");
     }
 
+    /// ★★★ `SourceMeta::read` ต้องอ่าน **ของจริง** ไม่ใช่คืนศูนย์ตลอด
+    ///
+    /// ประตู mutation ชี้ว่าทำให้มันคืนค่าปริยายเสมอแล้วไม่มีอะไรแดง
+    /// (12 ก.ย. 2026) · ราคาจริงของการคืนศูนย์ตลอด:
+    ///
+    /// * การเรียง "วันที่แก้ไข" (`docs/03 §3`) กลายเป็นลำดับสุ่ม
+    /// * `(hash, mtime, size)` คือคีย์ cache — ทุกไฟล์ได้ `(0, 0)` เหมือนกัน
+    ///   แปลว่า **ไฟล์ที่ถูกแก้แล้วจะยังตอบด้วย thumbnail เก่า**
+    ///
+    /// ★ ตัวตั้งมาจากคนละทาง: ขนาดที่เทสต์เขียนเอง และ mtime เทียบกับนาฬิกาจริง
+    #[test]
+    fn the_file_stamp_reports_what_the_disk_says_not_zero() {
+        let path = temp_dir("stamp").join("a.bin");
+        let payload = vec![7u8; 1234];
+        std::fs::write(&path, &payload).unwrap();
+
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let meta = SourceMeta::read(&path);
+
+        assert_eq!(meta.bytes, payload.len() as u64, "ขนาดไม่ตรงกับที่เขียนลงไป");
+        assert!(
+            meta.mtime_ms > 0,
+            "mtime เป็นศูนย์ — cache key ของทุกไฟล์จะเหมือนกันหมด"
+        );
+        // ไฟล์ที่เพิ่งเขียนต้องมี mtime ใกล้เดี๋ยวนี้ ไม่ใช่ค่าที่ประกอบขึ้นมาเอง
+        assert!(
+            (meta.mtime_ms - before).abs() < 60_000,
+            "mtime {} ห่างจากเวลาจริง {before} เกินหนึ่งนาที",
+            meta.mtime_ms
+        );
+
+        // ★ ประตูของประตู: ไฟล์ที่ไม่มีอยู่ต้องได้ค่าปริยาย ไม่ใช่ panic
+        let gone = SourceMeta::read(&temp_dir("stamp").join("ไม่มีไฟล์นี้.bin"));
+        assert_eq!(gone, SourceMeta::default());
+    }
+
+    /// ★★★ ไฟล์ที่ **หายไประหว่างอยู่ในคิว** ต้องกลายเป็นผลที่ UI เห็น ไม่ใช่เงียบ
+    ///
+    /// สถานการณ์จริง: ลากภาพจากไดรฟ์ USB เข้ามาแล้วถอดออกก่อนที่คิวจะเดินถึง
+    /// · ถ้าไม่มีอะไรกลับมา ตัวนับ "กำลังโหลด" จะค้างตลอดกาลและภาพจะไม่มี
+    /// ทั้ง thumbnail และทั้งสถานะ `Missing` — ผู้ใช้เห็นช่องว่างที่ไม่มีคำอธิบาย
+    ///
+    /// ★ ประตู mutation ชี้ว่าด่าน `hash_file` ที่ล้มไม่มีเทสต์ตัวไหนเดินผ่าน
+    #[test]
+    fn a_file_that_vanished_from_the_queue_still_reports_back() {
+        let path = temp_dir("vanish").join("gone.png");
+        std::fs::write(&path, b"still here").unwrap();
+        std::fs::remove_file(&path).unwrap();
+
+        let pool = test_pool(1);
+        pool.submit(job(path.clone(), 0.0, b"vanish"));
+
+        let result = pool
+            .results()
+            .recv_timeout(Duration::from_secs(30))
+            .expect("ไฟล์หายแล้วไม่มีอะไรกลับมาเลย — ตัวนับจะค้างตลอดกาล");
+        assert!(
+            matches!(result, JobResult::Failed { .. }),
+            "ต้องเป็น Failed เพื่อให้ UI ทำให้เป็น Missing ได้ แต่ได้ {result:?}"
+        );
+
+        // ★★ และ cache ต้องยอมแพ้อย่างสุภาพกับ path ที่ hash ไม่ได้
+        //    (ไม่ใช่แต่งคีย์ขึ้นมาเอง ซึ่งจะทำให้ไฟล์คนละใบใช้ thumbnail ร่วมกัน)
+        let io = crate::cache::IoThread::spawn(&temp_dir("vanish").join("cache.db")).ok();
+        let sender = io.as_ref().and_then(crate::cache::IoThread::sender);
+        assert!(
+            matches!(
+                cache_lookup(&path, sender.as_ref()),
+                CacheLookup::Unavailable
+            ),
+            "cache ตอบอะไรสักอย่างให้ไฟล์ที่ไม่มีอยู่"
+        );
+        // ★ ประตูของประตู: ไฟล์ที่มีอยู่จริงต้อง **ไม่** ตอบ Unavailable ด้วยเหตุผลนี้
+        let real = write_gradient_png("vanish-real", "there.png", 16, 16);
+        assert!(
+            !matches!(
+                cache_lookup(&real, sender.as_ref()),
+                CacheLookup::Unavailable
+            ),
+            "ไฟล์ปกติก็ตอบ Unavailable — ด่านแน่นเกินไปจน cache ไม่เคยทำงาน"
+        );
+    }
+
+    /// ★★★ **EXIF orientation ต้องถึงพิกเซลจริง ไม่ใช่แค่ถูกอ่าน**
+    ///
+    /// ## ทำไมเทสต์นี้ถึงต้องมี และทำไมเทสต์เดิมไม่พอ
+    ///
+    /// `thumb::read_orientation` มีเทสต์ครบทุกค่า แต่ทั้งหมดถาม **ค่า enum**
+    /// ไม่มีตัวไหนถามว่า *แล้วภาพที่ออกจากท่อหมุนจริงไหม* — เป็นรูปเดียวกับ
+    /// `quad_for` ที่ไม่เคยส่ง `rotation` เข้า shader ตั้งแต่ P0: ทุกชิ้นถูก
+    /// ไม่มีใครต่อ และไม่มีอะไรแดง
+    ///
+    /// ประตู mutation ชี้จุดนี้ 12 ก.ย. 2026 — ทำให้ตัวอ่าน EXIF คืน `Normal`
+    /// เสมอ แล้ว **ไม่มีเทสต์ตัวไหนแดงเลย**
+    ///
+    /// ## ตัวตั้งมาจากคนละทาง (`§3.9` ข้อ 14)
+    ///
+    /// สามคำถามที่ตอบด้วยของคนละแหล่ง:
+    ///
+    /// 1. **รูปทรงเปลี่ยนจริงไหม** — ไฟล์กว้าง 24 สูง 16 · orientation 6
+    ///    (หมุน 90°) ต้องออกมา 16×24 · ขนาดนี้มาจากบัฟเฟอร์จริงหลังหมุน
+    /// 2. **พิกเซลตรงกับการหมุนที่ถูกต้องไหม** — เทียบกับ thumbnail ของภาพ
+    ///    ที่หมุนด้วยมือ
+    /// 3. **มันไม่ใช่ no-op ใช่ไหม** — ต้อง **ต่าง** จาก thumbnail ของภาพที่
+    ///    ไม่ได้หมุน · ข้อนี้คือสิ่งที่ทำให้ข้อ 2 มีความหมาย (ลายของ fixture
+    ///    ไม่สมมาตรโดยตั้งใจ ไม่งั้นสองอันนั้นเท่ากันเองฟรี ๆ)
+    #[test]
+    fn exif_orientation_actually_rotates_the_pixels_that_come_out() {
+        const W: u32 = 24;
+        const H: u32 = 16;
+        let jpeg = crate::thumb::fixtures::jpeg_with_exif(6, W, H);
+        let path = temp_dir("orient").join("tilted.jpg");
+        std::fs::write(&path, &jpeg).unwrap();
+
+        let pool = test_pool(1);
+        pool.submit(job(path, 0.0, b"orient"));
+        let result = pool
+            .results()
+            .recv_timeout(Duration::from_secs(30))
+            .unwrap();
+        let JobResult::Done { thumb, .. } = result else {
+            panic!("ได้ {result:?} ซึ่งไม่ใช่ Done");
+        };
+
+        // ---- 1. รูปทรง ----
+        assert_eq!(
+            (thumb.source_width, thumb.source_height),
+            (H, W),
+            "ไฟล์กว้าง {W} สูง {H} ที่ประกาศ orientation 6 ต้องออกมาเป็น {H}×{W} \
+             — ได้ {}×{} แปลว่าไม่มีใครหมุนมันเลย",
+            thumb.source_width,
+            thumb.source_height
+        );
+
+        // ---- 2 กับ 3. พิกเซล ----
+        let decoded = image::load_from_memory(&jpeg).unwrap().to_rgba8();
+        assert_eq!((decoded.width(), decoded.height()), (W, H), "ไฟล์เก็บแนวนอน");
+        let upright = crate::thumb::make_thumbnail(
+            &crate::thumb::Orientation::Rotate90.apply(decoded.clone()),
+        );
+        let untouched = crate::thumb::make_thumbnail(&decoded);
+
+        assert_ne!(
+            upright.pixels, untouched.pixels,
+            "หมุนแล้วพิกเซลเหมือนเดิม — fixture สมมาตรเกินไป เทสต์นี้พิสูจน์อะไรไม่ได้"
+        );
+        assert_eq!(
+            thumb.pixels, upright.pixels,
+            "พิกเซลที่ออกจากท่อไม่ตรงกับภาพที่หมุนถูกต้อง"
+        );
+    }
+
     /// งาน picker ต้องไม่แตะ cache — cache เก็บแต่ thumbnail ที่ถูกบีบแล้ว
     #[test]
     fn a_sample_job_never_answers_from_the_thumbnail_cache() {

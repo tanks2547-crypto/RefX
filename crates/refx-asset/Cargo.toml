@@ -36,3 +36,12 @@ smallvec.workspace  = true
 thiserror.workspace = true
 tracing.workspace   = true
 directories.workspace = true
+
+[dev-dependencies]
+# ★ **dev-dependency เท่านั้น** — ใช้คำนวณ CRC ของ `eXIf` chunk ใน fixture ของ
+#   เทสต์ (PNG ที่มี EXIF จริง) · ตัวโปรแกรมไม่ได้ใช้ และ dev-dep ไม่ตามไปที่
+#   `fuzz/` ซึ่งพึ่ง crate นี้แบบปกติ
+#   ★★ ไม่เขียน CRC32 เอง: fixture ที่ checksum ผิดจะถูก decoder บางตัวปล่อยผ่าน
+#      แล้วเทสต์จะวัดของที่ไม่ใช่ของจริงโดยไม่มีอะไรฟ้อง (`docs/08 §3.9` ข้อ 9)
+crc32fast.workspace = true
+

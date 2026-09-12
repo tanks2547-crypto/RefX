@@ -270,6 +270,116 @@ pub fn dominant_color(image: &RgbaImage) -> u32 {
     0xFF00_0000 | (r << 16) | (g << 8) | b
 }
 
+/// ★★★ ตัวสร้างไฟล์ทดสอบที่มี **EXIF จริง** — ใช้ร่วมกันทั้ง `thumb` และ `pool`
+///
+/// อยู่ตรงนี้ไม่ใช่ใน `mod tests` เพราะ `pool.rs` ต้องใช้ตัวเดียวกัน · สองสำเนา
+/// ของตัวเขียน EXIF จะ drift แล้ววันหนึ่งจะมีเทสต์ที่ผ่านเพราะ fixture ของมันเอง
+/// ผิดตรงกับโค้ด (`docs/08 §3.9` ข้อ 14)
+#[cfg(test)]
+pub(crate) mod fixtures {
+    // ★ fixture ที่เขียนผิดต้อง **ล้มเสียงดัง** ไม่ใช่เงียบแล้วปล่อยไฟล์พิการ
+    //   ให้เทสต์ไปวัด — ไฟล์ที่ decoder ปล่อยผ่านทั้งที่ EXIF เพี้ยนคือของปลอม
+    //   ที่ทำให้เทสต์เขียวโดยไม่ได้ตรวจอะไร (`docs/08 §3.9` ข้อ 14)
+    #![allow(clippy::unwrap_used)]
+
+    use image::RgbaImage;
+
+    /// บล็อก TIFF/EXIF ที่เล็กที่สุดที่ประกาศ Orientation หนึ่งค่า
+    ///
+    /// เขียนเองเพราะ `image` ไม่เขียน EXIF ให้ และการเทียบกับ EXIF **จริง**
+    /// คือสิ่งเดียวที่พิสูจน์ว่าทางลัดไม่ได้ทำให้ภาพจากมือถือตะแคง
+    #[must_use]
+    pub(crate) fn exif_block(orientation: u16) -> Vec<u8> {
+        let mut tiff = Vec::new();
+        tiff.extend_from_slice(b"II"); // little-endian
+        tiff.extend_from_slice(&42u16.to_le_bytes()); // magic
+        tiff.extend_from_slice(&8u32.to_le_bytes()); // offset ของ IFD0
+        tiff.extend_from_slice(&1u16.to_le_bytes()); // มี 1 entry
+        tiff.extend_from_slice(&0x0112u16.to_le_bytes()); // tag = Orientation
+        tiff.extend_from_slice(&3u16.to_le_bytes()); // type = SHORT
+        tiff.extend_from_slice(&1u32.to_le_bytes()); // count
+        tiff.extend_from_slice(&orientation.to_le_bytes());
+        tiff.extend_from_slice(&[0, 0]); // เติมช่องค่าให้ครบ 4 ไบต์
+        tiff.extend_from_slice(&0u32.to_le_bytes()); // ไม่มี IFD ถัดไป
+        tiff
+    }
+
+    /// JPEG จริงจาก `image` (ไม่มี EXIF) — ★ **ลายไม่สมมาตร** เพื่อให้การหมุน
+    /// เปลี่ยนพิกเซลจริง · ภาพสีเดียวหมุนแล้วเหมือนเดิมทุกประการ แล้วเทสต์ที่
+    /// เทียบพิกเซลจะผ่านทั้งที่ไม่มีใครหมุนอะไรเลย
+    #[must_use]
+    pub(crate) fn plain_jpeg(w: u32, h: u32) -> Vec<u8> {
+        let img = RgbaImage::from_fn(w, h, |x, y| {
+            // ครึ่งบนสว่าง ครึ่งล่างมืด + ไล่สีตามแกน x → หมุน 90° แล้วต่างแน่นอน
+            let top = u8::from(y * 2 < h) * 200;
+            image::Rgba([top.saturating_add((x * 3) as u8), 90, 60, 255])
+        });
+        let mut out = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(
+                &mut std::io::Cursor::new(&mut out),
+                image::ImageFormat::Jpeg,
+            )
+            .unwrap();
+        out
+    }
+
+    /// แทรก APP1 ที่มี EXIF เข้าไปหลัง SOI ของ JPEG จริง
+    #[must_use]
+    pub(crate) fn jpeg_with_exif(orientation: u16, w: u32, h: u32) -> Vec<u8> {
+        let base = plain_jpeg(w, h);
+        let tiff = exif_block(orientation);
+        let len = u16::try_from(2 + super::EXIF_ID.len() + tiff.len()).unwrap();
+
+        let mut out = Vec::with_capacity(base.len() + usize::from(len) + 2);
+        out.extend_from_slice(&super::JPEG_SOI);
+        out.extend_from_slice(&[0xFF, 0xE1]);
+        out.extend_from_slice(&len.to_be_bytes());
+        out.extend_from_slice(&super::EXIF_ID);
+        out.extend_from_slice(&tiff);
+        out.extend_from_slice(&base[2..]); // ที่เหลือของไฟล์เดิม (ข้าม SOI)
+        out
+    }
+
+    /// ★★★ PNG ที่มี **`eXIf` chunk จริง** — เส้นทางที่ไม่ใช่ JPEG
+    ///
+    /// `read_orientation` มีสองทาง: ทางลัดของ JPEG (อ่าน APP1 เอง) กับทาง
+    /// container ทั่วไป · **ทางที่สองไม่เคยมีเทสต์เดินผ่านเลย** จนกระทั่ง
+    /// ประตู mutation ชี้ให้เห็น 12 ก.ย. 2026
+    ///
+    /// ตาม PNG spec ตัว chunk `eXIf` เก็บ **TIFF header ตรง ๆ** ไม่มี `Exif\0\0` นำ
+    #[must_use]
+    pub(crate) fn png_with_exif(orientation: u16, w: u32, h: u32) -> Vec<u8> {
+        let img = RgbaImage::from_fn(w, h, |x, y| {
+            image::Rgba([(x * 3) as u8, (y * 5) as u8, 60, 255])
+        });
+        let mut base = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(
+                &mut std::io::Cursor::new(&mut base),
+                image::ImageFormat::Png,
+            )
+            .unwrap();
+
+        let tiff = exif_block(orientation);
+        let mut chunk = Vec::with_capacity(12 + tiff.len());
+        chunk.extend_from_slice(&u32::try_from(tiff.len()).unwrap().to_be_bytes());
+        chunk.extend_from_slice(b"eXIf");
+        chunk.extend_from_slice(&tiff);
+        let mut crc_over = b"eXIf".to_vec();
+        crc_over.extend_from_slice(&tiff);
+        chunk.extend_from_slice(&crc32fast::hash(&crc_over).to_be_bytes());
+
+        // แทรกไว้ก่อน IEND (12 ไบต์สุดท้าย)
+        let cut = base.len() - 12;
+        let mut out = Vec::with_capacity(base.len() + chunk.len());
+        out.extend_from_slice(&base[..cut]);
+        out.extend_from_slice(&chunk);
+        out.extend_from_slice(&base[cut..]);
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -378,53 +488,13 @@ mod tests {
     }
 
     // ---------- ทางลัด EXIF ของ JPEG ----------
+    //
+    // ★ ตัวสร้าง fixture อยู่ที่ `super::fixtures` — **ที่เดียว** เพราะ `pool.rs`
+    //   ใช้ตัวเดียวกันเพื่อพิสูจน์ว่า orientation ถูกใช้จริงตลอดเส้นทาง
+    use super::fixtures::{exif_block, plain_jpeg, png_with_exif};
 
-    /// JPEG จริงจาก `image` (ไม่มี EXIF)
-    fn plain_jpeg(w: u32, h: u32) -> Vec<u8> {
-        let img = RgbaImage::from_pixel(w, h, image::Rgba([120, 90, 60, 255]));
-        let mut out = Vec::new();
-        image::DynamicImage::ImageRgba8(img)
-            .write_to(
-                &mut std::io::Cursor::new(&mut out),
-                image::ImageFormat::Jpeg,
-            )
-            .unwrap();
-        out
-    }
-
-    /// บล็อก TIFF/EXIF ที่เล็กที่สุดที่ประกาศ Orientation หนึ่งค่า
-    ///
-    /// เขียนเองเพราะ `image` ไม่เขียน EXIF ให้ และการเทียบกับ EXIF **จริง**
-    /// คือสิ่งเดียวที่พิสูจน์ว่าทางลัดไม่ได้ทำให้ภาพจากมือถือตะแคง
-    fn exif_block(orientation: u16) -> Vec<u8> {
-        let mut tiff = Vec::new();
-        tiff.extend_from_slice(b"II"); // little-endian
-        tiff.extend_from_slice(&42u16.to_le_bytes()); // magic
-        tiff.extend_from_slice(&8u32.to_le_bytes()); // offset ของ IFD0
-        tiff.extend_from_slice(&1u16.to_le_bytes()); // มี 1 entry
-        tiff.extend_from_slice(&0x0112u16.to_le_bytes()); // tag = Orientation
-        tiff.extend_from_slice(&3u16.to_le_bytes()); // type = SHORT
-        tiff.extend_from_slice(&1u32.to_le_bytes()); // count
-        tiff.extend_from_slice(&orientation.to_le_bytes());
-        tiff.extend_from_slice(&[0, 0]); // เติมช่องค่าให้ครบ 4 ไบต์
-        tiff.extend_from_slice(&0u32.to_le_bytes()); // ไม่มี IFD ถัดไป
-        tiff
-    }
-
-    /// แทรก APP1 ที่มี EXIF เข้าไปหลัง SOI ของ JPEG จริง
     fn jpeg_with_exif(orientation: u16) -> Vec<u8> {
-        let base = plain_jpeg(32, 32);
-        let tiff = exif_block(orientation);
-        let len = u16::try_from(2 + EXIF_ID.len() + tiff.len()).unwrap();
-
-        let mut out = Vec::with_capacity(base.len() + usize::from(len) + 2);
-        out.extend_from_slice(&JPEG_SOI);
-        out.extend_from_slice(&[0xFF, 0xE1]);
-        out.extend_from_slice(&len.to_be_bytes());
-        out.extend_from_slice(&EXIF_ID);
-        out.extend_from_slice(&tiff);
-        out.extend_from_slice(&base[2..]); // ที่เหลือของไฟล์เดิม (ข้าม SOI)
-        out
+        super::fixtures::jpeg_with_exif(orientation, 32, 32)
     }
 
     /// ★ ทางลัดต้องยังอ่าน EXIF จริงได้ครบ ไม่ใช่แค่เร็วขึ้น
@@ -448,6 +518,46 @@ mod tests {
             assert_eq!(
                 image::guess_format(&jpeg).unwrap(),
                 image::ImageFormat::Jpeg
+            );
+        }
+    }
+
+    /// ★★★ **EXIF ของไฟล์ที่ไม่ใช่ JPEG** — กิ่งที่ไม่มีใครเคยเดินผ่าน
+    ///
+    /// `read_orientation` มีสองทาง: ทางลัดของ JPEG (อ่าน APP1 เอง) กับทาง
+    /// container ทั่วไปสำหรับ PNG/TIFF/WebP · เทสต์ทั้งหมดที่มีอยู่เดินแต่ทางแรก
+    /// → ประตู mutation ชี้ว่า **ทำให้ทางที่สองคืน `Normal` เสมอ แล้วไม่มีอะไรแดง**
+    /// (12 ก.ย. 2026)
+    ///
+    /// อาการถ้าพัง: ภาพ PNG ที่ export จากมือถือ/กล้องมาพร้อม orientation
+    /// จะตะแคงบน board ทั้งที่ไฟล์บอกไว้ชัด
+    #[test]
+    fn a_png_carries_its_orientation_too_not_just_jpeg() {
+        for (value, expected) in [
+            (1u16, Orientation::Normal),
+            (3, Orientation::Rotate180),
+            (6, Orientation::Rotate90),
+            (8, Orientation::Rotate270),
+        ] {
+            let png = png_with_exif(value, 24, 16);
+            // ★ ประตูของประตู: ไฟล์ต้องยังเป็น PNG ที่ decode ได้ ไม่งั้นเราวัด
+            //   "ไฟล์พังแล้วคืน Normal" ซึ่งจริงตลอดกาล
+            assert_eq!(
+                image::guess_format(&png).unwrap(),
+                image::ImageFormat::Png,
+                "fixture ไม่ใช่ PNG แล้ว"
+            );
+            assert!(
+                image::load_from_memory(&png).is_ok(),
+                "แทรก eXIf แล้ว PNG เปิดไม่ได้ — fixture ผิด ไม่ใช่โค้ดผิด"
+            );
+            // ★★ และต้อง **ไม่** เดินทางลัดของ JPEG
+            assert!(jpeg_exif_payload(&png).is_none());
+
+            assert_eq!(
+                read_orientation(&png),
+                expected,
+                "PNG ที่ประกาศ orientation {value} อ่านไม่ได้"
             );
         }
     }
