@@ -310,15 +310,54 @@ mod tests {
         assert!(current < MAX_BYTES, "ไฟล์ปัจจุบันยังใหญ่เกินเพดาน: {current}");
     }
 
+    /// ★★★ หมุนแล้วต้องเหลือ **สามไฟล์ล่าสุด** — และต้องเป็นสามใบที่ถูกต้อง
+    ///
+    /// ★★ รุ่นก่อนยืนยันแค่ว่า `refx.log.4` ไม่มีอยู่ ซึ่ง **เป็นจริงตลอดกาล**:
+    /// `rotate()` เลื่อนได้สูงสุดถึง `.{KEEP_FILES}` เท่านั้น `.4` จึงไม่มีทาง
+    /// ถูกสร้างโดยโครงสร้างของโค้ดเอง · `rotate()` ที่ **ไม่ทำอะไรเลย** ก็ผ่าน
+    /// (พิสูจน์แล้วด้วย mutation 11 ก.ย. 2026) — `docs/08 §3.9` ข้อ 14
+    ///
+    /// → ตัวตั้งต้องมาจากคนละทาง: เขียน **เนื้อที่แยกแยะได้** ลงแต่ละรอบ
+    /// แล้วถามว่าสามใบที่เหลือคือสามใบล่าสุดจริงไหม
     #[test]
-    fn keeps_at_most_three_old_files() {
+    fn keeps_only_the_three_newest_log_files() {
         let dir = temp_dir("keep");
         let mut writer = SizeRotatingWriter::new(&dir).unwrap();
-        for _ in 0..5 {
+
+        // ห้ารอบ: รอบที่ n เขียนคำว่า "round-n" แล้วหมุน
+        for round in 1..=5u32 {
+            writer
+                .write_all(format!("round-{round}").as_bytes())
+                .unwrap();
+            writer.flush().unwrap();
             writer.rotate();
         }
+
+        // `.1` คือรอบล่าสุด · `.3` คือรอบที่เก่าที่สุดที่ยังเก็บไว้
+        for (slot, round) in [(1u32, 5u32), (2, 4), (3, 3)] {
+            let path = dir.join(format!("{LOG_FILE}.{slot}"));
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("{} ต้องมีอยู่หลังหมุน 5 รอบ: {err}", path.display()));
+            assert!(
+                text.contains(&format!("round-{round}")),
+                "{} ควรเป็นของรอบที่ {round} แต่ข้างในคือ {text:?}",
+                path.display()
+            );
+        }
+
+        // เกินโควตาต้องถูกทิ้ง — และ **รอบที่ 1 กับ 2 ต้องไม่เหลืออยู่ที่ไหนเลย**
         let extra = dir.join(format!("{LOG_FILE}.{}", KEEP_FILES + 1));
         assert!(!extra.exists(), "เก็บไฟล์เก่าเกิน {KEEP_FILES} ไฟล์");
+        let mut left = String::new();
+        for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+            left.push_str(&std::fs::read_to_string(entry.path()).unwrap_or_default());
+        }
+        for gone in [1u32, 2] {
+            assert!(
+                !left.contains(&format!("round-{gone}")),
+                "รอบที่ {gone} ควรถูกทิ้งไปแล้ว แต่ยังอยู่ในโฟลเดอร์"
+            );
+        }
     }
 
     /// ★ I-7: panic ของ decode worker ห้ามเด้ง dialog ใส่หน้าผู้ใช้
