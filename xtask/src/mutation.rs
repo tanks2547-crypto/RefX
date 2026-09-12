@@ -74,6 +74,15 @@ const ALLOWED: &[(&str, &str, &str)] = &[
         "ค่าเฉลี่ยของศูนย์ช่อง — ตัวเรียกถามเฉพาะตอนมีของ",
     ),
     (
+        "crates/refx-platform/src/memory.rs",
+        "if K32GetProcessMemoryInfo(GetCurrentProcess(), &raw mut counters, cb) == 0 {",
+        "ด่านนี้ทำงานก็ต่อเมื่อ **kernel32 ตอบว่าล้มเหลว** ซึ่งเราสั่งให้เกิดจากในเทสต์ไม่ได้ \
+         — pseudo-handle ของโปรเซสตัวเองใช้ได้เสมอ และบัฟเฟอร์เป็นของเราเอง · \
+         ★ เงื่อนไขเลิก: วันที่ชั้นนี้รับตัวเรียก API เข้ามาแทนที่จะเรียกตรง (inject ได้) \
+         ต้องเอาออกจากทะเบียนทันที — นี่คือข้อจำกัดของการเรียก OS ตรง ๆ ไม่ใช่คำตัดสินว่า \
+         กิ่งนี้ไม่ต้องมีเทสต์",
+    ),
+    (
         "crates/refx-core/src/spatial.rs",
         "if value.is_nan() {",
         "NaN ถูกกรองที่ `ItemCanvas::sanitized` ตั้งแต่ทางเข้า board แล้ว (I-4) \
@@ -152,6 +161,7 @@ pub fn run() -> anyhow::Result<()> {
 
     let mut survivors: Vec<&Guard> = Vec::new();
     let mut tested = 0usize;
+    let mut skipped = 0usize;
     for guard in &guards {
         let path = root.join(&guard.file);
         let original = std::fs::read_to_string(&path)?;
@@ -170,7 +180,10 @@ pub fn run() -> anyhow::Result<()> {
             }
             Ok(false) => tested += 1,
             // คอมไพล์ไม่ผ่าน = การแทรกไม่ถูกไวยากรณ์ตรงนั้น ไม่ใช่ผลของเทสต์
-            Err(_) => println!("ข้าม  {}:{}  (แทรกแล้วคอมไพล์ไม่ผ่าน)", guard.file, guard.at + 1),
+            Err(_) => {
+                skipped += 1;
+                println!("ข้าม  {}:{}  (แทรกแล้วคอมไพล์ไม่ผ่าน)", guard.file, guard.at + 1);
+            }
         }
     }
 
@@ -193,12 +206,24 @@ pub fn run() -> anyhow::Result<()> {
     }
     let unexpected = unregistered(&survivors, nc);
 
+    // ★★ `ข้าม` ต้องอยู่ใน **บรรทัดสรุป** ไม่ใช่แค่บรรทัดระหว่างทาง — ไม่งั้น
+    //   "รอดจากทุกเทสต์: 0" จะอ่านได้ว่า *ด่านทุกตัวมีเทสต์เห็น* ทั้งที่บางตัว
+    //   ไม่เคยถูกทดสอบเลย · นี่คือรูปที่ `docs/08 §3.9` ข้อ 9 พูดถึงตรง ๆ:
+    //   ตัวเลขที่ดู "ครบ" คือคำโกหกที่เนียนที่สุด
     println!(
-        "\nด่านที่ทดสอบ: {tested} · รอดจากทุกเทสต์: {} · ไม่ได้ขึ้นทะเบียน: {} · {:.0} วินาที",
+        "\nด่านที่ค้นเจอ: {} · ทดสอบ: {tested} · ข้าม: {skipped} · \
+         รอดจากทุกเทสต์: {} · ไม่ได้ขึ้นทะเบียน: {} · {:.0} วินาที",
+        guards.len(),
         survivors.len(),
         unexpected.len(),
         started.elapsed().as_secs_f64()
     );
+    if skipped > 0 {
+        println!(
+            "  ★ {skipped} ตัวที่ข้าม **ไม่ได้แปลว่าผ่าน** — ตัวกลายพันธุ์แบบ \
+             'ให้ด่านทำงานทุกครั้ง' ใช้กับ `if let` ที่คืนค่าจากตัวแปรที่ผูกไว้ไม่ได้"
+        );
+    }
     if nc {
         println!("NC วิ่งผ่านจริง: ปลอมตัวรอดเข้าไปหนึ่งตัว — ประตูต้องล้มบรรทัดถัดไป");
     }

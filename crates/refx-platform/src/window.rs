@@ -208,17 +208,46 @@ pub fn route(event: &WindowEvent) -> EventRoute {
     }
 }
 
+/// สิ่งเดียวที่ host ต้องการจากหน้าต่างจริง: ขอให้วาดใหม่
+///
+/// ★★★ แยกเป็น trait เพราะ `winit::Window` **สร้างนอก event loop ไม่ได้** →
+/// ตราบใดที่ host ผูกกับตัวหน้าต่างจริง ทุกกิ่งที่ทำงาน *หลัง* หน้าต่างพร้อม
+/// จะไม่มีทางถูกเทสต์เลย · ประตู mutation วัดได้ว่านั่นคือด่านสามตัวใน
+/// `ApplicationHandler` ที่รอดจากทุกเทสต์ (`docs/08 §3.9` ข้อ 8 ทางที่ 1)
+pub trait Surface {
+    /// ขอเฟรมใหม่จากระบบหน้าต่าง
+    fn request_redraw(&self);
+}
+
+impl Surface for Arc<Window> {
+    fn request_redraw(&self) {
+        Window::request_redraw(self);
+    }
+}
+
+/// event ตัวนั้นจบลงยังไง — คืนค่าแทนที่จะสั่ง `event_loop.exit()` ตรงนั้น
+/// เพื่อให้การตัดสินทั้งหมดเกิดในที่ที่ไม่ต้องมี `ActiveEventLoop`
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AfterEvent {
+    /// หน้าต่างอยู่ต่อ
+    Stay,
+    /// delegate อนุญาตให้ปิดแล้ว
+    Close,
+}
+
 /// ตัวเชื่อม winit เข้ากับ [`AppDelegate`]
-pub struct WindowHost<D: AppDelegate> {
+///
+/// `S` มีไว้ให้เทสต์ใส่หน้าต่างปลอมเข้ามาได้ — ของจริงคือ `Arc<Window>` เสมอ
+pub struct WindowHost<D: AppDelegate, S: Surface = Arc<Window>> {
     delegate: D,
     config: WindowConfig,
-    window: Option<Arc<Window>>,
+    window: Option<S>,
     tracker: RedrawTracker,
     /// error ที่เกิดตอน `window_ready` — เก็บไว้คืนหลัง event loop จบ
     failure: Option<D::Error>,
 }
 
-impl<D: AppDelegate> WindowHost<D> {
+impl<D: AppDelegate, S: Surface> WindowHost<D, S> {
     /// สร้าง host โดยยังไม่เปิดหน้าต่าง (หน้าต่างเกิดใน `resumed()`)
     pub fn new(delegate: D, config: WindowConfig) -> Self {
         Self {
@@ -248,15 +277,82 @@ impl<D: AppDelegate> WindowHost<D> {
             self.delegate.on_quiet_streak(self.tracker.quiet());
         }
     }
-}
 
-impl<D: AppDelegate> ApplicationHandler<WakeEvent> for WindowHost<D> {
-    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        // resumed() ถูกเรียกซ้ำได้ (มือถือ/สลับ session) — สร้างหน้าต่างครั้งเดียวพอ
+    /// ยังต้องสร้างหน้าต่างอยู่ไหม
+    ///
+    /// `resumed()` ถูกเรียกซ้ำได้ (มือถือ / สลับ session) — หน้าต่างต้องเกิด
+    /// **ครั้งเดียว** ไม่งั้น `window_ready` จะสร้าง GPU device ใบที่สอง
+    /// แล้วใบแรกลอยค้างอยู่โดยไม่มีใครถือ
+    ///
+    /// ★ แยกออกมาเพราะสลักที่อยู่ใน `resumed()` เทสต์ได้ทางเดียว: ทางที่
+    /// "ยังไม่มีหน้าต่าง" เท่านั้น — ทางที่มีแล้วต้องมี `Window` จริงซึ่งสร้าง
+    /// นอก event loop ไม่ได้ (`docs/08 §3.9` ข้อ 8)
+    fn needs_a_window(&self) -> bool {
         if self.window.is_some() {
-            return;
+            return false;
+        }
+        true
+    }
+
+    /// ★★★ ตัดสินว่า event หนึ่งตัวต้องทำอะไร — **ไม่แตะ `ActiveEventLoop`**
+    ///
+    /// event มาถึงก่อนหน้าต่างพร้อมได้จริง (winit ส่ง event ของ session เก่ามา
+    /// ระหว่างกำลัง resume) · ตอนนั้น delegate ยังไม่มี GPU surface การส่งต่อ
+    /// ให้มันคือการวาดลงบนของที่ยังไม่มี
+    fn handle_event(&mut self, event: &WindowEvent) -> AfterEvent {
+        if self.window.is_none() {
+            return AfterEvent::Stay;
         }
 
+        // ★ I-1: การคัดกรองอยู่ใน route() ซึ่งเป็นฟังก์ชันบริสุทธิ์ที่มีเทสต์คุม
+        //   RedrawRequested คือ "ผลของการขอวาด" ไม่ใช่ input จึงห้ามตกไปทาง on_input
+        //   — เจอของจริงตอน spike: 3068 เฟรม/20 วินาที ทั้งที่ไม่แตะอะไรเลย
+        match route(event) {
+            EventRoute::Draw => {
+                // วาดแล้วถามว่า "ต้องวาดอีกไหม" — ถ้าไม่ ก็หลับยาว
+                if let Some(reason) = self.delegate.redraw() {
+                    self.request_redraw(reason);
+                }
+            }
+            EventRoute::Close => {
+                if self.delegate.on_close_requested() {
+                    return AfterEvent::Close;
+                }
+            }
+            EventRoute::Resize(width, height) => {
+                self.delegate.on_resize(width, height);
+                // resize คือ input ตามข้อ 1 ของ docs/04 §1
+                self.request_redraw(RedrawReason::UserInput);
+            }
+            EventRoute::Input => {
+                if self.delegate.on_input(event) {
+                    self.request_redraw(RedrawReason::UserInput);
+                }
+            }
+        }
+        AfterEvent::Stay
+    }
+
+    /// เธรดอื่นปลุกมา (decode เสร็จ) — เงื่อนไขข้อ 2 ของ docs/04 §1
+    ///
+    /// การมาถึงของ event นี้เองคือสิ่งที่ทำให้ event loop ตื่นจาก `ControlFlow::Wait`
+    /// **ไม่ขัด I-1** เพราะเกิดเฉพาะตอนมีของใหม่จริง ๆ ไม่ใช่ปลุกเป็นระยะ
+    fn handle_wake(&mut self, event: WakeEvent) {
+        if self.window.is_none() {
+            return;
+        }
+        if self.delegate.on_wake_event(event) {
+            self.request_redraw(RedrawReason::TextureReady);
+        }
+    }
+}
+
+impl<D: AppDelegate> WindowHost<D, Arc<Window>> {
+    /// สร้างหน้าต่างจริงแล้วส่งให้ delegate เตรียม GPU
+    ///
+    /// ★ ตั้ง `self.window` **หลัง** `window_ready` สำเร็จเท่านั้น — ถ้าล้มแล้ว
+    /// resume รอบหน้ายังลองใหม่ได้ และ event ที่มาระหว่างนั้นยังถูกทิ้งอยู่
+    fn open_window(&mut self, event_loop: &ActiveEventLoop) {
         let attrs = Window::default_attributes()
             .with_title(self.config.title.clone())
             .with_inner_size(winit::dpi::LogicalSize::new(
@@ -282,6 +378,17 @@ impl<D: AppDelegate> ApplicationHandler<WakeEvent> for WindowHost<D> {
 
         self.window = Some(window);
     }
+}
+
+impl<D: AppDelegate> ApplicationHandler<WakeEvent> for WindowHost<D, Arc<Window>> {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        // ★ ทุกการตัดสินอยู่ใน needs_a_window()/handle_*() ซึ่งเทสต์ยิงได้ทั้งสองทาง
+        //   เมธอดของ `ApplicationHandler` เหลือไว้แค่ส่งต่อ เพราะ `ActiveEventLoop`
+        //   สร้างเองไม่ได้ อะไรที่อยู่ในนี้จึงไม่มีทางถูกเทสต์ (`docs/08 §3.9` ข้อ 8)
+        if self.needs_a_window() {
+            self.open_window(event_loop);
+        }
+    }
 
     fn window_event(
         &mut self,
@@ -289,49 +396,13 @@ impl<D: AppDelegate> ApplicationHandler<WakeEvent> for WindowHost<D> {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
-        if self.window.is_none() {
-            return;
-        }
-
-        // ★ I-1: การคัดกรองอยู่ใน route() ซึ่งเป็นฟังก์ชันบริสุทธิ์ที่มีเทสต์คุม
-        //   RedrawRequested คือ "ผลของการขอวาด" ไม่ใช่ input จึงห้ามตกไปทาง on_input
-        //   — เจอของจริงตอน spike: 3068 เฟรม/20 วินาที ทั้งที่ไม่แตะอะไรเลย
-        match route(&event) {
-            EventRoute::Draw => {
-                // วาดแล้วถามว่า "ต้องวาดอีกไหม" — ถ้าไม่ ก็หลับยาว
-                if let Some(reason) = self.delegate.redraw() {
-                    self.request_redraw(reason);
-                }
-            }
-            EventRoute::Close => {
-                if self.delegate.on_close_requested() {
-                    event_loop.exit();
-                }
-            }
-            EventRoute::Resize(width, height) => {
-                self.delegate.on_resize(width, height);
-                // resize คือ input ตามข้อ 1 ของ docs/04 §1
-                self.request_redraw(RedrawReason::UserInput);
-            }
-            EventRoute::Input => {
-                if self.delegate.on_input(&event) {
-                    self.request_redraw(RedrawReason::UserInput);
-                }
-            }
+        if self.handle_event(&event) == AfterEvent::Close {
+            event_loop.exit();
         }
     }
 
-    /// ★ เธรดอื่นปลุกมา (decode เสร็จ) — เงื่อนไขข้อ 2 ของ docs/04 §1
-    ///
-    /// การมาถึงของ event นี้เองคือสิ่งที่ทำให้ event loop ตื่นจาก `ControlFlow::Wait`
-    /// **ไม่ขัด I-1** เพราะเกิดเฉพาะตอนมีของใหม่จริง ๆ ไม่ใช่ปลุกเป็นระยะ
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: WakeEvent) {
-        if self.window.is_none() {
-            return;
-        }
-        if self.delegate.on_wake_event(event) {
-            self.request_redraw(RedrawReason::TextureReady);
-        }
+        self.handle_wake(event);
     }
 
     /// จุดเดียวที่ตัดสินว่า event loop จะ "หลับยาว" หรือ "หลับจนถึงเวลาหนึ่ง"
@@ -581,6 +652,214 @@ mod tests {
         );
         assert_eq!(route(&WindowEvent::Focused(true)), EventRoute::Input);
         assert_eq!(route(&WindowEvent::Occluded(false)), EventRoute::Input);
+    }
+
+    /// หน้าต่างปลอม — สิ่งเดียวที่ host ขอจากหน้าต่างจริงคือ "ขอเฟรมใหม่"
+    ///
+    /// ★ มีไว้เพื่อให้เทสต์เข้าถึงกิ่ง **หลัง** หน้าต่างพร้อมได้ · `winit::Window`
+    /// สร้างนอก event loop ไม่ได้ กิ่งเหล่านั้นจึงไม่เคยถูกเทสต์มาก่อน
+    #[derive(Clone, Default)]
+    struct FakeSurface(std::rc::Rc<std::cell::Cell<u32>>);
+
+    impl Surface for FakeSurface {
+        fn request_redraw(&self) {
+            self.0.set(self.0.get() + 1);
+        }
+    }
+
+    /// delegate ที่จดว่าถูกเรียกอะไรบ้าง — เทสต์ถามมันว่า event ไปถึงจริงไหม
+    #[derive(Default)]
+    struct SpyDelegate {
+        draws: u32,
+        inputs: u32,
+        wakes: u32,
+        resizes: Vec<(u32, u32)>,
+        close_asks: u32,
+        /// ตอบว่าอะไรเมื่อถูกถามว่าปิดได้ไหม
+        may_close: bool,
+        /// `on_input` / `on_wake_event` ตอบว่าต้องวาดใหม่ไหม
+        wants_frame: bool,
+    }
+
+    impl AppDelegate for SpyDelegate {
+        type Error = NeverError;
+
+        fn window_ready(&mut self, _window: Arc<Window>) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        fn redraw(&mut self) -> Option<RedrawReason> {
+            self.draws += 1;
+            None
+        }
+
+        fn on_input(&mut self, _event: &WindowEvent) -> bool {
+            self.inputs += 1;
+            self.wants_frame
+        }
+
+        fn on_resize(&mut self, width: u32, height: u32) {
+            self.resizes.push((width, height));
+        }
+
+        fn on_close_requested(&mut self) -> bool {
+            self.close_asks += 1;
+            self.may_close
+        }
+
+        fn on_wake_event(&mut self, _event: WakeEvent) -> bool {
+            self.wakes += 1;
+            self.wants_frame
+        }
+    }
+
+    /// host ที่ "หน้าต่างพร้อมแล้ว" โดยไม่ต้องมีระบบหน้าต่างจริง
+    fn host_with_window(delegate: SpyDelegate) -> WindowHost<SpyDelegate, FakeSurface> {
+        let mut host = WindowHost::new(delegate, WindowConfig::default());
+        host.window = Some(FakeSurface::default());
+        host
+    }
+
+    /// ★★★ `resumed()` มาซ้ำได้ — หน้าต่างต้องเกิดครั้งเดียว
+    ///
+    /// ถ้าสลักนี้ค้างที่ "ไม่ต้องสร้าง" โปรแกรมจะเปิดมาเป็นจอว่างตลอดไป
+    /// ถ้าค้างที่ "สร้าง" จะได้ GPU device ใบที่สองทับใบแรกตอนสลับ session
+    /// — ทั้งสองทางไม่มีเทสต์ตัวไหนเห็นเลยจนกระทั่ง 12 ก.ย. 2026
+    #[test]
+    fn the_window_is_created_once_no_matter_how_often_resume_comes_back() {
+        let fresh: WindowHost<SpyDelegate, FakeSurface> =
+            WindowHost::new(SpyDelegate::default(), WindowConfig::default());
+        assert!(
+            fresh.needs_a_window(),
+            "เปิดโปรแกรมมาแล้วไม่ยอมสร้างหน้าต่าง = จอว่าง"
+        );
+
+        let already = host_with_window(SpyDelegate::default());
+        assert!(
+            !already.needs_a_window(),
+            "resume รอบสองสร้างหน้าต่างใบใหม่ทับใบเดิม — GPU device ใบแรกจะลอยค้าง"
+        );
+    }
+
+    /// ★★★ event ที่มาก่อนหน้าต่างพร้อมต้องถูกทิ้ง — **และตัวที่มาทีหลังต้องไม่ถูกทิ้ง**
+    ///
+    /// ครึ่งหลังคือครึ่งที่หายไป: ด่าน `self.window.is_none()` ถ้าทำงานทุกครั้ง
+    /// = โปรแกรมที่ไม่ตอบสนองอะไรเลยทั้งโปรแกรม และไม่มีเทสต์ไหนแดง
+    #[test]
+    fn events_before_the_window_are_dropped_and_the_rest_get_through() {
+        // ---- ก่อนหน้าต่างพร้อม: delegate ต้องไม่ถูกแตะเลย ----
+        let mut early: WindowHost<SpyDelegate, FakeSurface> =
+            WindowHost::new(SpyDelegate::default(), WindowConfig::default());
+        for event in [
+            WindowEvent::RedrawRequested,
+            WindowEvent::CloseRequested,
+            WindowEvent::Focused(true),
+            WindowEvent::Resized(PhysicalSize::new(800, 600)),
+        ] {
+            assert_eq!(early.handle_event(&event), AfterEvent::Stay);
+        }
+        assert_eq!(early.delegate.draws, 0, "วาดทั้งที่ยังไม่มี surface");
+        assert_eq!(early.delegate.inputs, 0);
+        assert_eq!(early.delegate.close_asks, 0, "ถามเรื่องปิดก่อนหน้าต่างจะมีอยู่");
+        assert!(early.delegate.resizes.is_empty());
+
+        // ---- หลังหน้าต่างพร้อม: ต้องไปถึง delegate ครบทุกทาง ----
+        let mut host = host_with_window(SpyDelegate {
+            wants_frame: true,
+            ..SpyDelegate::default()
+        });
+        assert_eq!(
+            host.handle_event(&WindowEvent::RedrawRequested),
+            AfterEvent::Stay
+        );
+        assert_eq!(host.delegate.draws, 1, "RedrawRequested ไปไม่ถึง redraw()");
+
+        assert_eq!(
+            host.handle_event(&WindowEvent::Focused(true)),
+            AfterEvent::Stay
+        );
+        assert_eq!(host.delegate.inputs, 1, "input ไปไม่ถึง delegate");
+
+        assert_eq!(
+            host.handle_event(&WindowEvent::Resized(PhysicalSize::new(640, 480))),
+            AfterEvent::Stay
+        );
+        assert_eq!(host.delegate.resizes, vec![(640, 480)]);
+
+        // input ที่ตอบว่า "ต้องวาดใหม่" กับ resize ต้องขอเฟรมจริง ๆ ผ่านหน้าต่าง
+        assert_eq!(
+            host.tracker().total(),
+            2,
+            "คำขอวาดไม่ได้ถูกบันทึก: {}",
+            host.tracker().summary()
+        );
+        assert_eq!(
+            host.window.as_ref().map(|w| w.0.get()),
+            Some(2),
+            "บันทึกว่าขอเฟรมแล้วแต่ไม่ได้บอกระบบหน้าต่าง — ภาพจะไม่ขึ้นจนกว่าจะขยับเมาส์"
+        );
+    }
+
+    /// ปุ่มปิดต้องปิดได้จริง และ **ต้องไม่ปิดเมื่อ delegate ยังไม่ยอม** (งานที่ยังไม่เซฟ — I-3)
+    #[test]
+    fn closing_waits_for_the_delegate_to_say_yes() {
+        let mut refuses = host_with_window(SpyDelegate::default()); // may_close = false
+        assert_eq!(
+            refuses.handle_event(&WindowEvent::CloseRequested),
+            AfterEvent::Stay,
+            "ปิดทั้งที่ delegate ยังไม่ตอบ — งานที่ยังไม่เซฟหายทันที (I-3)"
+        );
+        assert_eq!(refuses.delegate.close_asks, 1, "ไม่ได้ถาม delegate เลยด้วยซ้ำ");
+
+        let mut agrees = host_with_window(SpyDelegate {
+            may_close: true,
+            ..SpyDelegate::default()
+        });
+        assert_eq!(
+            agrees.handle_event(&WindowEvent::CloseRequested),
+            AfterEvent::Close,
+            "delegate ยอมปิดแล้วแต่หน้าต่างไม่ปิด — กดกากบาทแล้วโปรแกรมไม่ตอบ"
+        );
+    }
+
+    /// ★★ ผลจากเธรดอื่น (decode เสร็จ) ต้องกลายเป็นเฟรม — ข้อ 2 ของ docs/04 §1
+    #[test]
+    fn a_wake_from_another_thread_turns_into_a_frame_once_the_window_exists() {
+        let mut early: WindowHost<SpyDelegate, FakeSurface> = WindowHost::new(
+            SpyDelegate {
+                wants_frame: true,
+                ..SpyDelegate::default()
+            },
+            WindowConfig::default(),
+        );
+        early.handle_wake(WakeEvent::TextureReady);
+        assert_eq!(
+            early.delegate.wakes, 0,
+            "ปลุกก่อนหน้าต่างพร้อม = วาดลงบนของที่ยังไม่มี"
+        );
+        assert_eq!(early.tracker().total(), 0);
+
+        let mut host = host_with_window(SpyDelegate {
+            wants_frame: true,
+            ..SpyDelegate::default()
+        });
+        host.handle_wake(WakeEvent::TextureReady);
+        assert_eq!(host.delegate.wakes, 1, "ของใหม่จากเธรดอื่นไปไม่ถึง delegate");
+        assert_eq!(
+            host.tracker().total(),
+            1,
+            "decode เสร็จแล้วไม่มีใครขอเฟรม — ภาพจะไม่ขึ้นจนกว่าผู้ใช้จะขยับเมาส์"
+        );
+
+        // delegate บอกว่า "ไม่ต้องวาด" → ต้องไม่มีเฟรมเพิ่ม (I-1)
+        let mut quiet = host_with_window(SpyDelegate::default()); // wants_frame = false
+        quiet.handle_wake(WakeEvent::TextureReady);
+        assert_eq!(quiet.delegate.wakes, 1);
+        assert_eq!(
+            quiet.tracker().total(),
+            0,
+            "ปลุกแล้ววาดทั้งที่ไม่มีอะไรเปลี่ยน — ละเมิด I-1"
+        );
     }
 
     /// วาดเฟรมแล้ว delegate บอกว่าไม่ต้องวาดต่อ → ต้องไม่มีคำขอใหม่แม้แต่ครั้งเดียว

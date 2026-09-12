@@ -13,8 +13,20 @@
 /// คืน `None` เมื่อถามไม่ได้หรือค่าที่ได้ว่างเปล่า — ผู้เรียกต้องใช้อังกฤษ
 #[must_use]
 pub fn user_language_tag() -> Option<String> {
-    let tag = platform_language_tag()?;
-    let tag = tag.trim();
+    accept_language_tag(platform_language_tag())
+}
+
+/// ★★★ การ **ตัดสิน** ค่าที่ OS ตอบมา — แยกจากการ **ถาม** OS
+///
+/// ตอนที่สองอย่างนี้อยู่ในฟังก์ชันเดียวกัน กิ่ง "ค่าใช้ได้" ถูกทดสอบได้เฉพาะ
+/// ด้วยภาษาของเครื่องที่รันเทสต์อยู่ — เทสต์เดียวที่มีจึงเขียนเป็น
+/// `if let Some(tag) = …` ซึ่งแปลว่า **เครื่องที่ตอบ `None` ทำให้เทสต์ผ่านฟรี**
+/// ประตู mutation จับได้ว่าถ้าด่านนี้ทำงานทุกครั้ง (= ไม่มีภาษาไหนผ่านเลย)
+/// ไม่มีเทสต์ตัวไหนแดง (`docs/08 §3.9` ข้อ 8 ทางที่ 1 · 12 ก.ย. 2026)
+#[must_use]
+fn accept_language_tag(raw: Option<String>) -> Option<String> {
+    let raw = raw?;
+    let tag = raw.trim();
     if !is_real_language(tag) {
         return None;
     }
@@ -129,6 +141,45 @@ mod tests {
         for value in ["th_TH.UTF-8", "en-US", "th", "ja_JP"] {
             assert!(is_real_language(value), "{value:?} เป็นภาษาจริงแต่ถูกตัดทิ้ง");
         }
+    }
+
+    /// ★★★ ค่าที่ **ใช้ได้** ต้องผ่านออกมาจริง ไม่ใช่แค่ค่าที่ใช้ไม่ได้ถูกตัด
+    ///
+    /// ด่าน `!is_real_language` เคยอยู่ติดกับการเรียก OS → เทสต์ยิงเข้าไปตรง ๆ
+    /// ไม่ได้ และตัวที่มีอยู่ (`system_tag_is_usable_when_present`) เขียนเป็น
+    /// `if let Some(…)` จึง **ผ่านฟรีบนเครื่องที่ OS ตอบ `None`** · ถ้าด่านนี้
+    /// ทำงานทุกครั้ง โปรแกรมจะตกเป็นภาษาอังกฤษให้ผู้ใช้ทุกคนบนโลกเงียบ ๆ
+    /// โดยไม่มีเทสต์ตัวไหนแดง — ประตู mutation จับได้ 12 ก.ย. 2026
+    #[test]
+    fn a_usable_tag_comes_back_out_not_only_the_junk_gets_dropped() {
+        // ผ่าน — และต้องคืนแท็กเต็ม ไม่ใช่รหัสภาษาที่ตัดหางแล้ว
+        assert_eq!(
+            accept_language_tag(Some("th-TH".to_owned())),
+            Some("th-TH".to_owned())
+        );
+        assert_eq!(
+            accept_language_tag(Some("en-US".to_owned())),
+            Some("en-US".to_owned())
+        );
+        assert_eq!(
+            accept_language_tag(Some("ja_JP.UTF-8".to_owned())),
+            Some("ja_JP.UTF-8".to_owned())
+        );
+        // ช่องว่างรอบ ๆ ต้องถูกตัดก่อนคืน ไม่ใช่ติดไปด้วย
+        assert_eq!(
+            accept_language_tag(Some("  th-TH \n".to_owned())),
+            Some("th-TH".to_owned())
+        );
+
+        // ไม่ผ่าน — locale เปล่าของระบบ กับการที่ OS ตอบไม่ได้เลย
+        for junk in ["C", "POSIX", "C.UTF-8", "", "   ", "-"] {
+            assert_eq!(
+                accept_language_tag(Some(junk.to_owned())),
+                None,
+                "{junk:?} ไม่ใช่ภาษา แต่หลุดเข้าไปในระบบเลือกภาษา"
+            );
+        }
+        assert_eq!(accept_language_tag(None), None, "OS ตอบไม่ได้ ต้องไม่เดาภาษาให้");
     }
 
     /// ถ้าระบบตอบมา ต้องเป็นแท็กที่ใช้ได้จริง ไม่ใช่ขยะ
