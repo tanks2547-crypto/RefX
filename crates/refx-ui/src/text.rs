@@ -1173,6 +1173,8 @@ pub enum Template {
     ExportCeiling,
     /// `{n}` — คืนแท็กจาก `.refx-meta` ให้ภาพกี่ใบ (P5-5)
     SidecarRestored,
+    /// ★★ `{n}` — แท็กที่บันทึกไว้แต่ไม่มีไฟล์ไหนรับแล้ว · **ของยังอยู่**
+    SidecarStranded,
     /// ★★ `{dir}` — เขียน `.refx-meta` ไม่ได้ · **ต้องบอกว่าทำอะไรต่อได้**
     SidecarCannotWrite,
     /// ★★★ `{dir}` — มี `.refx-meta` ที่อ่านไม่ได้อยู่ · เราไม่แตะมัน
@@ -1340,6 +1342,10 @@ Drag in a PNG, JPEG, WebP, GIF, BMP, TGA or TIFF instead."
             "up to {n} px for this board - limited by the resolution of the previews"
         }
         Template::SidecarRestored => "Brought back tags for {n} pictures",
+        Template::SidecarStranded => {
+            "{n} saved tags no longer match any file here. They are kept - rename \
+             the files back and they return."
+        }
         Template::SidecarCannotWrite => {
             "Cannot write .refx-meta in {dir}. Your tags work now but will be lost \
              when RefX closes - save the board as a .refx file to keep them."
@@ -1505,6 +1511,10 @@ fn template_th(template: Template) -> Option<&'static str> {
         Template::ExportFailed => "ส่งออก {name} ไม่สำเร็จ: {reason}",
         Template::ExportCeiling => "สูงสุด {n} px สำหรับ board นี้ — จำกัดโดยความละเอียดของภาพตัวอย่าง",
         Template::SidecarRestored => "คืนแท็กให้ภาพ {n} ใบแล้ว",
+        Template::SidecarStranded => {
+            "แท็กที่บันทึกไว้ {n} ชุด ไม่ตรงกับไฟล์ไหนแล้ว — ยังเก็บไว้ให้\n\
+             เปลี่ยนชื่อไฟล์กลับเมื่อไหร่ มันกลับมาเอง"
+        }
         Template::SidecarCannotWrite => {
             "เขียน .refx-meta ใน {dir} ไม่ได้ — แท็กยังใช้ได้ตอนนี้ แต่จะหายเมื่อปิดโปรแกรม\n\
              บันทึก board เป็นไฟล์ .refx เพื่อเก็บไว้"
@@ -1961,6 +1971,7 @@ mod tests {
 
     const ALL_TEMPLATES: &[Template] = &[
         Template::SidecarRestored,
+        Template::SidecarStranded,
         Template::SidecarCannotWrite,
         Template::SidecarHandsOff,
         Template::SidecarAskIn,

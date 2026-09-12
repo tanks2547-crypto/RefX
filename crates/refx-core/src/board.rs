@@ -709,6 +709,24 @@ pub struct AssetRef {
     pub file_size: u64,
 }
 
+/// meta ที่อ่านมาจากไฟล์ข้าง ๆ ภาพ — ★ ถือ **ชื่อแท็ก** ไม่ใช่ `TagId`
+///
+/// `TagId` เป็นดัชนีในตารางของ *board ใบนั้น* — ข้ามเซสชันแล้วไม่มีความหมาย
+/// · ตัวแปลงอยู่ใน [`Board::restore_meta`] ซึ่งเป็นที่เดียวที่มีตารางชื่ออยู่ในมือ
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RestoredMeta {
+    /// ดาว 0..=5 (clamp ตอนเขียนลง board)
+    pub rating: u8,
+    /// ป้ายสี
+    pub color_label: Option<ColorLabel>,
+    /// โน้ตของผู้ใช้
+    pub note: String,
+    /// ปักหมุด
+    pub pinned: bool,
+    /// ชื่อแท็ก — ตัวที่ยังไม่มีในตารางจะถูกเพิ่มให้
+    pub tags: Vec<String>,
+}
+
 /// โน้ตข้อความบน canvas (P2-11)
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TextNote {
@@ -1161,6 +1179,82 @@ impl Board {
     /// จะดู "เสร็จ" ทั้งที่สิ่งที่ถูกบันทึกคือกล้องค่าปริยายเสมอ**
     pub fn set_view(&mut self, view: ViewState) {
         self.view = view;
+    }
+
+    /// ★★★ คืน meta ที่ **มาจากไฟล์** — การโหลด ไม่ใช่การแก้ (`docs/02 §2.9`)
+    ///
+    /// คืนจำนวนภาพที่ค่าเปลี่ยนจริง
+    ///
+    /// ## ทำไมไม่ผ่าน `Command` — และทำไมเหตุผล "`set_meta` เป็น `pub(crate)`" ผิด
+    ///
+    /// P5-5 รุ่นแรกคืนแท็กจาก `.refx-meta` ผ่าน `EditMeta` เพราะตัวตั้งค่าเป็น
+    /// `pub(crate)` · **นั่นเป็นความสะดวกของตัวแปรภาษา ไม่ใช่เหตุผลเชิงออกแบบ**
+    /// และผลที่ตามมาคือสองอย่างที่ `docs/02 §2.9` มีอยู่เพื่อป้องกันพอดี:
+    ///
+    /// | อาการ | ทำไมถึงยอมไม่ได้ |
+    /// |---|---|
+    /// | เปิดโฟลเดอร์เฉย ๆ แล้วเอกสาร `dirty` | ปิดโปรแกรมแล้วโดนถาม "บันทึกไหม" ทั้งที่ไม่ได้แตะอะไร — ตัวอย่างเดียวกับที่ §2.9 ยกมาตอนย้าย `selection` ออกจาก `Board` |
+    /// | `Ctrl+Z` ครั้งแรกหลังเปิดโฟลเดอร์ | ไปลบแท็กที่ผู้ใช้บันทึกไว้เอง = โปรแกรมกินงานเขา ตรงข้ามกับที่ตั้งใจ |
+    ///
+    /// > ★ เส้นแบ่ง: กด `Ctrl+Z` แล้วอ่านว่า *"ไม่เอาสิ่งที่ฉันเพิ่งทำ"* = `Command`
+    /// > · อ่านว่า *"ไม่เอาสิ่งที่ไฟล์บอกมา"* = **ไม่ใช่ `Command`**
+    ///
+    /// ## ★★ `revision` บวก แต่ `dirty` ไม่ — สองคำถามคนละคำถาม
+    ///
+    /// ต่างจาก [`Board::set_view`] ตรงนี้: `rating`/`tags`/`note` เป็น **input ของ
+    /// filter และ sort** (P3-4) · ไม่บวก `revision` แล้วแผง Arrange จะกรองด้วยค่า
+    /// เก่าค้างไว้ทั้งที่ดาวขึ้นแล้ว
+    ///
+    /// | ถาม | ตอบ | เพราะ |
+    /// |---|---|---|
+    /// | เนื้อหาเปลี่ยนไหม (`revision`) | **ใช่** | cache ของ filter/sort ต้องคิดใหม่ |
+    /// | มีงานที่ยังไม่บันทึกไหม (`dirty`) | **ไม่** | ค่าพวกนี้อยู่บนดิสก์อยู่แล้ว อ่านใหม่ได้เสมอ |
+    ///
+    /// ## I-4
+    ///
+    /// ชื่อแท็กถูก [`TagTable::normalize`] (ตัดตาม *อักขระ* ไม่ใช่ไบต์) และ
+    /// `ItemMeta::sanitized()` clamp ดาวให้อยู่ในช่วง · ★ **ไม่แตะ `group`
+    /// กับ `added_at` ของเดิม** — ทั้งคู่เป็นข้อเท็จจริงของ *board* ใบนี้
+    /// ไม่ใช่ของไฟล์บนดิสก์ (ดูหัวโมดูล `refx_io::sidecar`)
+    pub fn restore_meta(&mut self, restored: Vec<(ItemId, RestoredMeta)>) -> usize {
+        let mut changed = 0usize;
+        for (id, meta) in restored {
+            // ★ แปลงชื่อ → `TagId` **ก่อน** ยืม item เพราะทั้งคู่ยืม `self`
+            let mut tags: smallvec::SmallVec<[TagId; 4]> = smallvec::SmallVec::new();
+            for name in &meta.tags {
+                let Some(tag) = self.tags.find(name).or_else(|| self.tags.insert(name)) else {
+                    continue; // ชื่อว่างหลัง normalize — ทิ้งไป ไม่ใช่เหตุให้ล้ม
+                };
+                if !tags.contains(&tag) {
+                    tags.push(tag);
+                }
+            }
+            tags.sort_unstable();
+
+            let Some(item) = self.items.get_mut(id) else {
+                continue;
+            };
+            let next = ItemMeta {
+                tags,
+                rating: meta.rating,
+                color_label: meta.color_label,
+                note: meta.note,
+                // ★ ของ board ไม่ใช่ของไฟล์ — คงไว้ตามเดิมเสมอ
+                group: item.meta.group,
+                added_at: item.meta.added_at,
+                pinned: meta.pinned,
+            }
+            .sanitized();
+            if next != item.meta {
+                item.meta = next;
+                changed += 1;
+            }
+        }
+        if changed > 0 {
+            // ★ `touch()` อย่างเดียว — **ไม่แตะ `dirty`** (ดูตารางข้างบน)
+            self.touch();
+        }
+        changed
     }
 
     // ---- เขียน: `pub(crate)` เท่านั้น — ทางเข้าคือ `Command` ----

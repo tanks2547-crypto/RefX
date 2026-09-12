@@ -5384,6 +5384,23 @@ impl RefxApp {
 
     // ---------- ★★★ P4-4: กู้คืนงานที่ยังไม่เคยบันทึก + เปิดไฟล์ ----------
 
+    /// ★★★ จองสิทธิ์ถามเรื่องงานค้าง — **จริงครั้งเดียวตลอดอายุโปรแกรม**
+    ///
+    /// `resumed()` ถูกเรียกใหม่ทุกครั้งที่กู้ device (`docs/04 §7`) · คำถามที่โผล่
+    /// ซ้ำ ๆ คือคำถามที่คนกดปิดโดยไม่อ่าน ซึ่งทำให้ตัวเลือกที่สามไร้ความหมาย
+    ///
+    /// ★★ **แยกออกมาเป็นเมธอดเพื่อให้เทสต์เห็นสลักตัวจริง** — `resumed()` ต้องมี
+    /// หน้าต่าง จึงเรียกจากเทสต์ไม่ได้เลย · เทสต์รุ่นก่อนเลยไป**ตั้งธงเองแล้ว
+    /// ยืนยันว่าธงยังตั้งอยู่** ซึ่งเป็นจริงตลอดกาลโดยไม่ได้ตรวจสลักเลยสักครั้ง
+    /// (`docs/08 §3.9` ข้อ 14 รูปที่สาม)
+    fn claim_recovery_scan(&mut self) -> bool {
+        if self.recovery_checked {
+            return false;
+        }
+        self.recovery_checked = true;
+        true
+    }
+
     /// ★★ ไล่ดูโฟลเดอร์ recovery ตอนเปิดโปรแกรม — **บนเธรดอื่นเสมอ** (I-2)
     ///
     /// การสแกนอ่าน metadata ของทุกไฟล์ในโฟลเดอร์แล้ว decode ตัวที่ใหม่สุด
@@ -7314,30 +7331,28 @@ impl RefxApp {
         self.say_about_sidecar(say);
     }
 
-    /// คืนค่าที่อ่านมาได้ — ★ ผ่าน `Command` เสมอ (`Board::set_meta` เป็น `pub(crate)`)
+    /// คืนค่าที่อ่านมาได้ — ★★★ **ไม่ผ่าน `Command`** (`docs/02 §2.9`)
+    ///
+    /// ค่าที่มาจากไฟล์คือ *สถานะเริ่มต้นของเอกสาร ไม่ใช่การกระทำของผู้ใช้*
+    /// → ไม่ขึ้นสแตก undo · ไม่ทำให้ `dirty` · แต่ board บวก `revision`
+    /// เพราะดาว/แท็กเป็น input ของ filter (ดู `Board::restore_meta`)
     fn apply_sidecar_restore(&mut self, restore: crate::sidecar::Restore) {
-        use refx_core::command::{EditMeta, MetaField, TagItems};
+        let items = self.docs.active_mut().board.restore_meta(restore.meta);
 
-        let items = restore.items();
-        if !restore.meta.is_empty()
-            && let Ok(command) = EditMeta::new(MetaField::Restored, restore.meta)
-            && let Err(err) = self.docs.active_mut().apply(Box::new(command))
-        {
-            tracing::warn!(%err, "cannot bring the sidecar metadata back");
-        }
-        for (tag, targets) in restore.tags {
-            let Ok(command) = TagItems::attach(&tag, targets) else {
-                continue; // ชื่อแท็กที่ normalize แล้วว่าง — ทิ้งไป ไม่ใช่เหตุให้ล้ม
-            };
-            if let Err(err) = self.docs.active_mut().apply(Box::new(command)) {
-                tracing::warn!(%err, "cannot bring a tag back from the sidecar");
-            }
-        }
-        // ★ ปิดหน้าต่าง merge — การคืนค่าต้องไม่กลืนสิ่งที่ผู้ใช้ทำต่อจากนี้
-        self.docs.active_mut().history.seal();
+        // ★ index ไม่ต้อง rebuild — meta ไม่แตะเรขาคณิตของ item เลยสักฟิลด์
+        //   (ต่างจาก `apply_*` ที่ย้าย/ย่อขยาย ซึ่งต้อง `reindex`)
 
         self.say_about_sidecar(restore.say);
-        if items > 0 {
+        // ★★ ของที่จับคู่ไม่ได้ต้อง **มองเห็น** — บอกหลังจำนวนที่คืนได้ เพราะ
+        //    มันคือข่าวที่ผู้ใช้ต้องทำอะไรต่อ (`docs/07 §5` ข้อ 3)
+        if restore.unmatched > 0 {
+            self.shell.status = text::fill(
+                self.shell.lang,
+                Template::SidecarStranded,
+                &[("n", &restore.unmatched.to_string())],
+            );
+            self.shell.status_warn = true;
+        } else if items > 0 {
             self.shell.status = text::fill(
                 self.shell.lang,
                 Template::SidecarRestored,
@@ -7969,8 +7984,7 @@ impl AppDelegate for RefxApp {
         //     อยู่เธรดอื่นทั้งหมด หน้าต่างจึงขึ้นทันทีไม่ต้องรอดิสก์ (I-2)
         //   ★ เรียกครั้งเดียวตลอดอายุโปรแกรม — `resumed()` ถูกเรียกซ้ำได้ตอนกู้
         //     device แต่ตอนนั้นผู้ใช้ตอบคำถามไปแล้ว การถามซ้ำจะน่ารำคาญมาก
-        if !self.recovery_checked {
-            self.recovery_checked = true;
+        if self.claim_recovery_scan() {
             self.start_recovery_scan();
         }
         Ok(())
@@ -12257,20 +12271,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// ★★ ตอบไปแล้วต้องไม่ถูกถามซ้ำในการรันเดียวกัน
+    /// ★★★ สลัก "ถามเรื่องงานค้าง" ต้องจองได้ **ครั้งเดียว** ต่อการรัน
     ///
-    /// `resumed()` ถูกเรียกใหม่ทุกครั้งที่กู้ device (docs/04 §7) — คำถามที่โผล่
-    /// ซ้ำ ๆ คือคำถามที่คนกดปิดโดยไม่อ่าน ซึ่งทำให้ตัวเลือกที่สามไร้ความหมาย
+    /// `resumed()` ถูกเรียกใหม่ทุกครั้งที่กู้ device (`docs/04 §7`) — ถ้าสลักนี้
+    /// ไม่ทำงาน ผู้ใช้จะโดนถามเรื่องงานค้างซ้ำทุกครั้งที่ไดรเวอร์สะดุด
+    ///
+    /// ★★ เทสต์รุ่นก่อนชื่อ `answering_once_is_enough_for_the_whole_run`
+    /// แต่มัน **ตั้งธงเองแล้วยืนยันว่าธงยังตั้งอยู่** และฟังก์ชันที่มันเรียก
+    /// (`apply_recover_choice`) คืนที่ด่านแรกทุกครั้งเพราะไม่มีงานค้าง
+    /// → เขียวตลอดกาลโดยไม่ได้แตะสลักเลย · **ชื่อที่กว้างกว่าสิ่งที่ assert จริง
+    /// ทำให้ทุกคนหลังจากนั้นเชื่อว่ามีคนตรวจแล้ว** (`docs/08 §3.9` ข้อ 14)
     #[test]
-    fn answering_once_is_enough_for_the_whole_run() {
+    fn the_recovery_question_is_claimed_once_per_run() {
         let mut app = RefxApp::new(AppArgs::default());
         assert!(!app.recovery_checked, "ยังไม่ได้ถามตอนเพิ่งสร้าง");
-        app.recovery_checked = true;
-        app.apply_recover_choice(crate::shell::RecoverChoice::Later);
-        assert!(
-            app.recovery_checked,
-            "ตอบแล้วต้องยังนับว่าถามไปแล้ว ไม่งั้นกู้ device ทีนึงถามใหม่ทีนึง"
-        );
+
+        assert!(app.claim_recovery_scan(), "ครั้งแรกต้องได้สิทธิ์ถาม");
+        assert!(app.recovery_checked, "จองแล้วต้องจดไว้ ไม่งั้นครั้งที่สองก็ได้อีก");
+
+        // ★ กู้ device แล้ว `resumed()` วิ่งซ้ำ — ต้องไม่ได้สิทธิ์อีก
+        for round in 2..=5 {
+            assert!(
+                !app.claim_recovery_scan(),
+                "รอบที่ {round} ยังได้สิทธิ์ถามอีก — ผู้ใช้จะโดนถามทุกครั้งที่ไดรเวอร์สะดุด"
+            );
+        }
     }
 
     /// ★ `Ctrl+O` ต้องติด และ `Ctrl+Shift+O` ต้องเงียบ (ยังไม่มีความหมาย)

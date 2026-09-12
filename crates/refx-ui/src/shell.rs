@@ -3504,6 +3504,9 @@ mod tests {
         .chain([Lang::En, Lang::Th].into_iter().flat_map(|lang| {
             [
                 text::fill(lang, Template::SidecarRestored, &[("n", "42")]),
+                // ★★ ข้อความที่ขึ้นเฉพาะวันที่ผู้ใช้เปลี่ยนชื่อไฟล์แล้วแก้เนื้อพร้อมกัน
+                //    — นาน ๆ เห็นที จึงเป็นวันที่แย่ที่สุดที่จะเจอสี่เหลี่ยม tofu
+                text::fill(lang, Template::SidecarStranded, &[("n", "2")]),
                 text::fill(
                     lang,
                     Template::SidecarCannotWrite,

@@ -7,15 +7,19 @@
 //! 2. **แปลง `TagId` ↔ ชื่อแท็ก** เพราะตารางชื่ออยู่ที่ `Board`
 //! 3. **เอางาน I/O ออกจาก UI thread** (I-2) และ **ปลุกกลับมาเก็บผล** (`§3.9` ข้อ 18)
 //!
-//! ## ★★ ทำไมการคืนค่า tag เป็น `Command` (และผลที่ตามมา)
+//! ## ★★★ การ **โหลด** ไม่ใช่การ **แก้** — ไม่ผ่าน `Command` (`docs/02 §2.9`)
 //!
-//! `Board::set_meta` เป็น `pub(crate)` — ชั้นนี้แก้ board ตรง ๆ ไม่ได้เลย
-//! ซึ่งตรงกับกฎ "ทุก mutation → Command ที่ undo ได้" อยู่แล้ว
+//! รุ่นแรกคืนแท็กผ่าน `EditMeta` เพราะ `Board::set_meta` เป็น `pub(crate)` ·
+//! **เหตุผลนั้นเป็นความสะดวกของตัวแปรภาษา ไม่ใช่เหตุผลเชิงออกแบบ** และมันทำให้
+//! เปิดโฟลเดอร์เฉย ๆ แล้วเอกสาร `dirty` ทันที · `Ctrl+Z` ครั้งแรกหลังเปิด
+//! ไปลบแท็กที่ผู้ใช้บันทึกไว้เอง
 //!
-//! **ผลที่ตามมาและเป็นสิ่งที่ตั้งใจ:** เปิดโฟลเดอร์ที่มี `.refx-meta` แล้ว
-//! ประวัติจะมีขั้น "คืนค่า tag" อยู่หนึ่งขั้น · `Ctrl+Z` ตรงนั้นแปลว่า
-//! *"ไม่เอา tag ชุดนั้น"* ซึ่งเป็นความหมายที่อ่านได้ — และดีกว่าทางเลือกอื่น
-//! ที่ board ถูกแก้โดยไม่มีใครย้อนได้
+//! → ทางที่ถูกคือ [`refx_core::board::Board::restore_meta`] ซึ่งเป็นทางที่
+//! **ตั้งใจเปิดไว้** แบบเดียวกับ `set_view` — ไม่ `Command` · ไม่ขึ้นสแตก
+//! · **ไม่ `dirty`** · แต่บวก `revision` เพราะดาว/แท็กเป็น input ของ filter
+//!
+//! > ★ เส้นแบ่ง: กด `Ctrl+Z` แล้วอ่านว่า *"ไม่เอาสิ่งที่ฉันเพิ่งทำ"* = `Command`
+//! > · อ่านว่า *"ไม่เอาสิ่งที่ไฟล์บอกมา"* = ไม่ใช่ `Command`
 //!
 //! ## ★★★ สองช่องข้ามเธรด สองวิธีปลุก — ไม่ใช่วิธีเดียวกัน
 //!
@@ -30,7 +34,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use refx_core::arena::ItemId;
-use refx_core::board::{Board, ItemKind, ItemMeta};
+use refx_core::board::{Board, ItemKind, RestoredMeta};
 use refx_io::settings::SidecarPolicy;
 use refx_io::sidecar::{self, Entry, LockReason, Present, Sidecar, WritePermit};
 
@@ -214,19 +218,21 @@ impl Folders {
                 let Some(entry) = at.and_then(|at| sidecar.entries.get(at)) else {
                     continue;
                 };
-                let Some(item) = board.item(*id) else {
-                    continue;
-                };
-                let mut next = item.meta.clone();
-                entry.apply_to(&mut next);
-                let next = next.sanitized();
-                if next != item.meta {
-                    restore.meta.push((*id, next));
-                }
-                for tag in &entry.tags {
-                    restore.tags.entry(tag.clone()).or_default().push(*id);
-                }
+                restore.meta.push((
+                    *id,
+                    RestoredMeta {
+                        rating: entry.rating,
+                        color_label: entry.color_label,
+                        note: entry.note.clone(),
+                        pinned: entry.pinned,
+                        tags: entry.tags.clone(),
+                    },
+                ));
             }
+
+            // ★★ แท็กที่บันทึกไว้แต่ไม่มีไฟล์ไหนรับ — **ของยังอยู่ ต้องบอกให้รู้**
+            let stranded = sidecar::orphans(&sidecar, &matched);
+            restore.unmatched += stranded.len();
 
             // ★★★ **มีใบไหนถูกจับคู่ด้วย hash ไม่ใช่ด้วยชื่อ = ผู้ใช้เปลี่ยนชื่อไฟล์**
             //
@@ -255,7 +261,7 @@ impl Folders {
                 Folder {
                     permit,
                     locked,
-                    orphans: sidecar::orphans(&sidecar, &matched),
+                    orphans: stranded,
                     dirty: moved,
                     had_file,
                     granted: false,
@@ -457,10 +463,13 @@ impl Folders {
 /// สิ่งที่ต้องเดินผ่าน `History` เพื่อคืนค่า tag ที่อ่านมาได้
 #[derive(Debug, Default)]
 pub struct Restore {
-    /// meta ที่ต้องทับ (rating · ป้ายสี · โน้ต · ปักหมุด)
-    pub meta: Vec<(ItemId, ItemMeta)>,
-    /// ชื่อแท็ก → ภาพที่ต้องติดแท็กนั้น
-    pub tags: BTreeMap<String, Vec<ItemId>>,
+    /// meta ที่อ่านมาได้ — ★ ถือ **ชื่อแท็ก** ตัวแปลงเป็น `TagId` อยู่ที่ `Board`
+    pub meta: Vec<(ItemId, RestoredMeta)>,
+    /// ★★ รายการใน `.refx-meta` ที่ **ไม่มีไฟล์ไหนจับคู่ด้วย** (`docs/07 §5`)
+    ///
+    /// ของไม่ได้หาย แค่ไม่ติด — รายการยังอยู่ในไฟล์และกลับมาเองถ้าไฟล์กลับมา
+    /// · ผู้ใช้ต้องรู้ว่ามันยังอยู่ **ห้ามเดาแทนเขา** และห้ามเงียบ
+    pub unmatched: usize,
     /// สิ่งที่ต้องบอกผู้ใช้
     pub say: Vec<Say>,
 }
@@ -469,18 +478,7 @@ impl Restore {
     /// ไม่มีอะไรต้องทำเลยไหม — ★ ไม่มี = **ไม่ขอเฟรม** (I-1)
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.meta.is_empty() && self.tags.is_empty() && self.say.is_empty()
-    }
-
-    /// จำนวนภาพที่ได้ของกลับคืน
-    #[must_use]
-    pub fn items(&self) -> usize {
-        let mut ids: std::collections::BTreeSet<ItemId> =
-            self.meta.iter().map(|(id, _)| *id).collect();
-        for targets in self.tags.values() {
-            ids.extend(targets.iter().copied());
-        }
-        ids.len()
+        self.meta.is_empty() && self.unmatched == 0 && self.say.is_empty()
     }
 }
 
@@ -555,6 +553,18 @@ mod tests {
         // ★ `ItemId` ถูกแจกตอน `apply` ไม่ใช่ตอนสร้างคำสั่ง — อ่านจาก board
         //   หลังจากนั้นจึงเป็นทางเดียวที่ได้ id จริง
         board.items_in_z_order().map(|(id, _)| id).collect()
+    }
+
+    fn entry_of(name: &str, seed: u8, rating: u8) -> Entry {
+        Entry {
+            file_name: name.to_owned(),
+            hash: hash_of(seed),
+            rating,
+            color_label: None,
+            note: String::new(),
+            pinned: false,
+            tags: Vec::new(),
+        }
     }
 
     fn history() -> History {
@@ -774,16 +784,120 @@ mod tests {
         assert!(!folders.has_work_outstanding());
     }
 
-    /// ★ นับ "กี่ใบได้ของคืน" ต้องไม่นับซ้ำเมื่อใบเดียวได้ทั้ง meta และ tag
+    /// ★★★ NC ของ `docs/02 §2.9`: **เปิดโฟลเดอร์ที่มีแท็กบันทึกไว้ ต้องไม่ใช่การแก้**
+    ///
+    /// สามอย่าง ไม่ใช่อย่างเดียว — แต่ละอย่างพังคนละแบบ:
+    ///
+    /// | ต้องเป็น | ถ้าไม่เป็น ผู้ใช้เจออะไร |
+    /// |---|---|
+    /// | `dirty == false` | ปิดโปรแกรมแล้วโดนถาม "บันทึกไหม" ทั้งที่ไม่ได้แตะอะไร |
+    /// | ประวัติว่าง | ตัวนับ undo ขึ้นเองตั้งแต่เปิด |
+    /// | `Ctrl+Z` ไม่แตะแท็ก | **กด undo ครั้งแรกแล้วแท็กที่เขาบันทึกไว้หายไป** |
     #[test]
-    fn one_picture_that_got_both_back_is_counted_once() {
+    fn opening_a_folder_with_saved_tags_is_not_an_edit() {
+        use refx_core::command::{EditMeta, MetaField};
+
         let mut board = Board::default();
         let mut h = history();
-        let id = put(&mut board, &mut h, vec![image("/photos/a.png", 1)])[0];
-        let mut restore = Restore::default();
-        restore.meta.push((id, ItemMeta::default()));
-        restore.tags.insert("a".to_owned(), vec![id]);
-        restore.tags.insert("b".to_owned(), vec![id]);
-        assert_eq!(restore.items(), 1);
+        let ids = put(
+            &mut board,
+            &mut h,
+            vec![image("/photos/a.png", 1), image("/photos/b.png", 2)],
+        );
+
+        // ★★ ผู้ใช้ทำอะไรจริง ๆ ไว้หนึ่งอย่าง — **ขั้นที่ `Ctrl+Z` ควรย้อน**
+        //    ถ้าไม่มีของจริงให้ย้อน เทสต์นี้พิสูจน์ไม่ได้ว่า undo ไปโดนอะไรผิด
+        let mut pinned = board.item(ids[1]).unwrap().meta.clone();
+        pinned.pinned = true;
+        h.apply(
+            &mut board,
+            Box::new(EditMeta::new(MetaField::Pinned, vec![(ids[1], pinned)]).unwrap()),
+        )
+        .unwrap();
+        h.mark_saved(&mut board);
+        let depth_before = h.undo_depth();
+        assert!(!board.is_dirty(), "จุดตั้งต้นต้องสะอาด ไม่งั้นเทสต์นี้พิสูจน์อะไรไม่ได้");
+
+        let changed = board.restore_meta(vec![(
+            ids[0],
+            RestoredMeta {
+                rating: 4,
+                note: "จากไฟล์".to_owned(),
+                tags: vec!["มังกร".to_owned()],
+                ..RestoredMeta::default()
+            },
+        )]);
+
+        // ★ ประตูของประตู: ถ้าไม่มีอะไรเปลี่ยนจริง สามข้อข้างล่างเป็นจริงฟรี ๆ
+        assert_eq!(changed, 1, "ไม่ได้คืนอะไรเลย — ข้อที่เหลือจะผ่านโดยไม่ได้ตรวจ");
+        assert_eq!(board.item(ids[0]).unwrap().meta.rating, 4);
+        assert_eq!(board.item(ids[0]).unwrap().meta.tags.len(), 1);
+
+        // (1) ไม่ dirty
+        assert!(!board.is_dirty(), "เปิดโฟลเดอร์เฉย ๆ แล้วเอกสาร dirty");
+        // (2) ไม่ขึ้นสแตก
+        assert_eq!(h.undo_depth(), depth_before, "การโหลดขึ้นสแตก undo");
+
+        // (3) ★★★ `Ctrl+Z` ต้องย้อน **สิ่งที่ผู้ใช้ทำ** ไม่ใช่สิ่งที่ไฟล์บอกมา
+        h.undo(&mut board).unwrap();
+        assert!(
+            !board.item(ids[1]).unwrap().meta.pinned,
+            "undo ไม่ได้ย้อนสิ่งที่ผู้ใช้ทำ — เทสต์นี้กำลังวัดของผิด"
+        );
+        assert_eq!(
+            board.item(ids[0]).unwrap().meta.rating,
+            4,
+            "กด undo แล้วแท็กที่มาจากไฟล์หายไปด้วย = โปรแกรมกินงานผู้ใช้"
+        );
+        assert_eq!(board.item(ids[0]).unwrap().meta.tags.len(), 1);
+    }
+
+    /// ★★ แท็กที่ไม่มีไฟล์ไหนรับ **ต้องถูกนับ** — ของไม่ได้หาย แค่ไม่ติด
+    ///
+    /// `docs/07 §5` ข้อ 3: ห้ามลบรายการ และ **ห้ามเงียบ** · ผู้ใช้ที่เปลี่ยนชื่อ
+    /// ไฟล์แล้วแก้เนื้อพร้อมกันต้องรู้ว่าของยังอยู่ ไม่ใช่เดาเอง
+    #[test]
+    fn tags_that_match_nothing_are_counted_not_hidden() {
+        let stored = Sidecar::new(vec![
+            entry_of("still-here.png", 1, 4),
+            entry_of("on-a-usb-stick.png", 2, 5),
+            entry_of("renamed-and-edited.png", 3, 3),
+        ]);
+        let present = [Present {
+            file_name: "still-here.png".to_owned(),
+            hash: hash_of(1),
+        }];
+        let matched = sidecar::resolve(&stored, &present);
+        // ★ `Sidecar::new` เรียงตามชื่อ — ถามด้วย **ชื่อ** ไม่ใช่ด้วยตำแหน่ง
+        //   (เทสต์ที่ผูกกับลำดับภายในจะแดงวันที่มีคนเพิ่มรายการ ไม่ใช่วันที่โค้ดผิด)
+        let hit = matched[0].and_then(|at| stored.entries.get(at));
+        assert_eq!(
+            hit.map(|e| e.file_name.as_str()),
+            Some("still-here.png"),
+            "ใบที่ยังอยู่ต้องจับคู่ได้"
+        );
+        assert_eq!(
+            sidecar::orphans(&stored, &matched).len(),
+            2,
+            "สองชุดที่ไม่มีไฟล์รับต้องถูกนับ ไม่ใช่หายไปเงียบ ๆ"
+        );
+
+        // ★ ประตูของประตู: ทุกใบจับคู่ได้ = ต้องนับเป็นศูนย์ ไม่ใช่นับเกินตลอด
+        let all = [
+            Present {
+                file_name: "still-here.png".to_owned(),
+                hash: hash_of(1),
+            },
+            Present {
+                file_name: "on-a-usb-stick.png".to_owned(),
+                hash: hash_of(2),
+            },
+            Present {
+                file_name: "renamed-and-edited.png".to_owned(),
+                hash: hash_of(3),
+            },
+        ];
+        let matched_all = sidecar::resolve(&stored, &all);
+        assert!(sidecar::orphans(&stored, &matched_all).is_empty());
     }
 }
