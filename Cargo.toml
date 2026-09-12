@@ -44,10 +44,31 @@ refx-platform = { path = "crates/refx-platform" }
 # --- GPU / window / UI --------------------------------------------------
 # !! ล็อกทั้งชุด อัปพร้อมกันเท่านั้น. wgpu 30 ยังใช้กับ egui-wgpu ไม่ได้
 #    ดู docs/09-crate-versions.md ก่อนแตะบรรทัดพวกนี้
-wgpu       = "29.0.4"
+# ★★★ `default-features = false` เพื่อ **เลือก backend ต่อ OS** ที่ `refx-render`
+#   (ดูเหตุผลและตัวเลขที่นั่น) · รายการ default ของ wgpu 29.0.4 คือ
+#   std · parking_lot · dx12 · metal · gles · vulkan · wgsl · webgpu
+#   — สามตัวหลังสุดไม่มีวันถูกใช้บนเครื่องที่เราแจก แต่ `gles` ถูกคอมไพล์เข้ามาจริง
+#
+#   ★ ที่ทำได้เพราะ `egui-wgpu` ประกาศ `default-features = false` อยู่แล้ว
+#     (features = std, wgsl เท่านั้น) — ถ้ามันดึง default มา การตัดของเราจะไม่มีผล
+#     เลยเพราะ feature ถูก union กันทั้ง workspace
+wgpu       = { version = "29.0.4", default-features = false }
 winit      = "0.30"
 egui       = "0.34.3"
-egui-wgpu  = "0.34.3"
+# ★★★ `default-features = false` — **ตัวที่ทำให้การเลือก backend มีผลจริง**
+#
+#   `default` ของ egui-wgpu มี `"wgpu/default"` กับ `"wgpu/webgl"` อยู่ข้างใน
+#   → ตราบใดที่เอา default ของมันมา **backend ทั้งชุดกลับเข้ามาทันที** และการ
+#   ตัดที่ `refx-render` ไม่มีผลอะไรเลยสักไบต์ (วัดแล้ว: ลดได้ 1,536 ไบต์)
+#
+#   สิ่งที่เสียไปเมื่อปิด default ของมันบน Windows/Linux: **ไม่มี** —
+#   `fragile-send-sync-non-atomic-wasm` กับ `webgl` เป็นของ wasm ·
+#   `macos-window-resize-jitter-fix` คือ `wgpu/metal` ซึ่ง `refx-render`
+#   เปิดให้เองอยู่แล้วในสาขา macOS (P6)
+#
+#   เราใช้จาก crate นี้แค่ `Renderer` · `RendererOptions` · `ScreenDescriptor`
+#   ซึ่งไม่มีตัวไหนอยู่หลัง feature
+egui-wgpu  = { version = "0.34.3", default-features = false }
 # ★ `default-features = false` เพื่อถอด feature `links` ตัวเดียว — ที่เหลือคือ
 #   รายการ `default` ของ egui-winit 0.34.3 เป๊ะ ๆ (clipboard · wayland · x11 ·
 #   winit/default) เทียบจาก [features] ในไฟล์ของมันเอง ไม่ใช่จากความจำ

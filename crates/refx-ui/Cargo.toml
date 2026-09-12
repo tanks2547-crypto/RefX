@@ -18,7 +18,9 @@ refx-platform.workspace = true
 egui.workspace       = true
 egui-wgpu.workspace  = true
 egui-winit.workspace = true
-wgpu.workspace       = true
+# ★ ชั้นนี้ไม่ได้เลือก backend — มันแค่ใช้ชนิดของ wgpu กับ shader WGSL
+#   backend ถูกเลือกที่ `refx-render` ต่อ OS (ดูที่นั่น) แล้ว cargo union ให้เอง
+wgpu = { workspace = true, features = ["std", "wgsl"] }
 winit.workspace      = true
 glam.workspace       = true
 indexmap.workspace   = true

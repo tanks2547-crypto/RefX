@@ -11,12 +11,33 @@ workspace = true
 
 [dependencies]
 refx-core.workspace = true
-wgpu.workspace     = true
 glam.workspace     = true
 bytemuck.workspace = true
 smallvec.workspace = true
 thiserror.workspace = true
 tracing.workspace  = true
+
+# ★★★ backend ของ wgpu เลือก **ต่อ OS** — `docs/08 §6`
+#
+#   กฎที่ห้ามละเมิด: **ห้ามเหลือ backend เดียว** · เครื่องที่ driver มีปัญหาต้องมี
+#   ทางถอยเสมอ · Windows เก็บ DX12 + Vulkan · Linux เก็บ Vulkan + GL
+#
+#   สิ่งที่ตัดออกคือตัวที่ **ไม่มีวันถูกใช้บนเครื่องนั้น** ไม่ใช่ทางถอย:
+#   `gles` บน Windows (เส้นทาง ANGLE/EGL ซึ่งเราไม่เคยขอ) · `webgpu` (wasm เท่านั้น)
+#   · `metal` ถูก cfg ออกด้วย target อยู่แล้วบน Windows/Linux จึงไม่ได้อะไรคืนมา
+#   แต่ประกาศให้ชัดดีกว่าพึ่งค่า default ที่เปลี่ยนได้ตอนอัป wgpu
+#
+#   ★ `wgsl` จำเป็น — shader ของเราเป็น WGSL ทั้งหมด · `parking_lot` คือของ default
+#     เดิมของ wgpu เก็บไว้ตามเดิมเพื่อไม่ให้เปลี่ยนพฤติกรรมการล็อกไปด้วย
+[target.'cfg(windows)'.dependencies]
+wgpu = { workspace = true, features = ["std", "parking_lot", "wgsl", "dx12", "vulkan"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+wgpu = { workspace = true, features = ["std", "parking_lot", "wgsl", "vulkan", "gles"] }
+
+# P6 (macOS) — Metal เป็น backend เดียวที่มีจริงบนนั้น ทางถอยคือ GL
+[target.'cfg(target_os = "macos")'.dependencies]
+wgpu = { workspace = true, features = ["std", "parking_lot", "wgsl", "metal", "gles"] }
 
 [features]
 default = []
