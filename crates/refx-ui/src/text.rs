@@ -1342,8 +1342,11 @@ Drag in a PNG, JPEG, WebP, GIF, BMP, TGA or TIFF instead."
             "up to {n} px for this board - limited by the resolution of the previews"
         }
         Template::SidecarRestored => "Brought back tags for {n} pictures",
+        // ★ เรียงประโยคให้ **ถูกทุกจำนวน** โดยไม่ต้องมีกลไกพหูพจน์ — เห็นบน
+        //   ภาพหน้าจอจริง 12 ก.ย. 2026 ว่ารุ่นแรกออกมาเป็น "1 saved tags"
+        //   · ภาษาไทยไม่มีปัญหานี้ ประตู tofu จึงมองไม่เห็น และเทสต์ก็ไม่เห็น
         Template::SidecarStranded => {
-            "{n} saved tags no longer match any file here. They are kept - rename \
+            "No file here matches {n} of the saved tags. They are kept - rename \
              the files back and they return."
         }
         Template::SidecarCannotWrite => {
@@ -1512,7 +1515,7 @@ fn template_th(template: Template) -> Option<&'static str> {
         Template::ExportCeiling => "สูงสุด {n} px สำหรับ board นี้ — จำกัดโดยความละเอียดของภาพตัวอย่าง",
         Template::SidecarRestored => "คืนแท็กให้ภาพ {n} ใบแล้ว",
         Template::SidecarStranded => {
-            "แท็กที่บันทึกไว้ {n} ชุด ไม่ตรงกับไฟล์ไหนแล้ว — ยังเก็บไว้ให้\n\
+            "ไม่มีไฟล์ไหนตรงกับแท็กที่บันทึกไว้ {n} ชุด — ยังเก็บไว้ให้\n\
              เปลี่ยนชื่อไฟล์กลับเมื่อไหร่ มันกลับมาเอง"
         }
         Template::SidecarCannotWrite => {
