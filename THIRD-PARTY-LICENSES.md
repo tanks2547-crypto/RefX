@@ -1,5 +1,5 @@
 <!-- ★ สร้างโดย `cargo xtask licenses` — ห้ามแก้ด้วยมือ -->
-<!-- Cargo.lock crc32 = 0x94d084c0 · crate 315 ตัว -->
+<!-- Cargo.lock crc32 = 0xab07ba2e · crate 314 ตัว -->
 
 # ใบอนุญาตของซอฟต์แวร์บุคคลที่สาม / Third-party licenses
 
@@ -26,8 +26,8 @@ RefX is distributed with the third-party software listed below. This document re
 | Apache-2.0 OR MIT | 35 |
 | Unicode-3.0 | 15 |
 | MIT/Apache-2.0 | 11 |
-| Apache-2.0 | 8 |
 | MIT OR Apache-2.0 OR Zlib | 8 |
+| Apache-2.0 | 7 |
 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | 4 |
 | Unlicense OR MIT | 4 |
 | BSD-2-Clause | 3 |
@@ -60,7 +60,7 @@ RefX is distributed with the third-party software listed below. This document re
 | option-ext | MPL-2.0 | ใช้เป็นไลบรารีโดย **ไม่แก้ซอร์สของมัน** — เงื่อนไขผูกกับไฟล์ที่ถูกแก้เท่านั้น ซอร์สต้นฉบับอยู่ที่ crates.io ตามรุ่นที่ระบุ |
 | self_cell | Apache-2.0 OR GPL-2.0-only | ใช้ทางเลือกที่ไม่ใช่ copyleft ตามที่ใบอนุญาตให้สิทธิ์เลือกไว้ |
 
-## 3. crate ทั้งหมด (315 ตัว)
+## 3. crate ทั้งหมด (314 ตัว)
 
 | crate | รุ่น | ใบอนุญาต |
 |---|---|---|
@@ -159,7 +159,6 @@ RefX is distributed with the third-party software listed below. This document re
 | gif | 0.14.2 | MIT OR Apache-2.0 |
 | glam | 0.29.3 | MIT OR Apache-2.0 |
 | glow | 0.17.0 | MIT OR Apache-2.0 OR Zlib |
-| glutin_wgl_sys | 0.6.1 | Apache-2.0 |
 | gpu-allocator | 0.28.0 | MIT OR Apache-2.0 |
 | gpu-descriptor | 0.3.2 | MIT OR Apache-2.0 |
 | gpu-descriptor-types | 0.2.0 | MIT OR Apache-2.0 |
@@ -380,7 +379,7 @@ RefX is distributed with the third-party software listed below. This document re
 | zvariant | 5.13.1 | MIT |
 | zvariant_utils | 3.5.0 | MIT |
 
-## 4. ตัวบทใบอนุญาต (197 ฉบับ)
+## 4. ตัวบทใบอนุญาต (196 ฉบับ)
 
 ### 4.1
 
@@ -4236,216 +4235,6 @@ Software.
 
 ### 4.21
 
-<details><summary>ใช้โดย 1 crate: glutin_wgl_sys 0.6.1</summary>
-
-```text
-Apache License
-                           Version 2.0, January 2004
-                        http://www.apache.org/licenses/
-
-   TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
-
-   1. Definitions.
-
-      "License" shall mean the terms and conditions for use, reproduction,
-      and distribution as defined by Sections 1 through 9 of this document.
-
-      "Licensor" shall mean the copyright owner or entity authorized by
-      the copyright owner that is granting the License.
-
-      "Legal Entity" shall mean the union of the acting entity and all
-      other entities that control, are controlled by, or are under common
-      control with that entity. For the purposes of this definition,
-      "control" means (i) the power, direct or indirect, to cause the
-      direction or management of such entity, whether by contract or
-      otherwise, or (ii) ownership of fifty percent (50%) or more of the
-      outstanding shares, or (iii) beneficial ownership of such entity.
-
-      "You" (or "Your") shall mean an individual or Legal Entity
-      exercising permissions granted by this License.
-
-      "Source" form shall mean the preferred form for making modifications,
-      including but not limited to software source code, documentation
-      source, and configuration files.
-
-      "Object" form shall mean any form resulting from mechanical
-      transformation or translation of a Source form, including but
-      not limited to compiled object code, generated documentation,
-      and conversions to other media types.
-
-      "Work" shall mean the work of authorship, whether in Source or
-      Object form, made available under the License, as indicated by a
-      copyright notice that is included in or attached to the work
-      (an example is provided in the Appendix below).
-
-      "Derivative Works" shall mean any work, whether in Source or Object
-      form, that is based on (or derived from) the Work and for which the
-      editorial revisions, annotations, elaborations, or other modifications
-      represent, as a whole, an original work of authorship. For the purposes
-      of this License, Derivative Works shall not include works that remain
-      separable from, or merely link (or bind by name) to the interfaces of,
-      the Work and Derivative Works thereof.
-
-      "Contribution" shall mean any work of authorship, including
-      the original version of the Work and any modifications or additions
-      to that Work or Derivative Works thereof, that is intentionally
-      submitted to Licensor for inclusion in the Work by the copyright owner
-      or by an individual or Legal Entity authorized to submit on behalf of
-      the copyright owner. For the purposes of this definition, "submitted"
-      means any form of electronic, verbal, or written communication sent
-      to the Licensor or its representatives, including but not limited to
-      communication on electronic mailing lists, source code control systems,
-      and issue tracking systems that are managed by, or on behalf of, the
-      Licensor for the purpose of discussing and improving the Work, but
-      excluding communication that is conspicuously marked or otherwise
-      designated in writing by the copyright owner as "Not a Contribution."
-
-      "Contributor" shall mean Licensor and any individual or Legal Entity
-      on behalf of whom a Contribution has been received by Licensor and
-      subsequently incorporated within the Work.
-
-   2. Grant of Copyright License. Subject to the terms and conditions of
-      this License, each Contributor hereby grants to You a perpetual,
-      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
-      copyright license to reproduce, prepare Derivative Works of,
-      publicly display, publicly perform, sublicense, and distribute the
-      Work and such Derivative Works in Source or Object form.
-
-   3. Grant of Patent License. Subject to the terms and conditions of
-      this License, each Contributor hereby grants to You a perpetual,
-      worldwide, non-exclusive, no-charge, royalty-free, irrevocable
-      (except as stated in this section) patent license to make, have made,
-      use, offer to sell, sell, import, and otherwise transfer the Work,
-      where such license applies only to those patent claims licensable
-      by such Contributor that are necessarily infringed by their
-      Contribution(s) alone or by combination of their Contribution(s)
-      with the Work to which such Contribution(s) was submitted. If You
-      institute patent litigation against any entity (including a
-      cross-claim or counterclaim in a lawsuit) alleging that the Work
-      or a Contribution incorporated within the Work constitutes direct
-      or contributory patent infringement, then any patent licenses
-      granted to You under this License for that Work shall terminate
-      as of the date such litigation is filed.
-
-   4. Redistribution. You may reproduce and distribute copies of the
-      Work or Derivative Works thereof in any medium, with or without
-      modifications, and in Source or Object form, provided that You
-      meet the following conditions:
-
-      (a) You must give any other recipients of the Work or
-          Derivative Works a copy of this License; and
-
-      (b) You must cause any modified files to carry prominent notices
-          stating that You changed the files; and
-
-      (c) You must retain, in the Source form of any Derivative Works
-          that You distribute, all copyright, patent, trademark, and
-          attribution notices from the Source form of the Work,
-          excluding those notices that do not pertain to any part of
-          the Derivative Works; and
-
-      (d) If the Work includes a "NOTICE" text file as part of its
-          distribution, then any Derivative Works that You distribute must
-          include a readable copy of the attribution notices contained
-          within such NOTICE file, excluding those notices that do not
-          pertain to any part of the Derivative Works, in at least one
-          of the following places: within a NOTICE text file distributed
-          as part of the Derivative Works; within the Source form or
-          documentation, if provided along with the Derivative Works; or,
-          within a display generated by the Derivative Works, if and
-          wherever such third-party notices normally appear. The contents
-          of the NOTICE file are for informational purposes only and
-          do not modify the License. You may add Your own attribution
-          notices within Derivative Works that You distribute, alongside
-          or as an addendum to the NOTICE text from the Work, provided
-          that such additional attribution notices cannot be construed
-          as modifying the License.
-
-      You may add Your own copyright statement to Your modifications and
-      may provide additional or different license terms and conditions
-      for use, reproduction, or distribution of Your modifications, or
-      for any such Derivative Works as a whole, provided Your use,
-      reproduction, and distribution of the Work otherwise complies with
-      the conditions stated in this License.
-
-   5. Submission of Contributions. Unless You explicitly state otherwise,
-      any Contribution intentionally submitted for inclusion in the Work
-      by You to the Licensor shall be under the terms and conditions of
-      this License, without any additional terms or conditions.
-      Notwithstanding the above, nothing herein shall supersede or modify
-      the terms of any separate license agreement you may have executed
-      with Licensor regarding such Contributions.
-
-   6. Trademarks. This License does not grant permission to use the trade
-      names, trademarks, service marks, or product names of the Licensor,
-      except as required for reasonable and customary use in describing the
-      origin of the Work and reproducing the content of the NOTICE file.
-
-   7. Disclaimer of Warranty. Unless required by applicable law or
-      agreed to in writing, Licensor provides the Work (and each
-      Contributor provides its Contributions) on an "AS IS" BASIS,
-      WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-      implied, including, without limitation, any warranties or conditions
-      of TITLE, NON-INFRINGEMENT, MERCHANTABILITY, or FITNESS FOR A
-      PARTICULAR PURPOSE. You are solely responsible for determining the
-      appropriateness of using or redistributing the Work and assume any
-      risks associated with Your exercise of permissions under this License.
-
-   8. Limitation of Liability. In no event and under no legal theory,
-      whether in tort (including negligence), contract, or otherwise,
-      unless required by applicable law (such as deliberate and grossly
-      negligent acts) or agreed to in writing, shall any Contributor be
-      liable to You for damages, including any direct, indirect, special,
-      incidental, or consequential damages of any character arising as a
-      result of this License or out of the use or inability to use the
-      Work (including but not limited to damages for loss of goodwill,
-      work stoppage, computer failure or malfunction, or any and all
-      other commercial damages or losses), even if such Contributor
-      has been advised of the possibility of such damages.
-
-   9. Accepting Warranty or Additional Liability. While redistributing
-      the Work or Derivative Works thereof, You may choose to offer,
-      and charge a fee for, acceptance of support, warranty, indemnity,
-      or other liability obligations and/or rights consistent with this
-      License. However, in accepting such obligations, You may act only
-      on Your own behalf and on Your sole responsibility, not on behalf
-      of any other Contributor, and only if You agree to indemnify,
-      defend, and hold each Contributor harmless for any liability
-      incurred by, or claims asserted against, such Contributor by reason
-      of your accepting any such warranty or additional liability.
-
-   END OF TERMS AND CONDITIONS
-
-   APPENDIX: How to apply the Apache License to your work.
-
-      To apply the Apache License to your work, attach the following
-      boilerplate notice, with the fields enclosed by brackets "{}"
-      replaced with your own identifying information. (Don't include
-      the brackets!)  The text should be enclosed in the appropriate
-      comment syntax for the file format. We also recommend that a
-      file or class name and description of purpose be included on the
-      same "printed page" as the copyright notice for easier
-      identification within third-party archives.
-
-   Copyright 2022 Kirill Chibisov
-
-   Licensed under the Apache License, Version 2.0 (the "License");
-   you may not use this file except in compliance with the License.
-   You may obtain a copy of the License at
-
-       http://www.apache.org/licenses/LICENSE-2.0
-
-   Unless required by applicable law or agreed to in writing, software
-   distributed under the License is distributed on an "AS IS" BASIS,
-   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-   See the License for the specific language governing permissions and
-   limitations under the License.
-```
-
-</details>
-
-### 4.22
-
 <details><summary>ใช้โดย 11 crate: cobs 0.3.0 · crc32fast 1.5.0 · dpi 0.1.2 · fallible-iterator 0.3.0 · fallible-streaming-iterator 0.1.9 · hex 0.4.3 · quick-error 2.0.1 · toml_datetime 1.1.1+spec-1.1.0 · toml_edit 0.25.13+spec-1.1.0 · toml_parser 1.1.2+spec-1.1.0 · winit 0.30.13</summary>
 
 ```text
@@ -4654,7 +4443,7 @@ Apache License
 
 </details>
 
-### 4.23
+### 4.22
 
 <details><summary>ใช้โดย 1 crate: async-broadcast 0.7.2</summary>
 
@@ -4853,7 +4642,7 @@ Apache License
 
 </details>
 
-### 4.24
+### 4.23
 
 <details><summary>ใช้โดย 2 crate: directories 5.0.1 · dirs-sys 0.4.1</summary>
 
@@ -5036,7 +4825,7 @@ TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION
 
 </details>
 
-### 4.25
+### 4.24
 
 <details><summary>ใช้โดย 16 crate: allocator-api2 0.2.21 · anyhow 1.0.104 · basic-toml 0.1.10 · constant_time_eq 0.4.2 · libc 0.2.189 · litrs 1.0.0 · proc-macro2 1.0.107 · quote 1.0.47 · rustc-hash 2.1.3 · serde 1.0.229 · serde_core 1.0.229 · syn 2.0.119 · syn 3.0.3 · thiserror 1.0.69 · thiserror 2.0.19 · unicode-ident 1.0.24</summary>
 
@@ -5221,7 +5010,7 @@ END OF TERMS AND CONDITIONS
 
 </details>
 
-### 4.26
+### 4.25
 
 <details><summary>ใช้โดย 5 crate: futures-channel 0.3.33 · futures-core 0.3.33 · futures-io 0.3.33 · futures-task 0.3.33 · futures-util 0.3.33</summary>
 
@@ -5432,7 +5221,7 @@ limitations under the License.
 
 </details>
 
-### 4.27
+### 4.26
 
 <details><summary>ใช้โดย 1 crate: ppv-lite86 0.2.21</summary>
 
@@ -5642,7 +5431,7 @@ limitations under the License.
 
 </details>
 
-### 4.28
+### 4.27
 
 <details><summary>ใช้โดย 1 crate: glam 0.29.3</summary>
 
@@ -5852,7 +5641,7 @@ limitations under the License.
 
 </details>
 
-### 4.29
+### 4.28
 
 <details><summary>ใช้โดย 1 crate: gpu-allocator 0.28.0</summary>
 
@@ -6062,7 +5851,7 @@ limitations under the License.
 
 </details>
 
-### 4.30
+### 4.29
 
 <details><summary>ใช้โดย 1 crate: notify-types 1.0.1</summary>
 
@@ -6272,7 +6061,7 @@ limitations under the License.
 
 </details>
 
-### 4.31
+### 4.30
 
 <details><summary>ใช้โดย 1 crate: memmap2 0.9.11</summary>
 
@@ -6482,7 +6271,7 @@ limitations under the License.
 
 </details>
 
-### 4.32
+### 4.31
 
 <details><summary>ใช้โดย 78 crate: ahash 0.8.12 · arrayvec 0.7.8 · async-channel 2.5.0 · async-executor 1.14.0 · async-fs 2.2.0 · async-io 2.6.0 · async-lock 3.4.2 · async-net 2.0.0 · async-process 2.5.0 · async-signal 0.2.14 · async-task 4.7.1 · atomic-waker 1.1.2 · bitflags 1.3.2 · bitflags 2.13.1 · blocking 1.6.2 · cfg-if 1.0.4 · concurrent-queue 2.5.0 · crossbeam-channel 0.5.16 · crossbeam-utils 0.8.22 · equivalent 1.0.2 · errno 0.3.14 · event-listener 5.4.1 · event-listener-strategy 0.5.4 · fastrand 2.5.0 · filetime 0.2.29 · flate2 1.1.9 · form_urlencoded 1.2.2 · futures-lite 2.6.1 · gethostname 1.1.0 · gif 0.14.2 · glow 0.17.0 · hash32 0.2.1 · hashbrown 0.14.5 · hashbrown 0.15.5 · hashbrown 0.16.1 · hashbrown 0.17.1 · heapless 0.7.17 · idna 1.1.0 · idna_adapter 1.2.2 · indexmap 2.14.0 · khronos-egl 6.0.0 · lazy_static 1.5.0 · linux-raw-sys 0.12.1 · linux-raw-sys 0.4.15 · lock_api 0.4.14 · log 0.4.33 · num-traits 0.2.19 · once_cell 1.21.4 · ordered-stream 0.2.0 · parking 2.2.1 · parking_lot 0.12.5 · parking_lot_core 0.9.12 · percent-encoding 2.3.2 · piper 0.2.5 · png 0.18.1 · polling 3.11.0 · pollster 0.4.0 · postcard 1.1.3 · regex-automata 0.4.16 · regex-syntax 0.8.11 · renderdoc-sys 1.1.0 · rustc-hash 1.1.0 · rustix 0.38.44 · rustix 1.1.4 · scoped-tls 1.0.1 · scopeguard 1.2.0 · signal-hook-registry 1.4.8 · smallvec 1.15.2 · smol_str 0.2.2 · stable_deref_trait 1.2.1 · symlink 0.1.0 · thread_local 1.1.10 · ttf-parser 0.25.1 · unicode-segmentation 1.13.3 · unicode-width 0.2.2 · url 2.5.8 · uuid 1.24.0 · weezl 0.1.12</summary>
 
@@ -6692,7 +6481,7 @@ limitations under the License.
 
 </details>
 
-### 4.33
+### 4.32
 
 <details><summary>ใช้โดย 1 crate: type-map 0.5.1</summary>
 
@@ -7106,7 +6895,7 @@ limitations under the License.
 
 </details>
 
-### 4.34
+### 4.33
 
 <details><summary>ใช้โดย 5 crate: bit-set 0.9.1 · bit-vec 0.9.1 · downcast-rs 1.2.1 · hashlink 0.9.1 · presser 0.3.1</summary>
 
@@ -7316,7 +7105,7 @@ limitations under the License.
 
 </details>
 
-### 4.35
+### 4.34
 
 <details><summary>ใช้โดย 1 crate: cpufeatures 0.3.0</summary>
 
@@ -7526,7 +7315,7 @@ limitations under the License.
 
 </details>
 
-### 4.36
+### 4.35
 
 <details><summary>ใช้โดย 2 crate: rand 0.9.5 · rand_chacha 0.9.0</summary>
 
@@ -7711,7 +7500,7 @@ END OF TERMS AND CONDITIONS
 
 </details>
 
-### 4.37
+### 4.36
 
 <details><summary>ใช้โดย 1 crate: rand_core 0.9.5</summary>
 
@@ -7907,7 +7696,7 @@ APPENDIX: How to apply the Apache License to your work.
 
 </details>
 
-### 4.38
+### 4.37
 
 <details><summary>ใช้โดย 1 crate: getrandom 0.3.4</summary>
 
@@ -8117,7 +7906,7 @@ limitations under the License.
 
 </details>
 
-### 4.39
+### 4.38
 
 <details><summary>ใช้โดย 2 crate: adler2 2.0.1 · proc-macro-crate 3.5.0</summary>
 
@@ -8327,7 +8116,7 @@ limitations under the License.
 
 </details>
 
-### 4.40
+### 4.39
 
 <details><summary>ใช้โดย 1 crate: bytemuck 1.25.2</summary>
 
@@ -8397,7 +8186,7 @@ limitations under the License.
 
 </details>
 
-### 4.41
+### 4.40
 
 <details><summary>ใช้โดย 1 crate: error-code 3.3.2</summary>
 
@@ -8429,7 +8218,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.42
+### 4.41
 
 <details><summary>ใช้โดย 1 crate: adler2 2.0.1</summary>
 
@@ -8450,7 +8239,7 @@ OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 </details>
 
-### 4.43
+### 4.42
 
 <details><summary>ใช้โดย 1 crate: lazy_static 1.5.0</summary>
 
@@ -8484,7 +8273,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.44
+### 4.43
 
 <details><summary>ใช้โดย 2 crate: tiny-skia 0.11.4 · tiny-skia-path 0.11.4</summary>
 
@@ -8523,7 +8312,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 </details>
 
-### 4.45
+### 4.44
 
 <details><summary>ใช้โดย 1 crate: hex 0.4.3</summary>
 
@@ -8552,7 +8341,7 @@ SOFTWARE.
 
 </details>
 
-### 4.46
+### 4.45
 
 <details><summary>ใช้โดย 1 crate: form_urlencoded 1.2.2</summary>
 
@@ -8586,7 +8375,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.47
+### 4.46
 
 <details><summary>ใช้โดย 3 crate: idna 1.1.0 · percent-encoding 2.3.2 · url 2.5.8</summary>
 
@@ -8620,7 +8409,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.48
+### 4.47
 
 <details><summary>ใช้โดย 3 crate: cfg-if 1.0.4 · filetime 0.2.29 · scoped-tls 1.0.1</summary>
 
@@ -8654,7 +8443,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.49
+### 4.48
 
 <details><summary>ใช้โดย 1 crate: mio 1.2.2</summary>
 
@@ -8682,7 +8471,7 @@ THE SOFTWARE.
 
 </details>
 
-### 4.50
+### 4.49
 
 <details><summary>ใช้โดย 1 crate: symlink 0.1.0</summary>
 
@@ -8716,7 +8505,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.51
+### 4.50
 
 <details><summary>ใช้โดย 1 crate: errno 0.3.14</summary>
 
@@ -8750,7 +8539,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.52
+### 4.51
 
 <details><summary>ใช้โดย 6 crate: bitflags 1.3.2 · bitflags 2.13.1 · log 0.4.33 · num-traits 0.2.19 · regex-automata 0.4.16 · regex-syntax 0.8.11</summary>
 
@@ -8784,7 +8573,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.53
+### 4.52
 
 <details><summary>ใช้โดย 1 crate: uuid 1.24.0</summary>
 
@@ -8819,7 +8608,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.54
+### 4.53
 
 <details><summary>ใช้โดย 2 crate: libsqlite3-sys 0.30.1 · rusqlite 0.32.1</summary>
 
@@ -8847,7 +8636,7 @@ THE SOFTWARE.
 
 </details>
 
-### 4.55
+### 4.54
 
 <details><summary>ใช้โดย 1 crate: flate2 1.1.9</summary>
 
@@ -8881,7 +8670,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.56
+### 4.55
 
 <details><summary>ใช้โดย 1 crate: arrayref 0.3.9</summary>
 
@@ -8916,7 +8705,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 </details>
 
-### 4.57
+### 4.56
 
 <details><summary>ใช้โดย 9 crate: wayland-backend 0.3.16 · wayland-client 0.31.15 · wayland-cursor 0.31.14 · wayland-protocols 0.32.13 · wayland-protocols-experimental 20250721.0.1 · wayland-protocols-misc 0.3.12 · wayland-protocols-plasma 0.3.12 · wayland-protocols-wlr 0.3.12 · wayland-sys 0.31.11</summary>
 
@@ -8944,7 +8733,7 @@ THE SOFTWARE.
 
 </details>
 
-### 4.58
+### 4.57
 
 <details><summary>ใช้โดย 1 crate: ordered-float 5.3.0</summary>
 
@@ -8978,7 +8767,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.59
+### 4.58
 
 <details><summary>ใช้โดย 2 crate: unicode-segmentation 1.13.3 · unicode-width 0.2.2</summary>
 
@@ -9012,7 +8801,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.60
+### 4.59
 
 <details><summary>ใช้โดย 1 crate: cobs 0.3.0</summary>
 
@@ -9040,7 +8829,7 @@ SOFTWARE.
 
 </details>
 
-### 4.61
+### 4.60
 
 <details><summary>ใช้โดย 1 crate: quick-error 2.0.1</summary>
 
@@ -9068,7 +8857,7 @@ SOFTWARE.
 
 </details>
 
-### 4.62
+### 4.61
 
 <details><summary>ใช้โดย 1 crate: fallible-iterator 0.3.0</summary>
 
@@ -9096,7 +8885,7 @@ SOFTWARE.
 
 </details>
 
-### 4.63
+### 4.62
 
 <details><summary>ใช้โดย 1 crate: dlib 0.5.3</summary>
 
@@ -9124,7 +8913,7 @@ THE SOFTWARE.
 
 </details>
 
-### 4.64
+### 4.63
 
 <details><summary>ใช้โดย 1 crate: png 0.18.1</summary>
 
@@ -9158,7 +8947,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.65
+### 4.64
 
 <details><summary>ใช้โดย 1 crate: ash 0.38.0+1.3.281</summary>
 
@@ -9192,7 +8981,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.66
+### 4.65
 
 <details><summary>ใช้โดย 5 crate: futures-channel 0.3.33 · futures-core 0.3.33 · futures-io 0.3.33 · futures-task 0.3.33 · futures-util 0.3.33</summary>
 
@@ -9227,7 +9016,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.67
+### 4.66
 
 <details><summary>ใช้โดย 4 crate: hashbrown 0.14.5 · hashbrown 0.15.5 · hashbrown 0.16.1 · hashbrown 0.17.1</summary>
 
@@ -9261,7 +9050,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.68
+### 4.67
 
 <details><summary>ใช้โดย 4 crate: lock_api 0.4.14 · parking_lot 0.12.5 · parking_lot_core 0.9.12 · thread_local 1.1.10</summary>
 
@@ -9295,7 +9084,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.69
+### 4.68
 
 <details><summary>ใช้โดย 1 crate: fallible-streaming-iterator 0.1.9</summary>
 
@@ -9323,7 +9112,7 @@ SOFTWARE.
 
 </details>
 
-### 4.70
+### 4.69
 
 <details><summary>ใช้โดย 1 crate: indexmap 2.14.0</summary>
 
@@ -9357,7 +9146,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.71
+### 4.70
 
 <details><summary>ใช้โดย 1 crate: equivalent 1.0.2</summary>
 
@@ -9391,7 +9180,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.72
+### 4.71
 
 <details><summary>ใช้โดย 1 crate: scopeguard 1.2.0</summary>
 
@@ -9425,7 +9214,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.73
+### 4.72
 
 <details><summary>ใช้โดย 1 crate: kamadak-exif 0.6.1</summary>
 
@@ -9457,7 +9246,7 @@ SUCH DAMAGE.
 
 </details>
 
-### 4.74
+### 4.73
 
 <details><summary>ใช้โดย 1 crate: heapless 0.7.17</summary>
 
@@ -9491,7 +9280,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.75
+### 4.74
 
 <details><summary>ใช้โดย 1 crate: stable_deref_trait 1.2.1</summary>
 
@@ -9525,7 +9314,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.76
+### 4.75
 
 <details><summary>ใช้โดย 1 crate: signal-hook-registry 1.4.8</summary>
 
@@ -9559,7 +9348,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.77
+### 4.76
 
 <details><summary>ใช้โดย 1 crate: enumflags2 0.7.12</summary>
 
@@ -9593,7 +9382,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.78
+### 4.77
 
 <details><summary>ใช้โดย 1 crate: hash32 0.2.1</summary>
 
@@ -9627,7 +9416,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.79
+### 4.78
 
 <details><summary>ใช้โดย 1 crate: smithay-clipboard 0.7.3</summary>
 
@@ -9655,7 +9444,7 @@ THE SOFTWARE.
 
 </details>
 
-### 4.80
+### 4.79
 
 <details><summary>ใช้โดย 4 crate: fearless_simd 0.3.0 · kurbo 0.13.1 · peniko 0.6.1 · polycool 0.4.0</summary>
 
@@ -9689,7 +9478,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.81
+### 4.80
 
 <details><summary>ใช้โดย 1 crate: smallvec 1.15.2</summary>
 
@@ -9723,7 +9512,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.82
+### 4.81
 
 <details><summary>ใช้โดย 1 crate: ahash 0.8.12</summary>
 
@@ -9757,7 +9546,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.83
+### 4.82
 
 <details><summary>ใช้โดย 4 crate: calloop 0.13.0 · calloop 0.14.4 · smithay-client-toolkit 0.19.2 · smithay-client-toolkit 0.20.0</summary>
 
@@ -9785,7 +9574,7 @@ THE SOFTWARE.
 
 </details>
 
-### 4.84
+### 4.83
 
 <details><summary>ใช้โดย 1 crate: ttf-parser 0.25.1</summary>
 
@@ -9813,7 +9602,7 @@ THE SOFTWARE.
 
 </details>
 
-### 4.85
+### 4.84
 
 <details><summary>ใช้โดย 1 crate: directories 5.0.1</summary>
 
@@ -9841,7 +9630,7 @@ SOFTWARE.
 
 </details>
 
-### 4.86
+### 4.85
 
 <details><summary>ใช้โดย 1 crate: dirs-sys 0.4.1</summary>
 
@@ -9869,7 +9658,7 @@ SOFTWARE.
 
 </details>
 
-### 4.87
+### 4.86
 
 <details><summary>ใช้โดย 1 crate: getrandom 0.3.4</summary>
 
@@ -9904,7 +9693,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.88
+### 4.87
 
 <details><summary>ใช้โดย 1 crate: postcard 1.1.3</summary>
 
@@ -9938,7 +9727,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.89
+### 4.88
 
 <details><summary>ใช้โดย 1 crate: slab 0.4.12</summary>
 
@@ -9972,7 +9761,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.90
+### 4.89
 
 <details><summary>ใช้โดย 3 crate: font-types 0.11.3 · read-fonts 0.37.0 · skrifa 0.40.0</summary>
 
@@ -10006,7 +9795,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.91
+### 4.90
 
 <details><summary>ใช้โดย 1 crate: bytemuck 1.25.2</summary>
 
@@ -10026,7 +9815,7 @@ Permission is granted to anyone to use this software for any purpose, including 
 
 </details>
 
-### 4.92
+### 4.91
 
 <details><summary>ใช้โดย 1 crate: sharded-slab 0.1.7</summary>
 
@@ -10054,7 +9843,7 @@ THE SOFTWARE.
 
 </details>
 
-### 4.93
+### 4.92
 
 <details><summary>ใช้โดย 1 crate: matchers 0.2.0</summary>
 
@@ -10082,7 +9871,7 @@ SOFTWARE.
 
 </details>
 
-### 4.94
+### 4.93
 
 <details><summary>ใช้โดย 1 crate: presser 0.3.1</summary>
 
@@ -10116,7 +9905,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.95
+### 4.94
 
 <details><summary>ใช้โดย 1 crate: mutate_once 0.1.2</summary>
 
@@ -10148,7 +9937,7 @@ SUCH DAMAGE.
 
 </details>
 
-### 4.96
+### 4.95
 
 <details><summary>ใช้โดย 1 crate: ppv-lite86 0.2.21</summary>
 
@@ -10182,7 +9971,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.97
+### 4.96
 
 <details><summary>ใช้โดย 5 crate: tracing 0.1.44 · tracing-appender 0.2.5 · tracing-core 0.1.36 · tracing-log 0.2.0 · tracing-subscriber 0.3.23</summary>
 
@@ -10216,7 +10005,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.98
+### 4.97
 
 <details><summary>ใช้โดย 1 crate: instant 0.1.13</summary>
 
@@ -10252,7 +10041,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 </details>
 
-### 4.99
+### 4.98
 
 <details><summary>ใช้โดย 1 crate: downcast-rs 1.2.1</summary>
 
@@ -10286,7 +10075,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.100
+### 4.99
 
 <details><summary>ใช้โดย 1 crate: raw-window-handle 0.6.2</summary>
 
@@ -10306,7 +10095,7 @@ Permission is granted to anyone to use this software for any purpose, including 
 
 </details>
 
-### 4.101
+### 4.100
 
 <details><summary>ใช้โดย 1 crate: litrs 1.0.0</summary>
 
@@ -10340,7 +10129,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.102
+### 4.101
 
 <details><summary>ใช้โดย 1 crate: memmap2 0.9.11</summary>
 
@@ -10375,7 +10164,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.103
+### 4.102
 
 <details><summary>ใช้โดย 1 crate: pollster 0.4.0</summary>
 
@@ -10409,7 +10198,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.104
+### 4.103
 
 <details><summary>ใช้โดย 1 crate: cpufeatures 0.3.0</summary>
 
@@ -10443,7 +10232,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.105
+### 4.104
 
 <details><summary>ใช้โดย 1 crate: gpu-allocator 0.28.0</summary>
 
@@ -10459,7 +10248,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 </details>
 
-### 4.106
+### 4.105
 
 <details><summary>ใช้โดย 1 crate: renderdoc-sys 1.1.0</summary>
 
@@ -10493,7 +10282,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.107
+### 4.106
 
 <details><summary>ใช้โดย 1 crate: type-map 0.5.1</summary>
 
@@ -10581,7 +10370,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.108
+### 4.107
 
 <details><summary>ใช้โดย 1 crate: strict-num 0.1.1</summary>
 
@@ -10609,7 +10398,7 @@ THE SOFTWARE.
 
 </details>
 
-### 4.109
+### 4.108
 
 <details><summary>ใช้โดย 1 crate: xkeysym 0.2.1</summary>
 
@@ -10637,7 +10426,7 @@ SOFTWARE.
 
 </details>
 
-### 4.110
+### 4.109
 
 <details><summary>ใช้โดย 1 crate: xkeysym 0.2.1</summary>
 
@@ -10657,7 +10446,7 @@ Permission is granted to anyone to use this software for any purpose, including 
 
 </details>
 
-### 4.111
+### 4.110
 
 <details><summary>ใช้โดย 1 crate: powerfmt 0.2.0</summary>
 
@@ -10685,7 +10474,7 @@ SOFTWARE.
 
 </details>
 
-### 4.112
+### 4.111
 
 <details><summary>ใช้โดย 2 crate: calloop-wayland-source 0.3.0 · calloop-wayland-source 0.4.1</summary>
 
@@ -10713,7 +10502,7 @@ THE SOFTWARE.
 
 </details>
 
-### 4.113
+### 4.112
 
 <details><summary>ใช้โดย 2 crate: cursor-icon 1.2.0 · wayland-csd-frame 0.3.0</summary>
 
@@ -10741,7 +10530,7 @@ SOFTWARE.
 
 </details>
 
-### 4.114
+### 4.113
 
 <details><summary>ใช้โดย 1 crate: cursor-icon 1.2.0</summary>
 
@@ -10761,7 +10550,7 @@ Permission is granted to anyone to use this software for any purpose, including 
 
 </details>
 
-### 4.115
+### 4.114
 
 <details><summary>ใช้โดย 1 crate: notify-types 1.0.1</summary>
 
@@ -10795,7 +10584,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.116
+### 4.115
 
 <details><summary>ใช้โดย 1 crate: bit-vec 0.9.1</summary>
 
@@ -10829,7 +10618,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.117
+### 4.116
 
 <details><summary>ใช้โดย 1 crate: deranged 0.5.8</summary>
 
@@ -10857,7 +10646,7 @@ SOFTWARE.
 
 </details>
 
-### 4.118
+### 4.117
 
 <details><summary>ใช้โดย 2 crate: foldhash 0.1.5 · foldhash 0.2.0</summary>
 
@@ -10885,7 +10674,7 @@ the following restrictions:
 
 </details>
 
-### 4.119
+### 4.118
 
 <details><summary>ใช้โดย 3 crate: zbus 5.18.0 · zbus_names 4.3.4 · zvariant 5.13.1</summary>
 
@@ -10919,7 +10708,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.120
+### 4.119
 
 <details><summary>ใช้โดย 1 crate: bit-set 0.9.1</summary>
 
@@ -10953,7 +10742,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.121
+### 4.120
 
 <details><summary>ใช้โดย 2 crate: inotify 0.10.2 · inotify-sys 0.1.8</summary>
 
@@ -10975,7 +10764,7 @@ THIS SOFTWARE.
 
 </details>
 
-### 4.122
+### 4.121
 
 <details><summary>ใช้โดย 3 crate: toml_datetime 1.1.1+spec-1.1.0 · toml_edit 0.25.13+spec-1.1.0 · toml_parser 1.1.2+spec-1.1.0</summary>
 
@@ -11003,7 +10792,7 @@ SOFTWARE.
 
 </details>
 
-### 4.123
+### 4.122
 
 <details><summary>ใช้โดย 1 crate: num-conv 0.2.2</summary>
 
@@ -11031,7 +10820,7 @@ SOFTWARE.
 
 </details>
 
-### 4.124
+### 4.123
 
 <details><summary>ใช้โดย 2 crate: time 0.3.54 · time-core 0.1.9</summary>
 
@@ -11059,7 +10848,7 @@ SOFTWARE.
 
 </details>
 
-### 4.125
+### 4.124
 
 <details><summary>ใช้โดย 2 crate: moxcms 0.7.11 · pxfm 0.1.30</summary>
 
@@ -11094,7 +10883,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 </details>
 
-### 4.126
+### 4.125
 
 <details><summary>ใช้โดย 1 crate: libc 0.2.189</summary>
 
@@ -11128,7 +10917,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.127
+### 4.126
 
 <details><summary>ใช้โดย 1 crate: idna_adapter 1.2.2</summary>
 
@@ -11162,7 +10951,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.128
+### 4.127
 
 <details><summary>ใช้โดย 1 crate: arrayvec 0.7.8</summary>
 
@@ -11196,7 +10985,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.129
+### 4.128
 
 <details><summary>ใช้โดย 1 crate: miniz_oxide 0.8.9</summary>
 
@@ -11219,7 +11008,7 @@ Permission is granted to anyone to use this software for any purpose, including 
 
 </details>
 
-### 4.130
+### 4.129
 
 <details><summary>ใช้โดย 1 crate: synstructure 0.13.2</summary>
 
@@ -11235,7 +11024,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 </details>
 
-### 4.131
+### 4.130
 
 <details><summary>ใช้โดย 3 crate: rand 0.9.5 · rand_chacha 0.9.0 · rand_core 0.9.5</summary>
 
@@ -11270,7 +11059,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.132
+### 4.131
 
 <details><summary>ใช้โดย 1 crate: nohash-hasher 0.2.0</summary>
 
@@ -11297,7 +11086,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.133
+### 4.132
 
 <details><summary>ใช้โดย 1 crate: zerocopy 0.8.55</summary>
 
@@ -11330,7 +11119,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 </details>
 
-### 4.134
+### 4.133
 
 <details><summary>ใช้โดย 1 crate: as-raw-xcb-connection 1.0.1</summary>
 
@@ -11364,7 +11153,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.135
+### 4.134
 
 <details><summary>ใช้โดย 2 crate: x11rb 0.13.2 · x11rb-protocol 0.13.2</summary>
 
@@ -11398,7 +11187,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.136
+### 4.135
 
 <details><summary>ใช้โดย 2 crate: vello_common 0.0.6 · vello_cpu 0.0.6</summary>
 
@@ -11432,7 +11221,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.137
+### 4.136
 
 <details><summary>ใช้โดย 1 crate: zerocopy 0.8.55</summary>
 
@@ -11466,7 +11255,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.138
+### 4.137
 
 <details><summary>ใช้โดย 1 crate: utf8_iter 1.0.4</summary>
 
@@ -11517,7 +11306,7 @@ licensed under the Apache License, Version 2.0 <LICENSE-APACHE> or
 
 </details>
 
-### 4.139
+### 4.138
 
 <details><summary>ใช้โดย 1 crate: utf8_iter 1.0.4</summary>
 
@@ -11551,7 +11340,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.140
+### 4.139
 
 <details><summary>ใช้โดย 1 crate: libloading 0.8.9</summary>
 
@@ -11572,7 +11361,7 @@ THIS SOFTWARE.
 
 </details>
 
-### 4.141
+### 4.140
 
 <details><summary>ใช้โดย 1 crate: fax 0.2.7</summary>
 
@@ -11588,7 +11377,7 @@ THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR I
 
 </details>
 
-### 4.142
+### 4.141
 
 <details><summary>ใช้โดย 3 crate: rand 0.9.5 · rand_chacha 0.9.0 · rand_core 0.9.5</summary>
 
@@ -11609,7 +11398,7 @@ published under these same licenses.
 
 </details>
 
-### 4.143
+### 4.142
 
 <details><summary>ใช้โดย 1 crate: notify 7.0.0</summary>
 
@@ -11659,7 +11448,7 @@ For these and/or other purposes and motivations, and without any expectation of 
 
 </details>
 
-### 4.144
+### 4.143
 
 <details><summary>ใช้โดย 2 crate: blake3 1.8.5 · constant_time_eq 0.4.2</summary>
 
@@ -11789,7 +11578,7 @@ express Statement of Purpose.
 
 </details>
 
-### 4.145
+### 4.144
 
 <details><summary>ใช้โดย 1 crate: self_cell 1.3.0</summary>
 
@@ -12137,7 +11926,7 @@ Public License instead of this License.
 
 </details>
 
-### 4.146
+### 4.145
 
 <details><summary>ใช้โดย 2 crate: unicode-segmentation 1.13.3 · unicode-width 0.2.2</summary>
 
@@ -12153,7 +11942,7 @@ according to those terms.
 
 </details>
 
-### 4.147
+### 4.146
 
 <details><summary>ใช้โดย 20 crate: windows 0.62.2 · windows-collections 0.3.2 · windows-core 0.62.2 · windows-future 0.3.2 · windows-link 0.2.1 · windows-numerics 0.3.1 · windows-result 0.4.1 · windows-strings 0.5.1 · windows-sys 0.48.0 · windows-sys 0.52.0 · windows-sys 0.59.0 · windows-sys 0.60.2 · windows-sys 0.61.2 · windows-targets 0.48.5 · windows-targets 0.52.6 · windows-targets 0.53.5 · windows-threading 0.2.1 · windows_x86_64_msvc 0.48.5 · windows_x86_64_msvc 0.52.6 · windows_x86_64_msvc 0.53.1</summary>
 
@@ -12183,7 +11972,7 @@ MIT License
 
 </details>
 
-### 4.148
+### 4.147
 
 <details><summary>ใช้โดย 1 crate: static_assertions 1.1.0</summary>
 
@@ -12213,7 +12002,7 @@ SOFTWARE.
 
 </details>
 
-### 4.149
+### 4.148
 
 <details><summary>ใช้โดย 1 crate: tiff 0.10.3</summary>
 
@@ -12243,7 +12032,7 @@ SOFTWARE.
 
 </details>
 
-### 4.150
+### 4.149
 
 <details><summary>ใช้โดย 1 crate: crc32fast 1.5.0</summary>
 
@@ -12273,7 +12062,7 @@ SOFTWARE.
 
 </details>
 
-### 4.151
+### 4.150
 
 <details><summary>ใช้โดย 1 crate: bytemuck 1.25.2</summary>
 
@@ -12291,7 +12080,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 </details>
 
-### 4.152
+### 4.151
 
 <details><summary>ใช้โดย 1 crate: raw-window-handle 0.6.2</summary>
 
@@ -12321,7 +12110,7 @@ SOFTWARE.
 
 </details>
 
-### 4.153
+### 4.152
 
 <details><summary>ใช้โดย 1 crate: ashpd 0.11.1</summary>
 
@@ -12351,7 +12140,7 @@ SOFTWARE.
 
 </details>
 
-### 4.154
+### 4.153
 
 <details><summary>ใช้โดย 1 crate: xcursor 0.3.10</summary>
 
@@ -12381,7 +12170,7 @@ SOFTWARE.
 
 </details>
 
-### 4.155
+### 4.154
 
 <details><summary>ใช้โดย 1 crate: fast_image_resize 5.5.0</summary>
 
@@ -12411,7 +12200,7 @@ SOFTWARE.
 
 </details>
 
-### 4.156
+### 4.155
 
 <details><summary>ใช้โดย 2 crate: rfd 0.15.4 · sctk-adwaita 0.10.1</summary>
 
@@ -12441,7 +12230,7 @@ SOFTWARE.
 
 </details>
 
-### 4.157
+### 4.156
 
 <details><summary>ใช้โดย 1 crate: arboard 3.6.1</summary>
 
@@ -12471,7 +12260,7 @@ SOFTWARE.
 
 </details>
 
-### 4.158
+### 4.157
 
 <details><summary>ใช้โดย 1 crate: range-alloc 0.1.5</summary>
 
@@ -12501,7 +12290,7 @@ SOFTWARE.
 
 </details>
 
-### 4.159
+### 4.158
 
 <details><summary>ใช้โดย 1 crate: web-time 1.1.0</summary>
 
@@ -12531,7 +12320,7 @@ SOFTWARE.
 
 </details>
 
-### 4.160
+### 4.159
 
 <details><summary>ใช้โดย 7 crate: naga 29.0.4 · wgpu 29.0.4 · wgpu-core 29.0.4 · wgpu-core-deps-windows-linux-android 29.0.4 · wgpu-hal 29.0.4 · wgpu-naga-bridge 29.0.4 · wgpu-types 29.0.4</summary>
 
@@ -12561,7 +12350,7 @@ SOFTWARE.
 
 </details>
 
-### 4.161
+### 4.160
 
 <details><summary>ใช้โดย 1 crate: simd-adler32 0.3.10</summary>
 
@@ -12591,7 +12380,7 @@ SOFTWARE.
 
 </details>
 
-### 4.162
+### 4.161
 
 <details><summary>ใช้โดย 2 crate: zune-core 0.5.1 · zune-jpeg 0.5.15</summary>
 
@@ -12599,6 +12388,40 @@ SOFTWARE.
 MIT License
 
 Copyright (c) zune-image developers
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+</details>
+
+### 4.162
+
+<details><summary>ใช้โดย 1 crate: miniz_oxide 0.8.9</summary>
+
+```text
+MIT License
+
+Copyright 2013-2014 RAD Game Tools and Valve Software
+Copyright 2010-2014 Rich Geldreich and Tenacious Software LLC
+Copyright (c) 2017 Frommi
+Copyright (c) 2017-2024 oyvindln
+
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -12633,7 +12456,6 @@ Copyright 2010-2014 Rich Geldreich and Tenacious Software LLC
 Copyright (c) 2017 Frommi
 Copyright (c) 2017-2024 oyvindln
 
-
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
 in the Software without restriction, including without limitation the rights
@@ -12656,39 +12478,6 @@ SOFTWARE.
 </details>
 
 ### 4.164
-
-<details><summary>ใช้โดย 1 crate: miniz_oxide 0.8.9</summary>
-
-```text
-MIT License
-
-Copyright 2013-2014 RAD Game Tools and Valve Software
-Copyright 2010-2014 Rich Geldreich and Tenacious Software LLC
-Copyright (c) 2017 Frommi
-Copyright (c) 2017-2024 oyvindln
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
-
-</details>
-
-### 4.165
 
 <details><summary>ใช้โดย 3 crate: fdeflate 0.3.7 · image 0.25.9 · image-webp 0.2.4</summary>
 
@@ -12722,7 +12511,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.166
+### 4.165
 
 <details><summary>ใช้โดย 3 crate: color 0.3.3 · half 2.7.1 · linebender_resource_handle 0.1.1</summary>
 
@@ -12750,7 +12539,7 @@ SOFTWARE.
 
 </details>
 
-### 4.167
+### 4.166
 
 <details><summary>ใช้โดย 2 crate: zstd-safe 7.2.4 · zstd-sys 2.0.16+zstd.1.5.7</summary>
 
@@ -12760,7 +12549,7 @@ MIT or Apache-2.0
 
 </details>
 
-### 4.168
+### 4.167
 
 <details><summary>ใช้โดย 1 crate: option-ext 0.2.0</summary>
 
@@ -13142,7 +12931,7 @@ Exhibit B - "Incompatible With Secondary Licenses" Notice
 
 </details>
 
-### 4.169
+### 4.168
 
 <details><summary>ใช้โดย 49 crate: adler2 2.0.1 · allocator-api2 0.2.21 · anyhow 1.0.104 · async-channel 2.5.0 · async-executor 1.14.0 · async-fs 2.2.0 · async-io 2.6.0 · async-lock 3.4.2 · async-net 2.0.0 · async-process 2.5.0 · async-signal 0.2.14 · async-task 4.7.1 · atomic-waker 1.1.2 · basic-toml 0.1.10 · blocking 1.6.2 · concurrent-queue 2.5.0 · endi 1.1.1 · event-listener 5.4.1 · event-listener-strategy 0.5.4 · fastrand 2.5.0 · futures-lite 2.6.1 · glam 0.29.3 · glow 0.17.0 · khronos-egl 6.0.0 · linux-raw-sys 0.12.1 · linux-raw-sys 0.4.15 · once_cell 1.21.4 · ordered-stream 0.2.0 · parking 2.2.1 · pin-project-lite 0.2.17 · piper 0.2.5 · polling 3.11.0 · proc-macro-crate 3.5.0 · proc-macro2 1.0.107 · quote 1.0.47 · rustc-hash 1.1.0 · rustc-hash 2.1.3 · rustix 0.38.44 · rustix 1.1.4 · serde 1.0.229 · serde_core 1.0.229 · smol_str 0.2.2 · syn 2.0.119 · syn 3.0.3 · thiserror 1.0.69 · thiserror 2.0.19 · unicode-ident 1.0.24 · x11-dl 2.21.0 · zvariant_utils 3.5.0</summary>
 
@@ -13174,7 +12963,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.170
+### 4.169
 
 <details><summary>ใช้โดย 1 crate: winnow 1.0.4</summary>
 
@@ -13201,7 +12990,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.171
+### 4.170
 
 <details><summary>ใช้โดย 1 crate: constant_time_eq 0.4.2</summary>
 
@@ -13224,7 +13013,7 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.172
+### 4.171
 
 <details><summary>ใช้โดย 2 crate: linux-raw-sys 0.12.1 · linux-raw-sys 0.4.15</summary>
 
@@ -13262,7 +13051,7 @@ at your option.
 
 </details>
 
-### 4.173
+### 4.172
 
 <details><summary>ใช้โดย 2 crate: rustix 0.38.44 · rustix 1.1.4</summary>
 
@@ -13300,7 +13089,7 @@ at your option.
 
 </details>
 
-### 4.174
+### 4.173
 
 <details><summary>ใช้โดย 1 crate: nu-ansi-term 0.50.3</summary>
 
@@ -13331,7 +13120,7 @@ SOFTWARE.
 
 </details>
 
-### 4.175
+### 4.174
 
 <details><summary>ใช้โดย 1 crate: spin 0.9.9</summary>
 
@@ -13361,7 +13150,7 @@ SOFTWARE.
 
 </details>
 
-### 4.176
+### 4.175
 
 <details><summary>ใช้โดย 4 crate: byteorder 1.5.0 · byteorder-lite 0.1.0 · memchr 2.8.3 · walkdir 2.5.0</summary>
 
@@ -13391,7 +13180,7 @@ THE SOFTWARE.
 
 </details>
 
-### 4.177
+### 4.176
 
 <details><summary>ใช้โดย 1 crate: gif 0.14.2</summary>
 
@@ -13421,7 +13210,7 @@ SOFTWARE.
 
 </details>
 
-### 4.178
+### 4.177
 
 <details><summary>ใช้โดย 1 crate: quick-xml 0.41.0</summary>
 
@@ -13453,7 +13242,7 @@ THE SOFTWARE.
 
 </details>
 
-### 4.179
+### 4.178
 
 <details><summary>ใช้โดย 1 crate: color_quant 1.1.0</summary>
 
@@ -13483,7 +13272,7 @@ SOFTWARE.
 
 </details>
 
-### 4.180
+### 4.179
 
 <details><summary>ใช้โดย 2 crate: same-file 1.0.6 · winapi-util 0.1.11</summary>
 
@@ -13513,7 +13302,7 @@ THE SOFTWARE.
 
 </details>
 
-### 4.181
+### 4.180
 
 <details><summary>ใช้โดย 2 crate: crossbeam-channel 0.5.16 · crossbeam-utils 0.8.22</summary>
 
@@ -13549,7 +13338,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.182
+### 4.181
 
 <details><summary>ใช้โดย 1 crate: async-broadcast 0.7.2</summary>
 
@@ -13579,7 +13368,7 @@ SOFTWARE.
 
 </details>
 
-### 4.183
+### 4.182
 
 <details><summary>ใช้โดย 1 crate: xkbcommon-dl 0.4.2</summary>
 
@@ -13609,7 +13398,7 @@ SOFTWARE.
 
 </details>
 
-### 4.184
+### 4.183
 
 <details><summary>ใช้โดย 1 crate: weezl 0.1.12</summary>
 
@@ -13639,7 +13428,7 @@ SOFTWARE.
 
 </details>
 
-### 4.185
+### 4.184
 
 <details><summary>ใช้โดย 3 crate: zstd 0.13.3 · zstd-safe 7.2.4 · zstd-sys 2.0.16+zstd.1.5.7</summary>
 
@@ -13656,7 +13445,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 </details>
 
-### 4.186
+### 4.185
 
 <details><summary>ใช้โดย 1 crate: zstd-sys 2.0.16+zstd.1.5.7</summary>
 
@@ -13697,7 +13486,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 </details>
 
-### 4.187
+### 4.186
 
 <details><summary>ใช้โดย 6 crate: byteorder 1.5.0 · byteorder-lite 0.1.0 · memchr 2.8.3 · same-file 1.0.6 · walkdir 2.5.0 · winapi-util 0.1.11</summary>
 
@@ -13730,7 +13519,7 @@ For more information, please refer to <http://unlicense.org/>
 
 </details>
 
-### 4.188
+### 4.187
 
 <details><summary>ใช้โดย 5 crate: byteorder 1.5.0 · memchr 2.8.3 · same-file 1.0.6 · walkdir 2.5.0 · winapi-util 0.1.11</summary>
 
@@ -13742,7 +13531,7 @@ You may use this code under the terms of either license.
 
 </details>
 
-### 4.189
+### 4.188
 
 <details><summary>ใช้โดย 1 crate: symlink 0.1.0</summary>
 
@@ -13754,7 +13543,7 @@ Copyright (c) 2014 Chris Morgan and the Teepee project developers
 
 </details>
 
-### 4.190
+### 4.189
 
 <details><summary>ใช้โดย 1 crate: glow 0.17.0</summary>
 
@@ -13778,7 +13567,7 @@ freely, subject to the following restrictions:
 
 </details>
 
-### 4.191
+### 4.190
 
 <details><summary>ใช้โดย 1 crate: hashlink 0.9.1</summary>
 
@@ -13813,7 +13602,7 @@ DEALINGS IN THE SOFTWARE.
 
 </details>
 
-### 4.192
+### 4.191
 
 <details><summary>ใช้โดย 1 crate: unicode-ident 1.0.24</summary>
 
@@ -13861,7 +13650,7 @@ authorization of the copyright holder.
 
 </details>
 
-### 4.193
+### 4.192
 
 <details><summary>ใช้โดย 15 crate: icu_collections 2.2.0 · icu_locale_core 2.2.0 · icu_normalizer 2.2.0 · icu_normalizer_data 2.2.0 · icu_properties 2.2.0 · icu_properties_data 2.2.0 · icu_provider 2.2.0 · litemap 0.8.2 · potential_utf 0.1.5 · tinystr 0.8.3 · writeable 0.6.3 · yoke 0.8.3 · zerofrom 0.1.8 · zerotrie 0.2.4 · zerovec 0.11.6</summary>
 
@@ -13916,7 +13705,7 @@ ICU 1.8.1 to ICU 57.1 © 1995-2016 International Business Machines Corporation a
 
 </details>
 
-### 4.194
+### 4.193
 
 <details><summary>ใช้โดย 1 crate: libm 0.2.16</summary>
 
@@ -14183,7 +13972,7 @@ Copyright notices are retained in src/* files where relevant.
 
 </details>
 
-### 4.195
+### 4.194
 
 <details><summary>ใช้โดย 1 crate: dpi 0.1.2</summary>
 
@@ -14243,7 +14032,7 @@ have been licensed under extremely permissive terms.
 
 </details>
 
-### 4.196
+### 4.195
 
 <details><summary>ใช้โดย 2 crate: zune-core 0.5.1 · zune-jpeg 0.5.15</summary>
 
@@ -14271,7 +14060,7 @@ freely, subject to the following restrictions:
 
 </details>
 
-### 4.197
+### 4.196
 
 <details><summary>ใช้โดย 1 crate: urlencoding 2.1.3</summary>
 
