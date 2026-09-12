@@ -102,10 +102,37 @@ Windows PowerShell 5.1 อ่านไฟล์ที่ไม่มี BOM ด�
 ```bash
 cargo fmt
 cargo clippy --all-targets -- -D warnings
-cargo test --all
+cargo nextest run --workspace --all-features   # ★ ไม่ใช่ `cargo test --all` — ดูข้างล่าง
 cargo deny check
 cargo tree -d | grep '^wgpu'     # ต้องว่าง (^ สำคัญ — ไม่งั้นจับ leaf crate อื่นติดมาด้วย)
 cargo tree -d | grep '^png'      # ต้องว่าง — เราตรึง png ตรง ๆ ต้องตรงกับที่ image ใช้
+```
+
+### ★★★ ห้ามใช้ `cargo test --all` — ใช้ `cargo nextest run --workspace --all-features`
+
+สองเหตุผล และทั้งคู่เสียหายจริงมาแล้ว (12 ก.ย. 2026):
+
+| | `cargo test --all` | `cargo nextest run --workspace --all-features` |
+|---|---|---|
+| จำนวนเทสต์ | **1,035** | **1,040** |
+| เทสต์ที่ค้าง | รันไปเรื่อย ๆ ไม่มีวันจบ | ฆ่าที่ 4 นาที **พร้อมบอกชื่อ** (`.config/nextest.toml`) |
+
+* **`--all` = "ทุก package" ไม่ใช่ "ทุก feature"** — เทสต์หลัง feature gate
+  ถูกข้ามเงียบ ๆ · ห้าตัวที่หายไปคือ `ForcedLoss` (จำลอง GPU device lost)
+  ซึ่งเป็นเส้นทางกู้คืนที่ `docs/04 §7` พึ่งพา · **CI รัน nextest มาตลอด**
+  เลขที่เห็นในเครื่องจึงน้อยกว่าที่ CI ตรวจจริงโดยไม่มีอะไรบอก
+* `cargo test` **ไม่มี timeout** · เทสต์ค้างหนึ่งตัว = รอจนชนเพดาน 6 ชั่วโมง
+  ของ Actions แล้วรายงานแค่ "ยกเลิก" โดยไม่บอกว่าตัวไหน
+  — นั่นคือสิ่งที่ `.config/nextest.toml` เขียนอธิบายไว้ล่วงหน้าตั้งแต่วันที่สร้าง
+
+### ★★ กฎของการรันคำสั่งยาว
+
+```bash
+❌ cmd 2>&1 | head -10          # ตัดหลักฐานทิ้ง (docs/08 §3.9 ข้อ 9 · เกิดแล้วสามครั้ง)
+❌ cargo test ... ; cargo test  # รันสองรอบเพื่อได้ตัวเลขสองตัว = เวลาคูณสอง
+❌ รัน cargo พื้นหลังค้างไว้ แล้วรัน cargo อื่นใน target dir เดียวกัน
+   # ตัวหลังไม่ได้ช้า — มันรอ **ล็อกของ target dir** เงียบ ๆ
+   # ถ้าต้องรันขนานกันจริง ให้ตั้ง CARGO_TARGET_DIR คนละที่
 ```
 
 ครบทั้ง 13 ข้อใน [`docs/08-testing-and-budgets.md`](docs/08-testing-and-budgets.md) §4 จึงจะ merge ได้
