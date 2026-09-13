@@ -249,6 +249,7 @@ fn fetch_every_platform(root: &Path) -> anyhow::Result<()> {
 /// รายชื่อ crate ที่ถูกแจก — ยูเนียนของทุกแพลตฟอร์มใน [`TARGETS`]
 fn roster(root: &Path) -> anyhow::Result<Vec<Dep>> {
     let mut all: BTreeSet<Dep> = BTreeSet::new();
+    // ★★★ ยุบตาม **(ชื่อ, รุ่น)** ไม่ใช่ตามทุกฟิลด์ — ดู [`dedup_by_identity`]
     for (triple, _) in TARGETS {
         let out = std::process::Command::new("cargo")
             .args([
@@ -269,7 +270,46 @@ fn roster(root: &Path) -> anyhow::Result<Vec<Dep>> {
             }
         }
     }
-    Ok(all.into_iter().collect())
+    Ok(dedup_by_identity(all))
+}
+
+/// ★★★ crate เดียวกันต้องมีแถวเดียว — ยุบตาม **(ชื่อ, รุ่น)**
+///
+/// ## อาการที่ทำให้ต้องมีฟังก์ชันนี้ (14 ก.ย. 2026)
+///
+/// `BTreeSet<Dep>` ยุบตาม **ทุกฟิลด์** รวม `license` · ถ้าการ resolve สอง
+/// แพลตฟอร์มรายงานสตริงใบอนุญาตของ crate เดียวกันต่างกันแม้แต่นิดเดียว
+/// **crate นั้นจะกลายเป็นสองแถว** แล้วไฟล์ที่ได้ก็ต่างจากเครื่องอื่นทันที
+///
+/// เกิดจริงบน CI: `egui` · `emath` · `epaint` โผล่อย่างละสองครั้ง (19 แทนที่จะ
+/// เป็น 16) ทั้งบน Linux และ Windows ขณะที่เครื่องพัฒนาได้ 16 — และประตูบอกได้
+/// แค่ "ไม่ตรง" จนกระทั่งเปลี่ยนมาพิมพ์ **ชื่อ** ออกมา
+///
+/// ★ ความไม่ตรงกันของสตริงใบอนุญาตเป็น **ข้อมูล ไม่ใช่ของที่ควรกลบ** —
+/// ถ้ามันเกิดขึ้น ให้พิมพ์ออกมาให้เห็น แล้วเลือกตัวแรกตามลำดับตัวอักษร
+/// เพื่อให้ผลลัพธ์คงที่ไม่ว่าจะรันบนเครื่องไหน
+fn dedup_by_identity(all: BTreeSet<Dep>) -> Vec<Dep> {
+    let mut by_identity: BTreeMap<(String, String), Vec<Dep>> = BTreeMap::new();
+    for dep in all {
+        by_identity
+            .entry((dep.name.clone(), dep.version.clone()))
+            .or_default()
+            .push(dep);
+    }
+
+    let mut out = Vec::with_capacity(by_identity.len());
+    for ((name, version), mut rows) in by_identity {
+        if rows.len() > 1 {
+            let seen: Vec<&str> = rows.iter().map(|d| d.license.as_str()).collect();
+            println!(
+                "★ {name} {version} ถูกรายงานด้วยใบอนุญาตต่างกันระหว่างแพลตฟอร์ม: {seen:?} \
+                 — ใช้ตัวแรกตามลำดับตัวอักษรเพื่อให้ผลคงที่"
+            );
+        }
+        rows.sort();
+        out.push(rows.remove(0));
+    }
+    out
 }
 
 /// อ่านบรรทัดของ `cargo tree --format "{p}|{l}"`
@@ -644,6 +684,39 @@ mod tests {
         ] {
             assert!(!is_license_file(Path::new(no)), "{no} ไม่ใช่ตัวบท");
         }
+    }
+
+    /// ★★★ crate เดียวกันที่ถูกรายงานคนละใบอนุญาต **ต้องเหลือแถวเดียว**
+    ///
+    /// นี่คืออาการที่ทำให้ไฟล์บน CI ต่างจากไฟล์บนเครื่องพัฒนา 14 ก.ย. 2026 —
+    /// `egui`/`emath`/`epaint` โผล่อย่างละสองครั้ง เพราะยุบตาม *ทุกฟิลด์*
+    #[test]
+    fn the_same_crate_reported_twice_collapses_to_one_row() {
+        let dep = |license: &str| Dep {
+            name: "egui".to_owned(),
+            version: "0.34.3".to_owned(),
+            license: license.to_owned(),
+        };
+        let set = BTreeSet::from([dep("MIT OR Apache-2.0"), dep("Apache-2.0 OR MIT")]);
+        let out = dedup_by_identity(set);
+        assert_eq!(out.len(), 1, "crate เดียวกันยังเป็นสองแถว: {out:?}");
+        // ★ ต้องเลือกแบบคงที่ ไม่ใช่แล้วแต่ลำดับที่เข้ามา
+        assert_eq!(out[0].license, "Apache-2.0 OR MIT");
+
+        // crate คนละตัว/คนละรุ่น ต้องไม่ถูกยุบรวมกัน
+        let mut many = BTreeSet::new();
+        many.insert(dep("MIT"));
+        many.insert(Dep {
+            name: "egui".to_owned(),
+            version: "0.35.0".to_owned(),
+            license: "MIT".to_owned(),
+        });
+        many.insert(Dep {
+            name: "emath".to_owned(),
+            version: "0.34.3".to_owned(),
+            license: "MIT".to_owned(),
+        });
+        assert_eq!(dedup_by_identity(many).len(), 3);
     }
 
     /// ★★★ NC: crate ที่หาตัวบทไม่เจอ **และไม่ได้ขึ้นทะเบียน** ต้องถูกชี้ชื่อ
