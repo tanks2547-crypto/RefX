@@ -55,6 +55,13 @@ struct Bare {
     ///
     /// ธงนี้จึงเป็นการถามว่า *"แค่เปิด IME อย่างเดียวก็พอทำให้ค้างไหม"*
     ime: bool,
+    /// ★★★ เรียก `set_ime_allowed` **ซ้ำทุกรอบของลูป** ไม่ใช่ครั้งเดียวตอนเริ่ม
+    ///
+    /// ผลลบจาก repro ที่ย่อส่วน ตัดออกได้แค่ *สิ่งที่ย่อส่วนแล้ว* — การเรียก
+    /// ครั้งเดียวตอนสร้างหน้าต่าง กับการยิง API ข้ามโปรเซสซ้ำ ๆ ระหว่างที่
+    /// ข้อความจากนอกโปรเซสกำลังเข้ามา **เป็นคนละรูปกัน** และรูปหลังคือรูปที่
+    /// น่าสงสัยว่าจะซ้อนกับ TSF
+    ime_every_round: bool,
 }
 
 impl ApplicationHandler for Bare {
@@ -81,24 +88,39 @@ impl ApplicationHandler for Bare {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         self.events += 1;
+        // ★ ยิงซ้ำ **ในจังหวะที่กำลังจัดการ event อยู่พอดี** ซึ่งเป็นจังหวะเดียว
+        //   กับที่ `WM_INPUTLANGCHANGEREQUEST` จากนอกโปรเซสเข้ามา
+        if self.ime_every_round
+            && let Some(window) = self.window.as_ref()
+        {
+            window.set_ime_allowed(true);
+        }
         if matches!(event, WindowEvent::CloseRequested) {
             event_loop.exit();
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if self.ime_every_round
+            && let Some(window) = self.window.as_ref()
+        {
+            window.set_ime_allowed(true);
+        }
         // ★ สภาพเดียวกับ RefX: หลับสนิทจนกว่าจะมี event (I-1)
         event_loop.set_control_flow(ControlFlow::Wait);
     }
 }
 
 fn main() -> Result<(), winit::error::EventLoopError> {
-    let ime = std::env::args().any(|a| a == "--ime");
-    println!("bare winit starting (ime = {ime})");
+    let args: Vec<String> = std::env::args().collect();
+    let ime_every_round = args.iter().any(|a| a == "--ime-every-round");
+    let ime = ime_every_round || args.iter().any(|a| a == "--ime");
+    println!("bare winit starting (ime = {ime}, every round = {ime_every_round})");
     let event_loop = EventLoop::new()?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let mut app = Bare {
         ime,
+        ime_every_round,
         ..Bare::default()
     };
     event_loop.run_app(&mut app)?;

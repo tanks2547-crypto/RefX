@@ -947,6 +947,55 @@ mod tests {
 
     use super::*;
 
+    /// ★★★ **GL ต้องไม่ถูกคอมไพล์เข้ามาบน Windows — นี่คือบั๊กเสถียรภาพ ไม่ใช่เรื่องขนาด**
+    ///
+    /// 14 ก.ย. 2026: `PostMessage(WM_INPUTLANGCHANGEREQUEST)` ทำหน้าต่างของ RefX
+    /// **หยุดตอบภายใน 4–5 ข้อความ** มาตั้งแต่ 6 ก.ย. · ตัวการคือ backend `gles`
+    /// ของ wgpu ซึ่งบน Windows ลาก WGL/EGL (`glutin_wgl_sys`) เข้ามาด้วย
+    ///
+    /// พิสูจน์ด้วยตัวแปรเดียว บนไบนารีเดียวกันทุกอย่างยกเว้น feature นี้:
+    ///
+    /// | build | ผล |
+    /// |---|---|
+    /// | ไม่มี `gles` | **รอด 8/8** · layout สลับได้ทุกครั้ง |
+    /// | มี `gles` | **ค้างที่ข้อความที่ 4** · layout ค้างตั้งแต่ข้อความที่ 2 |
+    ///
+    /// ★ และบันไดที่ไล่มาก่อนหน้า (winit เปล่า · +IME · +wgpu surface · +egui
+    /// · +user event · release) **รอดทุกขั้น** — ทั้งหมดนั้นไม่มี `gles` อยู่เลย
+    ///
+    /// เทสต์นี้ถามคำถามที่ **ไม่ต้องมี GPU** เพราะ `enabled_backend_features()`
+    /// ตอบจากสิ่งที่ **คอมไพล์เข้ามา** ไม่ใช่จากเครื่องที่รัน
+    #[test]
+    fn the_backend_that_hangs_the_window_is_not_compiled_in() {
+        let enabled = wgpu::Instance::enabled_backend_features();
+
+        #[cfg(windows)]
+        {
+            assert!(
+                !enabled.contains(wgpu::Backends::GL),
+                "backend `gles` กลับเข้ามาใน build ของ Windows — \
+                 มันทำให้หน้าต่างหยุดตอบเมื่อโปรแกรมสลับภาษาของคนอื่นส่ง \
+                 WM_INPUTLANGCHANGEREQUEST มา (HANDOFF §2.53)"
+            );
+            // ★ และทางถอยต้องยังครบสองทางตาม `docs/08 §6`
+            assert!(enabled.contains(wgpu::Backends::DX12), "DX12 หายไป");
+            assert!(enabled.contains(wgpu::Backends::VULKAN), "Vulkan หายไป");
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            // บน Linux ไม่มีอาการนี้ (ไม่มี WGL) และ GL คือทางถอยที่สเปกบังคับ
+            assert!(enabled.contains(wgpu::Backends::VULKAN), "Vulkan หายไป");
+            assert!(enabled.contains(wgpu::Backends::GL), "ทางถอย GL หายไป");
+        }
+
+        // ทุกแพลตฟอร์ม: ต้องมีอย่างน้อยสองทาง ไม่งั้น driver มีปัญหาแล้วจบเลย
+        assert!(
+            enabled.iter().count() >= 2,
+            "เหลือ backend เดียว = ไม่มีทางถอย: {enabled:?}"
+        );
+    }
+
     fn fake_caps(max_dim: u32) -> GpuCapabilities {
         GpuCapabilities {
             adapter_name: "test".to_owned(),

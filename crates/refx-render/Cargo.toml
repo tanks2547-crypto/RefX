@@ -39,6 +39,12 @@ wgpu = { workspace = true, features = ["std", "parking_lot", "wgsl", "vulkan", "
 [target.'cfg(target_os = "macos")'.dependencies]
 wgpu = { workspace = true, features = ["std", "parking_lot", "wgsl", "metal", "gles"] }
 
+# ★ `winit` มีอยู่ใน workspace แล้ว (ไม่ใช่ dependency ใหม่) — ที่นี่ใช้เฉพาะ
+#   `examples/bare_wgpu.rs` ซึ่งเป็นเครื่องมือหาตัวการของบั๊กหน้าต่างค้าง
+#   ตัว crate เองยังไม่รู้จัก winit เหมือนเดิม (ADR-007: refx-render ไม่แตะ OS)
+[dev-dependencies]
+winit.workspace = true
+
 [features]
 default = []
 # จำลอง device lost เพื่อทดสอบเส้นทางกู้คืน (P0-5) — ใช้กับ --force-device-lost-after=N

@@ -90,6 +90,16 @@ struct Crossing {
 ///
 /// เพิ่มช่องใหม่โดยไม่มาต่อแถวนี้ = เทสต์แดงพร้อมบอกชื่อฟังก์ชัน
 const CROSSINGS: &[Crossing] = &[
+    // ---------- เครื่องมือวินิจฉัย (examples) ----------
+    Crossing {
+        file: "crates/refx-ui/examples/bare_egui.rs",
+        func: "main",
+        wake: Wake::NotNeeded(
+            "★ ตัวส่งเองคือตัวปลุก — `EventLoopProxy::send_event` ปลุก event loop \
+             ตามนิยามของมัน ไม่มีช่องผลแยกที่ต้องมีคนมาอ่านทีหลัง · และไฟล์นี้เป็น \
+             เครื่องมือวินิจฉัยบั๊กหน้าต่างค้าง (§2.53) ไม่ได้อยู่ในโปรแกรมที่แจก",
+        ),
+    },
     // ---------- refx-ui ----------
     Crossing {
         file: "crates/refx-ui/src/app.rs",
