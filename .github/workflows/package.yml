@@ -56,6 +56,56 @@ jobs:
           path: target/package/*.zip
           if-no-files-found: error
 
+  # ★ MSI แยก job เพราะมันต้องลง WiX เพิ่ม และล้มได้ด้วยเหตุผลคนละเรื่องกับ zip
+  #   — zip ที่ใช้ได้ต้องไม่ถูกบล็อกเพราะ WiX ลงไม่สำเร็จ
+  windows-msi:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with: { tool: cargo-wix }
+      - name: ให้แน่ใจว่ามี WiX Toolset
+        shell: pwsh
+        run: |
+          $found = Get-ChildItem "C:\Program Files (x86)" -Filter "WiX Toolset*" -Directory -ErrorAction SilentlyContinue
+          if (-not $found) {
+            choco install wixtoolset --no-progress -y
+            $found = Get-ChildItem "C:\Program Files (x86)" -Filter "WiX Toolset*" -Directory
+          }
+          $bin = Join-Path $found[0].FullName "bin"
+          "WIX=$($found[0].FullName)\" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $bin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          Write-Output "WiX: $bin"
+
+      - name: สร้าง MSI
+        run: cargo wix -p refx-app --nocapture --output target/package/
+
+      # ★★★ กับดักที่ zip/deb ไม่มี: **ถอนแล้วต้องไม่ลบงานของผู้ใช้** (I-3)
+      #   NC ยิงที่ตัวตรวจนั้นโดยตรง — ถ้าไฟล์ผู้ใช้หายแล้วประตูยังเขียว
+      #   แปลว่าประตูนี้ไม่ได้ตรวจอะไรเลย
+      - name: negative control ของประตู MSI
+        shell: bash
+        run: |
+          msi=$(ls target/package/*.msi | head -1)
+          if REFX_PKG_NC=uninstall-eats-data cargo run -q -p xtask -- verify-msi "$msi" > /dev/null 2>&1; then
+            echo "::error::ประตู MSI ไม่ล้มแม้งานผู้ใช้ถูกลบ — ประตูเองพัง"
+            exit 1
+          fi
+          echo "::notice::NC ทำให้ประตู MSI แดงตามที่ควร"
+
+      - name: ตรวจ MSI — ติดตั้งจริง ถอนจริง งานผู้ใช้ต้องอยู่
+        shell: bash
+        run: cargo run -q -p xtask -- verify-msi "$(ls target/package/*.msi | head -1)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: refx-windows-x86_64-msi
+          path: target/package/*.msi
+          if-no-files-found: error
+
   # ★ `.deb` สร้างบน Linux เท่านั้น — `cargo deb` ต้องการ `dpkg` ในการประกอบ
   #   และประตูของเราต้องการ `dpkg-deb` ในการแตกกลับมาตรวจ
   linux-deb:

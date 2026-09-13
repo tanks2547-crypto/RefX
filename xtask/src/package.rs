@@ -200,6 +200,152 @@ pub fn verify_deb() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// ★★★ ตรวจ MSI — **ติดตั้งจริง แล้วถอนจริง**
+///
+/// ## ทำไมไม่แค่แตกไฟล์ออกมาดู
+///
+/// MSI มีสิ่งที่ zip/deb ไม่มี: **ตัวถอนการติดตั้ง** · และกับดักที่ `ROADMAP`
+/// ก้อน d ชี้ไว้คือ **ถอนแล้วต้องไม่ลบงานของผู้ใช้** — `I-3` ใช้กับตัวถอนติดตั้ง
+/// ด้วย · การแตกไฟล์ดูเฉย ๆ ตอบคำถามนั้นไม่ได้เลย
+///
+/// ลำดับ: ติดตั้ง → ตรวจไฟล์ + เวอร์ชันจากไบนารีที่ติดตั้งแล้ว → **สร้างไฟล์ของ
+/// ผู้ใช้ปลอม** → ถอน → ยืนยันว่าไฟล์ผู้ใช้ยังอยู่ และไฟล์โปรแกรมหายไปแล้ว
+///
+/// # Errors
+/// เมื่อติดตั้ง/ถอนไม่สำเร็จ · ไฟล์หาย · เวอร์ชันไม่ตรง · หรือ **งานผู้ใช้ถูกลบ**
+pub fn verify_msi() -> anyhow::Result<()> {
+    anyhow::ensure!(cfg!(windows), "MSI ตรวจได้บน Windows เท่านั้น");
+    let msi: PathBuf = std::env::args()
+        .nth(2)
+        .ok_or_else(|| anyhow::anyhow!("ใช้: cargo xtask verify-msi <ไฟล์.msi>"))?
+        .into();
+    anyhow::ensure!(msi.is_file(), "ไม่เจอไฟล์ {}", msi.display());
+
+    let root = root()?;
+    let declared = declared_version(&root)?;
+    let nc = std::env::var("REFX_PKG_NC").unwrap_or_default();
+    if !nc.is_empty() {
+        println!("★ NC เปิดอยู่: {nc} — ประตูต้องล้ม");
+    }
+
+    msiexec(&["/i", &msi.to_string_lossy(), "/qn"], "ติดตั้ง")?;
+
+    let installed =
+        PathBuf::from(std::env::var("ProgramFiles").unwrap_or_default()).join("refx-app");
+    let result = check_installed(&installed, &declared);
+
+    // ---- ★★★ กับดักของ MSI: ถอนแล้วงานผู้ใช้ต้องอยู่ครบ (I-3) ----
+    let marks = user_data_marks();
+    for mark in &marks {
+        if let Some(parent) = mark.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        std::fs::write(mark, b"work the user made before uninstalling\n")?;
+    }
+    println!("\nสร้างไฟล์ของผู้ใช้ไว้ {} จุด แล้วถอนการติดตั้ง", marks.len());
+
+    msiexec(&["/x", &msi.to_string_lossy(), "/qn"], "ถอน")?;
+    result?; // ★ รายงานผลการตรวจไฟล์หลังถอนเสร็จ — ไม่ทิ้งเครื่องไว้ในสภาพติดตั้งค้าง
+
+    println!("\n— ประตู 3: ถอนแล้วงานของผู้ใช้ยังอยู่ไหม (I-3) —");
+    for mark in &marks {
+        // NC: ลบเอง = จำลองตัวถอนติดตั้งที่กินงานผู้ใช้
+        if nc == "uninstall-eats-data" {
+            let _ = std::fs::remove_file(mark);
+            println!("★ NC: ลบ {} เอง", mark.display());
+        }
+        let alive = mark.is_file();
+        println!(
+            "  {:<64} {}",
+            mark.display().to_string(),
+            if alive {
+                "อยู่"
+            } else {
+                "หายไป"
+            }
+        );
+        anyhow::ensure!(
+            alive,
+            "★★★ ถอนการติดตั้งแล้ว **งานของผู้ใช้หายไป**: {}\n\
+             ผู้ใช้ที่ถอนโปรแกรมไม่ได้ขอให้ลบกระดานของเขา — นี่คือ I-3 ข้อเดียวกับ\n\
+             ที่ใช้กับ crash และ autosave ทุกประการ",
+            mark.display()
+        );
+        let _ = std::fs::remove_file(mark);
+    }
+
+    anyhow::ensure!(
+        !installed.join("bin").join("refx.exe").is_file(),
+        "★ ถอนแล้วแต่ {} ยังอยู่ — ตัวถอนติดตั้งทำงานไม่ครบ",
+        installed.display()
+    );
+    println!("\nMSI ผ่านประตูทั้งสามบาน");
+    Ok(())
+}
+
+/// ไฟล์ตัวแทน "งานของผู้ใช้" ที่การถอนติดตั้งห้ามแตะ
+///
+/// ★ สามที่นี้คือที่ที่ `AppPaths` วางของจริง — settings ที่เขาแก้เอง ·
+/// งานที่ยังไม่เคยบันทึก (recovery) · และภาพที่วางจาก clipboard
+fn user_data_marks() -> Vec<PathBuf> {
+    let roaming = PathBuf::from(std::env::var("APPDATA").unwrap_or_default());
+    let local = PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default());
+    vec![
+        roaming
+            .join("RefX")
+            .join("config")
+            .join("uninstall-probe.toml"),
+        local.join("RefX").join("data").join("uninstall-probe.refx"),
+        local
+            .join("RefX")
+            .join("data")
+            .join("recovery")
+            .join("uninstall-probe.refx"),
+    ]
+}
+
+/// ตรวจไฟล์ที่ติดตั้งแล้ว + เวอร์ชันของไบนารีที่ติดตั้งจริง
+fn check_installed(installed: &Path, declared: &str) -> anyhow::Result<()> {
+    println!("\n— ประตู 1: ไฟล์ใบอนุญาตถูกติดตั้งไปด้วยไหม —");
+    for (_, name) in REQUIRED {
+        let file = installed.join(name);
+        let bytes = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
+        println!("  {name:<26} {bytes} ไบต์");
+        anyhow::ensure!(
+            bytes > 0,
+            "★ {name} ไม่ได้ถูกติดตั้ง — เราแจกโค้ดของคนอื่นโดยไม่มีใบอนุญาตของเขา"
+        );
+    }
+
+    println!("\n— ประตู 2: เวอร์ชันตรงกันไหม —");
+    let exe = installed.join("bin").join("refx.exe");
+    anyhow::ensure!(exe.is_file(), "ไม่มี {} หลังติดตั้ง", exe.display());
+    let printed = std::process::Command::new(&exe).arg("--version").output()?;
+    let printed = String::from_utf8_lossy(&printed.stdout).trim().to_owned();
+    let from_binary = printed
+        .strip_prefix("refx ")
+        .ok_or_else(|| anyhow::anyhow!("`refx --version` ตอบรูปที่อ่านไม่ออก: {printed:?}"))?;
+    println!("  Cargo.toml       {declared}");
+    println!("  ไบนารีที่ติดตั้ง  {from_binary}");
+    anyhow::ensure!(
+        declared == from_binary,
+        "★★★ MSI ติดตั้งไบนารีคนละรุ่นกับที่ประกาศ — {declared} vs {from_binary}"
+    );
+    Ok(())
+}
+
+/// เรียก `msiexec` แล้วบอกให้ชัดว่าขั้นไหนล้ม
+fn msiexec(args: &[&str], step: &str) -> anyhow::Result<()> {
+    let status = std::process::Command::new("msiexec").args(args).status()?;
+    anyhow::ensure!(
+        status.success(),
+        "msiexec ขั้น '{step}' ล้ม (code {:?}) — args: {args:?}",
+        status.code()
+    );
+    println!("msiexec {step}: สำเร็จ");
+    Ok(())
+}
+
 /// เวอร์ชันจากชื่อไฟล์ `.deb` — `refx_0.1.0-1_amd64.deb` → `0.1.0`
 ///
 /// ★ Debian เติม `-<revision>` ต่อท้ายเสมอ · ตัดทิ้งก่อนเทียบ ไม่งั้นประตู

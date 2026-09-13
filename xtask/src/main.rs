@@ -130,6 +130,7 @@ fn main() -> anyhow::Result<()> {
         "bench" => todo!("P5-1"),
         "package" => package::run(),
         "verify-deb" => package::verify_deb(),
+        "verify-msi" => package::verify_msi(),
         other => {
             eprintln!(
                 "ไม่รู้จักคำสั่ง: {other:?}\n\
