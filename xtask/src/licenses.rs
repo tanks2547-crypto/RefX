@@ -256,6 +256,11 @@ fn roster(root: &Path) -> anyhow::Result<Vec<Dep>> {
                 "tree", "-p", "refx-app", "--edges",
                 "normal", // ★ ไม่เอา dev/build — สองอย่างนั้นไม่ได้อยู่ในไบนารี
                 "--target", triple, "--prefix", "none", "--format", "{p}|{l}",
+                // ★★★ **ห้ามให้ cargo ระบายสี** — CI ตั้ง `CARGO_TERM_COLOR=always`
+                //   แล้ว `(*)` กลายเป็น `\e[33m\e[2m(*)\e[39m\e[22m` ซึ่งทำให้
+                //   การตัดท้ายบรรทัดไม่แมตช์ → crate เดียวกันกลายเป็นสองแถว
+                //   → ไฟล์ที่ได้ต่างจากเครื่องที่ไม่ได้ตั้งตัวแปรนั้น (14 ก.ย. 2026)
+                "--color", "never",
             ])
             .current_dir(root)
             .output()?;
@@ -319,7 +324,11 @@ fn dedup_by_identity(all: BTreeSet<Dep>) -> Vec<Dep> {
 /// * `ahash v0.8.12|MIT OR Apache-2.0 (*)` — กิ่งที่ cargo ยุบเพราะซ้ำ
 /// * `refx-core v0.1.0 (E:\ref 10.0\crates\refx-core)|MIT OR Apache-2.0` — **ของเราเอง**
 fn parse_line(line: &str) -> Option<Dep> {
-    let line = line.trim().strip_suffix(" (*)").unwrap_or(line.trim());
+    // ★ ถอดสีทิ้งก่อนเสมอ — `--color never` ป้องกันได้ที่ต้นทางแล้ว แต่ตัวอ่าน
+    //   ที่พังเมื่อ input มีสีคือตัวอ่านที่รอวันพัง · สองชั้นราคาถูกกว่ารอบ CI หนึ่งรอบ
+    let plain = strip_ansi(line);
+    let line = plain.trim();
+    let line = line.strip_suffix(" (*)").unwrap_or(line);
     let (package, license) = line.rsplit_once('|')?;
     let package = package.trim();
     // ★ path dependency = crate ของเราเอง ไม่ใช่บุคคลที่สาม
@@ -332,6 +341,31 @@ fn parse_line(line: &str) -> Option<Dep> {
         version: version.trim().to_owned(),
         license: license.trim().to_owned(),
     })
+}
+
+/// ถอดลำดับหนีสี ANSI ออกจากข้อความที่เครื่องมืออื่นพ่นมา
+///
+/// รูปที่เจอ: `\e[33m\e[2m(*)\e[39m\e[22m` — CSI คือ `\e[` ตามด้วยพารามิเตอร์
+/// แล้วจบด้วยตัวอักษรในช่วง `@`–`~`
+fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\u{1b}' {
+            out.push(ch);
+            continue;
+        }
+        // ข้าม `[` แล้วกินไปจนเจอตัวจบของ CSI
+        if chars.next() != Some('[') {
+            continue;
+        }
+        for next in chars.by_ref() {
+            if ('@'..='~').contains(&next) {
+                break;
+            }
+        }
+    }
+    out
 }
 
 /// ทุกไฟล์ที่ถูก `include_bytes!` ต้องมีแถวใน [`EMBEDDED`]
@@ -646,12 +680,26 @@ mod tests {
         // กิ่งที่ cargo ยุบเพราะซ้ำ ต้องเป็น crate ตัวเดียวกันเป๊ะ ไม่งั้นจะนับสองครั้ง
         assert_eq!(
             parse_line("ahash v0.8.12|MIT OR Apache-2.0 (*)"),
-            Some(plain)
+            Some(plain.clone())
         );
 
         // ★★ path dependency = ของเราเอง — หลุดเข้าไปเมื่อไหร่ ไฟล์จะประกาศว่า
         //    เราเป็นบุคคลที่สามของตัวเอง
         assert!(parse_line("refx-core v0.1.0 (E:\\ref 10.0\\crates\\refx-core)|MIT").is_none());
+
+        // ★★★ บรรทัดที่ **ถูกระบายสี** ต้องอ่านได้เหมือนกันเป๊ะ
+        //
+        //   CI ตั้ง `CARGO_TERM_COLOR=always` → `(*)` กลายเป็น
+        //   `\e[33m\e[2m(*)\e[39m\e[22m` → การตัดท้ายไม่แมตช์ → crate เดียวกัน
+        //   กลายเป็นสองแถว → ไฟล์ต่างจากเครื่องที่ไม่ได้ตั้งตัวแปรนั้น
+        //   **เสีย CI ไปสามรอบกว่าจะเจอ** (14 ก.ย. 2026)
+        let coloured = parse_line(
+            "ahash v0.8.12|MIT OR Apache-2.0 \u{1b}[33m\u{1b}[2m(*)\u{1b}[39m\u{1b}[22m",
+        )
+        .unwrap();
+        assert_eq!(coloured, plain, "บรรทัดที่มีสีอ่านได้ไม่เหมือนบรรทัดธรรมดา");
+        assert_eq!(strip_ansi("\u{1b}[33mสี\u{1b}[0m"), "สี");
+        assert_eq!(strip_ansi("ไม่มีสี"), "ไม่มีสี");
 
         // ชื่อที่มี `-` และรุ่นที่มี pre-release ต้องไม่ทำให้แยกผิด
         let dashed = parse_line("smithay-client-toolkit v0.19.2|MIT").unwrap();

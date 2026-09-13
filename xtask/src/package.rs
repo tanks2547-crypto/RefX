@@ -220,6 +220,17 @@ pub fn verify_msi() -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("ใช้: cargo xtask verify-msi <ไฟล์.msi>"))?
         .into();
     anyhow::ensure!(msi.is_file(), "ไม่เจอไฟล์ {}", msi.display());
+    // ★★★ `msiexec` รับ **เส้นทางเต็มเท่านั้น** — เส้นทางสัมพัทธ์ให้ error 1619
+    //   ("This installation package could not be opened") ซึ่งอ่านเหมือนไฟล์เสีย
+    //   ทั้งที่ไฟล์ดีทุกอย่าง · เสีย CI ไปหนึ่งรอบกับข้อความที่ชี้ผิดทาง
+    let msi = std::fs::canonicalize(&msi)?;
+    // `canonicalize` บน Windows ให้ `\\?\C:\...` ซึ่ง msiexec ไม่ชอบ — ตัดคำนำหน้าออก
+    let msi = PathBuf::from(
+        msi.to_string_lossy()
+            .strip_prefix(r"\\?\")
+            .map_or_else(|| msi.to_string_lossy().into_owned(), str::to_owned),
+    );
+    println!("MSI: {}", msi.display());
 
     let root = root()?;
     let declared = declared_version(&root)?;

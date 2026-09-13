@@ -125,8 +125,18 @@ jobs:
       - name: THIRD-PARTY-LICENSES.md ต้องตรงกับ Cargo.lock
         run: cargo run -q -p xtask -- licenses --check
 
+      # ★★★ build เอง แล้วให้ `cargo deb` **แค่ห่อ** (`--no-build`)
+      #
+      #   ปล่อยให้ `cargo deb` build เองแล้วมันใส่ `--target` ให้ ซึ่งปิด
+      #   feature unification ของ resolver v2 → `zbus` (มาทาง clipboard ของ
+      #   Linux) คอมไพล์ไม่ผ่าน **157 error** ที่ไม่ใช่โค้ดของเราสักตัว
+      #   · build ปกติของเราผ่านอยู่แล้ว จึงห่อของที่ผ่านแล้วแทนที่จะ build ใหม่
+      #   ด้วยเงื่อนไขที่ต่างออกไป (14 ก.ย. 2026)
+      - name: build ที่จะถูกห่อ
+        run: cargo build --release --locked -p refx-app
+
       - name: สร้าง .deb
-        run: cargo deb -p refx-app --output target/package/
+        run: cargo deb -p refx-app --no-build --output target/package/
 
       # ★★ NC ก่อนของจริง — ตัว NC ลบไฟล์ออกจาก **สิ่งที่แตกมา** ไม่ใช่จากแพ็กเกจ
       #    ตัวไฟล์ `.deb` จึงไม่ถูกแตะ และของที่อัปโหลดยังเป็นตัวเดียวกับที่ตรวจผ่าน
