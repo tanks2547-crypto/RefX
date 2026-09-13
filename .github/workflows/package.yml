@@ -1,0 +1,57 @@
+# สร้างแพ็กเกจที่แจกได้ — **และพิสูจน์ว่าประตูของมันแดงได้จริงในที่ที่มันจะถูกสร้าง**
+#
+# ★ ไม่อยู่ใน CI ทุก push โดยตั้งใจ: มันคือ release build เต็ม ๆ บน Windows
+#   (ถูกคิด ×2) ซึ่งงบ Actions รับไม่ไหวถ้ารันทุกครั้ง · จุดที่ต้องการมันจริงคือ
+#   ตอนจะปล่อยของ กับตอนอยากได้ไฟล์ไปลองด้วยมือ
+#
+# ★★★ ทำไมต้องมี NC ใน CI ทั้งที่มีเทสต์ของ `xtask` อยู่แล้ว
+#
+#   เทสต์ของ xtask พิสูจน์ **ตรรกะ** ของประตู (เวอร์ชันไม่ตรง → แดง) แต่ไม่ได้
+#   พิสูจน์ว่าบนเครื่อง CI ซึ่ง **ไม่มี zip tool เดียวกับเครื่องพัฒนา**
+#   ไฟล์จะถูกประกอบและถูกแตะกลับมาตรวจได้จริง · ประตูที่ทำงานเฉพาะบนเครื่อง
+#   คนเขียนคือประตูที่จะเงียบในวันที่มีคนอื่นมาสร้างของ (`docs/08 §3.9` ข้อ 9)
+name: Package
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows-zip:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # ★ แพ็กเกจที่แจกรายชื่อใบอนุญาตที่ล้าสมัย = แจกโค้ดของคนอื่นโดยไม่มี
+      #   ใบอนุญาตของเขา · จับตรงนี้ก่อนจะสร้างไฟล์ ไม่ใช่หลังปล่อยไปแล้ว
+      - name: THIRD-PARTY-LICENSES.md ต้องตรงกับ Cargo.lock
+        run: cargo run -q -p xtask -- licenses --check
+
+      # ★★ NC ก่อน ไม่ใช่หลัง — ตัว NC สร้างซิปที่ **ขาดไฟล์ใบอนุญาต** ทับชื่อเดิม
+      #    ถ้ารันทีหลัง ไฟล์ที่อัปโหลดจะเป็นตัวที่พังแทนตัวจริง
+      - name: negative control ของประตูแพ็กเกจ
+        shell: bash
+        run: |
+          for nc in no-license stale-binary; do
+            if REFX_PKG_NC=$nc cargo run -q -p xtask -- package > /dev/null 2>&1; then
+              echo "::error::ประตูแพ็กเกจไม่ล้มกับ NC '$nc' — ประตูเองพัง"
+              exit 1
+            fi
+            echo "::notice::NC '$nc' ทำให้ประตูแดงตามที่ควร"
+          done
+
+      - name: สร้างแพ็กเกจจริง + ตรวจจากตัวไฟล์ที่ได้
+        run: cargo run -q -p xtask -- package
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: refx-windows-x86_64-portable
+          path: target/package/*.zip
+          if-no-files-found: error
