@@ -32,3 +32,34 @@ default = []
 # จำลอง device lost เพื่อทดสอบเส้นทางกู้คืน (P0-5) — forward ไป refx-render
 force-device-lost = ["refx-ui/force-device-lost"]
 profiling = ["refx-ui/profiling"]
+
+# ★★★ แพ็กเกจ `.deb` — สร้างด้วย `cargo deb` (อนุมัติแล้ว) ใน CI เท่านั้น
+#
+#   ★ ไฟล์ใบอนุญาตทั้งสี่ **ต้องอยู่ในแพ็กเกจ** เหมือน zip ทุกประการ
+#     (`ROADMAP` ก้อน d) — ประตูของ `cargo xtask verify-deb` แตกไฟล์ออกมาตรวจ
+#     จากตัวแพ็กเกจ ไม่ใช่จากโฟลเดอร์ build
+#
+#   ★★ `Icon=refx` ใน `.desktop` ชี้ไปที่ไอคอนที่ **ยังไม่มีในโปรเจกต์นี้** —
+#     เมนูจะแสดงไอคอนกลาง ๆ ของระบบแทน · ตั้งใจปล่อยไว้: หน้าตาของโปรแกรม
+#     เป็นการตัดสินใจของเจ้าของ ไม่ใช่ของที่ผมประดิษฐ์แล้วแจกออกไป
+#     · วันที่มีไฟล์จริง ให้ใส่ `usr/share/icons/hicolor/256x256/apps/refx.png`
+#       เข้า assets ข้างล่าง แล้ว AppImage ก็จะสร้างได้ทันที (ตอนนี้มันบังคับต้องมี)
+[package.metadata.deb]
+name = "refx"
+maintainer = "RefX"
+copyright = "RefX contributors — MIT OR Apache-2.0"
+section = "graphics"
+priority = "optional"
+extended-description = """\
+RefX keeps reference images on a board while you draw: drag them in, arrange \
+them, zoom without stutter, and keep the board open next to your art program \
+all day. It never touches the network."""
+depends = "$auto"
+assets = [
+    ["../../target/release/refx", "usr/bin/", "755"],
+    ["../../packaging/refx.desktop", "usr/share/applications/", "644"],
+    ["../../THIRD-PARTY-LICENSES.md", "usr/share/doc/refx/", "644"],
+    ["../../assets/fonts/OFL.txt", "usr/share/doc/refx/", "644"],
+    ["../../LICENSE-MIT", "usr/share/doc/refx/", "644"],
+    ["../../LICENSE-APACHE", "usr/share/doc/refx/", "644"],
+]

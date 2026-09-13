@@ -7,6 +7,7 @@
 //!   licenses       สร้าง THIRD-PARTY-LICENSES.md  (`--check` = ประตู)
 //!   bench          รัน benchmark ทั้งชุดแล้วเทียบกับเพดานใน docs/08
 //!   package        สร้าง portable zip ของ Windows + ตรวจจากตัวแพ็กเกจเอง
+//!   verify-deb     ตรวจ .deb ที่ `cargo deb` สร้าง (ประตูเดียวกับ zip)
 
 mod dump;
 mod json;
@@ -128,11 +129,12 @@ fn main() -> anyhow::Result<()> {
         "licenses" => licenses::run(),
         "bench" => todo!("P5-1"),
         "package" => package::run(),
+        "verify-deb" => package::verify_deb(),
         other => {
             eprintln!(
                 "ไม่รู้จักคำสั่ง: {other:?}\n\
                  คำสั่งที่มี: gen-testdata · gen-fuzz-seeds · dump-refx · mutation · \
-                 licenses · bench (P5-1) · package (P5-6)"
+                 licenses · package · verify-deb · bench (P5-1)"
             );
             Ok(())
         }

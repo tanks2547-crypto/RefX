@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=RefX
+GenericName=Reference Image Manager
+Comment=Keep reference images on a board while you draw
+Exec=refx %F
+Icon=refx
+Terminal=false
+Categories=Graphics;2DGraphics;Viewer;
+Keywords=reference;art;drawing;moodboard;
+MimeType=image/png;image/jpeg;image/webp;image/tiff;image/bmp;image/x-targa;
+StartupWMClass=RefX

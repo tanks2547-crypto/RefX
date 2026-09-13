@@ -112,6 +112,104 @@ pub fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// ไฟล์ใบอนุญาตอยู่ที่ไหนใน `.deb` (ตามมาตรฐาน Debian)
+const DEB_DOC_DIR: &str = "usr/share/doc/refx";
+
+/// ★★★ ตรวจแพ็กเกจ `.deb` — **จากตัวไฟล์ `.deb` ไม่ใช่จากโฟลเดอร์ build**
+///
+/// สร้างบน Linux (CI) ด้วย `cargo deb` · ตัวนี้แตกมันออกมาแล้วถามคำถามเดียวกับ
+/// ที่ถาม zip ทุกประการ: ใบอนุญาตอยู่ครบไหม · เวอร์ชันตรงกันสามที่ไหม
+///
+/// # Errors
+/// เมื่อแตกไฟล์ไม่ได้ · ไฟล์ที่ต้องมีหายไป · หรือเวอร์ชันไม่ตรง
+pub fn verify_deb() -> anyhow::Result<()> {
+    let path: PathBuf = std::env::args()
+        .nth(2)
+        .ok_or_else(|| anyhow::anyhow!("ใช้: cargo xtask verify-deb <ไฟล์.deb>"))?
+        .into();
+    anyhow::ensure!(path.is_file(), "ไม่เจอไฟล์ {}", path.display());
+
+    let root = root()?;
+    let declared = declared_version(&root)?;
+    let nc = std::env::var("REFX_PKG_NC").unwrap_or_default();
+    if !nc.is_empty() {
+        println!("★ NC เปิดอยู่: {nc} — ประตูต้องล้ม");
+    }
+
+    let unpacked = root.join("target").join("package").join("verify-deb");
+    let _ = std::fs::remove_dir_all(&unpacked);
+    std::fs::create_dir_all(&unpacked)?;
+    let out = std::process::Command::new("dpkg-deb")
+        .arg("-x")
+        .arg(&path)
+        .arg(&unpacked)
+        .output()?;
+    anyhow::ensure!(
+        out.status.success(),
+        "แตก {} ไม่ได้:\n{}",
+        path.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    println!("\n— ประตู 1: ไฟล์ใบอนุญาตอยู่ในแพ็กเกจจริงไหม —");
+    for (_, name) in REQUIRED {
+        let file = unpacked.join(DEB_DOC_DIR).join(name);
+        // NC: ลบไฟล์ออกจากสิ่งที่แตกมา = จำลอง "แพ็กเกจที่ลืมใส่ใบอนุญาต"
+        if nc == "no-license" && *name == "THIRD-PARTY-LICENSES.md" {
+            let _ = std::fs::remove_file(&file);
+            println!("★ NC: ลบ {name} ออกจากสิ่งที่แตกมา");
+        }
+        let bytes = std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0);
+        println!("  {name:<26} {bytes} ไบต์");
+        anyhow::ensure!(
+            bytes > 0,
+            "★ {name} ไม่อยู่ใน .deb (หรือว่างเปล่า) — เราแจกโค้ดของคนอื่น\n\
+             โดยไม่มีใบอนุญาตของเขาไปด้วย"
+        );
+    }
+    let desktop = unpacked.join("usr/share/applications/refx.desktop");
+    anyhow::ensure!(
+        desktop.is_file(),
+        "★ ไม่มี refx.desktop — ผู้ใช้จะไม่เห็นโปรแกรมในเมนูเลย"
+    );
+
+    println!("\n— ประตู 2: เวอร์ชันตรงกันสามที่ไหม —");
+    let exe = unpacked.join("usr/bin/refx");
+    anyhow::ensure!(exe.is_file(), "ไม่มี usr/bin/refx ใน .deb");
+    let printed = std::process::Command::new(&exe).arg("--version").output()?;
+    let printed = String::from_utf8_lossy(&printed.stdout).trim().to_owned();
+    let from_binary = printed
+        .strip_prefix("refx ")
+        .ok_or_else(|| anyhow::anyhow!("`refx --version` ตอบรูปที่อ่านไม่ออก: {printed:?}"))?
+        .to_owned();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let from_name = version_in_deb_name(&name)
+        .ok_or_else(|| anyhow::anyhow!("อ่านเวอร์ชันจากชื่อ {name:?} ไม่ได้"))?;
+
+    println!("  Cargo.toml     {declared}");
+    println!("  ไบนารีใน .deb  {from_binary}");
+    println!("  ชื่อแพ็กเกจ     {from_name}");
+    anyhow::ensure!(
+        agree(&declared, &from_binary, from_name),
+        "★★★ เวอร์ชันไม่ตรงกัน — Cargo.toml={declared} ไบนารี={from_binary} ชื่อ={from_name}"
+    );
+    println!("\n.deb ผ่านประตูทั้งสองบาน");
+    Ok(())
+}
+
+/// เวอร์ชันจากชื่อไฟล์ `.deb` — `refx_0.1.0-1_amd64.deb` → `0.1.0`
+///
+/// ★ Debian เติม `-<revision>` ต่อท้ายเสมอ · ตัดทิ้งก่อนเทียบ ไม่งั้นประตู
+/// จะแดงทุกครั้งด้วยเหตุผลที่ไม่ใช่ความผิดของใคร
+fn version_in_deb_name(name: &str) -> Option<&str> {
+    let rest = name.strip_prefix("refx_")?;
+    let (version, _) = rest.split_once('_')?;
+    Some(version.split_once('-').map_or(version, |(v, _)| v))
+}
+
 /// ★★★ ตรวจ **จากตัวแพ็กเกจ** — แตกออกมาใหม่ในที่ว่าง แล้วถามมันเอง
 fn verify(out_dir: &Path, archive: &Path, stem: &str, declared: &str) -> anyhow::Result<()> {
     let unpacked = out_dir.join("verify");
@@ -341,6 +439,24 @@ edition = \"2024\"\n";
         // รูปอื่นต้องอ่านไม่ออก ไม่ใช่เดาเอา
         assert_eq!(version_in_name("refx-0.1.0-linux-x86_64"), None);
         assert_eq!(version_in_name("something-else"), None);
+    }
+
+    /// ★★ ชื่อ `.deb` มี `-<revision>` ต่อท้ายเวอร์ชันเสมอ
+    ///
+    /// ไม่ตัดมันทิ้ง ประตูเวอร์ชันจะแดงทุกครั้งด้วยเหตุผลที่ไม่ใช่ความผิดของใคร
+    /// แล้วคนจะปิดประตูทิ้ง — ซึ่งแย่กว่าไม่มีประตู
+    #[test]
+    fn the_debian_revision_suffix_does_not_break_the_version_gate() {
+        assert_eq!(version_in_deb_name("refx_0.1.0-1_amd64.deb"), Some("0.1.0"));
+        assert_eq!(
+            version_in_deb_name("refx_1.10.3-2_amd64.deb"),
+            Some("1.10.3")
+        );
+        // ไม่มี revision ก็ต้องอ่านได้
+        assert_eq!(version_in_deb_name("refx_0.1.0_amd64.deb"), Some("0.1.0"));
+        // ของคนอื่นต้องอ่านไม่ออก
+        assert_eq!(version_in_deb_name("othertool_1.0-1_amd64.deb"), None);
+        assert_eq!(version_in_deb_name("refx-0.1.0-windows-x86_64.zip"), None);
     }
 
     /// ★ README ต้องบอกว่าข้อมูลอยู่ไหน — ไม่งั้น "portable" จะถูกอ่านว่า

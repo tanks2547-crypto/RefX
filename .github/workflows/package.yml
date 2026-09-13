@@ -55,3 +55,47 @@ jobs:
           name: refx-windows-x86_64-portable
           path: target/package/*.zip
           if-no-files-found: error
+
+  # ★ `.deb` สร้างบน Linux เท่านั้น — `cargo deb` ต้องการ `dpkg` ในการประกอบ
+  #   และประตูของเราต้องการ `dpkg-deb` ในการแตกกลับมาตรวจ
+  linux-deb:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev
+      - uses: taiki-e/install-action@v2
+        with: { tool: cargo-deb }
+
+      - name: THIRD-PARTY-LICENSES.md ต้องตรงกับ Cargo.lock
+        run: cargo run -q -p xtask -- licenses --check
+
+      - name: สร้าง .deb
+        run: cargo deb -p refx-app --output target/package/
+
+      # ★★ NC ก่อนของจริง — ตัว NC ลบไฟล์ออกจาก **สิ่งที่แตกมา** ไม่ใช่จากแพ็กเกจ
+      #    ตัวไฟล์ `.deb` จึงไม่ถูกแตะ และของที่อัปโหลดยังเป็นตัวเดียวกับที่ตรวจผ่าน
+      - name: negative control ของประตู .deb
+        shell: bash
+        run: |
+          deb=$(ls target/package/*.deb | head -1)
+          if REFX_PKG_NC=no-license cargo run -q -p xtask -- verify-deb "$deb" > /dev/null 2>&1; then
+            echo "::error::ประตู .deb ไม่ล้มแม้ใบอนุญาตหายไป — ประตูเองพัง"
+            exit 1
+          fi
+          echo "::notice::NC ทำให้ประตู .deb แดงตามที่ควร"
+
+      - name: ตรวจ .deb จากตัวแพ็กเกจ
+        shell: bash
+        run: cargo run -q -p xtask -- verify-deb "$(ls target/package/*.deb | head -1)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: refx-linux-x86_64-deb
+          path: target/package/*.deb
+          if-no-files-found: error
