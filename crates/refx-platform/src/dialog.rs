@@ -59,10 +59,12 @@ pub fn pick_images() -> Result<Vec<PathBuf>, DialogError> {
 /// ★★★ `waker` — ดู [`wake_after_send`] · **ไม่มีตัวปลุก = ผลนอนรอ**
 #[must_use]
 pub fn pick_save_location(
+    title: &str,
     suggested_name: &str,
     waker: Option<crate::window::Waker>,
 ) -> crossbeam_channel::Receiver<Option<PathBuf>> {
     let (tx, rx) = crossbeam_channel::bounded(1);
+    let title = title.to_owned();
     let name = suggested_name.to_owned();
     std::thread::Builder::new()
         .name("refx-save-dialog".to_owned())
@@ -70,7 +72,7 @@ pub fn pick_save_location(
             // rfd ล้มได้ถ้าไม่มี display (เช่นรันใน CI) — ห้ามให้ลามเป็น panic
             let picked = std::panic::catch_unwind(|| {
                 rfd::FileDialog::new()
-                    .set_title("บันทึกกระดานเป็น")
+                    .set_title(&title)
                     .set_file_name(&name)
                     .add_filter("RefX board", &["refx"])
                     .save_file()
@@ -96,15 +98,17 @@ pub fn pick_save_location(
 /// `None` = ผู้ใช้กดยกเลิก ซึ่งไม่ใช่ error
 #[must_use]
 pub fn pick_document_to_open(
+    title: &str,
     waker: Option<crate::window::Waker>,
 ) -> crossbeam_channel::Receiver<Option<PathBuf>> {
     let (tx, rx) = crossbeam_channel::bounded(1);
+    let title = title.to_owned();
     std::thread::Builder::new()
         .name("refx-open-dialog".to_owned())
         .spawn(move || {
             let picked = std::panic::catch_unwind(|| {
                 rfd::FileDialog::new()
-                    .set_title("เปิดกระดาน")
+                    .set_title(&title)
                     .add_filter("RefX board", &["refx"])
                     .pick_file()
             })
@@ -134,18 +138,20 @@ pub fn pick_document_to_open(
 /// อยู่อย่างนั้นจนขยับเมาส์ · `None` = ผู้เรียกยอมรับความหน่วงนั้น (เทสต์)
 #[must_use]
 pub fn pick_export_location(
+    title: &str,
     suggested_name: &str,
     extension: &'static str,
     waker: Option<crate::window::Waker>,
 ) -> crossbeam_channel::Receiver<Option<PathBuf>> {
     let (tx, rx) = crossbeam_channel::bounded(1);
+    let title = title.to_owned();
     let name = suggested_name.to_owned();
     std::thread::Builder::new()
         .name("refx-export-dialog".to_owned())
         .spawn(move || {
             let picked = std::panic::catch_unwind(|| {
                 rfd::FileDialog::new()
-                    .set_title("ส่งออกภาพเป็น")
+                    .set_title(&title)
                     .set_file_name(&name)
                     .add_filter(extension.to_uppercase(), &[extension])
                     .save_file()
@@ -170,15 +176,11 @@ pub fn pick_export_location(
 /// ผู้ใช้จะชี้ไฟล์ที่โปรแกรมเปิดไม่ได้แล้วได้ error ที่เขาทำอะไรกับมันไม่ได้
 #[must_use]
 pub fn pick_missing_image(
-    file_name: &str,
+    title: &str,
     waker: Option<crate::window::Waker>,
 ) -> crossbeam_channel::Receiver<Option<PathBuf>> {
     let (tx, rx) = crossbeam_channel::bounded(1);
-    let title = if file_name.is_empty() {
-        "หาไฟล์ภาพที่หายไป".to_owned()
-    } else {
-        format!("หาไฟล์: {file_name}")
-    };
+    let title = title.to_owned();
     std::thread::Builder::new()
         .name("refx-relink-dialog".to_owned())
         .spawn(move || {

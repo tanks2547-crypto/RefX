@@ -4795,6 +4795,7 @@ impl RefxApp {
             .map_or_else(|| "board".to_owned(), |s| s.to_string_lossy().into_owned());
         let waker = self.waker.clone();
         self.export_target_rx = Some(refx_platform::dialog::pick_export_location(
+            text::t(self.shell.lang, Key::DialogExportImage),
             &format!("{stem}.{extension}"),
             extension,
             waker,
@@ -5882,6 +5883,7 @@ impl RefxApp {
             return;
         }
         self.open_dialog = Some(refx_platform::dialog::pick_document_to_open(
+            text::t(self.shell.lang, Key::DialogOpenBoard),
             self.waker.clone(),
         ));
         // ★ บอกด้วยว่ากำลังรออะไรอยู่ — native dialog เปิดหลังหน้าต่างหลักได้
@@ -6660,8 +6662,18 @@ impl RefxApp {
             })
             .unwrap_or_default();
         self.relink_for = Some((self.docs.active().id, id));
+        // ★ รู้ชื่อไฟล์ก็บอกบนหัวกล่อง — ผู้ใช้ที่มีภาพหายหลายใบต้องรู้ว่ากำลังหาใบไหน
+        let title = if name.is_empty() {
+            text::t(self.shell.lang, Key::DialogFindImage).to_owned()
+        } else {
+            text::fill(
+                self.shell.lang,
+                text::Template::DialogFindNamedImage,
+                &[("name", &name)],
+            )
+        };
         self.relink_pick = Some(refx_platform::dialog::pick_missing_image(
-            &name,
+            &title,
             self.waker.clone(),
         ));
         // ★ ข้อความของ **การหาไฟล์ภาพ** ไม่ใช่ของการเปิด board — เคยใช้
@@ -6920,6 +6932,7 @@ impl RefxApp {
             );
         self.save_as_mode = mode;
         self.save_dialog = Some(refx_platform::dialog::pick_save_location(
+            text::t(self.shell.lang, Key::DialogSaveBoard),
             &name,
             self.waker.clone(),
         ));

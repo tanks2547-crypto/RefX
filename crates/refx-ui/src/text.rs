@@ -431,6 +431,17 @@ pub enum Key {
     SidecarAskYes,
     /// ตอบไม่ — tag ยังใช้ได้ในเซสชันนี้
     SidecarAskNo,
+    /// ★★ หัวเรื่องของกล่องเลือกไฟล์ของ OS — **แปลได้ ต่างจาก `--help`**
+    ///
+    /// สี่ตัวนี้เคยเป็นภาษาไทยตายตัวอยู่ใน `refx-platform` ซึ่งแปลไม่ได้เลย
+    /// ทั้งที่ชั้นที่เรียกมัน (`refx-ui`) มีระบบภาษาอยู่แล้ว (`docs/03 §0`)
+    DialogSaveBoard,
+    /// หัวเรื่องกล่องเปิดไฟล์ `.refx`
+    DialogOpenBoard,
+    /// หัวเรื่องกล่องเลือกที่บันทึกภาพที่ส่งออก
+    DialogExportImage,
+    /// หัวเรื่องกล่องหาไฟล์ภาพที่หายไป **ตอนไม่รู้ชื่อไฟล์**
+    DialogFindImage,
     /// หัวข้อย่อย: หน่วยความจำ
     SettingsMemory,
     /// เพดาน RAM ของ decode
@@ -700,6 +711,10 @@ fn en(key: Key) -> &'static str {
         Key::SidecarAskTitle => "Remember these tags for next time?",
         Key::SidecarAskYes => "Write .refx-meta here",
         Key::SidecarAskNo => "Not this time",
+        Key::DialogSaveBoard => "Save board as",
+        Key::DialogOpenBoard => "Open board",
+        Key::DialogExportImage => "Export image as",
+        Key::DialogFindImage => "Find the missing image",
         Key::SettingsMemory => "Memory",
         Key::SettingsRamLimit => "RAM for decoding",
         Key::SettingsRamLimitHint => {
@@ -942,6 +957,10 @@ fn th(key: Key) -> Option<&'static str> {
         Key::SidecarAskTitle => "จำแท็กชุดนี้ไว้ใช้ครั้งหน้าไหม",
         Key::SidecarAskYes => "เขียน .refx-meta ที่นี่",
         Key::SidecarAskNo => "ไม่ต้องตอนนี้",
+        Key::DialogSaveBoard => "บันทึกกระดานเป็น",
+        Key::DialogOpenBoard => "เปิดกระดาน",
+        Key::DialogExportImage => "ส่งออกภาพเป็น",
+        Key::DialogFindImage => "หาไฟล์ภาพที่หายไป",
         Key::SettingsMemory => "หน่วยความจำ",
         Key::SettingsRamLimit => "RAM สำหรับถอดรหัสภาพ",
         Key::SettingsRamLimitHint => {
@@ -1181,6 +1200,10 @@ pub enum Template {
     SidecarHandsOff,
     /// `{dir}` — คำถามว่าจะเขียน `.refx-meta` ลงโฟลเดอร์นี้ไหม
     SidecarAskIn,
+    /// ★ `{name}` — หัวเรื่องกล่องหาไฟล์ภาพที่หายไป **ตอนรู้ชื่อไฟล์**
+    ///
+    /// บอกชื่อไฟล์บนหัวกล่องเพราะผู้ใช้ที่มีภาพหายหลายใบต้องรู้ว่ากำลังหาใบไหนอยู่
+    DialogFindNamedImage,
 }
 
 /// เทมเพลตภาษาอังกฤษ — ต้องมีครบทุกตัว
@@ -1358,6 +1381,7 @@ Drag in a PNG, JPEG, WebP, GIF, BMP, TGA or TIFF instead."
              It was left untouched, and tags here will not be saved."
         }
         Template::SidecarAskIn => "Images in {dir}",
+        Template::DialogFindNamedImage => "Find {name}",
     }
 }
 
@@ -1527,6 +1551,7 @@ fn template_th(template: Template) -> Option<&'static str> {
              และจะไม่บันทึกแท็กลงโฟลเดอร์นี้"
         }
         Template::SidecarAskIn => "ภาพในโฟลเดอร์ {dir}",
+        Template::DialogFindNamedImage => "หาไฟล์ {name}",
     })
 }
 
@@ -1949,6 +1974,10 @@ mod tests {
         Key::SidecarAskTitle,
         Key::SidecarAskYes,
         Key::SidecarAskNo,
+        Key::DialogSaveBoard,
+        Key::DialogOpenBoard,
+        Key::DialogExportImage,
+        Key::DialogFindImage,
         Key::SettingsMemory,
         Key::SettingsRamLimit,
         Key::SettingsRamLimitHint,
@@ -1978,6 +2007,7 @@ mod tests {
         Template::SidecarCannotWrite,
         Template::SidecarHandsOff,
         Template::SidecarAskIn,
+        Template::DialogFindNamedImage,
         Template::ItemCount,
         Template::GroupMembers,
         Template::Saved,
