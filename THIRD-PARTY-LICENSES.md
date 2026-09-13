@@ -1,5 +1,5 @@
 <!-- ★ สร้างโดย `cargo xtask licenses` — ห้ามแก้ด้วยมือ -->
-<!-- Cargo.lock crc32 = 0xab07ba2e · crate 314 ตัว -->
+<!-- Cargo.lock crc32 = 0xf5354155 · crate 314 ตัว -->
 
 # ใบอนุญาตของซอฟต์แวร์บุคคลที่สาม / Third-party licenses
 
