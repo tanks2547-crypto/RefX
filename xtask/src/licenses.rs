@@ -120,15 +120,71 @@ pub fn run() -> anyhow::Result<()> {
     let found = std::fs::read_to_string(&target).unwrap_or_default();
     // ★ เทียบหลัง normalize ปลายบรรทัด — git บน Windows แปลงให้เองได้
     //   ประตูที่แดงเพราะ `\r` คือประตูที่คนจะปิดทิ้ง ไม่ใช่ประตูที่ทำงาน
+    let found = found.replace("\r\n", "\n");
     anyhow::ensure!(
-        found.replace("\r\n", "\n") == doc,
+        found == doc,
         "★★★ {OUTPUT} ไม่ตรงกับ `Cargo.lock` ปัจจุบัน\n\
          dependency เปลี่ยนแล้วแต่ไฟล์ใบอนุญาตยังเป็นของเก่า — \
          นั่นแปลว่าเราแจกโค้ดของคนอื่นโดยไม่มีใบอนุญาตของเขาอยู่ในแพ็กเกจ\n\
-         → รัน `cargo xtask licenses` แล้ว commit ไฟล์ที่ได้"
+         → รัน `cargo xtask licenses` แล้ว commit ไฟล์ที่ได้\n\n{}",
+        difference(&found, &doc)
     );
     println!("{OUTPUT} ตรงกับ Cargo.lock ปัจจุบัน — {} crate", deps.len());
     Ok(())
+}
+
+/// ★★★ บอกให้ได้ว่า **ต่างกันตรงไหน** ไม่ใช่แค่ว่า "ไม่ตรง"
+///
+/// ประตูที่บอกได้แค่ว่าไม่ผ่าน บังคับให้คนไปหาเองว่าอะไรผิด — บนเครื่อง CI
+/// ที่ไม่มีใครเข้าไปดูได้ นั่นแปลว่าไม่มีใครรู้เลย (`docs/08 §3.9` ข้อ 9)
+///
+/// ★ ไฟล์นี้ใหญ่ 700 KB จึงพิมพ์แค่ **บรรทัดแรกที่ต่าง** กับสรุปจำนวน —
+/// พอที่จะแยก "lock ขยับเฉย ๆ" (ต่างบรรทัดเดียวตรงหัว) ออกจาก
+/// "รายชื่อ crate เปลี่ยน" (ต่างหลายบรรทัดกลางไฟล์) ได้ทันที
+fn difference(found: &str, want: &str) -> String {
+    let mut out = String::new();
+    let found_lines: Vec<&str> = found.lines().collect();
+    let want_lines: Vec<&str> = want.lines().collect();
+    out.push_str(&format!(
+        "ไฟล์ในทรี {} บรรทัด · ที่ควรเป็น {} บรรทัด\n",
+        found_lines.len(),
+        want_lines.len()
+    ));
+
+    let differing = found_lines
+        .iter()
+        .zip(&want_lines)
+        .enumerate()
+        .filter(|(_, (a, b))| a != b)
+        .count();
+    out.push_str(&format!("บรรทัดที่ต่างกัน (เท่าที่เทียบคู่ได้): {differing}\n"));
+
+    if let Some((at, (a, b))) = found_lines
+        .iter()
+        .zip(&want_lines)
+        .enumerate()
+        .find(|(_, (a, b))| a != b)
+    {
+        out.push_str(&format!(
+            "\nบรรทัดแรกที่ต่าง — #{}\n  ในทรี : {}\n  ควรเป็น: {}\n",
+            at + 1,
+            trim_for_log(a),
+            trim_for_log(b)
+        ));
+    } else if found_lines.len() != want_lines.len() {
+        out.push_str("\nต่างกันที่ **ความยาว** เท่านั้น — ไฟล์ถูกตัดหรือมีของต่อท้าย\n");
+    }
+    out
+}
+
+/// ตัดบรรทัดยาวก่อนพิมพ์ลง log — ตัวบทใบอนุญาตบางบรรทัดยาวเป็นพันตัวอักษร
+fn trim_for_log(line: &str) -> String {
+    const MAX: usize = 160;
+    if line.chars().count() <= MAX {
+        return line.to_owned();
+    }
+    let short: String = line.chars().take(MAX).collect();
+    format!("{short}… (ตัดจาก {} ตัวอักษร)", line.chars().count())
 }
 
 /// รากของ workspace
@@ -525,6 +581,32 @@ mod tests {
         ] {
             assert!(!is_license_file(Path::new(no)), "{no} ไม่ใช่ตัวบท");
         }
+    }
+
+    /// ★★ ประตูต้องบอกได้ว่า **ต่างกันตรงไหน** ไม่ใช่แค่ "ไม่ตรง"
+    ///
+    /// บน CI ไม่มีใครเข้าไปเปิดไฟล์ดูเองได้ · ข้อความที่บอกแค่ว่าไม่ผ่าน
+    /// แปลว่าไม่มีใครรู้ว่าเกิดอะไรขึ้น
+    #[test]
+    fn the_gate_says_which_line_disagrees_not_just_that_it_does() {
+        let found = "หนึ่ง\nสอง\nสาม\n";
+        let want = "หนึ่ง\nสองครึ่ง\nสาม\n";
+        let report = difference(found, want);
+        assert!(report.contains("#2"), "ไม่ได้บอกเลขบรรทัด: {report}");
+        assert!(report.contains("สองครึ่ง"), "ไม่ได้บอกว่าควรเป็นอะไร: {report}");
+        assert!(report.contains("1"), "ไม่ได้นับจำนวนบรรทัดที่ต่าง: {report}");
+
+        // ความยาวต่างกันล้วน ๆ ต้องบอกได้เหมือนกัน
+        let cut = difference("หนึ่ง\n", "หนึ่ง\nสอง\n");
+        assert!(cut.contains("ความยาว"), "ไม่ได้บอกว่าต่างที่ความยาว: {cut}");
+
+        // ★ บรรทัดยาวมากต้องไม่ท่วม log — ตัวบทใบอนุญาตยาวเป็นพันตัวอักษร
+        let long = "ก".repeat(500);
+        assert!(
+            trim_for_log(&long).chars().count() < 220,
+            "บรรทัดยาวไม่ถูกตัดก่อนพิมพ์"
+        );
+        assert_eq!(trim_for_log("สั้น"), "สั้น");
     }
 
     /// ★★★ ไฟล์ต้องเปลี่ยนเมื่อ `Cargo.lock` เปลี่ยน — นั่นคือทั้งหมดของประตูนี้
