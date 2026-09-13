@@ -66,6 +66,40 @@ const EMBEDDED: &[(&str, &str, &str)] = &[(
     "assets/fonts/OFL.txt",
 )];
 
+/// ★★★ crate ที่ **ไม่มีไฟล์ตัวบทใบอนุญาตมากับ tarball เลย**
+///
+/// ใช้ตาม SPDX ที่มันประกาศไว้ใน `Cargo.toml` แทน · จับคู่ด้วย **ชื่อ ไม่ใช่รุ่น**
+/// เพราะรุ่นขยับทุกสัปดาห์แล้วทะเบียนจะกลายเป็นของที่ต้องแก้ตลอดเวลา
+///
+/// ## ทำไมต้องเขียนไว้ แทนที่จะปล่อยให้เงียบ
+///
+/// 13 ก.ย. 2026: ไฟล์ที่สร้างบนเครื่องพัฒนา (เจอตัวบท 298 ตัว) **ไม่ตรงกับ**
+/// ไฟล์ที่สร้างบน CI (เจอ 295) — ทั้ง Linux และ Windows · ประตูแดงโดยบอกได้แค่
+/// "ไม่ตรง" และไม่มีใครรู้ว่าหายไปตัวไหน
+///
+/// ★ รากของปัญหาเชิงออกแบบ: เนื้อไฟล์ขึ้นกับ **สิ่งที่บังเอิญมีอยู่ในเครื่อง**
+/// ซึ่งเป็นสิ่งที่ version control ไม่ได้พาไปด้วย (กฎเดียวกับที่ห้ามใช้ mtime
+/// เป็นฐานของประตู — `docs/08 §6`) · ทะเบียนนี้ทำให้ความคาดหวังถูกเขียนไว้
+/// **ในคอมมิต**: เจอไม่ครบเมื่อไหร่ ประตูบอกชื่อทันที ไม่ใช่บอกแค่ว่าไม่ตรง
+const NO_LICENSE_TEXT: &[&str] = &[
+    "accesskit",
+    "clipboard-win",
+    "ecolor",
+    "egui",
+    "egui-wgpu",
+    "egui-winit",
+    "emath",
+    "epaint",
+    "epaint_default_fonts",
+    "gpu-descriptor",
+    "gpu-descriptor-types",
+    "hexf-parse",
+    "profiling",
+    "spirv",
+    "zune-core",
+    "zune-jpeg",
+];
+
 /// crate หนึ่งตัวที่ถูกแจกไปกับโปรแกรม
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Dep {
@@ -382,14 +416,43 @@ fn collect_texts(deps: &[Dep]) -> anyhow::Result<BTreeMap<String, Vec<String>>> 
         }
     }
 
-    if !no_file.is_empty() {
-        // ★ พิมพ์ออกมาเสมอ — "ไม่มีไฟล์มากับ crate" ต้องแยกจาก "เราลืมอ่าน"
-        println!(
-            "crate ที่ไม่มีไฟล์ใบอนุญาตมาด้วย {} ตัว (ใช้ตาม SPDX ที่ประกาศไว้)",
-            no_file.len()
-        );
+    // ★★★ พิมพ์ **ชื่อ** ไม่ใช่แค่จำนวน · จำนวนบอกได้แค่ว่าไม่ตรง ชื่อบอกว่าตัวไหน
+    //   (กฎเดียวกับที่ใช้ปิดคดี "+1 เทสต์ที่กระทบไม่ลง" — `docs/08 §3.9` ข้อ 9)
+    println!(
+        "crate ที่ไม่มีไฟล์ใบอนุญาตมาด้วย {} ตัว (ใช้ตาม SPDX ที่ประกาศไว้):",
+        no_file.len()
+    );
+    for label in &no_file {
+        println!("  · {label}");
     }
+
+    let unexpected = unregistered_missing(&no_file);
+    anyhow::ensure!(
+        unexpected.is_empty(),
+        "★★★ crate ข้างล่างนี้ **ควรมีตัวบทใบอนุญาตมาด้วย แต่หาไม่เจอ**:\n  {}\n\n\
+         เนื้อของ {OUTPUT} จะขาดตัวบทเหล่านี้ไป และไฟล์ที่ได้จะไม่ตรงกับของเครื่องอื่น\n\
+         สาเหตุที่เป็นไปได้: `cargo fetch` ยังไม่ได้แตกซอร์สครบ · หรือ crate นั้น\n\
+         เลิกแถมไฟล์ใบอนุญาตมาจริง ๆ (ถ้าใช่ ให้เติมชื่อลง `NO_LICENSE_TEXT` \
+         พร้อมยืนยันว่า SPDX ของมันยังอ่านได้จาก `Cargo.toml`)",
+        unexpected.join("\n  ")
+    );
     Ok(texts)
+}
+
+/// ★★★ **ตัวตัดสิน** — crate ที่หาตัวบทไม่เจอ ทั้งที่ไม่ได้ขึ้นทะเบียนไว้
+///
+/// แยกเป็นฟังก์ชันบริสุทธิ์เพื่อให้ NC ยิงเข้ามาได้โดยไม่ต้องมี registry จริง
+/// (รูปเดียวกับ `unregistered()` ของประตู mutation)
+fn unregistered_missing(no_file: &[String]) -> Vec<String> {
+    no_file
+        .iter()
+        .filter(|label| {
+            // `label` คือ "ชื่อ รุ่น" — ทะเบียนจับคู่ด้วยชื่อเท่านั้น
+            let name = label.split(' ').next().unwrap_or(label);
+            !NO_LICENSE_TEXT.contains(&name)
+        })
+        .cloned()
+        .collect()
 }
 
 /// ชื่อไฟล์นี้ใช่ตัวบทใบอนุญาตไหม
@@ -581,6 +644,30 @@ mod tests {
         ] {
             assert!(!is_license_file(Path::new(no)), "{no} ไม่ใช่ตัวบท");
         }
+    }
+
+    /// ★★★ NC: crate ที่หาตัวบทไม่เจอ **และไม่ได้ขึ้นทะเบียน** ต้องถูกชี้ชื่อ
+    ///
+    /// นี่คือประตูที่ทำให้ "ไฟล์ต่างกันระหว่างเครื่อง" กลายเป็นข้อความที่บอกว่า
+    /// **ตัวไหนหาย** แทนที่จะเป็นแค่ "ไม่ตรง" ซึ่งไม่มีใครตามต่อได้
+    #[test]
+    fn a_crate_whose_licence_text_went_missing_is_named_not_just_counted() {
+        // ตัวที่ขึ้นทะเบียนแล้วต้องเงียบ — ประตูที่ร้องตอนปกติคือประตูที่ถูกปิดเสียง
+        let known = vec!["egui 0.34.3".to_owned(), "zune-jpeg 0.4.21".to_owned()];
+        assert!(unregistered_missing(&known).is_empty());
+
+        // ตัวที่ไม่ได้ขึ้นทะเบียน = แดง พร้อมชื่อและรุ่น
+        let mut mixed = known.clone();
+        mixed.push("serde 1.0.0".to_owned());
+        let caught = unregistered_missing(&mixed);
+        assert_eq!(caught, vec!["serde 1.0.0".to_owned()], "จับไม่ได้หรือจับเกิน");
+
+        // ★ ทะเบียนจับคู่ด้วย **ชื่อ** — รุ่นใหม่ของตัวเดิมต้องไม่ทำให้แดง
+        let bumped = vec!["egui 0.35.0".to_owned()];
+        assert!(
+            unregistered_missing(&bumped).is_empty(),
+            "รุ่นขยับแล้วทะเบียนใช้ไม่ได้ = ทะเบียนที่ต้องแก้ทุกสัปดาห์"
+        );
     }
 
     /// ★★ ประตูต้องบอกได้ว่า **ต่างกันตรงไหน** ไม่ใช่แค่ "ไม่ตรง"
