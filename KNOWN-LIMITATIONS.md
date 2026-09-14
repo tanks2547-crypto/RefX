@@ -49,10 +49,20 @@ size ceiling is computed from what is actually on the board.
 
 → กำลังทำอยู่ใน **P5-4b** (`ROADMAP`)
 
-## 4. ยังไม่มีไอคอนของโปรแกรม / No application icon yet
+## 4. ไอคอนเป็นของชั่วคราว / The icon is a placeholder
 
-หน้าต่าง แถบงาน และเมนูของระบบจะแสดงไอคอนกลาง ๆ ของ OS ·
-และ **AppImage ยังสร้างไม่ได้ด้วยเหตุผลนี้** (`appimagetool` บังคับต้องมีไอคอน)
+ไอคอนปัจจุบันวาดขึ้นเองเพื่อให้มีของใช้ ไม่ใช่งานออกแบบที่ผ่านการคิดเรื่องแบรนด์ ·
+**ตั้งใจให้ถูกแทนที่** · ต้นฉบับคือ `assets/icon/refx.svg` ไฟล์เดียว —
+`.ico` / `.png` / ไอคอนหน้าต่างสร้างจากมันด้วย `cargo xtask icon` และมีประตูใน CI
+คอยยืนยันว่าไม่หลุดจากกัน
+
+The icon is a placeholder we drew to have something usable; it is meant to be
+replaced. `assets/icon/refx.svg` is the only source — every raster form is
+generated from it and a CI gate fails if they drift apart.
+
+**ยังไม่ได้ฝังไอคอนลงในตัว `refx.exe`** → หน้าต่างและแถบงานมีไอคอนแล้ว แต่ไฟล์
+`refx.exe` ใน File Explorer ยังเป็นไอคอนกลาง ๆ ของ Windows · การฝังต้องใช้
+Windows resource ซึ่งต้องเพิ่ม build dependency ที่ยังไม่ได้ตัดสินใจ
 
 ## 5. ยังไม่รองรับ จีน/ญี่ปุ่น/เกาหลี / No CJK yet
 

@@ -17,6 +17,11 @@
 //! ด้วยของที่เรายังไม่รองรับ (gradient, opacity, scale) ประตูต้องแดงพร้อมชื่อ
 //! สิ่งที่ไม่รองรับ **ไม่ใช่วาดผิดเงียบ ๆ แล้วบอกว่าผ่าน** (`docs/08 §3.9` ข้อ 19)
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "เครื่องมือ dev อ่าน/เขียนไฟล์ asset เอง ไม่ใช่ดิสก์ I/O บนลูปเฟรม"
+)]
+
 use std::path::{Path, PathBuf};
 
 /// ต้นฉบับที่มนุษย์แก้ — ทุกอย่างข้างล่างสร้างจากไฟล์นี้
@@ -188,7 +193,11 @@ fn parse(text: &str) -> anyhow::Result<Icon> {
 
         match name {
             "svg" => {
-                allow(name, &attrs, &["xmlns", "viewBox", "width", "height", "role", "aria-label"])?;
+                allow(
+                    name,
+                    &attrs,
+                    &["xmlns", "viewBox", "width", "height", "role", "aria-label"],
+                )?;
                 side = Some(view_box(get(name, &attrs, "viewBox")?)?);
             }
             "g" => {
@@ -471,7 +480,13 @@ fn inside(shape: &Shape, x: f64, y: f64) -> bool {
             let (dx, dy) = (x - cx, y - cy);
             dx * dx + dy * dy <= r * r
         }
-        Shape::Rect { x: rx0, y: ry0, w, h, rx } => {
+        Shape::Rect {
+            x: rx0,
+            y: ry0,
+            w,
+            h,
+            rx,
+        } => {
             // SDF ของสี่เหลี่ยมมุมมน — `rx = 0` ได้สี่เหลี่ยมธรรมดาโดยอัตโนมัติ
             let (cx, cy) = (rx0 + w / 2.0, ry0 + h / 2.0);
             let rx = rx.min(w / 2.0).min(h / 2.0);
@@ -502,7 +517,12 @@ fn unpremultiply(r: f64, g: f64, b: f64, a: f64) -> (u8, u8, u8, u8) {
         return (0, 0, 0, 0);
     }
     let to8 = |v: f64| (v / a * 255.0).round().clamp(0.0, 255.0) as u8;
-    (to8(r), to8(g), to8(b), (a * 255.0).round().clamp(0.0, 255.0) as u8)
+    (
+        to8(r),
+        to8(g),
+        to8(b),
+        (a * 255.0).round().clamp(0.0, 255.0) as u8,
+    )
 }
 
 // ───────────────────────── เขียนไฟล์ ─────────────────────────
@@ -631,8 +651,10 @@ mod tests {
 
     #[test]
     fn a_curve_in_the_path_stops_the_tool() {
-        let err = parse(r##"<svg viewBox="0 0 8 8"><path d="M0 0 C1 1 2 2 3 3 Z" fill="#000000"/></svg>"##)
-            .expect_err("ต้องล้ม");
+        let err = parse(
+            r##"<svg viewBox="0 0 8 8"><path d="M0 0 C1 1 2 2 3 3 Z" fill="#000000"/></svg>"##,
+        )
+        .expect_err("ต้องล้ม");
         assert!(format!("{err}").contains("C1"), "{err}");
     }
 

@@ -528,10 +528,7 @@ mod tests {
             (ICON_SIDE * ICON_SIDE * 4) as usize,
             "assets/icon/refx-64.rgba ไม่ตรงกับ {ICON_SIDE}×{ICON_SIDE} — รัน `cargo xtask icon`"
         );
-        assert!(
-            window_icon().is_some(),
-            "winit ปฏิเสธไอคอนที่เรา commit ไว้"
-        );
+        assert!(window_icon().is_some(), "winit ปฏิเสธไอคอนที่เรา commit ไว้");
     }
 
     /// delegate จำลองที่ "ไม่มีอะไรต้องวาดต่อ" — เลียนแบบ egui ตอน idle
