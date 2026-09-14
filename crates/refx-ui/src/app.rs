@@ -8364,6 +8364,47 @@ impl AppDelegate for RefxApp {
                     .filter_map(|tag| doc.board.tags().name(*tag).map(str::to_owned))
                     .collect(),
             });
+        // ★★★ รูปทรง + ข้อมูลไฟล์ของ item ตัวแรกในชุดที่เลือก (`docs/03 §1`)
+        //
+        //   **ค่าสำหรับแสดงล้วน ไม่มีทางกลับ** — v1.0 อ่านอย่างเดียว จึงไม่มี
+        //   `geometry_edit` คู่กันเหมือน `appearance_edit` · วันที่พิมพ์แก้ได้
+        //   มันต้องเดินผ่าน `Command` เหมือนทุก mutation ไม่ใช่เขียน board ตรง
+        //
+        //   ★ ทุกค่าในนี้ `Board` ถืออยู่แล้ว — ไม่มีการอ่านดิสก์เพิ่มแม้แต่ครั้งเดียว
+        //   (I-2: UI thread ห้ามแตะ fs)
+        shell.geometry = doc
+            .selection
+            .iter()
+            .find_map(|id| doc.board.item(id))
+            .map(|item| crate::shell::GeometryView {
+                x: item.canvas.pos.x,
+                y: item.canvas.pos.y,
+                w: item.canvas.size.x,
+                h: item.canvas.size.y,
+                rotation_deg: item.canvas.rotation.to_degrees(),
+                selected: doc.selection.len(),
+                file: match &item.kind {
+                    refx_core::board::ItemKind::Image(asset) => Some(crate::shell::FileView {
+                        name: refx_asset::decode::file_label(&asset.path),
+                        px: Some((asset.px_size.x, asset.px_size.y)),
+                        format: Some(crate::shell::format_name(asset.format)),
+                        path: asset.path.display().to_string(),
+                        bytes: asset.file_size,
+                    }),
+                    // ★ ภาพที่หาไฟล์ไม่เจอ **ยังต้องบอกได้ว่าเคยเป็นไฟล์ไหน** —
+                    //   นั่นคือข้อมูลชิ้นเดียวที่ทำให้ผู้ใช้ relink ถูกใบ (docs/07 §2)
+                    refx_core::board::ItemKind::Missing { original_path, .. } => {
+                        Some(crate::shell::FileView {
+                            name: refx_asset::decode::file_label(original_path),
+                            px: None,
+                            format: None,
+                            path: original_path.display().to_string(),
+                            bytes: 0,
+                        })
+                    }
+                    refx_core::board::ItemKind::Text(_) => None,
+                },
+            });
         // ★★★ ภาพที่หาไฟล์ไม่เจอในสิ่งที่เลือกอยู่ (P4-6) — **ค่าสำหรับแสดง**
         //     inspector เอาไปขึ้นชื่อไฟล์ + ปุ่ม "หาไฟล์เอง" (`docs/07 §2` ขั้น 4/5)
         shell.missing = {

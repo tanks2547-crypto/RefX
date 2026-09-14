@@ -132,6 +132,10 @@ pub enum Key {
     FindFile,
     /// กำลังรอผู้ใช้ชี้ไฟล์ภาพที่หาย (P4-6 ขั้นที่ 5)
     FindFileChoosing,
+    /// ★ การหมุนของภาพที่เลือก — **อ่านอย่างเดียวใน v1.0** (`docs/03 §1`)
+    Rotation,
+    /// หัวข้อของแถบข้อมูลไฟล์ใน inspector — มีทั้งสอง mode (`docs/03 §1`)
+    InspectorFile,
     /// ความทึบ
     Opacity,
     /// กลับสี
@@ -527,6 +531,8 @@ fn en(key: Key) -> &'static str {
         Key::InspectorNoSelection => "Select an image to adjust it",
         Key::FindFile => "Find the file…",
         Key::FindFileChoosing => "Choose the image file RefX could not find",
+        Key::Rotation => "Rotation",
+        Key::InspectorFile => "File",
         Key::Opacity => "Opacity",
         Key::Invert => "Invert",
         Key::Brightness => "Brightness",
@@ -800,6 +806,8 @@ fn th(key: Key) -> Option<&'static str> {
         Key::InspectorNoSelection => "เลือกภาพก่อนถึงจะปรับได้",
         Key::FindFile => "หาไฟล์เอง…",
         Key::FindFileChoosing => "เลือกไฟล์ภาพที่ RefX หาไม่เจอ",
+        Key::Rotation => "การหมุน",
+        Key::InspectorFile => "ไฟล์",
         Key::Opacity => "ความทึบ",
         Key::Invert => "กลับสี",
         Key::Brightness => "ความสว่าง",
@@ -1031,6 +1039,10 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
 /// เทมเพลตที่มีตัวแปร — ค่าที่ใส่ได้มีอะไรบ้างเขียนไว้ในคอมเมนต์ของแต่ละตัว
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Template {
+    /// `{n}` — ★ เลือกหลายใบ แต่ inspector แสดงค่าของ **ใบแรก** ใบเดียว
+    ///
+    /// ต้องบอกให้เห็น ไม่งั้นผู้ใช้อ่านตัวเลข X/Y ว่าเป็นของทั้งชุด
+    ShowingFirstOf,
     /// `{n}` — จำนวน item บน board
     ItemCount,
     /// `{n}` — จำนวนสมาชิกของกลุ่มที่เลือกอยู่ (P3-7)
@@ -1209,6 +1221,7 @@ pub enum Template {
 /// เทมเพลตภาษาอังกฤษ — ต้องมีครบทุกตัว
 fn template_en(template: Template) -> &'static str {
     match template {
+        Template::ShowingFirstOf => "showing the first of {n} selected",
         Template::ItemCount => "{n} items",
         Template::GroupMembers => "{n} in this group",
         Template::Saved => "Saved to {name}",
@@ -1388,6 +1401,7 @@ Drag in a PNG, JPEG, WebP, GIF, BMP, TGA or TIFF instead."
 /// เทมเพลตภาษาไทย — ไม่ครบก็ได้ ตัวที่ยังไม่มีตกกลับเป็นอังกฤษ
 fn template_th(template: Template) -> Option<&'static str> {
     Some(match template {
+        Template::ShowingFirstOf => "แสดงค่าของใบแรกจาก {n} ใบที่เลือก",
         Template::ItemCount => "{n} รายการ",
         Template::GroupMembers => "{n} ใบในกลุ่มนี้",
         Template::Saved => "บันทึกลง {name} แล้ว",
@@ -1835,6 +1849,8 @@ mod tests {
         Key::InspectorNoSelection,
         Key::FindFile,
         Key::FindFileChoosing,
+        Key::Rotation,
+        Key::InspectorFile,
         Key::Opacity,
         Key::Invert,
         Key::Brightness,
@@ -2008,6 +2024,7 @@ mod tests {
         Template::SidecarHandsOff,
         Template::SidecarAskIn,
         Template::DialogFindNamedImage,
+        Template::ShowingFirstOf,
         Template::ItemCount,
         Template::GroupMembers,
         Template::Saved,

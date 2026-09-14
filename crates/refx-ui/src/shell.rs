@@ -257,6 +257,54 @@ pub struct MissingView {
     pub count: usize,
 }
 
+/// ★★★ รูปทรงและข้อมูลไฟล์ของสิ่งที่เลือกอยู่ — **ค่าสำหรับแสดงเท่านั้น** (`docs/03 §1`)
+///
+/// ## ทำไมถึงเพิ่งมีใน v1.0 ทั้งที่ spec เขียนไว้ตั้งแต่ต้น
+///
+/// แผงเคยมี **หัวข้อ `X / Y / W / H` ที่ไม่มีค่าอยู่ใต้มัน** มาตลอด — เจอตอน
+/// ขับแอปจริงหนึ่งรอบเต็ม ไม่มีเทสต์ตัวไหนเห็น · เกณฑ์ที่เจ้าของใช้ตัดสินคือ
+/// **แสดงค่าที่มีอยู่แล้ว = ถูก · ป้ายของสิ่งที่ยังไม่มี = ผิด** ทุกค่าในนี้
+/// จึงเป็นค่าที่ `Board` ถืออยู่แล้ว ไม่มีอะไรต้องคำนวณใหม่
+///
+/// ★ **อ่านอย่างเดียวใน v1.0** — ไม่มีช่องให้พิมพ์แก้ · ช่องที่กดแล้วไม่เกิดอะไร
+/// คือป้ายของสิ่งที่ยังไม่มีอีกแบบหนึ่ง
+#[derive(Debug, Clone, PartialEq)]
+pub struct GeometryView {
+    /// จุดกึ่งกลางใน world space
+    pub x: f32,
+    /// จุดกึ่งกลางใน world space
+    pub y: f32,
+    /// ความกว้างที่แสดง (world units — **ไม่ใช่พิกเซลต้นฉบับ**)
+    pub w: f32,
+    /// ความสูงที่แสดง
+    pub h: f32,
+    /// การหมุนเป็น **องศา** — `ItemCanvas` เก็บเป็นเรเดียน แปลงที่ชั้นนี้
+    /// เพราะองศาคือหน่วยที่นักวาดใช้ ไม่ใช่หน่วยที่ shader ใช้
+    pub rotation_deg: f32,
+    /// เลือกไว้กี่ใบ — ★ ค่าข้างบนเป็นของ **ใบแรก** ใบเดียวเสมอ
+    pub selected: usize,
+    /// ข้อมูลไฟล์ต้นฉบับ · `None` = โน้ตข้อความ (ไม่มีไฟล์)
+    pub file: Option<FileView>,
+}
+
+/// ข้อมูลไฟล์ต้นฉบับของภาพที่เลือก — ส่วนที่ **เหมือนกันทั้งสอง mode** (`docs/03 §1`)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileView {
+    /// ชื่อไฟล์ล้วน ไม่ใช่ path เต็ม (`docs/08 §5`)
+    pub name: String,
+    /// ขนาดพิกเซลจริงหลังแก้ EXIF orientation แล้ว
+    ///
+    /// ★ `None` = ยังไม่รู้ (ภาพที่หาไฟล์ไม่เจอ) — **ห้ามแทนด้วย `0 × 0`**
+    /// ตัวเลขศูนย์อ่านว่าไฟล์เสีย ทั้งที่ความจริงคือเรายังไม่ได้เปิดมัน
+    pub px: Option<(u32, u32)>,
+    /// ชื่อรูปแบบไฟล์ — **ไม่แปลภาษา** เพราะเป็นชื่อเฉพาะ · `None` = ไม่รู้
+    pub format: Option<&'static str>,
+    /// path เต็ม — ยาวได้ จึงต้องตัดบรรทัดในแผง ไม่ใช่ดันแผงให้กว้าง
+    pub path: String,
+    /// ขนาดไฟล์เป็นไบต์ · `0` = ไม่รู้ (ภาพจาก clipboard)
+    pub bytes: u64,
+}
+
 /// สิ่งที่ผู้ใช้ขอทำกับกลุ่มในเฟรมนี้ (P3-7)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GroupRequest {
@@ -611,6 +659,11 @@ pub struct ShellState {
     /// `docs/07 §2` ขั้นที่ 4 บังคับว่าต้องเห็น **ชื่อไฟล์** ไม่ใช่แค่ช่องว่าง
     /// ผู้ใช้ที่ถอดฮาร์ดดิสก์ออกต้องอ่านออกว่าหายไปเพราะอะไรและไฟล์ไหน
     pub missing: Option<MissingView>,
+    /// ★ รูปทรง + ข้อมูลไฟล์ของสิ่งที่เลือก — `None` = ไม่ได้เลือกอะไร
+    ///
+    /// เติมแบบเดียวกับ [`ShellState::appearance`] เป๊ะ: ชั้น `app` เขียนก่อนวาด
+    /// · แต่ **ไม่มีทางกลับ** เพราะ v1.0 อ่านอย่างเดียว (`docs/03 §1`)
+    pub geometry: Option<GeometryView>,
     /// ผู้ใช้กด "หาไฟล์เอง" ในเฟรมนี้ (ขั้นที่ 5)
     pub relink_request: bool,
     /// ★★ สิ่งที่ผู้ใช้ขอทำกับกลุ่มในเฟรมนี้ — `None` = ไม่ได้แตะ
@@ -776,6 +829,7 @@ impl Default for ShellState {
             appearance: None,
             appearance_edit: None,
             missing: None,
+            geometry: None,
             relink_request: false,
             arrange_request: None,
             appearance_sealed: false,
@@ -2047,12 +2101,126 @@ pub(crate) const ARRANGE_BUTTONS: [(ArrangeRequest, &str, Key); 8] = [
 /// ตัวควบคุมเขียนลง `state.appearance` เท่านั้น **ไม่แตะ `Board` เลย** ชั้น `app`
 /// เป็นคนเทียบกับค่าเดิมแล้วห่อเป็น `SetFilter` เข้า `History` — ทางเดียวที่กฎ
 /// "ทุก mutation ผ่าน Command" ยังบังคับได้จริงเมื่อ widget เป็นคนแก้ค่า
+/// ชื่อรูปแบบไฟล์ที่ผู้ใช้เห็น — **ไม่แปลภาษา** เพราะเป็นชื่อเฉพาะ
+///
+/// ★ `Unknown` แปลเป็น `"?"` ไม่ใช่คำว่า "ไม่ทราบ" — ช่องนี้อยู่ต่อท้ายขนาดภาพ
+/// ในบรรทัดเดียว คำยาว ๆ จะดันให้บรรทัดตัดโดยไม่ได้ให้ข้อมูลเพิ่ม
+/// · `Unknown` เกิดได้จริงกับภาพที่มาจาก cache hit (`docs/02 §2.2.5`)
+#[must_use]
+pub fn format_name(format: refx_core::board::ImageFormat) -> &'static str {
+    use refx_core::board::ImageFormat as F;
+    match format {
+        F::Png => "PNG",
+        F::Jpeg => "JPEG",
+        F::WebP => "WebP",
+        F::Gif => "GIF",
+        F::Bmp => "BMP",
+        F::Tga => "TGA",
+        F::Tiff => "TIFF",
+        F::Unknown => "?",
+    }
+}
+
+/// ทศนิยมหนึ่งตำแหน่ง และ **ห้ามให้ค่าที่เป็นศูนย์ขึ้นเป็น `-0.0`**
+///
+/// ★ `-0.0` บนแผงอ่านว่าโปรแกรมคำนวณเพี้ยน ทั้งที่มันคือศูนย์ · ภาพที่วางกลาง
+/// board พอดีจะเจอเคสนี้ทันที เพราะ world space มีจุดกำเนิดอยู่ตรงกลาง
+fn one_decimal(value: f32) -> String {
+    let value = if value.abs() < 0.05 { 0.0 } else { value };
+    format!("{value:.1}")
+}
+
+/// ★★★ แถว X/Y/W/H + การหมุน — **อ่านอย่างเดียวใน v1.0** (`docs/03 §1`)
+///
+/// ไม่มีช่องให้พิมพ์แก้โดยตั้งใจ: ช่องที่กดแล้วไม่เกิดอะไรคือป้ายของสิ่งที่
+/// ยังไม่มีอีกแบบหนึ่ง · การพิมพ์แก้เป็นฟีเจอร์ที่ต้องผ่าน `Command` + undo
+/// ซึ่งเป็นงานคนละก้อน
+///
+/// ★ ไม่มีป้าย "ไม่ได้เลือกอะไร" ที่นี่ — ข้างล่างมีอยู่แล้วหนึ่งอัน
+/// สองอันในแผงเดียวอ่านว่าโปรแกรมพูดซ้ำ
+fn geometry_rows(ui: &mut egui::Ui, state: &ShellState) {
+    let Some(geo) = state.geometry.as_ref() else {
+        return;
+    };
+    let lang = state.lang;
+
+    // X/Y/W/H เป็นสัญลักษณ์ ไม่ใช่คำ — ไม่ต้องแปล และตรงกับหัวข้อด้านบนพอดี
+    egui::Grid::new("canvas-geometry")
+        .num_columns(4)
+        .spacing([8.0, 2.0])
+        .show(ui, |ui| {
+            ui.label("X");
+            ui.label(one_decimal(geo.x));
+            ui.label("Y");
+            ui.label(one_decimal(geo.y));
+            ui.end_row();
+            ui.label("W");
+            ui.label(one_decimal(geo.w));
+            ui.label("H");
+            ui.label(one_decimal(geo.h));
+            ui.end_row();
+        });
+    ui.horizontal(|ui| {
+        ui.label(text::t(lang, Key::Rotation));
+        ui.label(format!("{}°", one_decimal(geo.rotation_deg)));
+    });
+
+    // ★★ เลือกหลายใบแล้วอ่านตัวเลขข้างบนว่าเป็นของทั้งชุด = เข้าใจผิดที่เงียบที่สุด
+    //    ในแผงนี้ · บอกตรง ๆ ว่ากำลังดูใบไหนอยู่
+    if geo.selected > 1 {
+        ui.label(text::fill(
+            lang,
+            text::Template::ShowingFirstOf,
+            &[("n", &geo.selected.to_string())],
+        ));
+    }
+}
+
+/// ★★★ ข้อมูลไฟล์ต้นฉบับ — **ส่วนที่เหมือนกันทั้งสอง mode** (`docs/03 §1`)
+///
+/// นักวาดที่มีภาพซ้ำกันสามใบบน board แยกออกด้วยสิ่งเดียวคือ **ชื่อไฟล์กับ path**
+/// · ขนาดพิกเซลอยู่ตรงนี้ด้วยเพราะมันคือคำถามแรกเวลาจะเอาภาพไปใช้ต่อ
+/// และเป็นค่าที่ `AssetRef` ถืออยู่แล้ว ไม่ต้องอ่านดิสก์ซ้ำ (I-2)
+fn file_rows(ui: &mut egui::Ui, state: &ShellState) {
+    let Some(file) = state.geometry.as_ref().and_then(|geo| geo.file.as_ref()) else {
+        return;
+    };
+    ui.separator();
+    ui.label(text::t(state.lang, Key::InspectorFile));
+    ui.label(&file.name);
+
+    // ★ บรรทัดนี้ประกอบจาก **เฉพาะสิ่งที่รู้จริง** — ช่องที่ไม่รู้หายไปทั้งช่อง
+    //   ไม่ใช่ขึ้นเป็น `0 × 0` หรือ `unknown` ซึ่งอ่านว่าไฟล์มีปัญหา
+    let mut parts: Vec<String> = Vec::new();
+    if let Some((w, h)) = file.px {
+        parts.push(format!("{w} × {h} px"));
+    }
+    if let Some(format) = file.format {
+        parts.push(format.to_owned());
+    }
+    if file.bytes > 0 {
+        parts.push(human_bytes(file.bytes));
+    }
+    if !parts.is_empty() {
+        ui.label(parts.join(" · "));
+    }
+
+    // ★ path ยาวกว่าแผงเสมอ — ต้องตัดบรรทัดในแผง **ไม่ใช่ดันแผงให้กว้าง**
+    //   ไม่งั้น canvas หดทุกครั้งที่เลือกภาพที่อยู่ลึก ๆ ในโฟลเดอร์
+    if !file.path.is_empty() {
+        ui.add(egui::Label::new(egui::RichText::new(&file.path).weak()).wrap());
+    }
+}
+
 fn canvas_inspector(ui: &mut egui::Ui, state: &mut ShellState) {
     use refx_core::board::Flip;
 
     let lang = state.lang;
     ui.label(text::t(lang, Key::InspectorCanvasGeometry));
     ui.separator();
+    // ★★★ ค่าจริงต้องอยู่ใต้หัวข้อนี้ ไม่งั้นมันคือป้ายของสิ่งที่ไม่มี (`docs/03 §1`)
+    geometry_rows(ui, state);
+    file_rows(ui, state);
 
     // ★★★ ภาพที่หาไฟล์ไม่เจอ (P4-6 ขั้นที่ 4/5) — มาก่อนทุกช่อง เพราะถ้าภาพหาย
     //   สิ่งที่ผู้ใช้อยากทำคือหามันให้เจอ ไม่ใช่ปรับ opacity ของช่องว่าง
@@ -2162,6 +2330,11 @@ fn arrange_inspector(ui: &mut egui::Ui, state: &mut ShellState) {
     let lang = state.lang;
     ui.label(text::t(lang, Key::InspectorArrangeMeta));
     ui.separator();
+    // ★ ข้อมูลไฟล์เป็น "ส่วนที่เหมือนกัน" ของทั้งสอง mode ตาม `docs/03 §1`
+    //   ★★ แต่ **X/Y/W/H ไม่ตามมาด้วย** — Arrange จัดตำแหน่งเองจากการเรียง
+    //   ตัวเลขของ Canvas จึงไม่ใช่สิ่งที่ผู้ใช้เห็นอยู่ตรงหน้าในโหมดนี้
+    //   (เจ้าของตัดสินไว้ล่วงหน้า 18 ก.ย. 2026)
+    file_rows(ui, state);
 
     let Some(meta) = state.meta.clone() else {
         ui.label(text::t(lang, Key::InspectorNoSelection));
@@ -2926,9 +3099,13 @@ mod tests {
             meta: _,               // ค่าสำหรับแสดง
             group: _,              // ค่าสำหรับแสดง
             missing: _,            // ค่าสำหรับแสดง (ชื่อไฟล์ที่หาย)
-            tag_input: _,          // ข้อความในช่องพิมพ์ ยังไม่ได้กด +
-            picked: _,             // สีที่ picker อ่านได้
-            measured: _,           // ไม้บรรทัด
+            // ★ อ่านอย่างเดียวใน v1.0 — ไม่มีคู่ `geometry_edit` ให้เขียนกลับ
+            //   วันที่พิมพ์แก้ X/Y ได้ **ต้องมาเพิ่มในกลุ่มบนของรายการนี้**
+            //   ไม่ใช่กลุ่มนี้ (`docs/03 §1`)
+            geometry: _,  // ค่าสำหรับแสดง (X/Y/W/H · หมุน · ข้อมูลไฟล์)
+            tag_input: _, // ข้อความในช่องพิมพ์ ยังไม่ได้กด +
+            picked: _,    // สีที่ picker อ่านได้
+            measured: _,  // ไม้บรรทัด
             loading: _,
 
             // ---- ★ แผงตั้งค่า (P5-3) — **ไม่มีตัวไหนแตะเอกสารเลย** ----
@@ -3666,6 +3843,172 @@ mod tests {
     }
 
     /// ข้อความทั้งหมดที่ egui วาดออกมาในเฟรมนั้น
+    /// วาดแผงด้วย state ที่กำหนดแล้วคืนข้อความทุกบรรทัดที่ขึ้นจริงบนจอ
+    fn panel_text(state: &mut ShellState) -> String {
+        let ctx = egui::Context::default();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1280.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let output = ctx.run_ui(input, |ui| {
+            let _ = draw_in_ui(ui, state, |_, _| {});
+        });
+        shell_text(&output)
+    }
+
+    /// ค่าการแสดงผลกลาง ๆ — เทสต์พวกนี้ไม่ได้สนใจตัวควบคุม แค่ต้องให้แผงวาดครบ
+    fn a_plain_appearance() -> Appearance {
+        Appearance {
+            opacity: 1.0,
+            grayscale: false,
+            invert: false,
+            brightness: 0.0,
+            contrast: 0.0,
+            flip: refx_core::board::Flip::None,
+        }
+    }
+
+    fn a_selected_photo() -> GeometryView {
+        GeometryView {
+            x: 1234.5,
+            y: -67.75,
+            w: 512.0,
+            h: 384.0,
+            rotation_deg: 15.0,
+            selected: 1,
+            file: Some(FileView {
+                name: "photo_01.jpg".to_owned(),
+                px: Some((2400, 1800)),
+                format: Some("JPEG"),
+                path: "E:/refs/photo_01.jpg".to_owned(),
+                bytes: 1_529_079,
+            }),
+        }
+    }
+
+    /// ★★★ **หัวข้อกับค่าต้องมาคู่กันเสมอ** (`docs/03 §1`)
+    ///
+    /// แผงเคยมีหัวข้อ `X / Y / W / H` โดยไม่มีค่าอยู่ใต้มันมาตลอด — และไม่มีเทสต์
+    /// ตัวไหนเห็น เพราะทุกตัวถามว่า "ตัวควบคุมทำงานไหม" ไม่มีตัวไหนถามว่า
+    /// **"สิ่งที่แผงสัญญาไว้มีอยู่จริงไหม"** · เจอตอนขับแอปจริงหนึ่งรอบเต็ม
+    #[test]
+    fn the_numbers_the_panel_promises_are_actually_on_the_panel() {
+        let lang = Lang::default();
+        let mut state = ShellState {
+            geometry: Some(a_selected_photo()),
+            appearance: Some(a_plain_appearance()),
+            ..ShellState::default()
+        };
+        let shown = panel_text(&mut state);
+
+        assert!(
+            shown.contains(text::t(lang, Key::InspectorCanvasGeometry)),
+            "หัวข้อหายไป:\n{shown}"
+        );
+        for wanted in ["1234.5", "-67.8", "512.0", "384.0"] {
+            assert!(shown.contains(wanted), "ไม่เห็นค่า {wanted}:\n{shown}");
+        }
+        assert!(
+            shown.contains(text::t(lang, Key::Rotation)) && shown.contains("15.0°"),
+            "การหมุนต้องมีทั้งป้ายและค่า:\n{shown}"
+        );
+        assert!(
+            shown.contains(text::t(lang, Key::InspectorFile)),
+            "หัวข้อข้อมูลไฟล์หายไป:\n{shown}"
+        );
+        for wanted in [
+            "photo_01.jpg",
+            "2400 × 1800 px",
+            "JPEG",
+            "E:/refs/photo_01.jpg",
+        ] {
+            assert!(shown.contains(wanted), "ไม่เห็น {wanted}:\n{shown}");
+        }
+    }
+
+    /// ★★ เลือกหลายใบ = ตัวเลขข้างบนเป็นของ **ใบเดียว** — ต้องบอก ไม่ใช่เงียบ
+    #[test]
+    fn selecting_many_says_whose_numbers_these_are() {
+        let lang = Lang::default();
+        let one = panel_text(&mut ShellState {
+            geometry: Some(a_selected_photo()),
+            appearance: Some(a_plain_appearance()),
+            ..ShellState::default()
+        });
+        let many = panel_text(&mut ShellState {
+            geometry: Some(GeometryView {
+                selected: 4,
+                ..a_selected_photo()
+            }),
+            appearance: Some(a_plain_appearance()),
+            ..ShellState::default()
+        });
+        let note = text::fill(lang, text::Template::ShowingFirstOf, &[("n", "4")]);
+        assert!(many.contains(&note), "เลือกสี่ใบแล้วไม่บอก:\n{many}");
+        assert!(
+            !one.contains("showing the first"),
+            "เลือกใบเดียวไม่ควรมีประโยคนี้:\n{one}"
+        );
+    }
+
+    /// ★ ภาพที่หาไฟล์ไม่เจอยังต้องบอกได้ว่า **เคยเป็นไฟล์ไหน** — แต่ห้ามแต่งค่า
+    /// ที่ยังไม่รู้ขึ้นมา · `0 × 0 px` อ่านว่าไฟล์เสีย ทั้งที่เรายังไม่ได้เปิดมัน
+    #[test]
+    fn a_missing_image_shows_its_name_but_never_invents_a_size() {
+        let shown = panel_text(&mut ShellState {
+            geometry: Some(GeometryView {
+                file: Some(FileView {
+                    name: "gone.png".to_owned(),
+                    px: None,
+                    format: None,
+                    path: "E:/refs/gone.png".to_owned(),
+                    bytes: 0,
+                }),
+                ..a_selected_photo()
+            }),
+            appearance: Some(a_plain_appearance()),
+            ..ShellState::default()
+        });
+        assert!(shown.contains("gone.png"), "ชื่อไฟล์ที่หายต้องยังอยู่:\n{shown}");
+        assert!(!shown.contains("0 × 0"), "แต่งขนาดขึ้นมาเอง:\n{shown}");
+        assert!(!shown.contains(" px"), "ไม่ควรมีบรรทัดขนาดเลย:\n{shown}");
+    }
+
+    /// ★ `-0.0` บนแผงอ่านว่าโปรแกรมคำนวณเพี้ยน — ภาพที่วางกลาง board เจอทันที
+    #[test]
+    fn a_value_that_is_zero_never_shows_up_as_negative_zero() {
+        assert_eq!(one_decimal(0.0), "0.0");
+        assert_eq!(one_decimal(-0.0), "0.0");
+        assert_eq!(one_decimal(-0.001), "0.0");
+        assert_eq!(one_decimal(-0.4), "-0.4");
+        // ★ ค่าลบที่ **ไม่ใช่ศูนย์** ต้องยังติดลบอยู่ — กันไม่ให้ตัวกันหน้าไปกลืนของจริง
+        assert_eq!(one_decimal(-67.75), "-67.8");
+        assert_eq!(one_decimal(1234.5), "1234.5");
+    }
+
+    /// ★ ชื่อรูปแบบไฟล์ต้องสั้นและไม่ว่าง — มันอยู่ต่อท้ายขนาดภาพในบรรทัดเดียว
+    #[test]
+    fn every_image_format_has_a_short_name_to_show() {
+        use refx_core::board::ImageFormat as F;
+        for format in [
+            F::Png,
+            F::Jpeg,
+            F::WebP,
+            F::Gif,
+            F::Bmp,
+            F::Tga,
+            F::Tiff,
+            F::Unknown,
+        ] {
+            let name = format_name(format);
+            assert!(!name.is_empty(), "{format:?} ไม่มีชื่อ");
+            assert!(name.len() <= 5, "{format:?} ชื่อยาวเกินไป: {name}");
+        }
+    }
+
     fn shell_text(output: &egui::FullOutput) -> String {
         let mut found = String::new();
         for shape in &output.shapes {
