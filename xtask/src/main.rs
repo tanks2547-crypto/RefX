@@ -5,11 +5,13 @@
 //!   dump-refx      แปลง .refx (binary) เป็น JSON เพื่อ debug  (P4-8)
 //!   mutation       ประตูข้อ 1b — ทำให้ด่านทำงานทุกครั้งแล้วดูว่าเทสต์ไหนแดง
 //!   licenses       สร้าง THIRD-PARTY-LICENSES.md  (`--check` = ประตู)
+//!   icon           สร้าง .ico/.png/.rgba จาก assets/icon/refx.svg (`--check` = ประตู)
 //!   bench          รัน benchmark ทั้งชุดแล้วเทียบกับเพดานใน docs/08
 //!   package        สร้าง portable zip ของ Windows + ตรวจจากตัวแพ็กเกจเอง
 //!   verify-deb     ตรวจ .deb ที่ `cargo deb` สร้าง (ประตูเดียวกับ zip)
 
 mod dump;
+mod icon;
 mod json;
 mod licenses;
 mod mutation;
@@ -127,6 +129,7 @@ fn main() -> anyhow::Result<()> {
         "dump-refx" => dump_refx(),
         "mutation" => mutation::run(),
         "licenses" => licenses::run(),
+        "icon" => icon::run(),
         "bench" => todo!("P5-1"),
         "package" => package::run(),
         "verify-deb" => package::verify_deb(),
@@ -135,7 +138,7 @@ fn main() -> anyhow::Result<()> {
             eprintln!(
                 "ไม่รู้จักคำสั่ง: {other:?}\n\
                  คำสั่งที่มี: gen-testdata · gen-fuzz-seeds · dump-refx · mutation · \
-                 licenses · package · verify-deb · bench (P5-1)"
+                 licenses · icon · package · verify-deb · verify-msi · bench (P5-1)"
             );
             Ok(())
         }

@@ -182,6 +182,30 @@ jobs:
         if: runner.os == 'Linux'
         run: cargo run -q -p xtask -- licenses --check
 
+      # ★★★ ไอคอนที่ commit ไว้ (.ico/.png/.rgba) ต้องยังตรงกับ assets/icon/refx.svg
+      #
+      #   ไฟล์สามอันนั้นเป็นไบนารีที่ `git diff` อ่านไม่ออก · ใครแก้ .svg แล้วลืม
+      #   รัน `cargo xtask icon` จะได้ไอคอนบน taskbar คนละอันกับใน installer
+      #   โดยไม่มีอะไรบอก — รูปเดียวกับใบอนุญาตที่ล้าสมัยเงียบ ๆ ข้างบน
+      - name: ไอคอนต้องตรงกับ assets/icon/refx.svg
+        if: runner.os == 'Linux'
+        run: cargo run -q -p xtask -- icon --check
+
+      # negative control (docs/08 §3.9 ข้อ 1) — ทำให้ไฟล์เพี้ยนหนึ่งไบต์
+      # แล้วประตูต้องแดง · แก้บนสำเนาที่ CI แล้วคืนค่าด้วย git ทันที
+      - name: negative control ของประตูไอคอน
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          printf '\0' >> assets/icon/refx-64.rgba
+          if cargo run -q -p xtask -- icon --check > /dev/null 2>&1; then
+            git checkout -- assets/icon/refx-64.rgba
+            echo "::error::ประตูไอคอนไม่ล้มแม้ไฟล์เพี้ยน — ประตูเองพัง"
+            exit 1
+          fi
+          git checkout -- assets/icon/refx-64.rgba
+          echo "::notice::negative control ผ่าน — ประตูไอคอนล้มได้จริง"
+
       - run: cargo build --release --all-features
 
       # ★ เพดาน binary ต้องบังคับอัตโนมัติ ไม่ใช่ความหวัง (docs/08 §6)

@@ -172,6 +172,14 @@ pub fn verify_deb() -> anyhow::Result<()> {
         desktop.is_file(),
         "★ ไม่มี refx.desktop — ผู้ใช้จะไม่เห็นโปรแกรมในเมนูเลย"
     );
+    // ★ `Icon=refx` ใน .desktop ชี้ไปที่ **ชื่อ** ไม่ใช่เส้นทาง · ไฟล์ผิดชื่อ
+    //   หรือผิดโฟลเดอร์ = เมนูแสดงกล่องเปล่า ซึ่งไม่มีอะไรในระบบ build บอกเลย
+    let png = unpacked.join("usr/share/icons/hicolor/256x256/apps/refx.png");
+    anyhow::ensure!(
+        png.is_file(),
+        "★ ไม่มี usr/share/icons/hicolor/256x256/apps/refx.png — \
+         `Icon=refx` ใน .desktop จะหาไม่เจอแล้วเมนูขึ้นเป็นกล่องเปล่า"
+    );
 
     println!("\n— ประตู 2: เวอร์ชันตรงกันสามที่ไหม —");
     let exe = unpacked.join("usr/bin/refx");

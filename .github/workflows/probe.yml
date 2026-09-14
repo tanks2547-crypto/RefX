@@ -1,0 +1,70 @@
+# ★ workflow ชั่วคราว — **มีอายุเท่ากับคำถามเดียว** แล้วต้องถูกลบ
+#
+# คำถาม: ทำไม `zbus 5.18.0` คอมไพล์ไม่ผ่านบน Linux ตอน build จากศูนย์
+#         ทั้งที่ไม่มี crate ไหนในทรีประกาศ MSRV เกิน 1.92 ที่เราตรึงไว้
+#
+# สิ่งที่รู้แล้ว (run 34771844462, 34804306697):
+#   * error ทุกตัวคือ "แมโครไม่ขยาย" — `cannot find attribute zbus`,
+#     `can't find crate for zbus_macros` · `Compiling zbus` ถึง error แรก 0.14 วิ
+#   * ชุด feature ของ zbus เท่ากันทั้ง `-p refx-app` และ `--workspace --all-features`
+#   * `check (ubuntu-latest)` ที่เขียวมาตลอด **ไม่เคยคอมไพล์ zbus** — หยิบจาก cache
+#   * เกิดทั้งตอน `cargo deb` ใส่ `--target` เองและตอนเรา build โดยไม่ใส่
+#
+# แต่ละขั้นเปลี่ยน **ตัวแปรเดียว** และไม่หยุดเมื่อแดง เพื่อให้ได้คำตอบครบในรอบเดียว
+name: Probe (zbus บน Linux)
+
+on: workflow_dispatch
+
+jobs:
+  zbus:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # ★ ไม่มี rust-cache โดยตั้งใจ — คำถามนี้เกี่ยวกับ **build จากศูนย์**
+      #   cache คือสิ่งที่ทำให้ job อื่นเขียวโดยไม่เคยตอบคำถามนี้เลย
+      - name: Linux deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev
+      - name: toolchain ที่จะถูกใช้จริง
+        run: |
+          rustc -vV
+          cargo -vV
+          cat rust-toolchain.toml
+
+      # A — ตามการตั้งค่าปัจจุบันทุกอย่าง
+      - name: A · zbus โดด ๆ ตามการตั้งค่าปัจจุบัน
+        id: a
+        continue-on-error: true
+        run: cargo build --release -p zbus
+
+      # B — เอา .cargo/config.toml ออก (ตัด `-C relocation-model=pie` และ link-arg)
+      #     ★ rustflags ของ `[target.'cfg(target_os = "linux")']` ถูกใส่ให้
+      #       **proc-macro ด้วย** เมื่อไม่ได้ส่ง `--target` — ถ้านั่นคือสาเหตุ
+      #       ขั้นนี้ต้องเขียวขณะที่ A แดง
+      - name: B · zbus โดย ๆ โดยไม่มี .cargo/config.toml
+        id: b
+        continue-on-error: true
+        run: |
+          mv .cargo/config.toml /tmp/refx-cargo-config.toml
+          cargo build --release -p zbus
+
+      - name: คืน .cargo/config.toml
+        run: mv /tmp/refx-cargo-config.toml .cargo/config.toml
+
+      # C — toolchain ล่าสุดแทน 1.92 ที่ rust-toolchain.toml ตรึงไว้
+      #     (`+stable` ชนะไฟล์ในโปรเจกต์)
+      - name: C · zbus ด้วย stable แทน 1.92
+        id: c
+        continue-on-error: true
+        run: |
+          rustup toolchain install stable --profile minimal
+          cargo +stable build --release -p zbus
+
+      - name: สรุปผลทั้งสามขั้น
+        run: |
+          echo "A (ตามปัจจุบัน)        : ${{ steps.a.outcome }}"
+          echo "B (ไม่มี cargo config) : ${{ steps.b.outcome }}"
+          echo "C (stable แทน 1.92)    : ${{ steps.c.outcome }}"

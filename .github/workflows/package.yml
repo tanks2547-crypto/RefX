@@ -80,6 +80,9 @@ jobs:
           $bin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
           Write-Output "WiX: $bin"
 
+      - name: ไอคอนต้องตรงกับ assets/icon/refx.svg
+        run: cargo run -q -p xtask -- icon --check
+
       - name: สร้าง MSI
         run: cargo wix -p refx-app --nocapture --output target/package/
 
@@ -125,6 +128,10 @@ jobs:
 
       - name: THIRD-PARTY-LICENSES.md ต้องตรงกับ Cargo.lock
         run: cargo run -q -p xtask -- licenses --check
+
+      # ★ `.deb` ใส่ assets/icon/refx-256.png ลง hicolor — ไฟล์นั้นต้องยังตรงกับ .svg
+      - name: ไอคอนต้องตรงกับ assets/icon/refx.svg
+        run: cargo run -q -p xtask -- icon --check
 
       # ★★★ build เอง แล้วให้ `cargo deb` **แค่ห่อ** (`--no-build`)
       #

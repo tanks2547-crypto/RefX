@@ -19,6 +19,30 @@ use winit::window::{Window, WindowId};
 
 use crate::redraw::{RedrawReason, RedrawTracker};
 
+/// ไอคอนหน้าต่างเป็น **RGBA ดิบ** ไม่ใช่ PNG — ตั้งใจ
+///
+/// ★ ถอดรหัส PNG ตอนเปิดโปรแกรมแปลว่าต้องลาก decoder เข้ามาใน `refx-platform`
+/// และเสียเวลาก่อนหน้าต่างแรกจะขึ้น ซึ่งเป็นตัวเลขที่ `docs/08 §2` จับอยู่
+/// · 64×64×4 = 16 KB ใน binary แลกกับศูนย์วินาทีตอนเปิด คุ้มกว่ามาก
+///
+/// ไฟล์นี้สร้างโดย `cargo xtask icon` จาก `assets/icon/refx.svg` และมีประตู
+/// `cargo xtask icon --check` ใน CI คอยยืนยันว่ามันยังตรงกับต้นฉบับ
+const ICON_RGBA: &[u8] = include_bytes!("../../../assets/icon/refx-64.rgba");
+/// ด้านของ [`ICON_RGBA`] — ต้องตรงกับ `WINDOW_ICON` ใน `xtask/src/icon.rs`
+const ICON_SIDE: u32 = 64;
+
+/// ★ ไอคอนพังห้ามทำให้เปิดโปรแกรมไม่ได้ — รูปเดียวกับ I-7 (ภาพเสียหนึ่งใบ
+/// ห้ามล้มโปรแกรม) · หน้าต่างที่ไม่มีไอคอนยังใช้งานได้ครบทุกอย่าง
+fn window_icon() -> Option<winit::window::Icon> {
+    match winit::window::Icon::from_rgba(ICON_RGBA.to_vec(), ICON_SIDE, ICON_SIDE) {
+        Ok(icon) => Some(icon),
+        Err(err) => {
+            tracing::warn!(%err, "the window icon was rejected; continuing without one");
+            None
+        }
+    }
+}
+
 /// เปิดหน้าต่าง/รัน event loop ไม่สำเร็จ
 #[derive(Debug, thiserror::Error)]
 pub enum WindowError {
@@ -355,6 +379,7 @@ impl<D: AppDelegate> WindowHost<D, Arc<Window>> {
     fn open_window(&mut self, event_loop: &ActiveEventLoop) {
         let attrs = Window::default_attributes()
             .with_title(self.config.title.clone())
+            .with_window_icon(window_icon())
             .with_inner_size(winit::dpi::LogicalSize::new(
                 self.config.width,
                 self.config.height,
@@ -492,6 +517,22 @@ mod tests {
     use winit::dpi::PhysicalSize;
 
     use super::*;
+
+    /// ★ ไอคอนที่ winit ปฏิเสธ = หน้าต่างขึ้นมาโล่ง ๆ โดยไม่มีใครรู้ เพราะเรา
+    /// กลืน error ไว้ตั้งใจ (ไอคอนห้ามล้มโปรแกรม) · เทสต์นี้คือที่เดียวที่จะบอก
+    /// ว่าไฟล์ที่ `xtask icon` สร้างยังใช้ได้จริง ไม่ใช่แค่ "มีไฟล์อยู่"
+    #[test]
+    fn the_window_icon_that_ships_is_one_winit_actually_accepts() {
+        assert_eq!(
+            ICON_RGBA.len(),
+            (ICON_SIDE * ICON_SIDE * 4) as usize,
+            "assets/icon/refx-64.rgba ไม่ตรงกับ {ICON_SIDE}×{ICON_SIDE} — รัน `cargo xtask icon`"
+        );
+        assert!(
+            window_icon().is_some(),
+            "winit ปฏิเสธไอคอนที่เรา commit ไว้"
+        );
+    }
 
     /// delegate จำลองที่ "ไม่มีอะไรต้องวาดต่อ" — เลียนแบบ egui ตอน idle
     /// (ของจริง egui คืน `repaint_delay = Duration::MAX`)

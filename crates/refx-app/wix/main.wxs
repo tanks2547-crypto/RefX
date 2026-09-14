@@ -185,13 +185,14 @@
 
         
         <!--
-          Uncomment the following `Icon` and `Property` tags to change the product icon.
+          The product icon shown in the "Apps & features" / Add-Remove Programs list.
 
-          The product icon is the graphic that appears in the Add/Remove
-          Programs control panel for the application.
+          Generated from assets/icon/refx.svg by `cargo xtask icon`; the CI gate
+          `cargo xtask icon --check` fails if the .ico stops matching the .svg,
+          so this file can never silently drift from the icon in the window.
         -->
-        <!--<Icon Id='ProductICO' SourceFile='wix\Product.ico'/>-->
-        <!--<Property Id='ARPPRODUCTICON' Value='ProductICO' />-->
+        <Icon Id='ProductICO' SourceFile='assets\icon\refx.ico'/>
+        <Property Id='ARPPRODUCTICON' Value='ProductICO' />
 
         
         <!--

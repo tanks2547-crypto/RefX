@@ -58,6 +58,9 @@ depends = "$auto"
 assets = [
     ["../../target/release/refx", "usr/bin/", "755"],
     ["../../packaging/refx.desktop", "usr/share/applications/", "644"],
+    # ★ ชื่อปลายทางต้องเป็น `refx.png` เป๊ะ — `Icon=refx` ใน .desktop ค้นหาไฟล์
+    #   ตามชื่อนี้ในทุกขนาดของ hicolor · ชื่อผิด = ไอคอนหายบนทุก desktop ของ Linux
+    ["../../assets/icon/refx-256.png", "usr/share/icons/hicolor/256x256/apps/refx.png", "644"],
     ["../../THIRD-PARTY-LICENSES.md", "usr/share/doc/refx/", "644"],
     ["../../assets/fonts/OFL.txt", "usr/share/doc/refx/", "644"],
     ["../../LICENSE-MIT", "usr/share/doc/refx/", "644"],
