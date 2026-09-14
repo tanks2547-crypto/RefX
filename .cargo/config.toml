@@ -1,8 +1,34 @@
 [target.'cfg(target_os = "windows")']
 rustflags = ["-C", "control-flow-guard=yes"]
 
+# ★★★ ห้ามใส่ `-C relocation-model=pie` กลับเข้ามา — มันทำให้ **build บน Linux
+#     พังทั้งทรี** และอาการไม่ได้ชี้มาทางนี้เลยแม้แต่น้อย
+#
+#   `[target.'cfg(...)']` **ไม่ได้แยก host ออกจาก target** เมื่อไม่ได้ส่ง
+#   `--target` · proc-macro (ซึ่งเป็น dylib ของ host) จึงได้ธงนี้ไปด้วย แล้ว
+#   rustc โหลดมันไม่ได้ · ผลที่เห็นคือ `zbus` ล้ม **157 error** ที่หน้าตาเหมือน
+#   โค้ดของ zbus เสียเอง (`cannot find attribute zbus`,
+#   `can't find crate for zbus_macros`, `the name Stats is defined multiple times`)
+#   — ไม่มีบรรทัดไหนพูดถึง rustflags เลยสักบรรทัด
+#
+#   พิสูจน์แล้วด้วยการเปลี่ยนตัวแปรทีละตัว (probe run 34805070404, 34805412531):
+#     เอา .cargo/config.toml ออก        → ผ่าน
+#     เหลือแต่ relocation-model=pie      → **ล้ม**
+#     เหลือแต่ link-arg relro,now        → ผ่าน
+#     config เดิมครบ แต่ build ด้วย --target → ผ่าน (เพราะ --target แยก host ออก)
+#
+#   ★ และธงนี้ **ไม่ได้ให้อะไรเพิ่มอยู่แล้ว**: x86_64-unknown-linux-gnu ตั้ง
+#     `relocation-model = pic` + `position-independent-executables = true`
+#     เป็นค่าเริ่มต้นของ target อยู่ก่อนแล้ว · เราจ่ายด้วย build ที่พังทั้งทรี
+#     เพื่อแลกกับศูนย์
+#
+#   ★★ ของที่ต้องการจริงคือ **คุณสมบัติของไฟล์ที่แจก ไม่ใช่ธงที่สั่ง** —
+#     `cargo xtask verify-deb` ตรวจ PIE + BIND_NOW จากตัว binary ที่แตกออกมา
+#     จาก `.deb` โดยตรง ธงหายเมื่อไหร่ประตูนั้นแดง ไม่ใช่เงียบ
+#
+#   13–14 ก.ย. 2026 · `docs/08 §3.9` ข้อ 13
 [target.'cfg(target_os = "linux")']
-rustflags = ["-C", "relocation-model=pie", "-C", "link-arg=-Wl,-z,relro,-z,now"]
+rustflags = ["-C", "link-arg=-Wl,-z,relro,-z,now"]
 
 [alias]
 xtask = "run --package xtask --"

@@ -34,8 +34,15 @@ jobs:
       - name: THIRD-PARTY-LICENSES.md ต้องตรงกับ Cargo.lock
         run: cargo run -q -p xtask -- licenses --check
 
-      # ★★ NC ก่อน ไม่ใช่หลัง — ตัว NC สร้างซิปที่ **ขาดไฟล์ใบอนุญาต** ทับชื่อเดิม
-      #    ถ้ารันทีหลัง ไฟล์ที่อัปโหลดจะเป็นตัวที่พังแทนตัวจริง
+      # ★★★ เหตุผลเดิมที่เขียนไว้ตรงนี้ **ผิด** และความผิดนั้นหลุดออกไปกับของจริง
+      #
+      #    เดิมเขียนว่า "NC ทับชื่อเดิม จึงต้องรันก่อน" — จริงกับ `no-license`
+      #    เท่านั้น · `stale-binary` เปลี่ยนชื่อไฟล์เป็น `refx-9.9.9-...zip`
+      #    จึงไม่ทับใคร แล้ว `upload-artifact` ที่เก็บ `target/package/*.zip`
+      #    ก็หอบไปด้วย — artifact ของ run 34771844462 มีซิปสองอันจริง ๆ
+      #
+      #    ตอนนี้ `xtask` เขียน NC ลง `target/package-nc/` คนละที่กับของจริง
+      #    ลำดับของขั้นจึงไม่สำคัญอีกต่อไป และของปลอมหลุดออกไปไม่ได้เลย
       - name: negative control ของประตูแพ็กเกจ
         shell: bash
         run: |
@@ -133,37 +140,28 @@ jobs:
       - name: ไอคอนต้องตรงกับ assets/icon/refx.svg
         run: cargo run -q -p xtask -- icon --check
 
-      # ★★★ build เอง แล้วให้ `cargo deb` **แค่ห่อ** (`--no-build`)
+      # ★★★ ปิดคดี `zbus` 157 error — ตัวการคือ `-C relocation-model=pie`
+      #     ใน `.cargo/config.toml` **ไม่ใช่ `cargo deb` และไม่ใช่ feature**
       #
-      #   ปล่อยให้ `cargo deb` build เองแล้วมันใส่ `--target` ให้ ซึ่งปิด
-      #   feature unification ของ resolver v2 · แต่ **นั่นไม่ใช่สาเหตุที่ zbus ล้ม**
-      #   — ย้ายมา build เองแล้วยังล้ม 157 error เท่าเดิม (run 34771844462)
-      #   จึงเหลือไว้เพราะห่อของที่ผ่านแล้วถูกกว่า build ซ้ำด้วยเงื่อนไขอื่น
+      #   `[target.'cfg(target_os = "linux")']` ไม่ได้แยก host ออกจาก target
+      #   เมื่อไม่ได้ส่ง `--target` · proc-macro จึงได้ธงนั้นไปด้วยแล้วโหลดไม่ได้
+      #   (probe run 34805070404 / 34805412531 — เปลี่ยนตัวแปรทีละตัว)
       #
-      # ★★★ ยังไม่รู้สาเหตุที่ `zbus` ล้ม — ขั้นข้างล่างคือการ **ตั้งคำถามให้ CI ตอบ**
+      # ★★ สิ่งที่ยังไม่ได้แก้ และสำคัญกว่าเรื่องแพ็กเกจ: job `check (ubuntu-latest)`
+      #    **ไม่เคยคอมไพล์ zbus เลยสักรอบ** — `Compiling zbus` = 0 ทุกครั้งที่ตรวจ
+      #    มันหยิบจาก cache · Linux build จากศูนย์จึงพังอยู่นานโดยไม่มีใครรู้
+      #    และรู้ได้เพราะ job นี้เป็น job แรกที่ cache ว่าง (ดู ROADMAP)
       #
-      #   สิ่งที่รู้แน่: `Compiling zbus` ถึง error แรกห่างกัน **0.14 วินาที** และ
-      #   error ทุกตัวคือ "แมโครไม่ขยาย" (`cannot find attribute zbus`,
-      #   `can't find crate for zbus_macros`) — ไม่ใช่การคอมไพล์ที่ล้มกลางทาง
-      #   · ตัด feature ออกแล้ว: ชุด feature ของ zbus เท่ากันเป๊ะระหว่าง
-      #     `-p refx-app` กับ `--workspace --all-features` (ตรวจด้วย cargo tree)
-      #
-      #   สิ่งที่ยังไม่รู้: job `check (ubuntu-latest)` ที่เขียวอยู่ **ไม่เคย
-      #   คอมไพล์ zbus เลย** — มันหยิบจาก cache ทุกรอบ (`Compiling zbus` = 0)
-      #   จึงยังไม่มีหลักฐานว่า build จากศูนย์บน Linux ผ่านได้จริงในวันนี้
-      #
-      #   → ขั้น "จากศูนย์แบบเดียวกับ ci.yml" ใช้คำสั่งที่ CI อ้างว่าเขียว
-      #     ผ่าน = ความต่างอยู่ที่คำสั่งของเรา · ล้ม = `check (ubuntu)` เป็น
-      #     **เขียวปลอมที่ cache เลี้ยงไว้** ซึ่งใหญ่กว่าเรื่องแพ็กเกจมาก
-      - name: สภาพเครื่องก่อน build (ตัดเรื่องดิสก์/แรมออกให้ได้ด้วยตัวเลข)
+      # ★ `--no-build` ยังอยู่: ห่อของที่ build ผ่านแล้ว ถูกกว่า build ซ้ำ
+      - name: สภาพเครื่อง + toolchain ที่จะถูกใช้จริง
+        # ★ พิมพ์ `rustc -vV` เสมอ — `rust-toolchain.toml` ตรึงไว้ที่ 1.92
+        #   ซึ่ง **ไม่ใช่** ตัวที่ `dtolnay/rust-toolchain@stable` ติดตั้ง
+        #   ความต่างนั้นมองไม่เห็นเลยถ้าไม่พิมพ์ และเคยพาการวินิจฉัยหลงทางมาแล้ว
         run: |
           df -h /
           free -m
           nproc
           rustc -vV
-
-      - name: วินิจฉัย — build จากศูนย์ด้วยคำสั่งเดียวกับ ci.yml
-        run: cargo build --release --all-features
 
       # ★ ของที่จะห่อต้องเป็น **default features เท่านั้น** — `--all-features`
       #   เปิด `force-device-lost` ซึ่งเป็นตะขอทดสอบ ห้ามติดไปกับของที่แจก

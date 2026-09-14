@@ -42,6 +42,18 @@ const REQUIRED: &[(&str, &str)] = &[
     ("LICENSE-APACHE", "LICENSE-APACHE"),
 ];
 
+/// โฟลเดอร์ผลลัพธ์ — ของจริงกับของ NC **ห้ามอยู่ที่เดียวกัน**
+///
+/// `.github/workflows/package.yml` อัปโหลดเฉพาะ `target/package/` ดังนั้นการ
+/// แยกที่อยู่คือสิ่งที่ทำให้ของปลอมหลุดออกไปไม่ได้เลย ไม่ใช่แค่ "ไม่น่าหลุด"
+fn nc_out_dir(nc: &str) -> &'static str {
+    if nc.is_empty() {
+        "package"
+    } else {
+        "package-nc"
+    }
+}
+
 /// สร้างแพ็กเกจแล้วตรวจมันจากตัวไฟล์ที่ได้
 ///
 /// # Errors
@@ -75,7 +87,17 @@ pub fn run() -> anyhow::Result<()> {
         .status()?;
     anyhow::ensure!(built.success(), "build ไม่ผ่าน — ไม่แพ็กของที่คอมไพล์ไม่ได้");
 
-    let out_dir = root.join("target").join("package");
+    // ★★★ NC ต้องเขียนลง **คนละโฟลเดอร์** กับของจริง (`docs/08 §3.9` ข้อ 19)
+    //
+    //   เดิมทั้งคู่ลง `target/package/` โดยอาศัยว่า NC "ทับชื่อเดิม" — จริงกับ
+    //   `no-license` เท่านั้น · `stale-binary` เปลี่ยน **ชื่อไฟล์** เป็น 9.9.9
+    //   จึงไม่ทับใคร แล้ว `upload-artifact` ที่เก็บ `target/package/*.zip`
+    //   ก็หอบมันไปด้วย · artifact ที่ CI แจกจึงมีซิปสองอัน อันหนึ่งเป็นของปลอม
+    //   ที่ตกประตูของตัวเอง (เจอจริงตอนโหลดของจากรอบ 34771844462 มาใช้ 14 ก.ย. 2026)
+    //
+    //   แยกโฟลเดอร์แล้วลำดับของขั้นใน workflow ไม่สำคัญอีกต่อไป และไม่มีทาง
+    //   ที่ของปลอมจะหลุดเข้าไปในสิ่งที่ถูกอัปโหลด ไม่ว่าใครจะสลับขั้นทีหลัง
+    let out_dir = root.join("target").join(nc_out_dir(&nc));
     let stage = out_dir.join(&stem);
     let _ = std::fs::remove_dir_all(&stage);
     std::fs::create_dir_all(&stage)?;
@@ -204,7 +226,66 @@ pub fn verify_deb() -> anyhow::Result<()> {
         agree(&declared, &from_binary, from_name),
         "★★★ เวอร์ชันไม่ตรงกัน — Cargo.toml={declared} ไบนารี={from_binary} ชื่อ={from_name}"
     );
-    println!("\n.deb ผ่านประตูทั้งสองบาน");
+    println!("\n— ประตู 3: การเสริมความแข็งแรงต้องอยู่ **ในไฟล์ที่แจก** —");
+    hardened(&exe)?;
+
+    println!("\n.deb ผ่านประตูทั้งสามบาน");
+    Ok(())
+}
+
+/// ★★★ ตรวจ PIE + BIND_NOW จาก **ตัว binary ที่แตกออกมาจาก .deb**
+///
+/// ## ทำไมต้องตรวจไฟล์ ไม่ใช่เชื่อธงใน `.cargo/config.toml`
+///
+/// เพราะธงหายไปได้โดยไม่มีใครรู้ · และเราเพิ่งเสียเวลาไปทั้งวันกับตรงกันข้าม:
+/// ธง `-C relocation-model=pie` ที่ **มีอยู่** แต่ทำให้ build ทั้งทรีพัง แล้ว
+/// ต้องถอดออก · ถ้าความมั่นใจของเราผูกกับ "มีธงอยู่ในไฟล์ config ไหม"
+/// การถอดมันออกจะเป็นการลดความแข็งแรงแบบเงียบ ๆ ทันที
+///
+/// PIE เป็นค่าเริ่มต้นของ target `x86_64-unknown-linux-gnu` อยู่แล้ว ประตูนี้
+/// จึงไม่ได้ตรวจธง แต่ตรวจ **ผลลัพธ์** ซึ่งเป็นสิ่งเดียวที่ผู้ใช้ได้รับจริง
+///
+/// `readelf` ที่หายไป = แดง ไม่ใช่ข้าม (`docs/08 §3.9` ข้อ 11 — ประตูที่ข้าม
+/// เงียบ ๆ คือประตูที่ไม่มีอยู่)
+fn hardened(exe: &Path) -> anyhow::Result<()> {
+    let header = std::process::Command::new("readelf").arg("-h").arg(exe).output();
+    let header = header.map_err(|err| {
+        anyhow::anyhow!("เรียก `readelf` ไม่ได้ ({err}) — ประตูนี้ห้ามข้าม ติดตั้ง binutils ก่อน")
+    })?;
+    anyhow::ensure!(header.status.success(), "`readelf -h` ล้มกับ {}", exe.display());
+    let dynamic = std::process::Command::new("readelf").arg("-d").arg(exe).output()?;
+    anyhow::ensure!(dynamic.status.success(), "`readelf -d` ล้มกับ {}", exe.display());
+
+    judge(
+        &String::from_utf8_lossy(&header.stdout),
+        &String::from_utf8_lossy(&dynamic.stdout),
+    )
+    .map_err(|err| anyhow::anyhow!("{} — {err}", exe.display()))
+}
+
+/// ตัดสินจากข้อความของ `readelf` — แยกออกมาเพื่อให้ **เทสต์ได้โดยไม่ต้องมี ELF จริง**
+fn judge(header: &str, dynamic: &str) -> anyhow::Result<()> {
+    let kind = header
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("Type:"))
+        .unwrap_or("")
+        .trim()
+        .to_owned();
+    println!("  ELF Type   {kind}");
+    anyhow::ensure!(
+        kind.starts_with("DYN"),
+        "ไม่ใช่ PIE (Type = {kind}) — ASLR ใช้กับตัวโปรแกรมไม่ได้"
+    );
+
+    let now = dynamic
+        .lines()
+        .any(|line| line.contains("BIND_NOW") || line.contains("FLAGS") && line.contains("NOW"));
+    println!("  BIND_NOW   {}", if now { "มี" } else { "ไม่มี" });
+    anyhow::ensure!(
+        now,
+        "ไม่มี BIND_NOW — GOT เขียนได้ตลอดอายุโปรเซส · ธง \
+         `-C link-arg=-Wl,-z,relro,-z,now` ใน .cargo/config.toml หายไปหรือเปล่า"
+    );
     Ok(())
 }
 
@@ -554,6 +635,44 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+
+    /// ★★★ ของปลอมจาก negative control ต้องออกไปกับ artifact ที่แจกไม่ได้
+    ///
+    /// เกิดจริง: `.github/workflows/package.yml` อัปโหลด `target/package/*.zip`
+    /// และ NC `stale-binary` สร้าง `refx-9.9.9-...zip` ไว้ที่เดียวกัน —
+    /// artifact ของรอบ 34771844462 จึงมีซิปสองอัน อันหนึ่งเป็นของที่ตกประตู
+    /// ของตัวเอง · จับได้ตอนโหลดของจริงมาใช้ ไม่มีเทสต์ไหนเห็นมาก่อน
+    #[test]
+    fn a_negative_control_package_never_lands_where_the_real_one_is_uploaded_from() {
+        assert_eq!(nc_out_dir(""), "package", "ของจริงต้องอยู่ที่ target/package");
+        for nc in ["no-license", "stale-binary", "อะไรก็ตามที่ยังไม่มี"] {
+            assert_ne!(
+                nc_out_dir(nc),
+                "package",
+                "NC {nc:?} เขียนลงโฟลเดอร์ที่ CI อัปโหลด — ของปลอมจะหลุดไปกับของจริง"
+            );
+        }
+    }
+
+    /// ข้อความจริงของ `readelf -h` บน binary ที่ build ตามปกติ (PIE)
+    const PIE_HEADER: &str = "ELF Header:\n  Class:  ELF64\n  Type:  DYN (Position-Independent Executable file)\n  Machine: Advanced Micro Devices X86-64\n";
+    /// ข้อความจริงของ `readelf -h` บน binary ที่ลิงก์ด้วย `-no-pie`
+    const NO_PIE_HEADER: &str = "ELF Header:\n  Class:  ELF64\n  Type:  EXEC (Executable file)\n  Machine: Advanced Micro Devices X86-64\n";
+    const RELRO_NOW: &str = " 0x000000000000001e (FLAGS)   BIND_NOW\n 0x000000006ffffffb (FLAGS_1) Flags: NOW PIE\n";
+    const LAZY: &str = " 0x0000000000000015 (DEBUG)   0x0\n 0x0000000000000003 (PLTGOT)  0x4000\n";
+
+    /// ★ ประตูที่ตัดสินจาก **ไฟล์ที่แจก** ต้องแดงได้จริงทั้งสองแบบที่มันอ้างว่าจับ
+    /// — ไม่งั้นมันคือบรรทัด "ผ่าน" ที่ไม่ได้แปลว่าอะไรเลย
+    #[test]
+    fn the_hardening_gate_goes_red_for_a_plain_executable_and_for_lazy_binding() {
+        judge(PIE_HEADER, RELRO_NOW).expect("binary ที่ถูกต้องต้องผ่าน");
+
+        let err = judge(NO_PIE_HEADER, RELRO_NOW).expect_err("EXEC ต้องไม่ผ่าน");
+        assert!(format!("{err}").contains("PIE"), "{err}");
+
+        let err = judge(PIE_HEADER, LAZY).expect_err("ไม่มี BIND_NOW ต้องไม่ผ่าน");
+        assert!(format!("{err}").contains("BIND_NOW"), "{err}");
+    }
 
     /// ★★★ ต้องอ่านเวอร์ชันของ **โปรแกรม** ไม่ใช่ของ dependency ตัวแรกที่เจอ
     #[test]
