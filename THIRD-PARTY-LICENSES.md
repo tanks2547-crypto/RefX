@@ -14,6 +14,7 @@ RefX is distributed with the third-party software listed below. This document re
 | ไฟล์ | ใบอนุญาต | ตัวบท |
 |---|---|---|
 | `assets/fonts/NotoSansThai-Regular.ttf` | SIL Open Font License 1.1 (OFL-1.1) | `assets/fonts/OFL.txt` |
+| `assets/icon/refx-64.rgba` | MIT OR Apache-2.0 (งานของ RefX เอง) | `LICENSE-MIT` |
 
 > ★ `epaint` ฝังฟอนต์ของตัวเองมาด้วย — ใบอนุญาตของมัน (`OFL-1.1` และ `Ubuntu-font-1.0`) อยู่ในรายการ crate ข้างล่าง
 

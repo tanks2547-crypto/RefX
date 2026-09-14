@@ -60,11 +60,24 @@ const TARGETS: &[(&str, &str)] = &[
 /// ★ ตรงนี้เป็นรายการเดียวในไฟล์นี้ที่เขียนด้วยมือ **โดยจำเป็น** — และมีประตู
 /// คุมอยู่: ทุกไฟล์ที่ `include_bytes!` ใน `crates/` ต้องมีแถวของมันที่นี่
 /// (ดู [`check_embedded`]) ไม่งั้นแดง
-const EMBEDDED: &[(&str, &str, &str)] = &[(
-    "assets/fonts/NotoSansThai-Regular.ttf",
-    "SIL Open Font License 1.1 (OFL-1.1)",
-    "assets/fonts/OFL.txt",
-)];
+const EMBEDDED: &[(&str, &str, &str)] = &[
+    (
+        "assets/fonts/NotoSansThai-Regular.ttf",
+        "SIL Open Font License 1.1 (OFL-1.1)",
+        "assets/fonts/OFL.txt",
+    ),
+    // ★ ไอคอนหน้าต่าง — **งานของโปรเจกต์นี้เอง** จึงใช้ใบอนุญาตเดียวกับซอร์ส
+    //   ไฟล์นี้สร้างโดย `cargo xtask icon` จาก `assets/icon/refx.svg`
+    //
+    //   ★★ ประตูนี้จับเรื่องนี้ได้ทันทีที่เพิ่ม `include_bytes!` เข้าไป —
+    //   ซึ่งเป็นสิ่งที่มันถูกสร้างมาเพื่อจับพอดี: ของที่ถูกฝังลงไบนารีแล้ว
+    //   ไม่มีใบอนุญาตกำกับ คือของที่เราแจกโดยไม่ได้บอกว่าแจกอะไร
+    (
+        "assets/icon/refx-64.rgba",
+        "MIT OR Apache-2.0 (งานของ RefX เอง)",
+        "LICENSE-MIT",
+    ),
+];
 
 /// ★★★ crate ที่ **ไม่มีไฟล์ตัวบทใบอนุญาตมากับ tarball เลย**
 ///

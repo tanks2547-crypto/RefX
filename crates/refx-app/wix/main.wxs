@@ -187,9 +187,13 @@
         <!--
           The product icon shown in the "Apps & features" / Add-Remove Programs list.
 
-          Generated from assets/icon/refx.svg by `cargo xtask icon`; the CI gate
-          `cargo xtask icon --check` fails if the .ico stops matching the .svg,
-          so this file can never silently drift from the icon in the window.
+          Generated from assets/icon/refx.svg by "cargo xtask icon". The CI gate
+          (the same command with the check flag) fails if the .ico stops matching
+          the .svg, so this file cannot silently drift from the window icon.
+
+          Do not write a double hyphen anywhere in a WiX comment: candle rejects
+          the file with CNDL0104 and the message points at the comment, not at
+          the flag you were quoting.
         -->
         <Icon Id='ProductICO' SourceFile='assets\icon\refx.ico'/>
         <Property Id='ARPPRODUCTICON' Value='ProductICO' />
