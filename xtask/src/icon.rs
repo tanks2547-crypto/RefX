@@ -672,6 +672,50 @@ mod tests {
         assert_eq!(at(128, 8).3, 255, "ขอบบนกลางภาพต้องทึบ");
     }
 
+    /// ★★★ สารบัญที่ถูกต้องไม่ได้แปลว่า **เนื้อ** ถูกต้อง
+    ///
+    /// เทสต์ข้างล่างตรวจว่าสารบัญของ `.ico` ชี้ไปในไฟล์และประกาศขนาดตรง ·
+    /// แต่ถ้า DIB ข้างในเป็นคนละขนาดกับที่สารบัญประกาศ Windows จะขึ้นไอคอน
+    /// เพี้ยนหรือว่างเปล่าโดยที่สารบัญยัง "ถูก" ทุกประการ — จึงต้องแกะ DIB
+    /// กลับมาอ่านหัวของมันเอง (ยืนยันภายนอกแล้วด้วย `System.Drawing.Icon`
+    /// ของ Windows ที่อ่าน entry 16×16 ออกมาได้จริง 14 ก.ย. 2026)
+    #[test]
+    fn the_bytes_inside_each_small_entry_really_are_a_dib_of_that_size() {
+        let ico = build_ico(&real_icon()).expect("สร้าง ico");
+        for (n, &size) in ICO_SIZES.iter().enumerate() {
+            if size == 256 {
+                continue; // 256 เก็บเป็น PNG ตามสเปก ไม่ใช่ DIB
+            }
+            let entry = 6 + 16 * n;
+            let at = |off: usize| {
+                u32::from_le_bytes([
+                    ico[entry + off],
+                    ico[entry + off + 1],
+                    ico[entry + off + 2],
+                    ico[entry + off + 3],
+                ])
+            };
+            let start = at(12) as usize;
+            let dib = &ico[start..start + at(8) as usize];
+            let word = |off: usize| {
+                u32::from_le_bytes([dib[off], dib[off + 1], dib[off + 2], dib[off + 3]])
+            };
+            assert_eq!(word(0), 40, "BITMAPINFOHEADER ของรายการที่ {n} ต้องยาว 40");
+            assert_eq!(word(4), size, "biWidth ของรายการที่ {n} ไม่ตรงกับที่สารบัญประกาศ");
+            assert_eq!(
+                word(8),
+                size * 2,
+                "biHeight ต้องเป็นสองเท่า (XOR + AND) — Windows อ่านครึ่งล่างเป็น mask"
+            );
+            assert_eq!(
+                u32::from(u16::from_le_bytes([dib[14], dib[15]])),
+                32,
+                "ต้องเป็น 32 bpp"
+            );
+            assert_eq!(word(16), 0, "biCompression ต้องเป็น BI_RGB");
+        }
+    }
+
     #[test]
     fn every_size_in_the_ico_is_declared_where_windows_looks_for_it() {
         let ico = build_ico(&real_icon()).expect("สร้าง ico");
