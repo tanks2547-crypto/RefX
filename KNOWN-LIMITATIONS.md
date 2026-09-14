@@ -83,19 +83,21 @@ UI มีภาษาอังกฤษกับไทย · ฟอนต์ CJK
 | Linux — AppImage | ❌ ยังไม่มีในรุ่นนี้ — เลื่อนไป v1.1 |
 | macOS | ❌ ยังไม่รองรับ (`ROADMAP` P6) |
 
-## 7. Inspector ยังไม่ครบตามที่ออกแบบไว้ / The Inspector is incomplete
+## 7. ตัวเลขใน Inspector ยัง **แก้ไม่ได้** / The Inspector numbers are read-only
 
-ตอนนี้ปรับได้: opacity · grayscale · invert · brightness · contrast · flip
+ตอนนี้ **เห็นค่า** ได้ครบ: X / Y / กว้าง / สูง · การหมุน · ชื่อไฟล์ · ขนาดพิกเซล ·
+รูปแบบไฟล์ · ขนาดไฟล์ · ที่อยู่เต็ม — แต่ **พิมพ์แก้ไม่ได้** ในรุ่นนี้
+ย้ายและหมุนด้วยการลากบน canvas ได้ตามปกติ
 
-**ยังไม่มี:** ตัวเลข X / Y / กว้าง / สูง · rotation · crop · lock ·
-และแถบข้อมูลไฟล์ (ชื่อ, ขนาดพิกเซล, รูปแบบ, ที่อยู่, ปุ่มเปิดโฟลเดอร์)
+**ยังไม่มีเลย:** ครอป · ล็อกไม่ให้ขยับ · ปุ่มเปิดโฟลเดอร์ของไฟล์
 
-★ หัวข้อ **"X / Y / W / H"** ที่เห็นบนแผงเป็นชื่อของส่วนที่ยังไม่ได้สร้าง —
-ไม่ใช่ว่าค่าหายไป · เขียนไว้ตรงนี้เพื่อให้คุณไม่ต้องนั่งหาว่ามันซ่อนอยู่ตรงไหน
+★ เราเลือกที่จะ **ไม่ใส่ช่องที่กดแล้วไม่เกิดอะไร** ไว้ล่วงหน้า — ช่องแบบนั้น
+อ่านว่าโปรแกรมพัง ไม่ใช่ว่ายังไม่รองรับ
 
-The Inspector currently exposes opacity and the filter controls only. The
-"X / Y / W / H" heading names a section that is not built yet; the numbers are
-not hidden somewhere, they do not exist in this release.
+The Inspector shows every number but does not let you type new ones yet; drag
+on the canvas to move and rotate. Crop, lock and "reveal in folder" are not in
+this release at all — we left the controls out rather than ship ones that do
+nothing.
 
 ## 8. Library ไม่ขึ้นชื่อโฟลเดอร์ / The Library panel stays empty
 

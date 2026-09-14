@@ -8387,7 +8387,7 @@ impl AppDelegate for RefxApp {
                     refx_core::board::ItemKind::Image(asset) => Some(crate::shell::FileView {
                         name: refx_asset::decode::file_label(&asset.path),
                         px: Some((asset.px_size.x, asset.px_size.y)),
-                        format: Some(crate::shell::format_name(asset.format)),
+                        format: crate::shell::format_name(asset.format),
                         path: asset.path.display().to_string(),
                         bytes: asset.file_size,
                     }),

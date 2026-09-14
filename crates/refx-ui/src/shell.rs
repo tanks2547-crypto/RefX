@@ -2103,21 +2103,28 @@ pub(crate) const ARRANGE_BUTTONS: [(ArrangeRequest, &str, Key); 8] = [
 /// "ทุก mutation ผ่าน Command" ยังบังคับได้จริงเมื่อ widget เป็นคนแก้ค่า
 /// ชื่อรูปแบบไฟล์ที่ผู้ใช้เห็น — **ไม่แปลภาษา** เพราะเป็นชื่อเฉพาะ
 ///
-/// ★ `Unknown` แปลเป็น `"?"` ไม่ใช่คำว่า "ไม่ทราบ" — ช่องนี้อยู่ต่อท้ายขนาดภาพ
-/// ในบรรทัดเดียว คำยาว ๆ จะดันให้บรรทัดตัดโดยไม่ได้ให้ข้อมูลเพิ่ม
-/// · `Unknown` เกิดได้จริงกับภาพที่มาจาก cache hit (`docs/02 §2.2.5`)
+/// ## ★★★ `Unknown` คืน `None` — **ไม่ใช่ `"?"`**
+///
+/// รอบแรกผมเขียนให้มันคืน `"?"` แล้วภาพหน้าจอของจริงขึ้นว่า
+/// `2400 × 1800 px · ? · 1.5 MB` สำหรับไฟล์ `.jpg` ธรรมดา — ซึ่งอ่านว่า
+/// **โปรแกรมไม่แน่ใจว่านี่คือไฟล์อะไร** ทั้งที่ความจริงคือ `AssetRef` ของเส้นทาง
+/// cache hit ไม่ได้บันทึก format ไว้ (`docs/02 §2.2.5`)
+///
+/// เป็นกฎเดียวกับที่ใช้กับขนาดพิกเซลในแผงนี้เป๊ะ: **ช่องที่ไม่รู้หายไปทั้งช่อง
+/// ไม่ใช่ขึ้นเป็นเครื่องหมายคำถาม** · ผมละเมิดกฎที่เพิ่งเขียนเองในไฟล์เดียวกัน
+/// และมีแต่ภาพหน้าจอของจริงที่จับได้ (`docs/08 §3.9` ข้อ 5)
 #[must_use]
-pub fn format_name(format: refx_core::board::ImageFormat) -> &'static str {
+pub fn format_name(format: refx_core::board::ImageFormat) -> Option<&'static str> {
     use refx_core::board::ImageFormat as F;
     match format {
-        F::Png => "PNG",
-        F::Jpeg => "JPEG",
-        F::WebP => "WebP",
-        F::Gif => "GIF",
-        F::Bmp => "BMP",
-        F::Tga => "TGA",
-        F::Tiff => "TIFF",
-        F::Unknown => "?",
+        F::Png => Some("PNG"),
+        F::Jpeg => Some("JPEG"),
+        F::WebP => Some("WebP"),
+        F::Gif => Some("GIF"),
+        F::Bmp => Some("BMP"),
+        F::Tga => Some("TGA"),
+        F::Tiff => Some("TIFF"),
+        F::Unknown => None,
     }
 }
 
@@ -3990,23 +3997,21 @@ mod tests {
     }
 
     /// ★ ชื่อรูปแบบไฟล์ต้องสั้นและไม่ว่าง — มันอยู่ต่อท้ายขนาดภาพในบรรทัดเดียว
+    /// ★★ และ `Unknown` ต้อง **ไม่มีชื่อ** ไม่ใช่ได้เครื่องหมายคำถาม —
+    ///    ภาพหน้าจอของจริงจับได้ว่า `?` อ่านเหมือนโปรแกรมสับสน (18 ก.ย. 2026)
     #[test]
-    fn every_image_format_has_a_short_name_to_show() {
+    fn every_image_format_has_a_short_name_and_unknown_has_none() {
         use refx_core::board::ImageFormat as F;
-        for format in [
-            F::Png,
-            F::Jpeg,
-            F::WebP,
-            F::Gif,
-            F::Bmp,
-            F::Tga,
-            F::Tiff,
-            F::Unknown,
-        ] {
-            let name = format_name(format);
+        for format in [F::Png, F::Jpeg, F::WebP, F::Gif, F::Bmp, F::Tga, F::Tiff] {
+            let name = format_name(format).unwrap_or_default();
             assert!(!name.is_empty(), "{format:?} ไม่มีชื่อ");
-            assert!(name.len() <= 5, "{format:?} ชื่อยาวเกินไป: {name}");
+            assert!(name.len() <= 4, "{format:?} ชื่อยาวเกินไป: {name}");
         }
+        assert_eq!(
+            format_name(F::Unknown),
+            None,
+            "format ที่ไม่รู้ต้องหายไปทั้งช่อง ไม่ใช่ขึ้นเป็นเครื่องหมายคำถาม"
+        );
     }
 
     fn shell_text(output: &egui::FullOutput) -> String {
