@@ -1,0 +1,116 @@
+# ★★★ ประตูของ `docs/08 §3.9` ข้อ 16 — **build จากศูนย์ ไม่มี cache ช่วยเลย**
+#
+# ## ทำไมต้องมี job นี้ ทั้งที่ `CI` เขียวทุก push
+#
+# `check (ubuntu-latest)` เขียวมาตลอดโดย **ไม่เคยคอมไพล์ `zbus` เลยสักรอบ** —
+# มันหยิบจาก `Swatinem/rust-cache` ทุกครั้ง · ระหว่างนั้น Linux build จากศูนย์
+# **พังอยู่เงียบ ๆ** เพราะ `-C relocation-model=pie` ใน `.cargo/config.toml`
+# ทำให้ proc-macro โหลดไม่ได้ · เรารู้ก็ต่อเมื่อ job แพ็กเกจโผล่มาเป็น job แรก
+# ที่ cache ว่าง แล้วระเบิดด้วย 157 error ที่ไม่มีบรรทัดไหนพูดถึง rustflags
+#
+# cache เร่งงานที่ **ถูกอยู่แล้ว** ได้ แต่ปิดบัง **ทางที่ไม่เคยถูกเดินใหม่** ด้วย
+#
+# ## ★★★ job นี้ต้องพิสูจน์ว่าตัวเองเย็นจริง ไม่ใช่แค่ "ไม่ได้ใส่ cache action"
+#
+# การพิสูจน์ด้วยการ **ไม่มี** อะไรสักอย่างนั้นอ่อน — วันหนึ่งมีคนเติม
+# `Swatinem/rust-cache` กลับเข้ามาด้วยความหวังดี job นี้จะยังเขียวและยัง
+# ชื่อว่า "cold" ทั้งที่มันอุ่นแล้ว กลายเป็นบานที่หลอกตัวเองซ้ำรอยเดิมเป๊ะ
+#
+# → จึงพิสูจน์ด้วย **หลักฐานบวก**: นับบรรทัด `Compiling` ที่ cargo พิมพ์จริง
+#   และบังคับว่า **crate ที่เคยถูก cache ปิดบังต้องโผล่ในรายการนั้น**
+#   · มี cache เมื่อไหร่ ตัวเลขจะยุบทันทีแล้วประตูแดงพร้อมบอกว่าเหลือกี่ตัว
+#
+# ★ นี่คือ `ข้อ 2` (โครงเปล่าต้องไม่เงียบ) ใช้กับ cache ทุกประการ:
+#   "ขั้นนี้ทำงานจริงหรือข้ามไป" ต้องอ่านออกจาก log เสมอ
+name: Cold build (docs/08 §3.9 ข้อ 16)
+
+on:
+  # ★ พฤหัส — CI จันทร์ · Mutation อังคาร · Fuzz จ/พ/ศ · ไม่ให้งานหนักชนวันกัน
+  schedule: [{ cron: "0 2 * * 4" }]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  cold:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ★ crate ที่ใช้เป็นพยานต้องเป็นตัวที่ **มีเฉพาะบน OS นั้น** และอยู่ลึก
+          #   พอที่จะพังได้ด้วยเหตุผลของแพลตฟอร์ม · `zbus` คือตัวที่พังจริง
+          - os: ubuntu-latest
+            witness: zbus
+          - os: windows-latest
+            witness: windows-sys
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # ★★★ **ห้ามใส่ `Swatinem/rust-cache` ที่นี่** — ทั้ง job มีอยู่เพื่อสิ่งนี้
+      #     ขั้น "พยาน" ข้างล่างจะจับได้เองถ้ามีใครเติมกลับเข้ามา
+
+      - name: Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev mesa-vulkan-drivers
+
+      - name: ยืนยันว่ายังไม่มีอะไรถูกสร้างไว้ก่อน
+        shell: bash
+        run: |
+          rustc -vV
+          if [ -d target ]; then
+            echo "::error::มี target/ อยู่แล้วก่อนเริ่ม build — job นี้ไม่เย็นจริง"
+            exit 1
+          fi
+          echo "target/ ยังไม่มี ตามที่ควร"
+
+      - uses: taiki-e/install-action@nextest
+
+      # ★ `--all-features` ให้ตรงกับ `ci.yml` เป๊ะ — job นี้ต่างจากตัวนั้น
+      #   **ที่ cache อย่างเดียว** ไม่ใช่ที่คำสั่ง ไม่งั้นเทียบผลกันไม่ได้
+      - name: build จากศูนย์ (เก็บ log ไว้ให้ขั้นพยานอ่าน)
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo build --release --all-features 2>&1 | tee cold-build.log
+
+      # ★★★ หลักฐานบวก — ตัวเลขนี้คือสิ่งเดียวที่แยก "เย็นจริง" ออกจาก
+      #     "เขียวเพราะไม่ได้ทำอะไร" · พิมพ์ทุกครั้งไม่ว่าผ่านหรือไม่
+      - name: พยาน — build นี้คอมไพล์อะไรไปจริงบ้าง
+        shell: bash
+        run: |
+          compiled=$(grep -c "Compiling" cold-build.log || true)
+          echo "คอมไพล์ไป $compiled crate"
+          echo "::notice title=cold build::คอมไพล์ $compiled crate บน ${{ matrix.os }}"
+
+          # 200 คือเลขที่ต่ำกว่าของจริงมาก (ทรีนี้ ~470) แต่สูงกว่า build
+          # ที่ cache อุ่นจะทำได้อย่างเทียบไม่ติด — จับหายนะ ไม่ใช่ความแกว่ง
+          if [ "$compiled" -lt 200 ]; then
+            echo "::error::คอมไพล์แค่ $compiled crate — build นี้ไม่ได้เริ่มจากศูนย์ (มีใครใส่ cache กลับมาหรือเปล่า)"
+            exit 1
+          fi
+
+          if ! grep -q "Compiling ${{ matrix.witness }} " cold-build.log; then
+            echo "::error::ไม่เห็น 'Compiling ${{ matrix.witness }}' — crate พยานไม่ได้ถูกคอมไพล์รอบนี้"
+            exit 1
+          fi
+          echo "เห็น 'Compiling ${{ matrix.witness }}' ตามที่ต้อง"
+
+      # ★ เทสต์ด้วย เพราะ "คอมไพล์ผ่าน" กับ "ทำงานถูก" เป็นคนละคำถาม
+      #   และ job นี้เป็นที่เดียวที่ทั้งสองคำถามถูกถามบนทรีที่ไม่มีของเก่าปน
+      - name: เทสต์ทั้งชุดบนทรีที่เย็น
+        env:
+          REFX_REQUIRE_GPU: "1"
+        run: cargo nextest run --workspace --all-features
+
+      # ★ ขึ้นไปดูได้ว่ารอบไหนคอมไพล์อะไร — ตัวเลขใน log หายไปกับ log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cold-build-log-${{ matrix.os }}
+          path: cold-build.log
+          if-no-files-found: warn
