@@ -110,7 +110,8 @@ jobs:
   #   และประตูของเราต้องการ `dpkg-deb` ในการแตกกลับมาตรวจ
   linux-deb:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # ★ 60 เพราะรอบนี้ build สองครั้ง (วินิจฉัย + ของที่จะห่อ) คนละชุด feature
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -128,10 +129,37 @@ jobs:
       # ★★★ build เอง แล้วให้ `cargo deb` **แค่ห่อ** (`--no-build`)
       #
       #   ปล่อยให้ `cargo deb` build เองแล้วมันใส่ `--target` ให้ ซึ่งปิด
-      #   feature unification ของ resolver v2 → `zbus` (มาทาง clipboard ของ
-      #   Linux) คอมไพล์ไม่ผ่าน **157 error** ที่ไม่ใช่โค้ดของเราสักตัว
-      #   · build ปกติของเราผ่านอยู่แล้ว จึงห่อของที่ผ่านแล้วแทนที่จะ build ใหม่
-      #   ด้วยเงื่อนไขที่ต่างออกไป (14 ก.ย. 2026)
+      #   feature unification ของ resolver v2 · แต่ **นั่นไม่ใช่สาเหตุที่ zbus ล้ม**
+      #   — ย้ายมา build เองแล้วยังล้ม 157 error เท่าเดิม (run 34771844462)
+      #   จึงเหลือไว้เพราะห่อของที่ผ่านแล้วถูกกว่า build ซ้ำด้วยเงื่อนไขอื่น
+      #
+      # ★★★ ยังไม่รู้สาเหตุที่ `zbus` ล้ม — ขั้นข้างล่างคือการ **ตั้งคำถามให้ CI ตอบ**
+      #
+      #   สิ่งที่รู้แน่: `Compiling zbus` ถึง error แรกห่างกัน **0.14 วินาที** และ
+      #   error ทุกตัวคือ "แมโครไม่ขยาย" (`cannot find attribute zbus`,
+      #   `can't find crate for zbus_macros`) — ไม่ใช่การคอมไพล์ที่ล้มกลางทาง
+      #   · ตัด feature ออกแล้ว: ชุด feature ของ zbus เท่ากันเป๊ะระหว่าง
+      #     `-p refx-app` กับ `--workspace --all-features` (ตรวจด้วย cargo tree)
+      #
+      #   สิ่งที่ยังไม่รู้: job `check (ubuntu-latest)` ที่เขียวอยู่ **ไม่เคย
+      #   คอมไพล์ zbus เลย** — มันหยิบจาก cache ทุกรอบ (`Compiling zbus` = 0)
+      #   จึงยังไม่มีหลักฐานว่า build จากศูนย์บน Linux ผ่านได้จริงในวันนี้
+      #
+      #   → ขั้น "จากศูนย์แบบเดียวกับ ci.yml" ใช้คำสั่งที่ CI อ้างว่าเขียว
+      #     ผ่าน = ความต่างอยู่ที่คำสั่งของเรา · ล้ม = `check (ubuntu)` เป็น
+      #     **เขียวปลอมที่ cache เลี้ยงไว้** ซึ่งใหญ่กว่าเรื่องแพ็กเกจมาก
+      - name: สภาพเครื่องก่อน build (ตัดเรื่องดิสก์/แรมออกให้ได้ด้วยตัวเลข)
+        run: |
+          df -h /
+          free -m
+          nproc
+          rustc -vV
+
+      - name: วินิจฉัย — build จากศูนย์ด้วยคำสั่งเดียวกับ ci.yml
+        run: cargo build --release --all-features
+
+      # ★ ของที่จะห่อต้องเป็น **default features เท่านั้น** — `--all-features`
+      #   เปิด `force-device-lost` ซึ่งเป็นตะขอทดสอบ ห้ามติดไปกับของที่แจก
       - name: build ที่จะถูกห่อ
         run: cargo build --release --locked -p refx-app
 
