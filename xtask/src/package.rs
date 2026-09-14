@@ -248,13 +248,27 @@ pub fn verify_deb() -> anyhow::Result<()> {
 /// `readelf` ที่หายไป = แดง ไม่ใช่ข้าม (`docs/08 §3.9` ข้อ 11 — ประตูที่ข้าม
 /// เงียบ ๆ คือประตูที่ไม่มีอยู่)
 fn hardened(exe: &Path) -> anyhow::Result<()> {
-    let header = std::process::Command::new("readelf").arg("-h").arg(exe).output();
+    let header = std::process::Command::new("readelf")
+        .arg("-h")
+        .arg(exe)
+        .output();
     let header = header.map_err(|err| {
         anyhow::anyhow!("เรียก `readelf` ไม่ได้ ({err}) — ประตูนี้ห้ามข้าม ติดตั้ง binutils ก่อน")
     })?;
-    anyhow::ensure!(header.status.success(), "`readelf -h` ล้มกับ {}", exe.display());
-    let dynamic = std::process::Command::new("readelf").arg("-d").arg(exe).output()?;
-    anyhow::ensure!(dynamic.status.success(), "`readelf -d` ล้มกับ {}", exe.display());
+    anyhow::ensure!(
+        header.status.success(),
+        "`readelf -h` ล้มกับ {}",
+        exe.display()
+    );
+    let dynamic = std::process::Command::new("readelf")
+        .arg("-d")
+        .arg(exe)
+        .output()?;
+    anyhow::ensure!(
+        dynamic.status.success(),
+        "`readelf -d` ล้มกับ {}",
+        exe.display()
+    );
 
     judge(
         &String::from_utf8_lossy(&header.stdout),
@@ -645,7 +659,8 @@ mod tests {
     #[test]
     fn a_negative_control_package_never_lands_where_the_real_one_is_uploaded_from() {
         assert_eq!(nc_out_dir(""), "package", "ของจริงต้องอยู่ที่ target/package");
-        for nc in ["no-license", "stale-binary", "อะไรก็ตามที่ยังไม่มี"] {
+        for nc in ["no-license", "stale-binary", "อะไรก็ตามที่ยังไม่มี"]
+        {
             assert_ne!(
                 nc_out_dir(nc),
                 "package",
@@ -658,7 +673,8 @@ mod tests {
     const PIE_HEADER: &str = "ELF Header:\n  Class:  ELF64\n  Type:  DYN (Position-Independent Executable file)\n  Machine: Advanced Micro Devices X86-64\n";
     /// ข้อความจริงของ `readelf -h` บน binary ที่ลิงก์ด้วย `-no-pie`
     const NO_PIE_HEADER: &str = "ELF Header:\n  Class:  ELF64\n  Type:  EXEC (Executable file)\n  Machine: Advanced Micro Devices X86-64\n";
-    const RELRO_NOW: &str = " 0x000000000000001e (FLAGS)   BIND_NOW\n 0x000000006ffffffb (FLAGS_1) Flags: NOW PIE\n";
+    const RELRO_NOW: &str =
+        " 0x000000000000001e (FLAGS)   BIND_NOW\n 0x000000006ffffffb (FLAGS_1) Flags: NOW PIE\n";
     const LAZY: &str = " 0x0000000000000015 (DEBUG)   0x0\n 0x0000000000000003 (PLTGOT)  0x4000\n";
 
     /// ★ ประตูที่ตัดสินจาก **ไฟล์ที่แจก** ต้องแดงได้จริงทั้งสองแบบที่มันอ้างว่าจับ
