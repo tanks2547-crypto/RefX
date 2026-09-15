@@ -164,10 +164,33 @@ jobs:
       #     ("ถ้ามันนิ่งพอค่อยเลื่อนขึ้นมาบังคับด้วยทีหลัง") · lavapipe เป็น
       #     dependency ที่เราลงเองด้วย apt จึงเป็นของที่เราคุมได้ ไม่ใช่ของที่
       #     runner บังเอิญมี — apt พังเมื่อไหร่ต้องแดงเสียงดัง ไม่ใช่เขียวเงียบ ๆ
+      # ★★★ ขา Windows ตัด `export_memory` ออกหนึ่งตัว — **พร้อมบอกใน log ทุกครั้ง**
+      #
+      #   เทสต์นั้นเรนเดอร์ tile บน GPU แล้วอ่านกลับ เวลาของมันจึงเป็นเวลาของ
+      #   rasterizer ไม่ใช่ของโค้ดเรา · adapter ของแต่ละที่ต่างกันคนละโลก:
+      #
+      #     เครื่องพัฒนา   RTX 4060 (GPU จริง)                       19 วิ
+      #     ubuntu runner llvmpipe 256-bit                        109 วิ
+      #     windows runner **WARP** `Microsoft Basic Render Driver` > 600 วิ
+      #
+      #   ★ **ไม่ได้ตัดออกจาก Windows** — เครื่องพัฒนาทุกเครื่องเป็น Windows และ
+      #     รันมันทุกครั้งใน 19 วินาที · ที่ตัดคือ **runner ที่ไม่มี GPU จริง**
+      #   ★★ ตัวบังคับใน CI คือ ubuntu ซึ่งรันมันครบทุกขั้น (`§3.9` ข้อ 12 —
+      #     ต้องมีอย่างน้อยหนึ่ง job ที่รันจริง ไม่ใช่ข้ามพร้อมกันทั้ง matrix)
+      #   ★★★ จำนวนเทสต์ของสอง OS จึงต่างกันหนึ่งตัวโดยตั้งใจ — ถ้าเห็นเลขไม่ตรง
+      #     **นี่คือเหตุผล** ไม่ใช่เทสต์หาย
       - name: เทสต์ทั้งชุด — **บังคับว่าต้องมี GPU จริง** ทั้งสองแพลตฟอร์ม
+        shell: bash
         env:
           REFX_REQUIRE_GPU: "1"
-        run: cargo nextest run --workspace --all-features
+        run: |
+          slow='what_an_export_really_costs_in_process_memory'
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            echo "::notice title=เทสต์ที่ถูกตัดออกจากขา Windows::$slow — มันวัดผ่าน rasterizer และ runner นี้ใช้ WARP (> 600 วิ) · ubuntu รันครบ · เครื่องพัฒนารันครบ"
+            cargo nextest run --workspace --all-features -E "not test($slow)"
+          else
+            cargo nextest run --workspace --all-features
+          fi
 
       # ★★★ ประตูใบอนุญาต — **เงื่อนไขทางกฎหมายของการแจกจ่าย ไม่ใช่ของแถม**
       #

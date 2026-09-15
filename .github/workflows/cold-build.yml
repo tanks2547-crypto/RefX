@@ -111,10 +111,22 @@ jobs:
 
       # ★ เทสต์ด้วย เพราะ "คอมไพล์ผ่าน" กับ "ทำงานถูก" เป็นคนละคำถาม
       #   และ job นี้เป็นที่เดียวที่ทั้งสองคำถามถูกถามบนทรีที่ไม่มีของเก่าปน
+      # ★ ตัดตัวเดียวกับที่ `ci.yml` ตัดบน Windows ด้วยเหตุผลเดียวกันเป๊ะ —
+      #   runner ตัวนี้ใช้ WARP ซึ่งทำให้เทสต์ที่วัดผ่าน rasterizer ใช้เวลา > 600 วิ
+      #   · ถ้าไม่ตัด job นี้จะแดงด้วยเรื่องที่ไม่เกี่ยวกับ "build จากศูนย์" เลย
+      #   แล้วคำถามที่มันถูกสร้างมาถามจะถูกกลบทุกรอบ
       - name: เทสต์ทั้งชุดบนทรีที่เย็น
+        shell: bash
         env:
           REFX_REQUIRE_GPU: "1"
-        run: cargo nextest run --workspace --all-features
+        run: |
+          slow='what_an_export_really_costs_in_process_memory'
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            echo "::notice title=เทสต์ที่ถูกตัดออกจากขา Windows::$slow — WARP ทำให้ใช้เวลา > 600 วิ · ubuntu รันครบ"
+            cargo nextest run --workspace --all-features -E "not test($slow)"
+          else
+            cargo nextest run --workspace --all-features
+          fi
 
       # ★ ขึ้นไปดูได้ว่ารอบไหนคอมไพล์อะไร — ตัวเลขใน log หายไปกับ log
       - uses: actions/upload-artifact@v4
