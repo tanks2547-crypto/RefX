@@ -6,8 +6,8 @@ on:
   #   repo ที่ไม่มีใครแตะสองสัปดาห์ = สองสัปดาห์ที่ไม่มีใครรู้ว่า dependency
   #   มีช่องโหว่ใหม่ (docs/06 §2.5) — job `deny` จึงต้องเดินเองตามเวลาด้วย
   #
-  #   ★★ ตั้งแต่ 10 ส.ค. 2026 ตารางนี้ยัง**เป็นรอบเดียวที่รัน Windows ด้วย**
-  #   (ดูหัวข้อ `changes` ข้างล่างว่าทำไม)
+  #   ★★ ~~ตารางนี้เป็นรอบเดียวที่รัน Windows~~ — **เลิกจริงแล้ว 19 ก.ย. 2026**
+  #   Windows อยู่ในทุกรอบ push · ดูเหตุผลที่หัวข้อ `changes` ข้างล่าง
   schedule: [{ cron: "0 4 * * 1" }]   # ทุกวันจันทร์ 04:00 UTC
   workflow_dispatch:
 
@@ -25,17 +25,27 @@ jobs:
   #   1. commit ที่แก้ **markdown ล้วน** จุด matrix เต็ม — วัดจากของจริง 21 จาก 78
   #      commit ในช่วง 20 วันเป็น `.md` ล้วน · เอกสารเปลี่ยนไม่ทำให้ผลของ
   #      clippy/nextest/ขนาด binary เปลี่ยนได้เลยแม้แต่ทางเดียว
-  #   2. runner **Windows ถูกคิดนาที ×2** และผลของมันตรงกับ Linux มาตลอด
-  #      ทุก run ที่เขียว
+  #   2. ~~runner **Windows ถูกคิดนาที ×2** และผลของมันตรงกับ Linux มาตลอด~~
+  #      **ข้อนี้พังไปแล้ว — ดูกล่องข้างล่าง**
   #
   # ★ ที่ไม่ทำคือ `paths-ignore` ระดับ workflow — มันทำให้ **ไม่มี status เลย**
   #   สำหรับ commit นั้น ซึ่งอ่านไม่ออกว่า "ไม่ต้องตรวจ" หรือ "ยังไม่ได้ตรวจ"
   #   การข้ามด้วย `if:` ทำให้ job โผล่เป็น **skipped พร้อมเหตุผลใน log**
   #   (docs/08 §3.9 ข้อ 2: โครงเปล่าห้ามเงียบ — ข้ามได้ แต่ต้องข้ามอย่างชัดเจน)
   #
-  # ★★ **Windows ไม่ได้ถูกตัดทิ้ง** มันย้ายไปรอบ schedule + workflow_dispatch
-  #   เท่านั้น · เป็นแพลตฟอร์มหลักของผู้ใช้ ห้ามเอาออกถาวร — ถ้าจะแตะโค้ดที่มี
-  #   `#[cfg(windows)]` หรือเรื่อง GPU/driver ให้กด **Run workflow** เองก่อน merge
+  # ★★★ **Windows กลับเข้ารอบ push แล้ว (19 ก.ย. 2026) — และนี่คือเหตุผล**
+  #
+  #   ตอนที่มันอยู่เฉพาะรอบ schedule + กดเอง มันแดงอยู่ **สองรอบติดโดยไม่มีใครรู้**
+  #   (`what_an_export_really_costs…` timeout บน WARP) ขณะที่รอบ push เขียวตลอด
+  #   · `docs/08 §3.9` ข้อ 16: **สิ่งที่คุมการ merge ต้องเป็นสิ่งที่รันทุก push**
+  #     ผลที่ไม่มีใครถูกบังคับให้อ่าน มีค่าเท่ากับไม่มีผล
+  #
+  #   ราคาที่เคยเป็นเหตุผลให้เลื่อนออกไปนั้น **หายไปแล้ว**: ชุดเทสต์บน Windows
+  #   ใช้ **59 วินาที** (เดิม 658 วินาทีแล้วตาย) หลังตัดเทสต์ที่วัดผ่าน rasterizer
+  #   ออกจากขาที่ไม่มี GPU จริง
+  #
+  #   ★ ถ้าวันหนึ่งมันแพงจนน่ารำคาญอีก **ให้รายงานตัวเลข ไม่ใช่ถอดออกเงียบ ๆ**
+  #   — การถอดออกคือการสร้างบานที่สองขึ้นมาใหม่
   changes:
     runs-on: ubuntu-latest
     outputs:
@@ -71,12 +81,10 @@ jobs:
             echo "$changed" | sed 's/^/  /'
           fi
 
-          # ★ Windows เฉพาะรอบ schedule / กดเอง — ×2 ของโควตา และผลตรงกับ Linux มาตลอด
-          if [ "$event" = "schedule" ] || [ "$event" = "workflow_dispatch" ]; then
-            os='["ubuntu-latest","windows-latest"]'
-          else
-            os='["ubuntu-latest"]'
-          fi
+          # ★★★ **Windows อยู่ในทุกรอบแล้ว ตั้งแต่ 19 ก.ย. 2026** — ดูกล่องข้างบน
+          #   เหตุผลเดิมคือราคา · ราคานั้นหายไปแล้ว (658 วิ แล้วตาย → 59 วิ)
+          #   และช่วงที่มันอยู่นอกรอบ push คือช่วงที่มันแดงโดยไม่มีใครรู้สองสัปดาห์
+          os='["ubuntu-latest","windows-latest"]'
 
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "os=$os"     >> "$GITHUB_OUTPUT"
@@ -145,9 +153,9 @@ jobs:
       #     ตาม `docs/08 §3.9` ข้อ 12 (ต้องมีอย่างน้อยหนึ่ง job ที่รันจริง ไม่งั้น
       #     ทั้ง matrix ข้ามพร้อมกันแล้วเขียวโดยไม่มีความครอบคลุม)
       #
-      #   ⚠️ **Windows รันแค่รายสัปดาห์ + กด Run เอง** (ดู job `changes`) การบังคับ
-      #      จึงมีผลตามรอบนั้น ไม่ใช่ทุก push — แตะโค้ด clipboard เมื่อไหร่
-      #      ให้กด Run workflow เองก่อน merge เหมือนที่ทำกับ path handling
+      #   ✅ **ตั้งแต่ 19 ก.ย. 2026 Windows รันทุก push** การบังคับข้อนี้จึงมีผล
+      #      ทุกรอบจริง ๆ ไม่ต้องกด Run workflow เองอีกแล้ว — ซึ่งเป็นสิ่งที่
+      #      คอมเมนต์นี้เคยต้องเตือนไว้เพราะมันไม่เป็นจริง
       - name: job นี้ได้ตรวจ clipboard จริงไหม
         shell: bash
         env:
@@ -328,3 +336,54 @@ jobs:
             cargo tree -d | grep -A3 '^png'
             exit 1
           fi
+
+  # ★★★ ประตูของบานที่สอง — **รอบตามตารางที่แดงต้องหยุด merge ได้**
+  #
+  # `docs/08 §3.9` ข้อ 16: job ที่รันคนละทริกเกอร์กับที่คนดู = job ที่ไม่มีใครดู
+  # · `cold-build` รันสัปดาห์ละครั้งโดยธรรมชาติ (มันคือ build จากศูนย์ × 2 OS
+  # จะเอาเข้าทุก push ไม่ได้จริง ๆ) → บานนี้จึงปิดด้วยการ **ลากผลของมันมาไว้บน push**
+  #
+  # ★ นี่คือรูปแบบที่ควรใช้กับ job รายสัปดาห์ **ทุกตัวในอนาคต** ไม่ใช่เฉพาะตัวนี้
+  #   — `mutation` และ `fuzz` ยังไม่มีประตูแบบนี้ (ดู ROADMAP v1.1)
+  cold-build-status:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: รอบ cold-build ล่าสุดเป็นอย่างไร
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # ★ เพดานความเก่า — รอบรายสัปดาห์ที่หายไปสิบวันคือรอบที่ไม่ได้รัน
+          #   ซึ่งอ่านค่าเท่ากับแดง ไม่ใช่เท่ากับเขียว
+          MAX_AGE_DAYS: "10"
+        run: |
+          set -uo pipefail
+          latest=$(gh run list --repo "$GITHUB_REPOSITORY" \
+                     --workflow cold-build.yml --branch "${{ github.event.repository.default_branch }}" \
+                     --status completed --limit 1 \
+                     --json conclusion,databaseId,updatedAt,headSha 2>/dev/null || echo '[]')
+
+          if [ "$(echo "$latest" | jq 'length')" -eq 0 ]; then
+            echo "::error title=ยังไม่เคยมีรอบ cold-build ที่จบเลย::กด Run workflow ของ cold-build.yml ก่อน — ประตูนี้อ่านผลของมัน"
+            exit 1
+          fi
+
+          conclusion=$(echo "$latest" | jq -r '.[0].conclusion')
+          run_id=$(echo "$latest" | jq -r '.[0].databaseId')
+          sha=$(echo "$latest" | jq -r '.[0].headSha' | cut -c1-7)
+          when=$(echo "$latest" | jq -r '.[0].updatedAt')
+          url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run_id"
+          age=$(( ( $(date -u +%s) - $(date -u -d "$when" +%s) ) / 86400 ))
+
+          echo "รอบล่าสุด: $run_id ($sha) · $conclusion · $when · เก่า $age วัน"
+
+          if [ "$conclusion" != "success" ]; then
+            echo "::error title=cold-build ล่าสุดไม่ผ่าน::$conclusion ที่ $sha — $url"
+            exit 1
+          fi
+          if [ "$age" -gt "$MAX_AGE_DAYS" ]; then
+            echo "::error title=cold-build เก่าเกินไป::ผ่านล่าสุดเมื่อ $age วันก่อน (เพดาน $MAX_AGE_DAYS) — $url"
+            exit 1
+          fi
+          echo "::notice title=cold-build::ผ่านที่ $sha เมื่อ $age วันก่อน — $url"

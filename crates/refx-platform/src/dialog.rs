@@ -238,6 +238,55 @@ pub fn show_crash_dialog(log_path: &std::path::Path) {
     }
 }
 
+/// ★★★ บอกผู้ใช้ว่า **เปิดโปรแกรมไม่ขึ้น** — และทำไม
+///
+/// ## ทำไมต้องมี ทั้งที่มี `show_crash_dialog` อยู่แล้ว
+///
+/// อันนั้นต่อไว้กับ **panic hook** เท่านั้น · ความล้มเหลวตอนเปิด (ไม่มี GPU ที่ใช้ได้
+/// · ไดรเวอร์เพิ่งอัปเดตแล้วพัง · `WGPU_BACKEND` ตั้งผิด) ไม่ใช่ panic — มันเป็น
+/// `Err` ที่ไหลกลับไปถึง `main` แล้วถูกพิมพ์ลง **stderr**
+///
+/// ★★ และ RefX ถูก build เป็น **GUI application** ซึ่งบน Windows แปลว่า
+/// **ไม่มี stderr ให้พิมพ์** (`KNOWN-LIMITATIONS` ข้อ 2) · ผลที่ผู้ใช้เห็นจริง
+/// คือ **ดับเบิลคลิกแล้วไม่เกิดอะไรขึ้นเลย** ซึ่งอ่านไม่ออกว่าเป็นอะไร
+/// และแยกไม่ออกจาก "โปรแกรมไม่ทำงาน"
+///
+/// เจอ 19 ก.ย. 2026 ระหว่างทดสอบ `WGPU_BACKEND` ที่ตั้งผิด — ข้อความที่เขียนไว้
+/// อย่างดีลง log ไม่มีค่าอะไรเลยถ้าผู้ใช้ไม่รู้ว่ามี log ให้เปิด
+///
+/// **บล็อกได้** ด้วยเหตุผลเดียวกับ [`show_crash_dialog`]: ไม่มีหน้าต่าง ไม่มี
+/// event loop และโปรแกรมกำลังจะจบอยู่แล้ว (ข้อยกเว้นของ I-2 ที่ยอมรับได้)
+pub fn show_startup_failure(details: &str, log_path: &std::path::Path) {
+    let message = startup_failure_message(details, log_path);
+    let result = std::panic::catch_unwind(|| {
+        rfd::MessageDialog::new()
+            .set_level(rfd::MessageLevel::Error)
+            .set_title("RefX cannot start")
+            .set_description(&message)
+            .set_buttons(rfd::MessageButtons::Ok)
+            .show();
+    });
+    if result.is_err() {
+        eprintln!("{message}");
+    }
+}
+
+/// ข้อความของ [`show_startup_failure`] — แยกออกมาเพื่อให้เทสต์อ่านได้
+///
+/// ★ ภาษาอังกฤษและไม่ผ่านระบบแปล ด้วยเหตุผลเดียวกับ [`crash_message`]:
+/// ชั้น UI อาจเป็นชั้นที่เพิ่งล้มไป การไปหยิบตารางคำแปลจากตรงนั้นคือการพึ่ง
+/// สิ่งที่เชื่อไม่ได้แล้ว
+fn startup_failure_message(details: &str, log_path: &std::path::Path) -> String {
+    format!(
+        "RefX could not start.\n\n\
+         {details}\n\n\
+         This usually means the graphics driver refused to start, or was updated \
+         while RefX was closed. Restarting the machine fixes most cases.\n\n\
+         The full log is here:\n{}",
+        log_path.display()
+    )
+}
+
 /// ข้อความที่ผู้ใช้จะได้อ่านตอนโปรแกรมพัง
 ///
 /// แยกออกมาเพราะ `show_crash_dialog` เปิดหน้าต่างจริง — เทสต์เรียกไม่ได้
@@ -264,6 +313,32 @@ mod tests {
         assert!(
             message.contains("C:/logs/refx.log"),
             "ไม่ได้บอกว่า log อยู่ไหน — ผู้ใช้แนบไฟล์มาให้ไม่ได้: {message}"
+        );
+    }
+
+    /// ★★★ เปิดไม่ขึ้นต้อง **บอกด้วยหน้าต่าง** ไม่ใช่แค่ลง log
+    ///
+    /// RefX เป็น GUI application ซึ่งบน Windows ไม่มี stderr — ข้อความที่เขียน
+    /// ไว้อย่างดีจึงหายไปทั้งหมด และผู้ใช้เห็นแค่ "ดับเบิลคลิกแล้วไม่เกิดอะไร"
+    #[test]
+    fn the_cannot_start_message_names_the_reason_and_the_log() {
+        let message = startup_failure_message(
+            "WGPU_BACKEND=\"gl\": this build does not contain gl",
+            std::path::Path::new("C:/logs/refx.log"),
+        );
+        assert!(message.is_ascii(), "ข้อความตอนเปิดไม่ขึ้นไม่ใช่ ASCII: {message}");
+        assert!(
+            message.contains("WGPU_BACKEND"),
+            "ไม่ได้บอกเหตุผลที่แท้จริง มันจึงเป็นแค่ 'พังนะ': {message}"
+        );
+        assert!(
+            message.contains("C:/logs/refx.log"),
+            "ไม่ได้บอกว่า log อยู่ไหน: {message}"
+        );
+        // ★ ต้องบอก **สิ่งที่ทำได้ต่อ** ไม่ใช่แค่สิ่งที่เกิดขึ้น (`CLAUDE.md`)
+        assert!(
+            message.to_lowercase().contains("restart"),
+            "ไม่ได้บอกว่าทำอะไรต่อได้: {message}"
         );
     }
 }

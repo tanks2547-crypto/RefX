@@ -35,6 +35,176 @@ pub enum DeviceError {
     /// surface ไม่รองรับรูปแบบใดที่ใช้ได้
     #[error("surface supports no colour format that RefX can use")]
     NoSupportedFormat,
+
+    /// `WGPU_BACKEND` บอกชื่อที่ใช้ไม่ได้
+    #[error(transparent)]
+    Backend(#[from] BackendChoiceError),
+}
+
+/// ตัวแปรสภาพแวดล้อมที่เลือก backend — **ชื่อเดียวกับที่ wgpu ใช้โดยตั้งใจ**
+///
+/// ★★★ ทำไมต้องมี: ตอนไล่บั๊ก `gles` ที่ค้างหน้าต่าง (สิบวัน) การเปลี่ยน backend
+/// หนึ่งตัวแปร **ต้อง build ใหม่ทั้งทรีทุกครั้ง** เพราะโค้ดเดิมสร้าง instance ด้วย
+/// `InstanceDescriptor::new_with_display_handle(...)` ซึ่งไม่อ่าน env เลย ·
+/// ราคาของการถามคำถามหนึ่งข้อจึงเป็นหลักสิบนาที แทนที่จะเป็นหลักวินาที
+pub const BACKEND_ENV: &str = "WGPU_BACKEND";
+
+/// ชื่อที่รับได้ — **ชุดเดียวกับ `wgpu::Backends::from_comma_list` เป๊ะ**
+/// เพื่อให้คนที่เคยใช้ wgpu ไม่ต้องจำสองชุด
+const BACKEND_NAMES: &[(&str, wgpu::Backends)] = &[
+    ("vulkan", wgpu::Backends::VULKAN),
+    ("vk", wgpu::Backends::VULKAN),
+    ("dx12", wgpu::Backends::DX12),
+    ("d3d12", wgpu::Backends::DX12),
+    ("metal", wgpu::Backends::METAL),
+    ("mtl", wgpu::Backends::METAL),
+    ("gl", wgpu::Backends::GL),
+    ("gles", wgpu::Backends::GL),
+    ("opengl", wgpu::Backends::GL),
+];
+
+/// backend ที่จะใช้ **และที่มาของการเลือก**
+///
+/// เก็บ "เลือกอะไร" กับ "เพราะอะไร" ไว้ด้วยกันโดยตั้งใจ — log ที่บอกแค่ชื่อ
+/// backend ตอบไม่ได้ว่ามันมาจาก env ของคนที่กำลังไล่บั๊ก หรือเป็นค่าปริยาย
+/// ซึ่งเป็นคำถามแรกเสมอเวลาอ่าน log ของคนอื่น
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackendChoice {
+    /// ชุดที่จะส่งให้ `wgpu`
+    pub backends: wgpu::Backends,
+    /// `true` = มาจาก [`BACKEND_ENV`] · `false` = ทุกตัวที่คอมไพล์เข้ามา
+    pub from_env: bool,
+}
+
+/// `WGPU_BACKEND` บอกชื่อที่ใช้ไม่ได้ — **ทั้งสองแบบต้องล้ม ไม่ใช่ตกไปค่าปริยาย**
+///
+/// ★ `wgpu::Backends::from_comma_list` เลือกทาง "เตือนแล้วข้าม" ซึ่งแปลว่าพิมพ์
+/// ชื่อผิดหนึ่งตัวอักษรแล้วได้ backend อื่นมาเงียบ ๆ · สำหรับเครื่องมือที่มีไว้
+/// **ไล่บั๊ก** นั่นคือพฤติกรรมที่แย่ที่สุดที่เป็นไปได้: มันตอบคำถามที่ไม่ได้ถาม
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum BackendChoiceError {
+    /// ไม่ใช่ชื่อ backend เลย
+    #[error("{BACKEND_ENV}={asked:?} is not a backend name — use one of: {names}")]
+    UnknownName {
+        /// ชื่อที่ผู้ใช้พิมพ์มา
+        asked: String,
+        /// ชื่อทั้งหมดที่รับได้
+        names: String,
+    },
+
+    /// เป็นชื่อที่ถูก แต่ build นี้ไม่ได้คอมไพล์มันเข้ามา
+    #[error(
+        "{BACKEND_ENV}={asked:?}: this build does not contain {missing} — it contains {available}"
+    )]
+    NotInThisBuild {
+        /// ค่าที่ผู้ใช้ตั้งไว้ทั้งก้อน
+        asked: String,
+        /// ตัวที่ขาด
+        missing: String,
+        /// ตัวที่มีจริงใน build นี้
+        available: String,
+    },
+}
+
+/// ชื่อที่ **พิมพ์ออก** — หนึ่งชื่อต่อหนึ่ง backend
+///
+/// แยกจาก [`BACKEND_NAMES`] เพราะอันนั้นมีชื่อเล่นหลายชื่อต่อ backend ซึ่งเป็น
+/// เรื่องของ *สิ่งที่รับเข้า* · log ที่เขียน "vulkan, vk" คือ log ที่อ่านแล้วงง
+const BACKEND_LABELS: &[(wgpu::Backends, &str)] = &[
+    (wgpu::Backends::VULKAN, "vulkan"),
+    (wgpu::Backends::DX12, "dx12"),
+    (wgpu::Backends::METAL, "metal"),
+    (wgpu::Backends::GL, "gl"),
+];
+
+/// ชื่อที่อ่านออกของชุด backend — ใช้ทั้งใน log และในข้อความ error
+#[must_use]
+pub fn backend_names(backends: wgpu::Backends) -> String {
+    let out: Vec<&str> = BACKEND_LABELS
+        .iter()
+        .filter(|(bit, _)| backends.contains(*bit))
+        .map(|(_, name)| *name)
+        .collect();
+    if out.is_empty() {
+        "(none)".to_owned()
+    } else {
+        out.join(", ")
+    }
+}
+
+/// ตัดสินว่าจะใช้ backend ไหน จากค่า env และ **ชุดที่คอมไพล์เข้ามาจริง**
+///
+/// ★★★ `compiled_in` เป็นพารามิเตอร์ ไม่ใช่การเรียก `enabled_backend_features()`
+/// ข้างใน — เพื่อให้เทสต์ถามคำถามนี้ได้โดยไม่ต้องมี GPU และไม่ขึ้นกับว่าเครื่อง
+/// ที่รันเทสต์คอมไพล์อะไรมา (เทสต์ที่ผลเปลี่ยนตามเครื่องคือเทสต์ที่อ่านไม่ออก)
+///
+/// ★★ **ขอบเขตยังเป็นชุดที่คอมไพล์เข้ามาเสมอ** — env เลือกได้แค่ *ในนั้น*
+/// ประตู `the_backend_that_hangs_the_window_is_not_compiled_in` จึงไม่ถูกผ่อน
+/// แม้แต่นิดเดียว: สิ่งที่ไม่ได้คอมไพล์เข้ามา ไม่มีทางถูกเลือกด้วย env
+///
+/// # Errors
+/// เมื่อชื่อไม่ถูก หรือชื่อถูกแต่ build นี้ไม่มีตัวนั้น
+pub fn choose_backends(
+    raw: Option<&str>,
+    compiled_in: wgpu::Backends,
+) -> Result<BackendChoice, BackendChoiceError> {
+    let Some(asked) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(BackendChoice {
+            backends: compiled_in,
+            from_env: false,
+        });
+    };
+
+    let mut wanted = wgpu::Backends::empty();
+    let mut missing: Vec<String> = Vec::new();
+    for item in asked.split(',') {
+        let item = item.trim().to_lowercase();
+        if item.is_empty() {
+            continue;
+        }
+        let Some((_, bit)) = BACKEND_NAMES
+            .iter()
+            .find(|(name, _)| *name == item.as_str())
+        else {
+            return Err(BackendChoiceError::UnknownName {
+                asked: item,
+                names: BACKEND_NAMES
+                    .iter()
+                    .map(|(name, _)| *name)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            });
+        };
+        // ★ ตรวจ **ทีละชื่อ** ไม่ใช่ตัดกันทั้งชุด — ขอ `vulkan,gl` แล้วได้ vulkan
+        //   อย่างเดียวเงียบ ๆ คือการตอบคำถามที่ไม่ได้ถาม เหมือนกับชื่อผิด
+        if !compiled_in.contains(*bit) && !missing.iter().any(|seen| seen == &item) {
+            missing.push(item.clone());
+        }
+        wanted |= *bit;
+    }
+
+    if !missing.is_empty() {
+        return Err(BackendChoiceError::NotInThisBuild {
+            asked: asked.to_owned(),
+            missing: missing.join(", "),
+            available: backend_names(compiled_in),
+        });
+    }
+    if wanted.is_empty() {
+        return Err(BackendChoiceError::UnknownName {
+            asked: asked.to_owned(),
+            names: BACKEND_NAMES
+                .iter()
+                .map(|(name, _)| *name)
+                .collect::<Vec<_>>()
+                .join(", "),
+        });
+    }
+
+    Ok(BackendChoice {
+        backends: wanted,
+        from_env: true,
+    })
 }
 
 /// แหล่งที่สร้าง surface ได้ **ซ้ำหลายครั้ง**
@@ -45,7 +215,12 @@ pub enum DeviceError {
 /// มี blanket impl ให้ทุกอย่างที่เป็น window handle อยู่แล้ว ชั้นบนไม่ต้อง implement เอง
 pub trait SurfaceSource: Send + Sync + 'static {
     /// สร้าง `Instance` ใหม่ (พร้อม display handle สำหรับ Wayland)
-    fn make_instance(&self) -> wgpu::Instance;
+    ///
+    /// `backends` มาจาก [`choose_backends`] — ส่งเข้ามาแทนที่จะอ่าน env เองที่นี่
+    /// เพราะการอ่าน env ต้อง **ล้มได้** และเมธอดนี้คืน `Instance` เฉย ๆ ·
+    /// อีกเหตุผล: ตอนกู้ device lost เราสร้าง instance ใหม่ทั้งก้อน แล้วมันต้อง
+    /// ได้ชุดเดิมเป๊ะ ไม่ใช่ไปอ่าน env ซ้ำซึ่งอาจเปลี่ยนไปแล้วระหว่างโปรแกรมรัน
+    fn make_instance(&self, backends: wgpu::Backends) -> wgpu::Instance;
     /// สร้าง `Surface` ใหม่จาก instance ที่ให้มา
     fn make_surface(
         &self,
@@ -57,11 +232,17 @@ impl<W> SurfaceSource for W
 where
     W: wgpu::DisplayAndWindowHandle + std::fmt::Debug + Clone + Send + Sync + 'static,
 {
-    fn make_instance(&self) -> wgpu::Instance {
+    fn make_instance(&self, backends: wgpu::Backends) -> wgpu::Instance {
         // ส่ง display handle เข้าไปด้วย — Linux/Wayland ต้องใช้เลือก backend ให้ถูก
-        wgpu::Instance::new(wgpu::InstanceDescriptor::new_with_display_handle(Box::new(
-            self.clone(),
-        )))
+        //
+        // ★ ตั้ง `backends` เอง **ไม่ใช้ `with_env()` ของ wgpu** ทั้งที่มันมีให้ —
+        //   ตัวนั้นเจอชื่อที่ไม่รู้จักแล้ว "เตือนแล้วข้าม" และเปิดประตูให้ env
+        //   ตัวอื่น (`WGPU_DEBUG`, backend options) เปลี่ยนพฤติกรรมไปด้วย
+        //   ซึ่งกว้างกว่าที่เราต้องการและเงียบกว่าที่เรายอมรับได้
+        let mut descriptor =
+            wgpu::InstanceDescriptor::new_with_display_handle(Box::new(self.clone()));
+        descriptor.backends = backends;
+        wgpu::Instance::new(descriptor)
     }
 
     fn make_surface(
@@ -660,7 +841,20 @@ fn build_stack(
     generation: u64,
     uncapped_present: bool,
 ) -> Result<GpuStack, DeviceError> {
-    let instance = window.make_instance();
+    // ★★★ เลือก backend ก่อนแตะ GPU — และ **บอกใน log ทุกครั้งว่ามาจากไหน**
+    //
+    //   log ที่เขียนแค่ชื่อ backend ตอบไม่ได้ว่ามันมาจาก env ของคนที่กำลังไล่บั๊ก
+    //   หรือเป็นค่าปริยาย ซึ่งเป็นคำถามแรกเสมอเวลาอ่าน log ที่คนอื่นส่งมาให้
+    let compiled_in = wgpu::Instance::enabled_backend_features();
+    let choice = choose_backends(std::env::var(BACKEND_ENV).ok().as_deref(), compiled_in)?;
+    tracing::info!(
+        backends = %backend_names(choice.backends),
+        source = if choice.from_env { BACKEND_ENV } else { "built-in default" },
+        compiled_in = %backend_names(compiled_in),
+        "graphics backend chosen"
+    );
+
+    let instance = window.make_instance(choice.backends);
     let surface = window.make_surface(&instance)?;
 
     // LowPower: RefX เปิดค้างทั้งวันข้าง Photoshop ไม่ควรปลุก dGPU โดยไม่จำเป็น
@@ -946,6 +1140,88 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+
+    /// ไม่ตั้ง env = ได้ทุกตัวที่คอมไพล์เข้ามา และ log ต้องบอกว่าเป็นค่าปริยาย
+    #[test]
+    fn with_no_environment_variable_the_choice_is_everything_this_build_contains() {
+        let built = wgpu::Backends::VULKAN | wgpu::Backends::DX12;
+        for raw in [None, Some(""), Some("   ")] {
+            let choice = choose_backends(raw, built).expect("ค่าว่างต้องไม่ใช่ error");
+            assert_eq!(choice.backends, built, "{raw:?}");
+            assert!(!choice.from_env, "{raw:?} ไม่ได้มาจาก env");
+        }
+    }
+
+    /// ★★★ ชื่อผิด **ต้องล้ม ไม่ใช่ตกไปค่าปริยาย** — และต้องบอกว่ามีชื่อไหนให้เลือก
+    ///
+    /// `wgpu::Backends::from_comma_list` เลือกทาง "เตือนแล้วข้าม" ซึ่งแปลว่าพิมพ์
+    /// ผิดหนึ่งตัวอักษรแล้วได้ backend อื่นมาเงียบ ๆ · สำหรับเครื่องมือที่มีไว้
+    /// **ไล่บั๊ก** นั่นคือการตอบคำถามที่ไม่ได้ถาม
+    #[test]
+    fn a_name_that_is_not_a_backend_stops_the_program_and_lists_the_real_ones() {
+        let err = choose_backends(Some("vulcan"), wgpu::Backends::all()).expect_err("ต้องล้ม");
+        let shown = err.to_string();
+        assert!(shown.contains("vulcan"), "ไม่ได้บอกว่าพิมพ์อะไรมา: {shown}");
+        for name in ["vulkan", "dx12", "gl"] {
+            assert!(shown.contains(name), "ไม่ได้บอกชื่อ {name}: {shown}");
+        }
+    }
+
+    /// ★★★ ชื่อถูกแต่ **build นี้ไม่มี** ก็ต้องล้ม พร้อมบอกว่ามีตัวไหนอยู่จริง
+    ///
+    /// นี่คือข้อที่ทำให้ env **ไม่ผ่อนประตู** `the_backend_that_hangs_the_window…`
+    /// ข้างล่าง: สิ่งที่ไม่ได้คอมไพล์เข้ามา ไม่มีทางถูกเลือกด้วยตัวแปรสภาพแวดล้อม
+    #[test]
+    fn asking_for_a_backend_this_build_does_not_contain_fails_loudly() {
+        let built = wgpu::Backends::VULKAN | wgpu::Backends::DX12;
+        let err = choose_backends(Some("gl"), built).expect_err("gl ไม่ได้คอมไพล์มา ต้องล้ม");
+        let shown = err.to_string();
+        assert!(shown.contains("gl"), "ไม่ได้บอกว่าตัวไหนขาด: {shown}");
+        assert!(shown.contains("vulkan"), "ไม่ได้บอกว่ามีตัวไหนอยู่: {shown}");
+        assert!(shown.contains("dx12"), "ไม่ได้บอกว่ามีตัวไหนอยู่: {shown}");
+    }
+
+    /// ★★ ขอหลายตัวแล้วมีตัวหนึ่งขาด = ล้ม **ไม่ใช่เงียบ ๆ ให้เท่าที่มี**
+    #[test]
+    fn asking_for_two_when_only_one_exists_never_quietly_gives_the_one() {
+        let built = wgpu::Backends::VULKAN;
+        let err = choose_backends(Some("vulkan,gl"), built).expect_err("ขาดไปหนึ่งตัวก็ต้องล้ม");
+        assert!(err.to_string().contains("gl"), "{err}");
+    }
+
+    /// ชื่อที่ถูกและมีอยู่จริง — รับทั้งชื่อเต็มและชื่อเล่น และไม่สนตัวพิมพ์
+    #[test]
+    fn the_names_wgpu_accepts_are_the_names_we_accept() {
+        let built = wgpu::Backends::all();
+        for (raw, want) in [
+            ("vulkan", wgpu::Backends::VULKAN),
+            ("VK", wgpu::Backends::VULKAN),
+            ("  dx12 ", wgpu::Backends::DX12),
+            ("d3d12", wgpu::Backends::DX12),
+            ("gles", wgpu::Backends::GL),
+            ("opengl", wgpu::Backends::GL),
+            ("mtl", wgpu::Backends::METAL),
+        ] {
+            let result = choose_backends(Some(raw), built);
+            assert!(result.is_ok(), "{raw:?} ควรใช้ได้: {result:?}");
+            let choice = result.expect("ตรวจด้วย is_ok ไปแล้วบรรทัดบน");
+            assert_eq!(choice.backends, want, "{raw:?}");
+            assert!(choice.from_env, "{raw:?} ต้องนับว่ามาจาก env");
+        }
+        let both = choose_backends(Some("vulkan,dx12"), built).expect("สองตัวพร้อมกัน");
+        assert_eq!(both.backends, wgpu::Backends::VULKAN | wgpu::Backends::DX12);
+    }
+
+    /// ★ ชื่อที่พิมพ์ออกต้องมีหนึ่งชื่อต่อหนึ่ง backend — ไม่ใช่ "vulkan, vk"
+    #[test]
+    fn the_printed_names_have_no_duplicates_for_the_same_backend() {
+        assert_eq!(backend_names(wgpu::Backends::VULKAN), "vulkan");
+        assert_eq!(
+            backend_names(wgpu::Backends::VULKAN | wgpu::Backends::DX12),
+            "vulkan, dx12"
+        );
+        assert_eq!(backend_names(wgpu::Backends::empty()), "(none)");
+    }
 
     /// ★★★ **GL ต้องไม่ถูกคอมไพล์เข้ามาบน Windows — นี่คือบั๊กเสถียรภาพ ไม่ใช่เรื่องขนาด**
     ///

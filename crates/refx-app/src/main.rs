@@ -212,7 +212,17 @@ fn main() -> anyhow::Result<()> {
     //
     // ★ `recovery_dir()` อยู่ใต้ **data_dir ไม่ใช่ cache_dir** — งานที่ยังไม่เคย
     //   บันทึกคือสิ่งที่สร้างใหม่ไม่ได้ (docs/07 §4 · เทสต์คุมไว้ที่ AppPaths)
-    refx_ui::app::run(
+    // ★★★ `?` เฉย ๆ ไม่พอ — RefX เป็น **GUI application** ซึ่งบน Windows
+    //   ไม่มี stderr ให้พิมพ์ · ความล้มเหลวตอนเปิด (ไม่มี GPU ที่ใช้ได้ ·
+    //   ไดรเวอร์เพิ่งอัปเดตแล้วพัง · `WGPU_BACKEND` ตั้งผิด) จึงกลายเป็น
+    //   **"ดับเบิลคลิกแล้วไม่เกิดอะไรขึ้นเลย"** ในสายตาผู้ใช้
+    //
+    //   เจอ 19 ก.ย. 2026 ตอนทดสอบ `WGPU_BACKEND` ที่ตั้งผิด: ข้อความที่เขียนไว้
+    //   อย่างดีลง log ไม่มีค่าอะไรเลยถ้าผู้ใช้ไม่รู้ว่ามี log ให้เปิด
+    //
+    //   ★ ยังคืน `Err` ต่อไปเหมือนเดิม — exit code ที่ไม่ใช่ศูนย์คือสิ่งที่
+    //     สคริปต์และประตูของแพ็กเกจอ่าน · dialog เป็นของผู้ใช้ ไม่ใช่ของเครื่องมือ
+    let started = refx_ui::app::run(
         cli.args,
         &paths.cache_dir().join("cache.sqlite"),
         &paths.recovery_dir(),
@@ -222,7 +232,11 @@ fn main() -> anyhow::Result<()> {
         // ★ `settings.toml` อยู่ใต้ config_dir — เป็นของที่ผู้ใช้แก้เองด้วยมือ
         //   จึงต้องอยู่ที่ที่ OS บอกว่าเป็น config ไม่ใช่ cache ที่มีคนตั้งใจลบ
         paths.config_dir(),
-    )?;
+    );
+    if let Err(err) = started {
+        refx_platform::dialog::show_startup_failure(&err.to_string(), paths.log_dir());
+        return Err(err.into());
+    }
     Ok(())
 }
 
