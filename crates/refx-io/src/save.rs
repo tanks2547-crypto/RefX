@@ -177,19 +177,41 @@ fn write_document(
 
     // ---- 1. เขียนของใหม่ลงไฟล์ชั่วคราว แล้ว fsync ----
     let tmp = tmp_path(doc);
-    write_and_sync(&tmp, &bytes)?;
+    discard_tmp_on_error(&tmp, write_and_sync(&tmp, &bytes))?;
 
     // ---- 2. สำรองไฟล์เดิมไว้ (ถ้ามี) ----
     if existed && backup_policy == Backup::Keep {
-        backup(doc, rename)?;
+        discard_tmp_on_error(&tmp, backup(doc, rename))?;
     }
 
     // ---- 3. สลับตัวจริง — atomic ----
     //
     // ★ `fs::rename` บน Windows ใช้ `MoveFileEx` พร้อม `MOVEFILE_REPLACE_EXISTING`
     //   จึงทับไฟล์ที่มีอยู่ได้และเป็น atomic เหมือนบน Unix
-    rename(&tmp, doc).map_err(|err| SaveError::io("replace", doc, err))?;
+    discard_tmp_on_error(
+        &tmp,
+        rename(&tmp, doc).map_err(|err| SaveError::io("replace", doc, err)),
+    )?;
     Ok(())
+}
+
+/// ★★★ บันทึกล้มเหลว → **เก็บไฟล์ชั่วคราวทิ้ง** แล้วคืน error เดิมไปตามเดิม
+///
+/// ## ทำไมข้อนี้สำคัญกว่าที่เห็น
+///
+/// ตอนดิสก์เต็ม ไฟล์ `.refx.tmp` ที่ค้างอยู่ **คือที่ว่างที่ผู้ใช้ต้องการพอดี** ·
+/// เขาจะกดเซฟซ้ำแล้วล้มซ้ำ โดยที่โปรแกรมกินที่เพิ่มขึ้นทุกครั้ง และทางออกเดียว
+/// คือไปลบไฟล์ที่เขาไม่รู้ว่ามีอยู่ ในโฟลเดอร์งานของตัวเอง
+/// (เจอ 17 ก.ย. 2026 ตอนไล่ `RELEASE-CHECKLIST` ข้อ "ดิสก์เต็มจริง")
+///
+/// ★★ **error เดิมต้องไม่ถูกกลบ** — ถ้าลบ tmp ไม่สำเร็จด้วย เราก็ยังต้องบอก
+/// ผู้ใช้ว่า *การบันทึก* ล้มเพราะอะไร ไม่ใช่ว่า *การเก็บกวาด* ล้มเพราะอะไร ·
+/// สาเหตุที่สองไม่ใช่สิ่งที่เขาทำอะไรกับมันได้ และมันบังสาเหตุแรกที่เขาทำได้
+fn discard_tmp_on_error<T>(tmp: &Path, result: Result<T, SaveError>) -> Result<T, SaveError> {
+    if result.is_err() {
+        let _ = std::fs::remove_file(tmp);
+    }
+    result
 }
 
 /// ★★★ บันทึกเอกสารพร้อม **ฝัง asset ที่ต้องฝัง** — เส้นทางเดียวของ P4-5
@@ -227,19 +249,25 @@ pub fn save_document(
 
     // ---- เขียนลง tmp แบบสตรีม (ไฟล์ปลายทางใหญ่ระดับ GB ได้) ----
     let tmp = tmp_path(doc);
-    {
+    // ★ เส้นทาง packed ก็ต้องเก็บกวาดเหมือนกัน — และที่นี่ tmp **ใหญ่ระดับ GB ได้**
+    //   เพราะมันฝังภาพต้นฉบับไว้ · ไฟล์ค้างตรงนี้จึงแพงกว่าที่อื่นมาก
+    let streamed = (|| -> Result<(), SaveError> {
         let mut file =
             std::fs::File::create(&tmp).map_err(|err| SaveError::io("create", &tmp, err))?;
         crate::packed::write_packed(&mut file, board, embeds)?;
         // ★ ขั้นที่แยก "เขียนแล้ว" ออกจาก "อยู่บนดิสก์แล้ว" (เหตุผลเดียวกับ `save_atomic`)
         file.sync_all()
-            .map_err(|err| SaveError::io("flush", &tmp, err))?;
-    }
+            .map_err(|err| SaveError::io("flush", &tmp, err))
+    })();
+    discard_tmp_on_error(&tmp, streamed)?;
 
     if existed {
-        backup(doc, rename)?;
+        discard_tmp_on_error(&tmp, backup(doc, rename))?;
     }
-    rename(&tmp, doc).map_err(|err| SaveError::io("replace", doc, err))?;
+    discard_tmp_on_error(
+        &tmp,
+        rename(&tmp, doc).map_err(|err| SaveError::io("replace", doc, err)),
+    )?;
     Ok(())
 }
 
@@ -273,8 +301,11 @@ fn read_header(doc: &Path) -> Option<Vec<u8>> {
 /// [`SaveError`] เมื่อเขียนไม่สำเร็จ — **ไฟล์เดิม (ถ้ามี) ยังอยู่ครบ**
 pub fn write_bytes_atomic(path: &Path, bytes: &[u8], rename: RenameFn) -> Result<(), SaveError> {
     let tmp = path.with_extension("tmp");
-    write_and_sync(&tmp, bytes)?;
-    rename(&tmp, path).map_err(|err| SaveError::io("replace", path, err))?;
+    discard_tmp_on_error(&tmp, write_and_sync(&tmp, bytes))?;
+    discard_tmp_on_error(
+        &tmp,
+        rename(&tmp, path).map_err(|err| SaveError::io("replace", path, err)),
+    )?;
     Ok(())
 }
 
@@ -397,6 +428,92 @@ mod tests {
         );
         // บันทึกครั้งแรกยังไม่มีของเดิมให้สำรอง
         assert!(!backup_path(&doc).exists());
+    }
+
+    /// ★★★ **บันทึกล้มเหลว → ห้ามทิ้ง `.refx.tmp` ไว้** (ดิสก์เต็ม · สิทธิ์ไม่พอ)
+    ///
+    /// ## ทำไมข้อนี้สำคัญกว่าที่เห็น
+    ///
+    /// ตอนดิสก์เต็ม ไฟล์ `.tmp` ที่ค้างอยู่ **คือที่ว่างที่ผู้ใช้ต้องการพอดี** ·
+    /// ผู้ใช้ที่พยายามเซฟซ้ำจะล้มซ้ำ ๆ โดยที่โปรแกรมกินที่เพิ่มทุกครั้ง และ
+    /// ทางออกเดียวคือไปลบไฟล์ที่เขาไม่รู้ว่ามีอยู่ ในโฟลเดอร์งานของตัวเอง
+    ///
+    /// ★ ยิงผ่าน `RenameFn` ซึ่งเป็น seam ที่มีอยู่แล้ว — **ไม่ต้องมีดิสก์เต็มจริง**
+    /// เพื่อถามคำถามนี้ · การรอเครื่องที่ดิสก์เต็มคือการไม่ถามเลย
+    ///
+    /// ★★ เทสต์นี้ตรวจ **ทั้งสามอย่างที่ I-3 สัญญาไว้** ในความล้มเหลวเดียว:
+    /// ไฟล์เดิมยังอยู่ครบ · ผู้ใช้ได้ error · และไม่มีขยะค้าง
+    #[test]
+    fn a_failed_save_leaves_the_original_whole_and_no_temporary_file_behind() {
+        fn always_fails(_: &Path, _: &Path) -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::StorageFull,
+                "there is not enough space on the disk",
+            ))
+        }
+
+        let dir = temp_dir("disk-full");
+        let doc = dir.join("work.refx");
+        let first = board_named("งานที่เซฟไว้แล้ว", 3);
+        save_atomic(&doc, &first, rename_durable).unwrap();
+        let before = read_all(&doc).unwrap();
+
+        let second = board_named("งานที่กำลังจะเซฟตอนดิสก์เต็ม", 9);
+        let err =
+            save_atomic(&doc, &second, always_fails).expect_err("rename ล้ม แต่ save บอกว่าสำเร็จ");
+
+        assert_eq!(
+            read_all(&doc).unwrap(),
+            before,
+            "★★★ ไฟล์เดิมเปลี่ยนไปทั้งที่การบันทึกล้มเหลว — I-3 พัง"
+        );
+        assert!(
+            format!("{err}").contains("replace") || format!("{err}").contains("space"),
+            "error ไม่ได้บอกว่าล้มที่ขั้นไหน: {err}"
+        );
+        assert!(
+            !tmp_path(&doc).exists(),
+            "★★ `.refx.tmp` ค้างอยู่หลังบันทึกล้มเหลว — ตอนดิสก์เต็ม \
+             นั่นคือที่ว่างที่ผู้ใช้ต้องการพอดี และเขาไม่รู้ว่าไฟล์นี้มีอยู่"
+        );
+    }
+
+    /// ★★ **ทุกเส้นทางที่เขียนไฟล์ต้องเก็บกวาดเหมือนกัน** — ไม่ใช่แค่เส้นที่นึกออก
+    ///
+    /// `save_document` (packed · ไฟล์ใหญ่ระดับ GB) และ `write_bytes_atomic`
+    /// (ภาพที่วางจาก clipboard) เป็นอีกสองเส้นที่สร้าง `.tmp` · ถ้าเก็บกวาด
+    /// แค่เส้นเดียว ไฟล์ค้างจะย้ายไปอยู่เส้นที่ไม่มีใครดูแทน ซึ่งอ่านว่า
+    /// "แก้แล้ว" ได้ง่ายมากเพราะเทสต์ของเส้นแรกเขียว
+    #[test]
+    fn every_path_that_writes_a_file_cleans_up_after_a_failure() {
+        fn always_fails(_: &Path, _: &Path) -> std::io::Result<()> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::StorageFull,
+                "there is not enough space on the disk",
+            ))
+        }
+
+        // ---- ภาพที่วางจาก clipboard (P4-5 spool) ----
+        let dir = temp_dir("disk-full-bytes");
+        let blob = dir.join("pasted.png");
+        let err = write_bytes_atomic(&blob, b"pretend png", always_fails)
+            .expect_err("rename ล้ม แต่บอกว่าสำเร็จ");
+        assert!(format!("{err}").contains("replace"), "{err}");
+        assert!(
+            !blob.with_extension("tmp").exists(),
+            "★ `write_bytes_atomic` ทิ้ง .tmp ไว้ — ภาพที่วางมาแต่ละใบใหญ่หลายสิบ MB"
+        );
+
+        // ---- เอกสาร packed (P4-5) ----
+        let doc = dir.join("packed.refx");
+        let board = board_named("packed", 2);
+        let err =
+            save_document(&doc, &board, &[], always_fails).expect_err("rename ล้ม แต่บอกว่าสำเร็จ");
+        assert!(format!("{err}").contains("replace"), "{err}");
+        assert!(
+            !tmp_path(&doc).exists(),
+            "★★ เส้นทาง packed ทิ้ง .tmp ไว้ — ไฟล์นั้นใหญ่ระดับ GB ได้"
+        );
     }
 
     /// ★ บันทึกทับ → `.refx.bak` ต้องเป็น **รุ่นก่อนหน้า** ไม่ใช่รุ่นปัจจุบัน

@@ -7,7 +7,7 @@
 //! ไม่ใช่รูปแบบการแพ็ก (`ROADMAP` ก้อน d) → `README.txt` ในซิปจึงต้องบอกให้ชัด
 //! ว่าข้อมูลอยู่ที่ไหน ไม่ใช่ปล่อยให้ผู้ใช้เดาว่ามันพกไปกับโฟลเดอร์
 //!
-//! ## ★★ ประตูสองบานที่ห้ามขาด
+//! ## ★★ ประตูสามบานที่ห้ามขาด
 //!
 //! 1. **แตกแพ็กเกจออกมาแล้วต้องเจอไฟล์ใบอนุญาต** — และต้องตรวจ **จากตัวแพ็กเกจ**
 //!    ไม่ใช่จากโฟลเดอร์ staging ที่เราเพิ่งเขียนเอง · โฟลเดอร์ staging ตอบได้แค่ว่า
@@ -15,6 +15,9 @@
 //! 2. **เวอร์ชันตรงกันสามที่** — `Cargo.toml` · `--version` ของไบนารีที่แตกออกมา
 //!    · ชื่อแพ็กเกจ · สองที่ไม่พอ: ไบนารีที่หลงรุ่นเข้ามาในซิปที่ชื่อถูกต้อง
 //!    คือสิ่งที่ผู้ใช้แยกไม่ออกเลยจนกว่าจะเจอบั๊กที่แก้ไปแล้ว
+//! 3. **ไบนารีต้องพึ่งตัวเองได้** — ไม่ import DLL ของ VC++ redistributable
+//!    · อาการของการพลาดข้อนี้คือ "ติดตั้งสำเร็จแล้วเปิดไม่ขึ้น" บนเครื่องที่
+//!    เพิ่งลง Windows ใหม่ ซึ่ง **เครื่องนักพัฒนาไม่มีวันเห็นเอง**
 //!
 //! ## ใช้
 //!
@@ -511,7 +514,59 @@ fn verify(out_dir: &Path, archive: &Path, stem: &str, declared: &str) -> anyhow:
         "★★★ เวอร์ชันไม่ตรงกัน — Cargo.toml={declared} ไบนารี={from_binary} ชื่อ={from_name}\n\
          ไบนารีที่หลงรุ่นเข้ามาในซิปที่ชื่อถูกต้อง คือสิ่งที่ผู้ใช้แยกไม่ออกเลย"
     );
+
+    println!("\n— ประตู 3: พึ่งตัวเองได้จริงไหม —");
+    self_contained(&std::fs::read(&exe)?)?;
     Ok(())
+}
+
+/// ชื่อ DLL ที่ **มากับ VC++ redistributable** ไม่ใช่กับ Windows
+///
+/// `api-ms-win-crt-*` และ `ucrtbase.dll` ไม่อยู่ในรายการนี้โดยตั้งใจ — พวกนั้นคือ
+/// UCRT ซึ่งเป็นส่วนหนึ่งของ Windows 10 ขึ้นไป · การเอามาปนกันคือการทำให้ประตู
+/// แดงด้วยเหตุผลที่ไม่มีอยู่จริง
+const REDIST_DLLS: &[&str] = &["VCRUNTIME140", "MSVCP140", "VCRUNTIME140_1"];
+
+/// ★★★ ไบนารีที่แจกต้อง **ไม่พึ่ง VC++ redistributable**
+///
+/// ## ทำไมต้องเป็นประตู ไม่ใช่แค่ธงใน `.cargo/config.toml`
+///
+/// เพราะอาการของมันคือ **"ติดตั้งสำเร็จ แล้วเปิดไม่ขึ้นเลย"** บนเครื่องที่เพิ่ง
+/// ลง Windows ใหม่ · เครื่องนักพัฒนามี redist เสมอเพราะลง Visual Studio ไปแล้ว
+/// → **เป็นบั๊กที่เราไม่มีวันเห็นเองสักครั้ง** ไม่ว่าจะทดสอบมากแค่ไหน
+///
+/// ★ และมันเกิดก่อนโค้ดของเราได้รันแม้แต่บรรทัดเดียว — dialog "RefX cannot start"
+/// ช่วยไม่ได้ เพราะยังไม่ถึงตาเรา · ผู้ใช้เห็นกล่อง error ของ OS แล้วจบ
+///
+/// วิธีตรวจ: ชื่อของ DLL ที่ถูก import **ถูกเก็บเป็นสตริง ASCII ในตัวไฟล์ PE**
+/// ตรง ๆ · ไม่เจอชื่อ = import ไม่ได้ · ไม่ต้องมี PE parser และไม่ต้องมี `dumpbin`
+/// (ซึ่งต้องลง Visual Studio — เครื่องมือที่ต้องมี VS ถึงจะตรวจได้ว่าไม่ต้องมี VS
+/// คือเครื่องมือที่ตอบคำถามผิดข้อ)
+///
+/// # Errors
+/// เมื่อไบนารียังพึ่ง DLL ของ redist อยู่
+fn self_contained(binary: &[u8]) -> anyhow::Result<()> {
+    let found: Vec<&str> = REDIST_DLLS
+        .iter()
+        .filter(|name| contains_ascii(binary, name.as_bytes()))
+        .copied()
+        .collect();
+    if found.is_empty() {
+        println!("  ไม่พึ่ง VC++ redistributable — เปิดได้บน Windows ที่เพิ่งลงใหม่");
+        return Ok(());
+    }
+    anyhow::bail!(
+        "★★★ ไบนารีที่จะแจกยังพึ่ง {} ซึ่งมากับ VC++ redistributable\n\
+         เครื่องที่เพิ่งลง Windows ใหม่จะ **ติดตั้งสำเร็จแล้วเปิดไม่ขึ้น** โดยไม่มีข้อความ\n\
+         ของเราให้อ่านเลย · `.cargo/config.toml` ตั้ง `-C target-feature=+crt-static`\n\
+         ไว้เพื่อกันข้อนี้ — ธงนั้นหายไปหรือเปล่า",
+        found.join(", ")
+    )
+}
+
+/// ค้นสตริงไบต์ในไฟล์ — `slice::windows` ตรง ๆ พอสำหรับไฟล์ระดับ 18 MB
+fn contains_ascii(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|slice| slice == needle)
 }
 
 /// เวอร์ชันที่ประกาศไว้ใน `[workspace.package]`
@@ -649,6 +704,25 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+
+    /// ★★★ ประตู "พึ่งตัวเองได้" ต้องแดงกับไบนารีที่ยังพึ่ง redist
+    ///
+    /// ★ และต้อง **ไม่แดง** กับ `api-ms-win-crt-*` ซึ่งเป็น UCRT ที่มากับ Windows
+    /// — ประตูที่แดงด้วยเหตุผลที่ไม่มีอยู่จริง จะถูกปิดโดยคนที่ไม่มีเวลาอ่าน
+    #[test]
+    fn the_self_contained_gate_knows_the_redistributable_from_the_operating_system() {
+        let clean = b"....api-ms-win-crt-heap-l1-1-0.dll....ucrtbase.dll....KERNEL32.dll";
+        self_contained(clean).expect("UCRT ไม่ใช่ redist — ห้ามแดง");
+
+        let needs_redist = b"....VCRUNTIME140.dll....KERNEL32.dll";
+        let err = self_contained(needs_redist).expect_err("ต้องแดง");
+        let shown = err.to_string();
+        assert!(shown.contains("VCRUNTIME140"), "ไม่ได้บอกว่าตัวไหน: {shown}");
+        assert!(shown.contains("crt-static"), "ไม่ได้บอกว่าจะแก้ยังไง: {shown}");
+
+        let cpp = b"....MSVCP140.dll....";
+        assert!(self_contained(cpp).is_err(), "MSVCP140 ก็ต้องแดง");
+    }
 
     /// ★★★ ของปลอมจาก negative control ต้องออกไปกับ artifact ที่แจกไม่ได้
     ///
