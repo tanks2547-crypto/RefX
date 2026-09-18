@@ -106,6 +106,14 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      # ★★★ ก่อนอะไรทั้งนั้น — job นี้เคยแดงกลางการคอมไพล์ด้วย
+      #   "No space left on device" (run 35308516735) และ **รอบเขียวก่อนหน้า
+      #   จบด้วยที่ว่าง 96 MB** · มันไม่เคยผ่านเพราะสุขภาพดี มันผ่านมาเฉียด ๆ
+      #   โดยที่ตัวเลขนั้นอยู่ใน log ในฐานะ warning ที่ไม่มีใครถูกบังคับให้อ่าน
+      - name: คืนที่ว่างบนดิสก์ของ runner
+        if: runner.os == 'Linux'
+        shell: bash
+        run: scripts/check-disk.sh free
       - uses: dtolnay/rust-toolchain@stable
         with: { components: rustfmt, clippy }
       - uses: Swatinem/rust-cache@v2
@@ -279,6 +287,23 @@ jobs:
             exit 1
           fi
           echo "::notice::negative control ผ่าน — ตัวตรวจ benchmark ล้มได้จริง"
+
+      # ★★ `always()` โดยตั้งใจ — ถ้า job แดงเพราะดิสก์เต็ม ขั้นนี้คือขั้นที่
+      #   **บอกว่าเป็นเพราะดิสก์** แทนที่จะปล่อยให้อ่าน error ของ rustc แล้วเดา
+      - name: เหลือที่ว่างเท่าไหร่ — ต้องอ่านทุกรอบ ไม่ใช่ตอนที่มันเป็นศูนย์แล้ว
+        if: always() && runner.os == 'Linux'
+        shell: bash
+        run: scripts/check-disk.sh report
+
+      - name: negative control ของตัวตรวจดิสก์
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          if REFX_DISK_FLOOR_MB=99999999 scripts/check-disk.sh report > /dev/null 2>&1; then
+            echo "::error::ตัวตรวจดิสก์ไม่ล้มแม้ตั้งพื้นสูงเกินจริง — ตัวตรวจเองพัง"
+            exit 1
+          fi
+          echo "::notice::negative control ผ่าน — ตัวตรวจดิสก์ล้มได้จริง"
 
   deny:
     needs: changes

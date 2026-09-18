@@ -57,6 +57,12 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+      # job นี้ build ทั้งทรีจากศูนย์ จึงกินดิสก์มากกว่า `check` เสียอีก —
+      # เหตุผลเดียวกับที่ `ci.yml` มีขั้นนี้ (ดู scripts/check-disk.sh)
+      - name: คืนที่ว่างบนดิสก์ของ runner
+        if: runner.os == 'Linux'
+        shell: bash
+        run: scripts/check-disk.sh free
       - uses: dtolnay/rust-toolchain@stable
       # ★★★ **ห้ามใส่ `Swatinem/rust-cache` ที่นี่** — ทั้ง job มีอยู่เพื่อสิ่งนี้
       #     ขั้น "พยาน" ข้างล่างจะจับได้เองถ้ามีใครเติมกลับเข้ามา
@@ -127,6 +133,11 @@ jobs:
           else
             cargo nextest run --workspace --all-features
           fi
+
+      - name: เหลือที่ว่างเท่าไหร่ — ต้องอ่านทุกรอบ
+        if: always() && runner.os == 'Linux'
+        shell: bash
+        run: scripts/check-disk.sh report
 
       # ★ ขึ้นไปดูได้ว่ารอบไหนคอมไพล์อะไร — ตัวเลขใน log หายไปกับ log
       - uses: actions/upload-artifact@v4
