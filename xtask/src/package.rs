@@ -222,15 +222,23 @@ pub fn verify_deb() -> anyhow::Result<()> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let from_name = version_in_deb_name(&name)
-        .ok_or_else(|| anyhow::anyhow!("อ่านเวอร์ชันจากชื่อ {name:?} ไม่ได้"))?;
+    // ★ ชื่อไฟล์ตอบว่า "ใช่เวอร์ชันนี้ไหม" ไม่ใช่ "เวอร์ชันคืออะไร" — ดู
+    //   `deb_name_declares` ว่าทำไมคำถามหลังตอบไม่ได้
+    let name_ok = deb_name_declares(&name, &declared);
 
     println!("  Cargo.toml     {declared}");
     println!("  ไบนารีใน .deb  {from_binary}");
-    println!("  ชื่อแพ็กเกจ     {from_name}");
+    println!(
+        "  ชื่อแพ็กเกจ     {name} → {}",
+        if name_ok {
+            "ตรงกับที่ประกาศ"
+        } else {
+            "ไม่ตรง"
+        }
+    );
     anyhow::ensure!(
-        agree(&declared, &from_binary, from_name),
-        "★★★ เวอร์ชันไม่ตรงกัน — Cargo.toml={declared} ไบนารี={from_binary} ชื่อ={from_name}"
+        declared == from_binary && name_ok,
+        "★★★ เวอร์ชันไม่ตรงกัน — Cargo.toml={declared} ไบนารี={from_binary} ชื่อ={name}"
     );
     println!("\n— ประตู 3: การเสริมความแข็งแรงต้องอยู่ **ในไฟล์ที่แจก** —");
     hardened(&exe)?;
@@ -468,14 +476,50 @@ fn msiexec(args: &[&str], step: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// เวอร์ชันจากชื่อไฟล์ `.deb` — `refx_0.1.0-1_amd64.deb` → `0.1.0`
+/// ชื่อไฟล์ `.deb` **ประกาศเวอร์ชันนี้หรือเปล่า** — `refx_1.0.0-1_amd64.deb` กับ `1.0.0`
 ///
-/// ★ Debian เติม `-<revision>` ต่อท้ายเสมอ · ตัดทิ้งก่อนเทียบ ไม่งั้นประตู
-/// จะแดงทุกครั้งด้วยเหตุผลที่ไม่ใช่ความผิดของใคร
-fn version_in_deb_name(name: &str) -> Option<&str> {
-    let rest = name.strip_prefix("refx_")?;
-    let (version, _) = rest.split_once('_')?;
-    Some(version.split_once('-').map_or(version, |(v, _)| v))
+/// # ★★★ ทำไมไม่ "แยกเวอร์ชันออกจากชื่อ" แบบเดิม (18 ก.ย. 2026)
+///
+/// ตัวเดิมตัดที่ขีดกลาง **ตัวแรก** เพื่อลอก Debian revision ทิ้ง ซึ่งถูกตราบใด
+/// ที่เวอร์ชันไม่มีขีดกลางของตัวเอง · พอเวอร์ชันเป็น pre-release มันพังทันที
+/// **และพังเงียบ ๆ โดยคืนค่าที่หน้าตาปกติ**:
+///
+/// | ชื่อไฟล์ | ตัดตัวแรก | ตัดตัวท้าย |
+/// |---|---|---|
+/// | `refx_1.0.0-rc.1-1_amd64.deb` | `1.0.0` ❌ | `1.0.0-rc.1` ✅ |
+/// | `refx_1.0.0-rc.1_amd64.deb` | `1.0.0` ❌ | `1.0.0-rc` ❌ |
+///
+/// ★★ **ไม่มีการตัดแบบไหนที่ถูกทั้งสองแถว** — ชื่อไฟล์อย่างเดียวแยก
+/// "revision ของ Debian" ออกจาก "pre-release ของ semver" ไม่ได้ เพราะทั้งคู่
+/// คั่นด้วยขีดกลางเหมือนกัน · คำถามที่ตอบได้จริงจึงไม่ใช่ *"เวอร์ชันในชื่อคืออะไร"*
+/// แต่เป็น *"ชื่อนี้เป็นของเวอร์ชันที่เราประกาศไหม"* ซึ่งมีคำตอบเสมอ
+///
+/// ★★★ และ **ความกำกวมนี้แก้ด้วยการเดาไม่ได้เลย**: `refx_1.0.0-rc.1_amd64.deb`
+/// อ่านได้สองแบบที่ถูกต้องตามกฎของ Debian ทั้งคู่ — upstream `1.0.0` ที่มี
+/// revision ชื่อ `rc.1` (Debian ยอมให้ revision เป็นตัวอักษรได้) หรือ upstream
+/// `1.0.0-rc.1` ที่ไม่มี revision · ตัวแก้รอบแรกของรอบนี้พลาดตรงนี้พอดี และ
+/// **เทสต์ `the_release_does_not_accept_a_release_candidate_of_itself` เป็นคนจับ**
+///
+/// ทางออกคือเลิกรับทุกรูปที่ Debian ยอม แล้วรับ **เฉพาะรูปที่เครื่องมือของเรา
+/// สร้างจริง**: `cargo deb` เติม revision เป็น **ตัวเลขล้วน** (`-1`) เสมอ
+/// → `-rc.1` จึงไม่ใช่ revision ในโลกของเรา และความกำกวมหายไปทั้งหมด
+///
+/// ยอมรับ `refx_<declared>_...` และ `refx_<declared>-<ตัวเลข>_...` เท่านั้น
+fn deb_name_declares(name: &str, declared: &str) -> bool {
+    let Some(rest) = name.strip_prefix("refx_") else {
+        return false;
+    };
+    let Some((field, _)) = rest.split_once('_') else {
+        return false;
+    };
+    let Some(tail) = field.strip_prefix(declared) else {
+        return false;
+    };
+    // ว่าง = ไม่มี revision · ไม่งั้นต้องเป็น `-<ตัวเลข>` ตามที่ `cargo deb` สร้าง
+    match tail.strip_prefix('-') {
+        None => tail.is_empty(),
+        Some(revision) => !revision.is_empty() && revision.bytes().all(|b| b.is_ascii_digit()),
+    }
 }
 
 /// ★★★ ตรวจ **จากตัวแพ็กเกจ** — แตกออกมาใหม่ในที่ว่าง แล้วถามมันเอง
@@ -822,20 +866,45 @@ edition = \"2024\"\n";
 
     /// ★★ ชื่อ `.deb` มี `-<revision>` ต่อท้ายเวอร์ชันเสมอ
     ///
-    /// ไม่ตัดมันทิ้ง ประตูเวอร์ชันจะแดงทุกครั้งด้วยเหตุผลที่ไม่ใช่ความผิดของใคร
+    /// ไม่ยอมรับมัน ประตูเวอร์ชันจะแดงทุกครั้งด้วยเหตุผลที่ไม่ใช่ความผิดของใคร
     /// แล้วคนจะปิดประตูทิ้ง — ซึ่งแย่กว่าไม่มีประตู
     #[test]
     fn the_debian_revision_suffix_does_not_break_the_version_gate() {
-        assert_eq!(version_in_deb_name("refx_0.1.0-1_amd64.deb"), Some("0.1.0"));
-        assert_eq!(
-            version_in_deb_name("refx_1.10.3-2_amd64.deb"),
-            Some("1.10.3")
-        );
-        // ไม่มี revision ก็ต้องอ่านได้
-        assert_eq!(version_in_deb_name("refx_0.1.0_amd64.deb"), Some("0.1.0"));
-        // ของคนอื่นต้องอ่านไม่ออก
-        assert_eq!(version_in_deb_name("othertool_1.0-1_amd64.deb"), None);
-        assert_eq!(version_in_deb_name("refx-0.1.0-windows-x86_64.zip"), None);
+        assert!(deb_name_declares("refx_1.0.0-1_amd64.deb", "1.0.0"));
+        assert!(deb_name_declares("refx_1.10.3-2_amd64.deb", "1.10.3"));
+        // ไม่มี revision ก็ต้องผ่าน
+        assert!(deb_name_declares("refx_1.0.0_amd64.deb", "1.0.0"));
+        // ของคนอื่นต้องไม่ผ่าน
+        assert!(!deb_name_declares("othertool_1.0-1_amd64.deb", "1.0"));
+        assert!(!deb_name_declares("refx-1.0.0-windows-x86_64.zip", "1.0.0"));
+        // ★ คนละรุ่นต้องไม่ผ่าน — นี่คืองานหลักของประตูนี้
+        assert!(!deb_name_declares("refx_9.9.9-1_amd64.deb", "1.0.0"));
+    }
+
+    /// ★★★ เวอร์ชัน pre-release — เคสที่ตัวเดิมพัง **เงียบ ๆ โดยคืนค่าที่ดูปกติ**
+    ///
+    /// ตัวเดิมตัดที่ขีดกลางตัวแรก `refx_1.0.0-rc.1-1_amd64.deb` จึงอ่านได้
+    /// `1.0.0` แล้วเทียบกับ `1.0.0-rc.1` ไม่ตรง → ประตูแดงทั้งที่ทุกอย่างถูก
+    /// · ตัดตัวท้ายก็ไม่ช่วย เพราะแพ็กเกจที่ไม่มี revision จะอ่านได้ `1.0.0-rc`
+    #[test]
+    fn a_pre_release_version_survives_both_shapes_of_the_name() {
+        assert!(deb_name_declares(
+            "refx_1.0.0-rc.1-1_amd64.deb",
+            "1.0.0-rc.1"
+        ));
+        assert!(deb_name_declares("refx_1.0.0-rc.1_amd64.deb", "1.0.0-rc.1"));
+    }
+
+    /// ★★★ และ `1.0.0` ต้อง **ไม่กลืน** แพ็กเกจของ `1.0.0-rc.1` เข้ามา
+    ///
+    /// นี่คือด้านที่อันตรายกว่า: ประตูที่แดงผิดคนเห็น ประตูที่เขียวผิดไม่มีใครเห็น
+    /// — rc ที่หลุดออกไปในชื่อของรุ่นจริงคือสิ่งที่ผู้ใช้แยกไม่ออกเลย
+    #[test]
+    fn the_release_does_not_accept_a_release_candidate_of_itself() {
+        assert!(!deb_name_declares("refx_1.0.0-rc.1-1_amd64.deb", "1.0.0"));
+        assert!(!deb_name_declares("refx_1.0.0-rc.1_amd64.deb", "1.0.0"));
+        // และกันการชนกันแบบต่อท้ายตัวเลขเฉย ๆ
+        assert!(!deb_name_declares("refx_1.0.01-1_amd64.deb", "1.0.0"));
     }
 
     /// ★ README ต้องบอกว่าข้อมูลอยู่ไหน — ไม่งั้น "portable" จะถูกอ่านว่า
