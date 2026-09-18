@@ -104,9 +104,24 @@ cargo fmt
 cargo clippy --all-targets -- -D warnings
 cargo nextest run --workspace --all-features   # ★ ไม่ใช่ `cargo test --all` — ดูข้างล่าง
 cargo deny check
+cargo xtask licenses --check      # ★ ดูกล่องข้างล่าง — ประตูนี้บล็อกการสร้างแพ็กเกจ
+cargo xtask icon --check          # ★ เช่นกัน
 cargo tree -d | grep '^wgpu'     # ต้องว่าง (^ สำคัญ — ไม่งั้นจับ leaf crate อื่นติดมาด้วย)
 cargo tree -d | grep '^png'      # ต้องว่าง — เราตรึง png ตรง ๆ ต้องตรงกับที่ image ใช้
 ```
+
+### ★★★ ประตูทุกบานที่บล็อกได้ ต้องอยู่ในรายการที่รันก่อน commit
+
+ไม่งั้นมันไม่ใช่ประตู **มันคือเซอร์ไพรส์**
+
+18 ก.ย. 2026: การขยับเวอร์ชัน `0.1.0 → 1.0.0` เปลี่ยน `Cargo.lock` → crc32
+ในหัว `THIRD-PARTY-LICENSES.md` ไม่ตรง → `windows-zip` กับ `linux-deb`
+**แดงพร้อมกัน** ทั้งที่ `fmt` · `clippy` · 1,110 เทสต์ · `deny` เขียวหมดในเครื่อง
+· ต่างกันบรรทัดเดียว (314 crate เท่าเดิม) แต่ต้องรอ CI สองรอบกว่าจะรู้
+
+`licenses --check` กับ `icon --check` **สร้างไฟล์ใหม่แล้วเทียบไบต์** ไม่ใช่เทียบ
+เวลาไฟล์ จึงตอบได้ตรง ๆ ว่าตรงไหม · `licenses --check` ใช้เวลาหลักนาที (ต้องดึง
+ซอร์สของทุกแพลตฟอร์ม) — ราคาที่ถูกกว่าการค้นพบตอน CI มาก
 
 ### ★★★ ห้ามใช้ `cargo test --all` — ใช้ `cargo nextest run --workspace --all-features`
 

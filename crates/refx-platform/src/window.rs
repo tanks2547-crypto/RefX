@@ -232,6 +232,44 @@ pub fn route(event: &WindowEvent) -> EventRoute {
     }
 }
 
+/// ชื่อสั้น ๆ ของชนิด event — สำหรับตัวนับที่บอกว่า *อะไร* ทำให้วาด
+///
+/// ★ เขียนเองแทนการใช้ `{:?}` เพราะ `Debug` ของ winit พ่นค่าทั้งก้อน
+/// (ตำแหน่งเมาส์ ฯลฯ) ซึ่งทำให้ทุกครั้งเป็นคีย์คนละตัวกัน แล้วตัวนับก็ไร้ความหมาย
+fn event_kind(event: &WindowEvent) -> &'static str {
+    match event {
+        WindowEvent::CursorMoved { .. } => "CursorMoved",
+        WindowEvent::CursorEntered { .. } => "CursorEntered",
+        WindowEvent::CursorLeft { .. } => "CursorLeft",
+        WindowEvent::MouseInput { .. } => "MouseInput",
+        WindowEvent::MouseWheel { .. } => "MouseWheel",
+        WindowEvent::KeyboardInput { .. } => "KeyboardInput",
+        WindowEvent::ModifiersChanged(..) => "ModifiersChanged",
+        WindowEvent::Focused(..) => "Focused",
+        WindowEvent::Occluded(..) => "Occluded",
+        WindowEvent::Moved(..) => "Moved",
+        WindowEvent::HoveredFile(..) => "HoveredFile",
+        WindowEvent::HoveredFileCancelled => "HoveredFileCancelled",
+        WindowEvent::DroppedFile(..) => "DroppedFile",
+        WindowEvent::ScaleFactorChanged { .. } => "ScaleFactorChanged",
+        WindowEvent::ThemeChanged(..) => "ThemeChanged",
+        WindowEvent::Ime(..) => "Ime",
+        WindowEvent::Touch(..) => "Touch",
+        WindowEvent::AxisMotion { .. } => "AxisMotion",
+        WindowEvent::PinchGesture { .. } => "PinchGesture",
+        WindowEvent::PanGesture { .. } => "PanGesture",
+        WindowEvent::DoubleTapGesture { .. } => "DoubleTapGesture",
+        WindowEvent::RotationGesture { .. } => "RotationGesture",
+        WindowEvent::TouchpadPressure { .. } => "TouchpadPressure",
+        WindowEvent::ActivationTokenDone { .. } => "ActivationTokenDone",
+        WindowEvent::Destroyed => "Destroyed",
+        // สามตัวนี้ไม่มีทางมาถึงที่นี่ — `route()` ส่งไปทางอื่นก่อน
+        WindowEvent::RedrawRequested => "RedrawRequested",
+        WindowEvent::CloseRequested => "CloseRequested",
+        WindowEvent::Resized(..) => "Resized",
+    }
+}
+
 /// สิ่งเดียวที่ host ต้องการจากหน้าต่างจริง: ขอให้วาดใหม่
 ///
 /// ★★★ แยกเป็น trait เพราะ `winit::Window` **สร้างนอก event loop ไม่ได้** →
@@ -269,6 +307,20 @@ pub struct WindowHost<D: AppDelegate, S: Surface = Arc<Window>> {
     tracker: RedrawTracker,
     /// error ที่เกิดตอน `window_ready` — เก็บไว้คืนหลัง event loop จบ
     failure: Option<D::Error>,
+    /// ★★★ event ชนิดไหนทำให้เกิด `UserInput` บ้าง และกี่ครั้ง
+    ///
+    /// # ทำไมต้องนับ (18 ก.ย. 2026)
+    ///
+    /// วัดแล้วพบว่า **เคอร์เซอร์ที่ค้างอยู่ในหน้าต่างเฉย ๆ ทำให้เกิดเฟรมต่อเนื่อง**
+    /// โดยไม่มีใครแตะอะไร — ปล่อยนิ่ง 130 วินาที: เคอร์เซอร์อยู่บนผืนผ้าใบได้
+    /// `UserInput=77` · บนแถบเครื่องมือได้ `9` · ไม่อยู่ในหน้าต่างได้ `10`
+    ///
+    /// `redraws=` บอกว่า **มีการขอวาดกี่ครั้งเพราะเหตุผลอะไร** แต่ตอบไม่ได้ว่า
+    /// *event ตัวไหน* เป็นคนพามา → เดาได้อย่างเดียว ซึ่งเป็นสิ่งที่
+    /// `docs/08 §3.9` ข้อ 9 ห้าม · ตัวนับนี้ตอบคำถามนั้นตรง ๆ
+    ///
+    /// `BTreeMap` ไม่ใช่ `HashMap` — ลำดับต้องคงที่ทุกครั้งที่พิมพ์ (กฎใน `CLAUDE.md`)
+    input_kinds: std::collections::BTreeMap<&'static str, u64>,
 }
 
 impl<D: AppDelegate, S: Surface> WindowHost<D, S> {
@@ -280,7 +332,21 @@ impl<D: AppDelegate, S: Surface> WindowHost<D, S> {
             window: None,
             tracker: RedrawTracker::new(),
             failure: None,
+            input_kinds: std::collections::BTreeMap::new(),
         }
+    }
+
+    /// สรุปว่า event ชนิดไหนพา `UserInput` มากี่ครั้ง — เรียงคงที่
+    #[must_use]
+    pub fn input_kinds(&self) -> String {
+        if self.input_kinds.is_empty() {
+            return "ไม่มี input เลย".to_owned();
+        }
+        self.input_kinds
+            .iter()
+            .map(|(kind, n)| format!("{kind}={n}"))
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     /// ตัวนับ redraw — ใช้ตรวจ I-1
@@ -350,6 +416,9 @@ impl<D: AppDelegate, S: Surface> WindowHost<D, S> {
             }
             EventRoute::Input => {
                 if self.delegate.on_input(event) {
+                    // ★ นับ **เฉพาะตัวที่ทำให้เกิดเฟรมจริง** ไม่ใช่ทุก event ที่เข้ามา
+                    //   — คำถามคือ "อะไรทำให้วาด" ไม่ใช่ "อะไรวิ่งผ่าน"
+                    *self.input_kinds.entry(event_kind(event)).or_insert(0) += 1;
                     self.request_redraw(RedrawReason::UserInput);
                 }
             }
@@ -498,6 +567,9 @@ pub fn run<D: AppDelegate>(
     tracing::info!(
         redraws = %host.tracker().summary(),
         worst_quiet = %host.tracker().worst_quiet().summary(),
+        // ★ `redraws=` บอกว่าวาดเพราะเหตุผลอะไร · ตัวนี้บอกว่า **event ไหนพามา**
+        //   ซึ่งเป็นคำถามที่ตอบไม่ได้มาก่อนแล้วต้องเดา
+        inputs = %host.input_kinds(),
         "shutting down"
     );
 
@@ -529,6 +601,41 @@ mod tests {
             "assets/icon/refx-64.rgba ไม่ตรงกับ {ICON_SIDE}×{ICON_SIDE} — รัน `cargo xtask icon`"
         );
         assert!(window_icon().is_some(), "winit ปฏิเสธไอคอนที่เรา commit ไว้");
+    }
+
+    /// ★★★ ชื่อชนิด event ต้อง **ไม่ขึ้นกับค่าข้างใน**
+    ///
+    /// ถ้าใช้ `{:?}` ของ winit ตำแหน่งเมาส์จะติดมาด้วย → `CursorMoved` ทุกครั้ง
+    /// กลายเป็นคีย์คนละตัว แล้วตัวนับก็บอกอะไรไม่ได้เลย ซึ่งแย่กว่าไม่มีตัวนับ
+    /// เพราะมันดูเหมือนมีข้อมูล
+    #[test]
+    fn the_name_of_an_event_does_not_change_with_its_payload() {
+        use winit::dpi::PhysicalPosition;
+        let id = winit::event::DeviceId::dummy();
+        let a = WindowEvent::CursorMoved {
+            device_id: id,
+            position: PhysicalPosition::new(1.0, 2.0),
+        };
+        let b = WindowEvent::CursorMoved {
+            device_id: id,
+            position: PhysicalPosition::new(900.0, 700.0),
+        };
+        assert_eq!(event_kind(&a), event_kind(&b));
+        assert_eq!(event_kind(&a), "CursorMoved");
+    }
+
+    /// ★★ การลากไฟล์ต้องแยกออกจากการขยับเมาส์ได้
+    ///
+    /// นี่คือข้อที่ทำให้ตอบได้ว่าช่วงเงียบตอนลากไฟล์ค้างมาจากอะไร
+    /// แทนที่จะเดา (`KNOWN-LIMITATIONS` ข้อ 12)
+    #[test]
+    fn dragging_a_file_is_a_different_kind_from_moving_the_mouse() {
+        let hovered = WindowEvent::HoveredFile("a.png".into());
+        let dropped = WindowEvent::DroppedFile("a.png".into());
+        assert_eq!(event_kind(&hovered), "HoveredFile");
+        assert_eq!(event_kind(&dropped), "DroppedFile");
+        assert_ne!(event_kind(&hovered), event_kind(&dropped));
+        assert_ne!(event_kind(&hovered), "CursorMoved");
     }
 
     /// delegate จำลองที่ "ไม่มีอะไรต้องวาดต่อ" — เลียนแบบ egui ตอน idle
