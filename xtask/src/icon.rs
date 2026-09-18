@@ -43,7 +43,11 @@ const SUBSAMPLES: u32 = 8;
 
 /// `cargo xtask icon [--check]`
 pub fn run() -> anyhow::Result<()> {
-    let check = std::env::args().skip(2).any(|a| a == "--check");
+    // ★ ไม่ใช่ `.any(|a| a == "--check")` — แบบนั้น `--chek` จะถูกทิ้งเงียบ ๆ
+    //   แล้วคำสั่งกลายเป็น "สร้างไฟล์ใหม่" แทนที่จะเป็นประตู (`docs/08 §3.9` ข้อ 9)
+    let mut args = crate::args::Args::new("cargo xtask icon [--check]");
+    let check = args.flag("--check");
+    args.finish()?;
     let root = repo_root()?;
 
     let svg_path = root.join(SVG);

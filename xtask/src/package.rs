@@ -62,6 +62,7 @@ fn nc_out_dir(nc: &str) -> &'static str {
 /// # Errors
 /// เมื่อ build ไม่ผ่าน · ไฟล์ที่ต้องมีหายไปจากแพ็กเกจ · หรือเวอร์ชันสามที่ไม่ตรงกัน
 pub fn run() -> anyhow::Result<()> {
+    crate::args::Args::new("cargo xtask package").finish()?;
     anyhow::ensure!(
         cfg!(windows),
         "รอบนี้ทำเฉพาะแพ็กเกจของ Windows — AppImage/deb ต้องสร้างบน Linux (ทำใน CI)"
@@ -148,10 +149,12 @@ const DEB_DOC_DIR: &str = "usr/share/doc/refx";
 /// # Errors
 /// เมื่อแตกไฟล์ไม่ได้ · ไฟล์ที่ต้องมีหายไป · หรือเวอร์ชันไม่ตรง
 pub fn verify_deb() -> anyhow::Result<()> {
-    let path: PathBuf = std::env::args()
-        .nth(2)
+    let mut args = crate::args::Args::new("cargo xtask verify-deb <ไฟล์.deb>");
+    let path: PathBuf = args
+        .positional()
         .ok_or_else(|| anyhow::anyhow!("ใช้: cargo xtask verify-deb <ไฟล์.deb>"))?
         .into();
+    args.finish()?;
     anyhow::ensure!(path.is_file(), "ไม่เจอไฟล์ {}", path.display());
 
     let root = root()?;
@@ -321,10 +324,12 @@ fn judge(header: &str, dynamic: &str) -> anyhow::Result<()> {
 /// เมื่อติดตั้ง/ถอนไม่สำเร็จ · ไฟล์หาย · เวอร์ชันไม่ตรง · หรือ **งานผู้ใช้ถูกลบ**
 pub fn verify_msi() -> anyhow::Result<()> {
     anyhow::ensure!(cfg!(windows), "MSI ตรวจได้บน Windows เท่านั้น");
-    let msi: PathBuf = std::env::args()
-        .nth(2)
+    let mut args = crate::args::Args::new("cargo xtask verify-msi <ไฟล์.msi>");
+    let msi: PathBuf = args
+        .positional()
         .ok_or_else(|| anyhow::anyhow!("ใช้: cargo xtask verify-msi <ไฟล์.msi>"))?
         .into();
+    args.finish()?;
     anyhow::ensure!(msi.is_file(), "ไม่เจอไฟล์ {}", msi.display());
     // ★★★ `msiexec` รับ **เส้นทางเต็มเท่านั้น** — เส้นทางสัมพัทธ์ให้ error 1619
     //   ("This installation package could not be opened") ซึ่งอ่านเหมือนไฟล์เสีย

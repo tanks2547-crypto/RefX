@@ -43,6 +43,7 @@ const OUT: &str = "fuzz/seeds/fuzz_packed";
 /// # Errors
 /// เมื่อเขียนไฟล์ไม่สำเร็จ
 pub fn gen_fuzz_seeds() -> anyhow::Result<()> {
+    crate::args::Args::new("cargo xtask gen-fuzz-seeds").finish()?;
     let out = PathBuf::from(OUT);
     std::fs::create_dir_all(&out)?;
     let work = std::env::temp_dir().join(format!("refx-seed-blobs-{}", std::process::id()));

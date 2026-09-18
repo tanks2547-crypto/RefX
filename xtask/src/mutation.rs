@@ -107,16 +107,14 @@ struct Guard {
 /// # Errors
 /// เมื่อมีด่านที่ไม่มีเทสต์ตัวไหนเห็น หรือทะเบียนไม่ตรงกับซอร์สจริง
 pub fn run() -> anyhow::Result<()> {
-    let mut args = std::env::args().skip(2);
-    let mut krate = String::from("refx-core");
-    let mut time_only = false;
-    for arg in args.by_ref() {
-        if arg == "--time-only" {
-            time_only = true;
-        } else {
-            krate = arg;
-        }
-    }
+    // ★ เดิมเป็น `else { krate = arg }` ซึ่งแปลว่าธงที่พิมพ์ผิดกลายเป็น**ชื่อ crate**
+    //   และ `mutation a b` เก็บแค่ `b` เงียบ ๆ (`docs/08 §3.9` ข้อ 9)
+    let mut args = crate::args::Args::new("cargo xtask mutation [crate] [--time-only]");
+    let time_only = args.flag("--time-only");
+    let krate = args
+        .positional()
+        .unwrap_or_else(|| String::from("refx-core"));
+    args.finish()?;
     let nc = std::env::var_os("REFX_MUT_NC").is_some();
 
     let real = root()?;

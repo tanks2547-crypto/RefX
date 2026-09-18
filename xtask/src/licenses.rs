@@ -139,7 +139,11 @@ impl Dep {
 /// เมื่อเรียก cargo ไม่สำเร็จ · หาซอร์สของ crate ไม่เจอ · หรือ (`--check`)
 /// ไฟล์ในทรีไม่ตรงกับสิ่งที่สร้างใหม่
 pub fn run() -> anyhow::Result<()> {
-    let check = std::env::args().any(|a| a == "--check");
+    // ★ เดิมเป็น `std::env::args().any(...)` ซึ่งอ่าน argv ทั้งแถบ (รวมชื่อโปรแกรม)
+    //   และทิ้งอาร์กิวเมนต์ที่ไม่รู้จักเงียบ ๆ — `--chek` = สร้างไฟล์ใหม่ ไม่ใช่ประตู
+    let mut args = crate::args::Args::new("cargo xtask licenses [--check]");
+    let check = args.flag("--check");
+    args.finish()?;
     let root = root()?;
 
     // ★ ต้องมีซอร์สของ **ทุก** แพลตฟอร์มอยู่ในเครื่อง ไม่งั้นฝั่งที่ไม่ได้ build

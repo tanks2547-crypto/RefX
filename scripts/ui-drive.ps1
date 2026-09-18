@@ -56,12 +56,80 @@
 #   kill                             stop refx and WAIT for the single-instance
 #                                    lock to be released
 #
+#   -Validate                        check the step list and run NOTHING
+#
 # Exit codes: 1 = lost focus (would produce a screenshot of another window)
+#             2 = bad step list (checked before anything runs)
 #             3 = target hung (would produce a screenshot of a dead app)
+#
+# ---------------------------------------------------------------------------
+# WHY EVERY STEP IS CHECKED BEFORE ANY STEP RUNS  (cost a device-lost run,
+# 17 Sep 2026)
+# ---------------------------------------------------------------------------
+# 'launch' read $parts[1] and $parts[2] and said nothing about a $parts[3].  So
+#
+#   "launch|refx.exe|--open-dir=E:\imgs|--force-device-lost-after-ms=6000"
+#
+# started RefX with the folder and WITHOUT the simulation flag.  The app came
+# up, sat there, and the run "passed" -- because nothing happened.  Nothing was
+# supposed to happen: the experiment was never performed.  It was only caught by
+# reading refx.log and seeing generation=0 where the whole point was to see a 1.
+#
+# An argument that is dropped in silence is an experiment that never ran, and it
+# lands in the checklist as a line that was verified.  So the step list is now
+# checked against the arity table below BEFORE the first mouse moves: too many
+# fields is an error, too few is an error, and the run stops at zero steps
+# rather than half way through with real input already delivered.
 #
 # ASCII only on purpose: Windows PowerShell 5.1 reads a BOM-less file as ANSI,
 # so non-ASCII comments come back as mojibake and can break parsing.
-param([string[]]$Steps)
+param([string[]]$Steps, [switch]$Validate)
+
+# verb -> @(fewest fields, most fields) INCLUDING the verb itself.
+# ! keep in step with the switch below - a handler that starts reading one more
+#   field must widen its entry here, and that is the point: the table is the
+#   place where "how many fields does this step have" is written down once.
+$ARITY = @{
+  'launch'    = @(2, 3)   # args are optional
+  'launchlog' = @(4, 4)
+  'attach'    = @(1, 1)
+  'move'      = @(3, 3)
+  'down'      = @(1, 1)
+  'up'        = @(1, 1)
+  'click'     = @(3, 3)
+  'pan'       = @(5, 5)
+  'wheel'     = @(4, 4)
+  'keydn'     = @(2, 2)
+  'keyup'     = @(2, 2)
+  'key'       = @(2, 2)
+  'paste'     = @(2, 2)
+  'copyimg'   = @(2, 2)
+  'dlgtype'   = @(2, 2)
+  'dlgenter'  = @(1, 1)
+  'shot'      = @(2, 2)
+  'sleep'     = @(2, 2)
+  'kill'      = @(1, 1)
+}
+
+function Check-Steps($steps) {
+  $problems = @()
+  for ($i = 0; $i -lt $steps.Count; $i++) {
+    $parts = $steps[$i] -split '\|'
+    $verb = $parts[0]
+    if (-not $ARITY.ContainsKey($verb)) {
+      $problems += "step $($i + 1) '$($steps[$i])': unknown step '$verb'"
+      continue
+    }
+    $lo = $ARITY[$verb][0]; $hi = $ARITY[$verb][1]; $n = $parts.Count
+    if ($n -gt $hi) {
+      $extra = ($parts[$hi..($n - 1)]) -join '|'
+      $problems += "step $($i + 1) '$($steps[$i])': $n fields but '$verb' reads $hi - '$extra' WOULD BE DROPPED SILENTLY"
+    } elseif ($n -lt $lo) {
+      $problems += "step $($i + 1) '$($steps[$i])': $n fields but '$verb' needs $lo"
+    }
+  }
+  return ,$problems
+}
 
 Add-Type -AssemblyName System.Drawing
 Add-Type @"
@@ -286,6 +354,17 @@ function Setup-Window($proc, $note) {
 # (& .\scripts\ui-drive.ps1 -Steps @(...)) which passes the array intact.
 Write-Output "steps: $($Steps.Count)"
 
+$problems = Check-Steps $Steps
+if ($problems.Count -gt 0) {
+  Write-Output "STEP LIST REJECTED - nothing was run"
+  foreach ($p in $problems) { Write-Output "  $p" }
+  exit 2
+}
+if ($Validate) {
+  Write-Output "step list ok: $($Steps.Count) steps - nothing run (-Validate)"
+  exit 0
+}
+
 foreach ($step in $Steps) {
   $parts = $step -split '\|'
   switch ($parts[0]) {
@@ -444,6 +523,9 @@ foreach ($step in $Steps) {
       }
       Start-Sleep -Milliseconds 1200
     }
+    # unreachable now that Check-Steps runs first, and kept anyway: the arity
+    # table and this switch are two lists that have to agree, and this is the
+    # arm that says so out loud if somebody adds a verb to only one of them.
     default  { Write-Output "unknown step: $($parts[0])"; exit 1 }
   }
 }

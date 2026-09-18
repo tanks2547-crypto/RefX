@@ -10,6 +10,7 @@
 //!   package        สร้าง portable zip ของ Windows + ตรวจจากตัวแพ็กเกจเอง
 //!   verify-deb     ตรวจ .deb ที่ `cargo deb` สร้าง (ประตูเดียวกับ zip)
 
+mod args;
 mod dump;
 mod icon;
 mod json;
@@ -26,14 +27,15 @@ mod seeds;
 ///
 /// `cargo xtask gen-testdata <โฟลเดอร์> <จำนวน> [กว้าง] [สูง]`
 fn gen_testdata() -> anyhow::Result<()> {
-    let mut args = std::env::args().skip(2);
+    let mut args = args::Args::new("cargo xtask gen-testdata <โฟลเดอร์> [จำนวน] [กว้าง] [สูง]");
     let dir: std::path::PathBuf = args
-        .next()
+        .positional()
         .ok_or_else(|| anyhow::anyhow!("ระบุโฟลเดอร์ปลายทางด้วย"))?
         .into();
-    let count: u32 = args.next().unwrap_or_else(|| "100".into()).parse()?;
-    let width: u32 = args.next().unwrap_or_else(|| "4000".into()).parse()?;
-    let height: u32 = args.next().unwrap_or_else(|| "3000".into()).parse()?;
+    let count: u32 = args.positional().unwrap_or_else(|| "100".into()).parse()?;
+    let width: u32 = args.positional().unwrap_or_else(|| "4000".into()).parse()?;
+    let height: u32 = args.positional().unwrap_or_else(|| "3000".into()).parse()?;
+    args.finish()?;
 
     std::fs::create_dir_all(&dir)?;
     for i in 0..count {
@@ -68,30 +70,15 @@ fn gen_testdata() -> anyhow::Result<()> {
 /// ของเครื่องมือนี้ ไม่ใช่ความล้มเหลวของมัน · โค้ดที่ไม่ใช่ 0 สงวนไว้ให้กรณีที่
 /// **เปิดไฟล์ไม่ได้เลย** หรือเขียนผลลัพธ์ไม่ได้ ซึ่งเป็นคนละเรื่องกัน
 fn dump_refx() -> anyhow::Result<()> {
-    let mut args = std::env::args().skip(2);
-    let mut path: Option<std::path::PathBuf> = None;
-    let mut out_path: Option<std::path::PathBuf> = None;
-    let mut options = dump::Options::default();
-
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--verify-assets" => options.verify_assets = true,
-            "--out" => {
-                out_path = Some(
-                    args.next()
-                        .ok_or_else(|| anyhow::anyhow!("`--out` ต้องตามด้วยชื่อไฟล์ปลายทาง"))?
-                        .into(),
-                );
-            }
-            other if other.starts_with('-') => {
-                anyhow::bail!(
-                    "ไม่รู้จักตัวเลือก {other:?}\n\
-                     ใช้: cargo xtask dump-refx <ไฟล์.refx> [--verify-assets] [--out <ไฟล์.json>]"
-                );
-            }
-            other => path = Some(other.into()),
-        }
-    }
+    let mut args =
+        args::Args::new("cargo xtask dump-refx <ไฟล์.refx> [--verify-assets] [--out <ไฟล์.json>]");
+    let options = dump::Options {
+        verify_assets: args.flag("--verify-assets"),
+    };
+    // ★ อ่านค่าของธงก่อน positional เสมอ ไม่งั้น positional จะกินค่าของ `--out` ไป
+    let out_path: Option<std::path::PathBuf> = args.value("--out")?.map(Into::into);
+    let path: Option<std::path::PathBuf> = args.positional().map(Into::into);
+    args.finish()?;
 
     let path = path.ok_or_else(|| {
         anyhow::anyhow!(
@@ -134,13 +121,14 @@ fn main() -> anyhow::Result<()> {
         "package" => package::run(),
         "verify-deb" => package::verify_deb(),
         "verify-msi" => package::verify_msi(),
-        other => {
-            eprintln!(
-                "ไม่รู้จักคำสั่ง: {other:?}\n\
-                 คำสั่งที่มี: gen-testdata · gen-fuzz-seeds · dump-refx · mutation · \
-                 licenses · icon · package · verify-deb · verify-msi · bench (P5-1)"
-            );
-            Ok(())
-        }
+        // ★★★ **ต้องเป็น Err ไม่ใช่ Ok** — เดิมมันพิมพ์แล้วคืน `Ok(())` คือ exit 0
+        //   `cargo xtask licence --check` (สะกดผิดหนึ่งตัว) ใน CI จึง **เขียว**
+        //   ทั้งที่ไม่มีประตูไหนทำงานเลย · ชนชั้นเดียวกับ `$parts[3]` ที่หายไป
+        //   ใน `ui-drive.ps1` (`docs/08 §3.9` ข้อ 9)
+        other => anyhow::bail!(
+            "ไม่รู้จักคำสั่ง: {other:?}\n\
+             คำสั่งที่มี: gen-testdata · gen-fuzz-seeds · dump-refx · mutation · \
+             licenses · icon · package · verify-deb · verify-msi · bench (P5-1)"
+        ),
     }
 }
