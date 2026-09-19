@@ -482,6 +482,7 @@ const fn reason_name(reason: refx_platform::redraw::RedrawReason) -> &'static st
         R::TextureReady => "TextureReady",
         R::Animation => "Animation",
         R::EguiRepaint => "EguiRepaint",
+        R::HoverRepaint => "HoverRepaint",
         R::SurfaceRecovery => "SurfaceRecovery",
     }
 }
@@ -562,6 +563,31 @@ fn escape_target(shell: &crate::shell::ShellState, has_selection: bool) -> Escap
 /// `egui_wants_keyboard_input` เป็นจริง ๆ ใน egui 0.34) และถามในช่วงเวลาที่
 /// คำตอบคงที่ (ระหว่างจบ `run_ui` ของเฟรมก่อน กับเริ่ม `run_ui` ของเฟรมนี้) —
 /// จึงเป็นไปไม่ได้ที่ทั้งคู่จะทำงาน หรือทั้งคู่จะไม่ทำงาน
+/// egui ขอวาดอีกเฟรม — เป็นเพราะ **ตัวชี้อยู่เหนือหน้าต่าง** หรือเปล่า
+///
+/// ★★★ ดู [`RedrawReason::HoverRepaint`] ว่าทำไมสองอย่างนี้ต้องแยกกัน ·
+/// สรุป: การชี้เมาส์ค้างคือการโต้ตอบ ไม่ใช่ idle · ตัวเลขยังถูกนับและพิมพ์
+/// เหมือนเดิม **ที่เปลี่ยนคือมันไม่ปลุกเสียงเตือน**
+///
+/// ★★ แยกเป็นฟังก์ชันของตัวเองเพราะมีผู้เรียกสองที่ (เส้นทาง `redraw()` กับ
+/// `on_wake()`) — ถ้าเขียนซ้ำสองแห่ง วันหนึ่งจะแก้ข้างเดียวแล้วสองเส้นทาง
+/// รายงานคนละเรื่องโดยไม่มีอะไรจับได้
+fn repaint_reason(ctx: &egui::Context) -> RedrawReason {
+    if pointer_is_over_the_window(ctx) {
+        RedrawReason::HoverRepaint
+    } else {
+        RedrawReason::EguiRepaint
+    }
+}
+
+/// ตัวชี้อยู่เหนือหน้าต่างของเราไหม (ตามที่ egui เห็น)
+///
+/// `latest_pos()` เป็น `None` เมื่อตัวชี้ออกนอกหน้าต่างไปแล้ว — นั่นคือ**สภาพ**
+/// ที่นิยาม "input" แบบนับ event ตอบไม่ได้
+fn pointer_is_over_the_window(ctx: &egui::Context) -> bool {
+    ctx.input(|i| i.pointer.latest_pos().is_some())
+}
+
 fn strip_tab_when_it_is_ours(ctx: &egui::Context, raw_input: &mut egui::RawInput) {
     if ctx.egui_wants_keyboard_input() {
         return;
@@ -8895,7 +8921,7 @@ impl AppDelegate for RefxApp {
         if repaint_delay.is_zero() {
             // ต้องวาดต่อทันที (มี animation กำลังเล่น)
             gfx.egui_wake = None;
-            return Some(RedrawReason::EguiRepaint);
+            return Some(repaint_reason(&gfx.egui_ctx));
         }
 
         // delay จำกัด (เคอร์เซอร์กะพริบ ฯลฯ) → นอนรอด้วย WaitUntil ไม่ใช่วาดรัว ๆ
@@ -8955,7 +8981,7 @@ impl AppDelegate for RefxApp {
             .is_some_and(|at| std::time::Instant::now() >= at)
         {
             gfx.egui_wake = None;
-            return Some(RedrawReason::EguiRepaint);
+            return Some(repaint_reason(&gfx.egui_ctx));
         }
 
         None

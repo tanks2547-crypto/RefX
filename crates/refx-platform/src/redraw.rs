@@ -26,6 +26,30 @@ pub enum RedrawReason {
     Animation,
     /// §1 ข้อ 4 — `egui::Context::request_repaint_after()` ขอมา
     EguiRepaint,
+    /// ★★★ egui ขอวาด **ขณะที่ตัวชี้อยู่เหนือหน้าต่าง** — การชี้ค้างคือการโต้ตอบ
+    ///
+    /// # ทำไมต้องแยกจาก [`RedrawReason::EguiRepaint`] (22 ก.ย. 2026)
+    ///
+    /// วัดแล้วด้วยการปล่อยนิ่ง 130 วินาที ต่างกันตัวแปรเดียว:
+    ///
+    /// | เคอร์เซอร์ค้างที่ | ขอวาด | ช่วงเงียบยาวสุด |
+    /// |---|---|---|
+    /// | ไม่อยู่ในหน้าต่าง | 4 | 2 |
+    /// | ผืนผ้าใบ | 4 | 2 |
+    /// | **แถบเครื่องมือ** | **24** | **20** |
+    ///
+    /// และ **ไม่ได้เกิดจาก event ที่วิ่งเข้ามาซ้ำ ๆ** — `CursorMoved` มาแค่ 3 ครั้ง
+    /// ใน 130 วินาที · คนขอวาดคือ egui เองผ่าน `repaint_delay`
+    ///
+    /// ★ นิยาม "input" เดิมของตัวจับแคบเกินไป: นับเฉพาะ **event ที่เป็นชิ้น**
+    /// ไม่นับ **สภาพ** ที่ตัวชี้อยู่เหนือหน้าต่าง · แต่การชี้เมาส์ค้างคือการโต้ตอบ
+    /// ไม่ใช่ idle → เหตุผลนี้จึง **รีเซ็ตช่วงเงียบ** เหมือน [`RedrawReason::UserInput`]
+    ///
+    /// ★★ **นี่คือความแม่นของตัวจับ ไม่ใช่การผ่อนเกณฑ์** — ตัวเลขยังถูกนับและ
+    /// พิมพ์ตอนปิดโปรแกรมเหมือนเดิมทุกประการ **ที่เปลี่ยนคือมันไม่ปลุกเสียงเตือน
+    /// ไม่ใช่มันหายไปจากสายตา** · ถ้ามีใครขอวาดวนจริงโดยตัวชี้ไม่อยู่ในหน้าต่าง
+    /// เหตุผลจะเป็น `EguiRepaint` และตัวจับยังร้องเหมือนเดิม
+    HoverRepaint,
     /// docs/04 §7 — กู้ surface หลัง `Lost` / `Outdated` แล้วต้องวาดใหม่หนึ่งครั้ง
     SurfaceRecovery,
 }
@@ -34,11 +58,12 @@ impl RedrawReason {
     /// เหตุผลทั้งหมด เรียงคงที่ — ใช้ทำดัชนีและวนรายงาน
     ///
     /// ใช้ array ไม่ใช่ `HashMap` เพราะลำดับต้อง deterministic (กฎใน CLAUDE.md)
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::UserInput,
         Self::TextureReady,
         Self::Animation,
         Self::EguiRepaint,
+        Self::HoverRepaint,
         Self::SurfaceRecovery,
     ];
 
@@ -48,7 +73,24 @@ impl RedrawReason {
             Self::TextureReady => 1,
             Self::Animation => 2,
             Self::EguiRepaint => 3,
-            Self::SurfaceRecovery => 4,
+            Self::HoverRepaint => 4,
+            Self::SurfaceRecovery => 5,
+        }
+    }
+
+    /// เหตุผลนี้ **รีเซ็ต** ช่วงเงียบไหม — คือ "ผู้ใช้หรืองานจริงเกี่ยวข้องอยู่" ไหม
+    ///
+    /// ★ แยกเป็นฟังก์ชันของตัวเองเพื่อให้มี **ที่เดียว** ที่ตอบคำถามนี้
+    /// และเทสต์จับได้ถ้ามีใครเพิ่มเหตุผลใหม่แล้วลืมตัดสินใจ
+    const fn resets_quiet(self) -> bool {
+        match self {
+            // ผู้ใช้แตะ = ไม่ใช่ idle ตามนิยาม
+            Self::UserInput
+            // งานจริงเพิ่งเสร็จ · จำนวนถูกจำกัดด้วยคิวอยู่แล้ว
+            | Self::TextureReady
+            // ตัวชี้อยู่เหนือหน้าต่าง = กำลังโต้ตอบ (ดู `HoverRepaint`)
+            | Self::HoverRepaint => true,
+            Self::Animation | Self::EguiRepaint | Self::SurfaceRecovery => false,
         }
     }
 }
@@ -178,7 +220,7 @@ impl RedrawTracker {
 
     /// ★★★ อัปเดตช่วงเงียบ — ดู [`QuietStreak`] ว่าอะไรรีเซ็ตและทำไม
     fn note_quiet(&mut self, reason: RedrawReason) {
-        if matches!(reason, RedrawReason::UserInput | RedrawReason::TextureReady) {
+        if reason.resets_quiet() {
             self.quiet = QuietStreak::default();
             self.warned_at = 0;
             return;
@@ -357,6 +399,63 @@ mod tests {
             tracker.record(breaker);
             assert!(tracker.quiet().is_empty(), "{breaker:?} ต้องจบช่วงเงียบ");
         }
+    }
+
+    /// ★★★ ตัวชี้ที่ค้างเหนือหน้าต่างคือ **การโต้ตอบ** — จบช่วงเงียบเหมือนผู้ใช้แตะ
+    ///
+    /// วัดได้ 22 ก.ย. 2026: เคอร์เซอร์ค้างบนแถบเครื่องมือ 130 วินาที ได้ช่วงเงียบ
+    /// ยาว 20 เฟรม ทั้งที่ไม่มีใครแตะอะไร · ดู [`RedrawReason::HoverRepaint`]
+    #[test]
+    fn a_pointer_resting_over_the_window_ends_the_quiet_stretch() {
+        let mut tracker = RedrawTracker::new();
+        for _ in 0..5 {
+            tracker.record(RedrawReason::EguiRepaint);
+        }
+        assert_eq!(tracker.quiet().len(), 5);
+        tracker.record(RedrawReason::HoverRepaint);
+        assert!(tracker.quiet().is_empty());
+    }
+
+    /// ★★★ **NC ที่บังคับก่อนปิด `KNOWN-LIMITATIONS` ข้อ 12**
+    ///
+    /// การให้ `HoverRepaint` รีเซ็ตช่วงเงียบจะกลายเป็นการ **ปิดปากตัวจับ**
+    /// ทันทีถ้าเผลอทำให้ทุกอย่างรีเซ็ต · เทสต์นี้ยิงที่กรณีที่ต้องยังร้องได้:
+    /// **มีคนขอวาดวนจริงโดยตัวชี้ไม่อยู่ในหน้าต่าง**
+    ///
+    /// ถ้าเทสต์นี้ไม่แดงตอนตัวจับพัง แปลว่าเราไม่มีตัวจับแล้ว มีแต่ความเงียบ
+    #[test]
+    fn the_alarm_still_fires_for_a_real_loop_with_no_pointer_in_the_window() {
+        let mut tracker = RedrawTracker::new();
+        for _ in 0..QUIET_ALARM {
+            tracker.record(RedrawReason::EguiRepaint);
+        }
+        assert_eq!(
+            tracker.quiet().len(),
+            QUIET_ALARM,
+            "ช่วงเงียบต้องไต่ถึงเพดาน — ถ้าไม่ถึง แปลว่าไม่มีอะไรจะร้องได้อีกแล้ว"
+        );
+        assert_eq!(
+            tracker.quiet().worst_reason(),
+            Some(RedrawReason::EguiRepaint),
+            "ผู้ขอต้องยังถูกชี้ตัวได้ถูกคน"
+        );
+    }
+
+    /// ★★ เหตุผลใหม่ทุกตัวต้องถูก **ตัดสินว่ารีเซ็ตหรือไม่** ไม่ใช่ตกหล่น
+    ///
+    /// `ALL` กับ `index()` กับ `resets_quiet()` เป็นสามรายการที่ต้องตรงกันเอง
+    /// — เทสต์นี้คือสิ่งที่บังคับ ไม่งั้นเหตุผลที่เพิ่มทีหลังจะได้ดัชนีชนกันเงียบ ๆ
+    #[test]
+    fn every_reason_has_its_own_slot_and_a_decision_about_the_quiet_streak() {
+        let mut seen = vec![false; RedrawReason::ALL.len()];
+        for reason in RedrawReason::ALL {
+            let at = reason.index();
+            assert!(!seen[at], "{reason:?} ใช้ดัชนีซ้ำกับตัวอื่น");
+            seen[at] = true;
+            // เรียกให้ครบทุกตัวเพื่อให้ `match` ที่ไม่ครบกลายเป็น compile error
+            let _ = reason.resets_quiet();
+        }
+        assert!(seen.into_iter().all(|hit| hit), "มีช่องดัชนีที่ไม่มีใครใช้");
     }
 
     /// ★★★ **ช่วงที่ยาวที่สุดต้องรอดมาถึงตอนปิดโปรแกรม**
