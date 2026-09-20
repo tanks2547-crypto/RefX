@@ -4,7 +4,7 @@
 #   ยังถูกเก็บต่อเนื่องเหมือนเดิม — fuzzer ไม่ได้เริ่มจากศูนย์ทุกรอบอยู่แล้ว
 name: Fuzz (nightly toolchain)
 on:
-  schedule: [{ cron: "0 3 * * 1,3,5" }]   # จันทร์ / พุธ / ศุกร์ 03:00 UTC
+  schedule: [{ cron: "0 3 * * 1" }]   # จันทร์ / พุธ / ศุกร์ 03:00 UTC
   workflow_dispatch:
 
 # ★ ทำไมต้องตั้ง RUSTUP_TOOLCHAIN (แก้ 2 ส.ค. 2026)
