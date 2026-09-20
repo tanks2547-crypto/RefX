@@ -91,20 +91,50 @@ pub fn gen_fuzz_seeds() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// เขียนไฟล์ที่มีเนื้อไม่ซ้ำกันจริง (บีบไม่ลงง่าย ๆ) แล้วคืน path
-fn plant(dir: &Path, name: &str, bytes: usize) -> anyhow::Result<PathBuf> {
-    let path = dir.join(name);
+/// ไฟล์ตัวอย่างหนึ่งก้อน — **ที่อยู่จริงบนดิสก์ กับที่อยู่ที่ถูกบันทึกลงเอกสาร
+/// เป็นคนละอย่างกันโดยตั้งใจ**
+///
+/// # ★★★ ทำไมต้องแยก (แก้ 24 ก.ย. 2026)
+///
+/// เดิม `plant()` คืน path จริงตัวเดียว แล้วมันถูกบันทึกลง `AssetRef.path`
+/// ตรง ๆ · ผลคือ seed ที่ commit ไว้มีข้อความ
+/// **`C:\Users\<ชื่อผู้ใช้>\AppData\Local\Temp\refx-seed-blobs-<pid>`** ฝังอยู่ข้างใน
+///
+/// เสียสองชั้น:
+///
+/// 1. **ชื่อผู้ใช้ของเครื่องที่สร้าง หลุดไปอยู่ในไฟล์ที่ commit**
+/// 2. **seed สร้างซ้ำข้ามเครื่องไม่ได้** — คนละเครื่องได้ไบต์คนละชุด
+///    ทั้งที่ input เหมือนกันทุกอย่าง · `docs/08 §3.9` ข้อ 13
+///
+/// `real` ใช้อ่านไฟล์ตอนแพ็ก (ไม่ถูกบันทึกลงไฟล์เลย — `PackSource.path`
+/// ถูกใช้โดย `copy_asset` อย่างเดียว) · `logical` คือสิ่งที่ถูกบันทึก
+struct Blob {
+    /// ที่อยู่จริงบนดิสก์ชั่วคราว — ต่างกันทุกเครื่อง และ **ห้ามหลุดลงไฟล์**
+    real: PathBuf,
+    /// ที่อยู่ที่ถูกบันทึกลงเอกสาร — คงที่ ไม่ขึ้นกับเครื่องที่สร้าง
+    logical: PathBuf,
+}
+
+/// เขียนไฟล์ที่มีเนื้อไม่ซ้ำกันจริง (บีบไม่ลงง่าย ๆ) แล้วคืนที่อยู่ทั้งสองแบบ
+fn plant(dir: &Path, name: &str, bytes: usize) -> anyhow::Result<Blob> {
+    let real = dir.join(name);
     let body: Vec<u8> = (0..bytes)
         .map(|i| (i.wrapping_mul(31).wrapping_add(7) % 251) as u8)
         .collect();
-    write(&path, &body)?;
-    Ok(path)
+    write(&real, &body)?;
+    Ok(Blob {
+        real,
+        // ★ เครื่องหมาย `/` ตรง ๆ ไม่ใช่ `Path::join` — ไม่งั้น Windows จะได้
+        //   `seed-blobs\small.bin` ส่วน Linux ได้ `seed-blobs/small.bin`
+        //   แล้วไบต์ก็ยังต่างกันข้ามเครื่องอยู่ดี แค่เนียนกว่าเดิม
+        logical: PathBuf::from(format!("seed-blobs/{name}")),
+    })
 }
 
-fn source(n: u8, path: &Path) -> PackSource {
+fn source(n: u8, blob: &Blob) -> PackSource {
     PackSource {
         hash: ContentHash::from_bytes([n; 32]),
-        path: path.to_path_buf(),
+        path: blob.real.clone(),
     }
 }
 
@@ -113,13 +143,14 @@ fn source(n: u8, path: &Path) -> PackSource {
 /// ★ `added_at` ถูกตั้งเป็น 0 เพื่อให้ seed ออกมา **ไบต์เท่าเดิมทุกครั้งที่รัน**
 /// — ไม่งั้นการรันซ้ำจะสร้าง diff ปลอมใน git ทุกครั้ง และ corpus ที่ต่างกัน
 /// ทุกรอบทำให้เทียบผลของสอง session ไม่ได้
-fn board(images: &[(u8, &Path)]) -> Board {
+fn board(images: &[(u8, &Blob)]) -> Board {
     let mut items: Vec<ItemParts> = images
         .iter()
-        .map(|(n, path)| {
+        .map(|(n, blob)| {
             let mut item = Item::new(ItemKind::Image(AssetRef {
                 hash: ContentHash::from_bytes([*n; 32]),
-                path: path.to_path_buf(),
+                // ★ ที่อยู่เชิงตรรกะเท่านั้น — ดู `Blob` ว่าทำไม
+                path: blob.logical.clone(),
                 px_size: glam::UVec2::new(64, 64),
                 format: ImageFormat::Unknown,
                 embedded: false,
@@ -199,6 +230,12 @@ fn display_name(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    // I-2 คุมเธรดของแอป · เทสต์ของ xtask ไม่มี UI thread และงานของมันคือ
+    // การอ่านไฟล์ seed ที่ commit ไว้ในทรีเพื่อเทียบไบต์
+    #![expect(
+        clippy::disallowed_methods,
+        reason = "เทสต์ของ xtask — ไม่มี UI thread ให้บล็อก"
+    )]
 
     use super::*;
 
@@ -235,6 +272,9 @@ mod tests {
     }
 
     /// ★ seed ต้องออกมา **ไบต์เท่าเดิมทุกครั้ง** ไม่งั้นรันซ้ำจะได้ diff ปลอม
+    ///
+    /// ★★ เทสต์นี้ตอบได้แค่ "รันสองครั้งบนเครื่องเดียวกันเหมือนกันไหม" ซึ่ง
+    /// **ไม่พอ** — ดู `the_committed_seeds_are_what_this_machine_would_write`
     #[test]
     fn generating_seeds_twice_gives_identical_bytes() {
         let dir = std::env::temp_dir().join(format!("refx-seeddet-{}", std::process::id()));
@@ -247,5 +287,79 @@ mod tests {
         assert_eq!(a, b, "seed ไม่ deterministic — น่าจะมีนาฬิกาหลุดเข้ามา");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ★★★ **ไม่มีที่อยู่ของเครื่องไหนฝังอยู่ใน seed ที่ commit ไว้**
+    ///
+    /// 24 ก.ย. 2026 พบว่า seed ที่ commit ไว้มี
+    /// `C:\Users\<ชื่อผู้ใช้>\AppData\Local\Temp\refx-seed-blobs-<pid>` อยู่ข้างใน
+    /// — ชื่อผู้ใช้หลุด **และ** seed สร้างซ้ำข้ามเครื่องไม่ได้
+    ///
+    /// ★★ เทสต์เดิม (`generating_seeds_twice_...`) มองไม่เห็นเลย เพราะมัน
+    /// **เทียบผลของตัวเองกับตัวเองบนเครื่องเดียวกัน** ซึ่งเหมือนกันเสมอ
+    /// ไม่ว่าจะมี path ของเครื่องฝังอยู่หรือไม่ (`docs/08 §3.9` ข้อ 14)
+    #[test]
+    fn no_seed_carries_a_path_from_the_machine_that_made_it() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask อยู่ใต้รากของ workspace")
+            .join(OUT);
+        let entries = std::fs::read_dir(&dir)
+            .unwrap_or_else(|err| panic!("อ่าน {} ไม่ได้: {err}", dir.display()));
+
+        let mut checked = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("refx") {
+                continue;
+            }
+            let bytes = std::fs::read(&path).expect("อ่าน seed ไม่ได้");
+            let text = String::from_utf8_lossy(&bytes);
+            for mark in [
+                "\\Users\\",
+                "/home/",
+                "/Users/",
+                "AppData",
+                "Temp\\",
+                "/tmp/",
+            ] {
+                assert!(
+                    !text.contains(mark),
+                    "{} มี {mark:?} อยู่ข้างใน — ที่อยู่ของเครื่องที่สร้างหลุดลงไฟล์ที่ commit",
+                    path.display()
+                );
+            }
+            checked += 1;
+        }
+        assert!(checked >= 5, "ตรวจ seed ได้แค่ {checked} ไฟล์ — น้อยเกินจะเชื่อ");
+    }
+
+    /// ★★★ **seed ที่ commit ไว้ ต้องตรงกับสิ่งที่เครื่องนี้จะเขียนออกมา**
+    ///
+    /// นี่คือข้อที่ทำให้ "สร้างซ้ำได้ข้ามเครื่อง" เป็นคำที่ตรวจได้ ไม่ใช่ความหวัง —
+    /// ถ้าใครเผลอใส่อะไรที่ขึ้นกับเครื่องกลับเข้ามา CI บนอีกแพลตฟอร์มจะแดงทันที
+    /// แทนที่จะเงียบจนกว่าจะมีคนไปเปิดไฟล์ดูเอง
+    #[test]
+    fn the_committed_seeds_are_what_this_machine_would_write() {
+        let dir = std::env::temp_dir().join(format!("refx-seedcmp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let blob = plant(&dir, "small.bin", 512).unwrap();
+        let fresh = pack(&board(&[(1, &blob)]), &[source(1, &blob)], &dir, "x.refx").unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let committed = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask อยู่ใต้รากของ workspace")
+            .join(OUT)
+            .join("packed_one_asset.refx");
+        let want = std::fs::read(&committed)
+            .unwrap_or_else(|err| panic!("อ่าน {} ไม่ได้: {err}", committed.display()));
+
+        assert_eq!(
+            fresh, want,
+            "seed ที่ commit ไว้ไม่ตรงกับที่เครื่องนี้สร้าง — รัน `cargo xtask gen-fuzz-seeds` \
+             แล้วดูว่า diff เป็นสิ่งที่ตั้งใจจริงไหม"
+        );
     }
 }

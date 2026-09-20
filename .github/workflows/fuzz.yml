@@ -19,6 +19,12 @@ on:
 #
 # `RUSTUP_TOOLCHAIN` ชนะ toolchain file ตามลำดับความสำคัญของ rustup
 # **ไม่ใช่การปักหมุดวันที่** — ยังเป็น nightly ล่าสุดเสมอ ถ้า nightly พังเราต้องรู้
+# ★ กันรอบตามตารางกับรอบที่กดเองซ้อนกัน — รอบเก่าที่ไม่มีใครอ่านผลคือเวลาที่หายเปล่า
+#   (วัดจริง 14–19 ก.ย. 2026: CI เสีย 237 นาทีที่ถูกคิดไปกับรอบที่ถูกแทนที่)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   RUSTUP_TOOLCHAIN: nightly
 

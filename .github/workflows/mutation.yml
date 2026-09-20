@@ -39,6 +39,12 @@ on:
   schedule: [{ cron: "0 2 * * 2" }]
   workflow_dispatch:
 
+# ★ กันรอบตามตารางกับรอบที่กดเองซ้อนกัน — รอบเก่าที่ไม่มีใครอ่านผลคือเวลาที่หายเปล่า
+#   (วัดจริง 14–19 ก.ย. 2026: CI เสีย 237 นาทีที่ถูกคิดไปกับรอบที่ถูกแทนที่)
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
 

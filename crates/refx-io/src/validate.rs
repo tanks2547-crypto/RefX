@@ -291,9 +291,9 @@ mod tests {
     #[test]
     fn the_paths_real_users_actually_have_are_allowed() {
         for ok in [
-            r"C:\Users\kitsa\Pictures\refs\pose01.jpg",
+            r"C:\Users\artist\Pictures\refs\pose01.jpg",
             r"D:\งานอ้างอิง\ท่าทาง\01.png",
-            "/home/kitsa/refs/pose01.jpg",
+            "/home/artist/refs/pose01.jpg",
             "refs/pose01.jpg",
             r"C:\refs\CONCEPT\hero.png", // ขึ้นต้นด้วย CON แต่ไม่ใช่ CON
             r"C:\refs\NULL_island.png",  // ขึ้นต้นด้วย NUL แต่ไม่ใช่ NUL
@@ -369,10 +369,10 @@ mod tests {
     #[test]
     fn the_places_users_really_export_to_are_allowed() {
         for ok in [
-            r"C:\Users\kitsa\Desktop\moodboard.png",
+            r"C:\Users\artist\Desktop\moodboard.png",
             r"D:\งานอ้างอิง\ส่งลูกค้า\v3.jpg",
             r"\\studio-nas\ทีม\hero.png",
-            "/home/kitsa/Pictures/board.png",
+            "/home/artist/Pictures/board.png",
             "board.png",
             r"E:\refs\CONCEPT\hero.png", // ขึ้นต้นด้วย CON แต่ไม่ใช่ CON
             r"E:\refs\NULL_island.png",

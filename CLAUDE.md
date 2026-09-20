@@ -28,7 +28,7 @@
 
 | # | กฎ | วิธีตรวจ |
 |---|---|---|
-| I-1 | Idle = 0% CPU. `ControlFlow::Wait` เท่านั้น | เทสต์ `idle_produces_no_redraw` |
+| I-1 | **ไม่วาดเมื่อไม่มีอะไรเปลี่ยน** · `ControlFlow::Wait` เท่านั้น · เกณฑ์สี่ข้อใน `ARCHITECTURE §1` (CPU ตอนนิ่ง **≤ 1.0 %** ไม่ใช่ 0) | `idle_produces_no_redraw` + `worst_quiet` < 32 |
 | I-2 | UI thread ห้ามบล็อก — ไม่มี fs / decode / DB | code review + profiler |
 | I-3 | ข้อมูลผู้ใช้ห้ามหาย — Command + journal + atomic save | property test undo, kill test |
 | I-4 | ทุกไฟล์คือ input ที่ไม่น่าไว้ใจ | fuzz + limit |
