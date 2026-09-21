@@ -4902,6 +4902,7 @@ dependencies = [
  "refx-asset",
  "refx-core",
  "refx-io",
+ "zstd",
 ]
 
 [[package]]

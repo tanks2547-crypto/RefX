@@ -63,33 +63,63 @@ jobs:
           fi
       - run: cargo install cargo-fuzz --locked
 
-      # corpus ตั้งต้นถูก commit ไว้ที่ fuzz/seeds/ ส่วน fuzz/corpus/ อยู่ใน .gitignore
-      # (ของที่ fuzzer งอกเองมีเป็นพันไฟล์ ไม่ควรอยู่ใน repo)
-      #
-      # ★★★ 21 ก.ย. 2026 — **รอบนี้ไม่ต่อยอดจากรอบก่อน** และไม่เคยต่อยอดเลย
+      # ★★★ corpus ต้องอยู่ข้ามรอบ — ก่อน 21 ก.ย. 2026 มันไม่เคยอยู่เลย
       #
       #   `fuzz/corpus/` อยู่ใน `.gitignore` · ไม่มี `actions/cache` ตัวไหนเก็บมัน ·
       #   `Swatinem/rust-cache` เก็บแค่ registry กับ target dir · runner ถูกทิ้งทุกรอบ
       #   → ทุกรอบเริ่มจาก `fuzz/seeds/` เท่าที่มี **แล้วทิ้งสิ่งที่งอกทั้งหมด**
       #
-      #   คอมเมนต์หัวไฟล์เดิมเขียนว่า "corpus ยังถูกเก็บต่อเนื่อง — fuzzer ไม่ได้
-      #   เริ่มจากศูนย์ทุกรอบอยู่แล้ว" ซึ่ง**ไม่จริง** และมันเคยถูกใช้เป็นเหตุผล
-      #   ในการลดความถี่ · ขั้น "corpus งอกเท่าไร" ข้างล่างมีไว้ให้ตัวเลขนี้
-      #   มองเห็นทุกรอบ แทนที่จะต้องมีใครมาขุด
-      - name: วาง corpus ตั้งต้น
+      #   และคอมเมนต์หัวไฟล์เดิมเขียนว่า "corpus ยังถูกเก็บต่อเนื่อง" ซึ่ง**ไม่จริง**
+      #   · มันเคยถูกใช้เป็นเหตุผลตอนลดความถี่ — `docs/08 §3.9` ข้อ 1:
+      #   **การตัดสินใจที่ตั้งบนข้อความที่ไม่จริง ต้องถูกตัดสินใหม่**
+      #
+      # ★ คีย์ไม่ซ้ำต่อรอบ + `restore-keys` เป็นคำนำหน้า = cache แบบกลิ้ง:
+      #   รอบนี้คืนของรอบล่าสุดที่มี แล้วเซฟของตัวเองเป็นกองใหม่
+      #   (คีย์เดิมซ้ำ ๆ จะเซฟแค่ครั้งแรกครั้งเดียวแล้วแช่แข็งตลอดไป)
+      - name: คืน corpus ของรอบก่อน
+        id: corpus
+        uses: actions/cache@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+
+      # ★★ NC ของ cache เอง: ลบ cache ของ target หนึ่งทิ้ง แล้วรอบถัดไป
+      #    **ต้องพิมพ์ว่าเริ่มจากศูนย์** ไม่ใช่เงียบแล้วดูเหมือนปกติ
+      #    · กลไกที่ไม่มีใครรู้ว่ามันทำงานไหม คือกลไกที่เราเพิ่งเสียไปกับ fuzz ทั้งตัว
+      - name: cache คืนมาได้ไหม
+        run: |
+          set -uo pipefail
+          t=${{ matrix.target }}
+          matched='${{ steps.corpus.outputs.cache-matched-key }}'
+          n=$(ls "fuzz/corpus/$t" 2>/dev/null | wc -l)
+          if [ -z "$matched" ]; then
+            echo "::notice title=$t เริ่มจากศูนย์::ไม่มี cache ของรอบก่อน — รอบนี้มีแต่ seed ที่ commit ไว้ · ปกติเมื่อเป็น target ใหม่ หรือ cache ถูกลบ/หมดอายุ 7 วัน"
+          else
+            echo "::notice title=$t คืน corpus ได้::$n ไฟล์ จาก '$matched' ($(du -sh fuzz/corpus/$t 2>/dev/null | cut -f1))"
+          fi
+
+      # corpus ตั้งต้นถูก commit ไว้ที่ fuzz/seeds/ ส่วน fuzz/corpus/ อยู่ใน .gitignore
+      # (ของที่ fuzzer งอกเองมีเป็นพันไฟล์ ไม่ควรอยู่ใน repo)
+      - name: วาง seed ทับลงไป
         run: |
           set -uo pipefail
           t=${{ matrix.target }}
           mkdir -p "fuzz/corpus/$t"
-          # ★ seed ที่หายไปต้องดัง ไม่ใช่ `|| true` เงียบ ๆ
-          #   `fuzz_layout` กับ `fuzz_document` ไม่มีโฟลเดอร์ seed เลย → เริ่มจาก
-          #   ศูนย์จริง ๆ ทุกรอบ ซึ่งอ่านไม่ออกจากผลลัพธ์ที่เขียวเหมือนกันหมด
-          if [ -d "fuzz/seeds/$t" ] && [ -n "$(ls -A "fuzz/seeds/$t" 2>/dev/null)" ]; then
-            cp -n "fuzz/seeds/$t"/* "fuzz/corpus/$t/"
-            echo "::notice title=$t corpus ตั้งต้น::$(ls fuzz/corpus/$t | wc -l) ไฟล์จาก fuzz/seeds/$t"
-          else
-            echo "::warning title=$t ไม่มี seed::fuzz/seeds/$t ว่างหรือไม่มี — รอบนี้เริ่มจากศูนย์ ต้องเสียเวลาหา header ที่ถูกต้องใหม่ทั้งหมด"
+          # ★★★ seed ที่หายไป = **แดง** ไม่ใช่ warning และไม่ใช่ `|| true`
+          #
+          #   เดิมบรรทัดนี้จบด้วย `|| true` · `fuzz_layout` กับ `fuzz_document`
+          #   จึงยิง 900 วินาทีจากศูนย์ทุกรอบ **โดยไม่มีอะไรบอกเลย** นานเท่าที่
+          #   ไม่มีใครไปเปิดดู · `docs/08 §3.9` ข้อ 2: โครงเปล่าต้องไม่เงียบ
+          #
+          #   ประตูฝั่งเครื่องอยู่ที่ `seeds::tests::every_wired_target_has_a_seed_folder_with_files_in_it`
+          #   ซึ่งแดงก่อนถึง CI — ตรงนี้คือด่านสุดท้ายเผื่อมีใครมาถึงได้
+          if [ ! -d "fuzz/seeds/$t" ] || [ -z "$(ls -A "fuzz/seeds/$t" 2>/dev/null)" ]; then
+            echo "::error title=$t ไม่มี seed::fuzz/seeds/$t ว่างหรือไม่มี — target นี้จะยิงจากศูนย์ทุกรอบ · เพิ่มตัวสร้างใน xtask/src/seeds.rs แล้วรัน 'cargo xtask gen-fuzz-seeds'"
+            exit 1
           fi
+          cp -n "fuzz/seeds/$t"/* "fuzz/corpus/$t/"
+          echo "::notice title=$t corpus ก่อนยิง::$(ls fuzz/corpus/$t | wc -l) ไฟล์ (seed $(ls fuzz/seeds/$t | wc -l) ใบ + ของที่คืนมาจาก cache)"
           echo "CORPUS_BEFORE=$(ls fuzz/corpus/$t 2>/dev/null | wc -l)" >> "$GITHUB_ENV"
 
       - name: fuzz ${{ matrix.target }}
@@ -98,8 +128,11 @@ jobs:
       # ★ corpus งอกเท่าไรในรอบนี้ — ตัวเลขที่ตอบว่า "ยังหาทางใหม่เจออยู่ไหม"
       #
       #   งอกน้อยลงเรื่อย ๆ = fuzzer ตันแล้ว การยิงนานขึ้น/ถี่ขึ้นไม่ช่วย
-      #   งอกเยอะทุกรอบ = ยังมีพื้นที่ที่ไม่เคยถูกแตะ **และเราทิ้งมันทุกรอบ**
+      #   งอกเยอะทุกรอบ = ยังมีพื้นที่ที่ไม่เคยถูกแตะ
       #   → พิมพ์เสมอ ทั้งตอนผ่านและไม่ผ่าน ด้วยเหตุผลเดียวกับ last-run-status.sh
+      #
+      # ★★ นี่คือตัวเลขที่เรื่อง "ความถี่ควรเป็นเท่าไร" ต้องตั้งอยู่บน · ก่อนมี
+      #    ขั้นนี้ เราเถียงกันเรื่องความถี่ของสิ่งที่ไม่มีใครวัดว่ามันคืบไปแค่ไหน
       - name: corpus งอกเท่าไร
         if: always()
         run: |
@@ -107,7 +140,7 @@ jobs:
           t=${{ matrix.target }}
           after=$(ls "fuzz/corpus/$t" 2>/dev/null | wc -l)
           before=${CORPUS_BEFORE:-0}
-          echo "::notice title=$t corpus::$before → $after ไฟล์ (+$((after - before))) ในรอบนี้ — และ $after ไฟล์นี้จะถูกทิ้งไปกับ runner"
+          echo "::notice title=$t corpus::$before → $after ไฟล์ (+$((after - before))) ในรอบนี้ · $(du -sh fuzz/corpus/$t 2>/dev/null | cut -f1) — จะถูกเซฟเป็น cache ให้รอบหน้า"
 
       # input ที่ทำให้ล้มคือหลักฐานชิ้นเดียวที่เราจะได้ — ห้ามปล่อยหายไปกับ runner
       #

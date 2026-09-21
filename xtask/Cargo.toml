@@ -16,3 +16,7 @@ image.workspace     = true
 # ตัวถอดรหัสปกติปฏิเสธไฟล์ไปตั้งแต่ด่านนั้น จึงบอกไม่ได้ว่าค่าที่ได้จริงคืออะไร
 crc32fast.workspace = true
 glam.workspace      = true    # เทสต์สร้าง Board ตัวอย่าง (UVec2 / Vec2)
+# seed ของ `fuzz_document` ทางที่ 3 คือ **postcard ดิบ** ไม่ใช่ไฟล์ทั้งใบ
+# `dto::encode_body` คืนของที่บีบแล้ว จึงต้องคลายกลับด้วยตัวเดียวกับที่มันใช้
+# ★ ไม่ใช่ dependency ใหม่ของโปรเจกต์ — `refx-io` ใช้ zstd อยู่แล้ว
+zstd.workspace      = true

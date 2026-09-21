@@ -1,4 +1,28 @@
-//! `cargo xtask gen-fuzz-seeds` — corpus ตั้งต้นของ `fuzz_packed` (P4-9)
+//! `cargo xtask gen-fuzz-seeds` — corpus ตั้งต้นของ `fuzz_packed` · `fuzz_document`
+//! · `fuzz_layout`
+//!
+//! # ★★★ ทำไมสามตัว ไม่ใช่ตัวเดียว (21 ก.ย. 2026)
+//!
+//! ตอนทำ NC ของ fuzz พบว่า **`fuzz_layout` กับ `fuzz_document` ไม่มี seed สักไฟล์**
+//! · ขั้น "วาง corpus ตั้งต้น" ใน `fuzz.yml` ปิดท้ายด้วย `|| true` จึงเงียบสนิท
+//! → ทั้งสองยิง 900 วินาที/รอบ **จากศูนย์ทุกครั้ง**
+//!
+//! ★ `docs/08 §3.9` ข้อ 2: โครงเปล่าต้องไม่เงียบ · corpus เปล่าก็เหมือนกัน
+//!
+//! ## ★★ seed ไม่ได้แก้ปัญหา "ไปไม่ถึง parser" — มันแก้ปัญหาอื่น
+//!
+//! สมมติฐานแรกคือ *"ไบต์สุ่มตายที่ด่าน magic ตลอดไป"* · **วัดแล้วไม่จริง**
+//! (run `35561900295`, ก่อนมี seed): `fuzz_document` เริ่มจากศูนย์ไฟล์แล้วยัง
+//! ไปถึง `cov: 1255` และงอก 621 ไฟล์ใน 900 วินาที เพราะทางที่ 3 ของ target
+//! บีบ zstd + ประกอบหัวไฟล์ให้เอง
+//!
+//! สิ่งที่ seed ให้จริง ๆ มีสามอย่าง และวัดได้ทั้งสาม:
+//!
+//! 1. **จุดตั้งต้นที่ถูกต้องตั้งแต่วินาทีแรก** — ไม่ต้องใช้เวลาไต่ไปหาเอง
+//! 2. **เคสขอบที่เรารู้อยู่แล้ว** — `columns: Some(0)`, `NaN`, เอกสารว่าง ·
+//!    ของพวกนี้ fuzzer หาเจอเองได้ แต่ไม่มีเหตุผลให้มันต้องเสียเวลาหา
+//! 3. **ครบทุกสาขาที่เลือกด้วยไบต์เดียว** — `fuzz_layout` เลือก engine จาก
+//!    `data[0] % 5` · seed การันตีว่าทั้งห้าตัวถูกแตะ ไม่ใช่หวังว่าจะสุ่มถูก
 //!
 //! ## ★★★ ทำไมต้องสร้างด้วย **ตัวเขียนของจริง** ไม่ใช่สคริปต์ที่ประกอบไบต์เอง
 //!
@@ -37,6 +61,8 @@ use refx_io::packed::{self, ENTRY_LEN, PackSource, TABLE_HEADER_LEN};
 
 /// โฟลเดอร์ปลายทาง — commit ไว้ใน repo (ดู `fuzz/README.md`)
 const OUT: &str = "fuzz/seeds/fuzz_packed";
+const OUT_DOC: &str = "fuzz/seeds/fuzz_document";
+const OUT_LAYOUT: &str = "fuzz/seeds/fuzz_layout";
 
 /// สร้าง corpus ตั้งต้นทั้งชุด
 ///
@@ -44,6 +70,13 @@ const OUT: &str = "fuzz/seeds/fuzz_packed";
 /// เมื่อเขียนไฟล์ไม่สำเร็จ
 pub fn gen_fuzz_seeds() -> anyhow::Result<()> {
     crate::args::Args::new("cargo xtask gen-fuzz-seeds").finish()?;
+    gen_packed_seeds()?;
+    gen_document_seeds()?;
+    gen_layout_seeds()?;
+    Ok(())
+}
+
+fn gen_packed_seeds() -> anyhow::Result<()> {
     let out = PathBuf::from(OUT);
     std::fs::create_dir_all(&out)?;
     let work = std::env::temp_dir().join(format!("refx-seed-blobs-{}", std::process::id()));
@@ -89,6 +122,174 @@ pub fn gen_fuzz_seeds() -> anyhow::Result<()> {
     let _ = std::fs::remove_dir_all(&work);
     println!("เขียน seed ลง {OUT} แล้ว");
     Ok(())
+}
+
+/// corpus ตั้งต้นของ `fuzz_document`
+///
+/// # ★★ ทำไมต้องมี **สองชนิด** ในโฟลเดอร์เดียวกัน
+///
+/// target ยิงสามทางจากไบต์ชุดเดียวกัน (ดูหัวไฟล์ `fuzz_document.rs`):
+///
+/// | ทาง | สิ่งที่ `data` เป็น | seed ที่พาไปถึง |
+/// |---|---|---|
+/// | 1 | ไฟล์ `.refx` ทั้งใบ | `doc_*.refx` |
+/// | 2 | body ที่ถูก `wrap` ให้ | (ได้จากทั้งสองชนิดโดยปริยาย) |
+/// | 3 | **postcard ดิบ** แล้ว target บีบ+ประกอบหัวให้เอง | `postcard_*.bin` |
+///
+/// ★★★ ทางที่ 3 คือทางที่ลึกที่สุด — มันข้ามทั้งด่าน magic และด่าน zstd
+/// ไปโผล่ที่ **โครงของเอกสารโดยตรง** ซึ่งเป็นที่ที่ fuzzer แก้อะไรที่มีความหมายได้
+/// · ถ้ามีแต่ไฟล์ทั้งใบเป็น seed การกลายพันธุ์เกือบทุกครั้งจะพัง crc แล้วตาย
+/// ตั้งแต่ด่านแรก — *corpus ที่ดูเหมือนมี แต่ไม่เคยพาไปถึง parser*
+fn gen_document_seeds() -> anyhow::Result<()> {
+    let out = PathBuf::from(OUT_DOC);
+    std::fs::create_dir_all(&out)?;
+    for (name, bytes) in document_seeds()? {
+        write(&out.join(&name), &bytes)?;
+    }
+    println!("เขียน seed ลง {OUT_DOC} แล้ว");
+    Ok(())
+}
+
+/// ★ ตัวผลิตล้วน — ไม่แตะดิสก์เลย จึงเป็นตัวเดียวกับที่เทสต์ใช้เทียบกับ
+/// ไฟล์ที่ commit ไว้ · ถ้าตัวผลิตกับตัวเขียนเป็นคนละเส้นทาง เทสต์จะยืนยัน
+/// ได้แค่ว่า "ตัวเทสต์ตรงกับตัวเทสต์" ซึ่งไม่มีความหมาย
+fn document_seeds() -> anyhow::Result<Vec<(String, Vec<u8>)>> {
+    // ★ ไม่ต้อง `plant` — เอกสารบันทึกแค่ `logical` ส่วนไฟล์จริงถูกอ่านโดย
+    //   `PackSource` เท่านั้น ซึ่ง seed ชุดนี้ไม่ได้ใช้
+    let small = logical_only("small.bin");
+    let big = logical_only("big.bin");
+    let tiny = logical_only("tiny.bin");
+
+    let mut out = Vec::new();
+    for (name, board) in [
+        ("empty", board(&[])),
+        ("one_asset", board(&[(1, &small)])),
+        ("three_assets", board(&[(1, &small), (2, &big), (3, &tiny)])),
+    ] {
+        // ทางที่ 1 — ไฟล์ทั้งใบที่ `Ctrl+S` ของผู้ใช้เขียนออกมาจริง ๆ
+        out.push((format!("doc_{name}.refx"), dto::encode(&board)?));
+        // ทางที่ 3 — postcard ดิบ
+        out.push((format!("postcard_{name}.bin"), postcard_of(&board)?));
+    }
+    Ok(out)
+}
+
+/// `Blob` ที่มีแต่ที่อยู่เชิงตรรกะ — ใช้กับ seed ที่ไม่ต้องอ่านไฟล์จริง
+fn logical_only(name: &str) -> Blob {
+    Blob {
+        real: PathBuf::new(),
+        logical: PathBuf::from(format!("seed-blobs/{name}")),
+    }
+}
+
+/// postcard ดิบของเอกสาร — **คลายกลับด้วยตัวเดียวกับที่ `encode_body` ใช้บีบ**
+///
+/// ★ ไม่เรียก `postcard::to_stdvec` เอง · ถ้าวันหนึ่งรูปแบบของเอกสารเปลี่ยน
+/// (v1 → v2, เปลี่ยน serializer) seed จะเปลี่ยนตามโดยอัตโนมัติ · ตัวประกอบ
+/// ตัวที่สองจะ drift เงียบ ๆ แล้ว seed จะกลายเป็นของที่ parser ปฏิเสธทุกใบ
+fn postcard_of(board: &Board) -> anyhow::Result<Vec<u8>> {
+    let squeezed = dto::encode_body(board)?;
+    Ok(zstd::decode_all(squeezed.as_slice())?)
+}
+
+/// corpus ตั้งต้นของ `fuzz_layout`
+///
+/// # ★★★ ที่นี่ "ของจริง" คืออะไร
+///
+/// สองตัวบนมีรูปแบบไฟล์ของตัวเอง จึงเรียกตัวเขียนจริงได้ · **`fuzz_layout`
+/// ไม่มีรูปแบบไฟล์** — สิ่งที่ target อ่านคือการตีความไบต์ที่มันนิยามขึ้นเอง
+/// ในตัวมัน (byte 0 = engine, แล้ว f32 สามตัว, แล้ว 2 ไบต์ของ `columns`,
+/// แล้วคู่ f32 ไปเรื่อย ๆ)
+///
+/// → ตัวเขียนที่นี่จึงเป็น **ตัวประกอบตัวที่สองโดยเลี่ยงไม่ได้** ซึ่งคือสิ่งที่
+///   หัวไฟล์นี้เตือนไว้เอง · ทางแก้ไม่ใช่การแกล้งว่าไม่มีปัญหา แต่คือ
+///   `the_layout_target_still_reads_bytes_the_way_these_seeds_write_them`
+///   ที่ **อ่าน `fuzz_layout.rs` ตัวจริง** แล้วล้มถ้าลำดับช่องเปลี่ยน
+///   (รูปเดียวกับ `xtask/tests/ui_drive_step_lists.rs`)
+fn gen_layout_seeds() -> anyhow::Result<()> {
+    let out = PathBuf::from(OUT_LAYOUT);
+    std::fs::create_dir_all(&out)?;
+    for (name, bytes) in layout_seeds() {
+        write(&out.join(&name), &bytes)?;
+    }
+    println!("เขียน seed ลง {OUT_LAYOUT} แล้ว");
+    Ok(())
+}
+
+/// หนึ่ง seed ของ `fuzz_layout` — ช่องเรียงตามลำดับที่ target อ่านไบต์พอดี
+struct LayoutCase {
+    name: &'static str,
+    /// ไบต์ 0 · target ทำ `% 5` เอง
+    engine: u8,
+    width: f32,
+    gap: f32,
+    row_height: f32,
+    columns: Option<u32>,
+    items: usize,
+}
+
+/// ★ ตัวผลิตล้วน — เหตุผลเดียวกับ [`document_seeds`]
+fn layout_seeds() -> Vec<(String, Vec<u8>)> {
+    let case = |name, engine, width, gap, row_height, columns, items| LayoutCase {
+        name,
+        engine,
+        width,
+        gap,
+        row_height,
+        columns,
+        items,
+    };
+    let cases = [
+        case("grid_sane", 0, 1280.0, 8.0, 220.0, None, 12),
+        case("masonry_sane", 1, 1600.0, 12.0, 240.0, Some(4), 40),
+        case("justified_sane", 2, 1024.0, 6.0, 180.0, None, 25),
+        case("shelf_sane", 3, 1920.0, 10.0, 200.0, None, 30),
+        case("radial_sane", 4, 900.0, 4.0, 160.0, None, 16),
+        // ★ ขอบที่เรารู้ว่าอันตราย — ใส่เป็นจุดตั้งต้น ไม่ต้องรอ fuzzer สุ่มเจอ
+        case("grid_zero_width", 0, 0.0, 0.0, 0.0, Some(0), 8),
+        case("masonry_nan", 1, f32::NAN, f32::NAN, f32::NAN, Some(1), 8),
+        case("justified_inf", 2, f32::INFINITY, -1.0, f32::MIN, None, 8),
+        case("shelf_one_item", 3, 800.0, 5.0, 150.0, None, 1),
+        case("radial_no_items", 4, 800.0, 5.0, 150.0, None, 0),
+        case("grid_many_items", 0, 2400.0, 3.0, 120.0, Some(9), 600),
+    ];
+
+    let mut out = Vec::new();
+    for LayoutCase {
+        name,
+        engine,
+        width,
+        gap,
+        row_height,
+        columns,
+        items,
+    } in cases
+    {
+        let mut bytes = vec![engine];
+        for value in [width, gap, row_height] {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        // `columns`: ไบต์แรกคี่ = Some(ไบต์ที่สอง) · คู่ = None
+        match columns {
+            None => bytes.extend_from_slice(&[0, 0]),
+            Some(n) => bytes.extend_from_slice(&[1, u8::try_from(n).unwrap_or(u8::MAX)]),
+        }
+        // คู่ f32 = aspect ของแต่ละภาพ · ไล่ค่าให้ต่างกันจริงเพื่อให้แต่ละ engine
+        // เดินคนละเส้น ไม่ใช่ภาพจัตุรัสเหมือนกันหมดซึ่งเป็นเคสง่ายที่สุด
+        for i in 0..items {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "ค่า aspect ของ seed — ความละเอียดระดับ f32 พอเกินพอ"
+            )]
+            let t = i as f32;
+            let w = 40.0 + (t * 37.0) % 610.0;
+            let h = 30.0 + (t * 53.0) % 430.0;
+            bytes.extend_from_slice(&w.to_le_bytes());
+            bytes.extend_from_slice(&h.to_le_bytes());
+        }
+        out.push((format!("layout_{name}.bin"), bytes));
+    }
+    out
 }
 
 /// ไฟล์ตัวอย่างหนึ่งก้อน — **ที่อยู่จริงบนดิสก์ กับที่อยู่ที่ถูกบันทึกลงเอกสาร
@@ -300,19 +501,25 @@ mod tests {
     /// ไม่ว่าจะมี path ของเครื่องฝังอยู่หรือไม่ (`docs/08 §3.9` ข้อ 14)
     #[test]
     fn no_seed_carries_a_path_from_the_machine_that_made_it() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
-            .expect("xtask อยู่ใต้รากของ workspace")
-            .join(OUT);
-        let entries = std::fs::read_dir(&dir)
-            .unwrap_or_else(|err| panic!("อ่าน {} ไม่ได้: {err}", dir.display()));
+            .expect("xtask อยู่ใต้รากของ workspace");
+        // ★ ทั้งสามโฟลเดอร์ ไม่ใช่แค่ `fuzz_packed` · โฟลเดอร์ที่ไม่ถูกตรวจ
+        //   คือโฟลเดอร์ที่ path หลุดลงไปได้โดยไม่มีใครรู้
+        let entries: Vec<_> = [OUT, OUT_DOC, OUT_LAYOUT]
+            .iter()
+            .flat_map(|dir| {
+                let dir = root.join(dir);
+                std::fs::read_dir(&dir)
+                    .unwrap_or_else(|err| panic!("อ่าน {} ไม่ได้: {err}", dir.display()))
+                    .flatten()
+                    .collect::<Vec<_>>()
+            })
+            .collect();
 
         let mut checked = 0;
-        for entry in entries.flatten() {
+        for entry in entries {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("refx") {
-                continue;
-            }
             let bytes = std::fs::read(&path).expect("อ่าน seed ไม่ได้");
             let text = String::from_utf8_lossy(&bytes);
             for mark in [
@@ -331,7 +538,150 @@ mod tests {
             }
             checked += 1;
         }
-        assert!(checked >= 5, "ตรวจ seed ได้แค่ {checked} ไฟล์ — น้อยเกินจะเชื่อ");
+        assert!(checked >= 20, "ตรวจ seed ได้แค่ {checked} ไฟล์ — น้อยเกินจะเชื่อ");
+    }
+
+    /// ★★★ **ไม่มี target ไหนที่ commit target ไว้แต่ไม่ commit seed ไว้**
+    ///
+    /// นี่คือข้อที่ถ้ามีมาตั้งแต่แรก จะจับได้ตั้งแต่วันที่ `fuzz_layout` กับ
+    /// `fuzz_document` ถูกต่อ — แทนที่จะต้องรอให้มีคนไปทำ NC ของ fuzz
+    /// แล้วบังเอิญเห็น `|| true` (21 ก.ย. 2026)
+    #[test]
+    fn every_wired_target_has_a_seed_folder_with_files_in_it() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask อยู่ใต้รากของ workspace");
+        let targets = std::fs::read_dir(root.join("fuzz/fuzz_targets"))
+            .expect("อ่านโฟลเดอร์ fuzz_targets ไม่ได้")
+            .flatten()
+            .filter_map(|e| {
+                let p = e.path();
+                (p.extension().and_then(|x| x.to_str()) == Some("rs"))
+                    .then(|| p.file_stem()?.to_str().map(str::to_owned))?
+            })
+            .collect::<Vec<_>>();
+        assert!(targets.len() >= 4, "เจอ target แค่ {} ตัว", targets.len());
+
+        let mut starving = Vec::new();
+        for target in &targets {
+            let dir = root.join("fuzz/seeds").join(target);
+            let count = std::fs::read_dir(&dir)
+                .map(|it| it.flatten().count())
+                .unwrap_or(0);
+            if count == 0 {
+                starving.push(target.clone());
+            }
+        }
+        assert!(
+            starving.is_empty(),
+            "target ที่ไม่มี seed สักไฟล์: {starving:?} — มันจะยิง 900 วินาทีจากศูนย์ \
+             ทุกรอบ · เพิ่มตัวสร้างใน xtask/src/seeds.rs แล้วรัน \
+             `cargo xtask gen-fuzz-seeds`"
+        );
+    }
+
+    /// ★★★ **seed ของ `fuzz_document` ทุกใบต้องเดินถึง parser จริง**
+    ///
+    /// นี่คือข้อที่ทำให้ seed ต่างจาก "ไฟล์ที่มีอยู่" · seed ที่ตกด่านแรก
+    /// มีค่าเท่ากับไม่มี seed เลย แต่**หน้าตาเหมือนมี** ซึ่งแย่กว่า เพราะ
+    /// `fuzz.yml` จะพิมพ์ว่าวาง corpus ตั้งต้นสำเร็จ
+    ///
+    /// ★ เทสต์เดินทาง **ทางเดียวกับที่ target เดิน** ไม่ใช่ทางที่สะดวกกว่า:
+    /// `postcard_*.bin` ถูกบีบก่อนแล้วค่อยส่งให้ `decode_document` เหมือนที่
+    /// `fuzz_document.rs` ทางที่ 3 ทำ
+    #[test]
+    fn every_document_seed_reaches_the_real_parser() {
+        let id = BoardId::from_parts(0, 0);
+        let mut docs = 0;
+        let mut cards = 0;
+        for (name, bytes) in document_seeds().expect("สร้าง seed ของเอกสารไม่ได้")
+        {
+            if name.ends_with(".refx") {
+                let got = dto::decode(&bytes, id);
+                assert!(
+                    got.is_ok(),
+                    "{name} เปิดไม่ได้ ({:?}) — seed ที่ตกด่านแรกไม่เคยพา fuzzer ไปถึง parser",
+                    got.err()
+                );
+                docs += 1;
+            } else {
+                let squeezed = zstd::encode_all(bytes.as_slice(), 3).expect("บีบ seed ไม่ได้");
+                let got = dto::decode_document(&squeezed);
+                assert!(
+                    got.is_ok(),
+                    "{name} ไม่ใช่ postcard ที่อ่านได้ ({:?}) — ทางที่ 3 ของ target จะตายทันที",
+                    got.err()
+                );
+                cards += 1;
+            }
+        }
+        assert!(
+            docs >= 3 && cards >= 3,
+            "ได้ {docs} ไฟล์ .refx กับ {cards} postcard — น้อยเกินจะเชื่อ"
+        );
+    }
+
+    /// ★★★ **`fuzz_layout.rs` ต้องยังอ่านไบต์ด้วยลำดับที่ seed เขียน**
+    ///
+    /// ต่างจากอีกสองตัว: `fuzz_layout` ไม่มีรูปแบบไฟล์ของตัวเอง ตัวเขียน seed
+    /// จึงเป็น **ตัวประกอบตัวที่สอง** ซึ่งหัวไฟล์นี้เตือนไว้เองว่าเป็นที่ที่บั๊กอยู่
+    ///
+    /// วันที่ใครสลับ `width` กับ `gap` หรือย้าย `columns` ไปอยู่ข้างหน้า
+    /// seed ทุกใบจะยังเป็นไฟล์ที่ "ใช้ได้" แต่จะสื่อความหมายคนละอย่าง —
+    /// **ไม่มีอะไรแดง มีแต่ corpus ที่เงียบ ๆ เลิกตรงประเด็น**
+    ///
+    /// → เทสต์นี้อ่าน target ตัวจริง แล้วยืนยันลำดับที่เราพึ่งพา
+    ///   (รูปเดียวกับ `xtask/tests/ui_drive_step_lists.rs`)
+    #[test]
+    fn the_layout_target_still_reads_bytes_the_way_these_seeds_write_them() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask อยู่ใต้รากของ workspace")
+            .join("fuzz/fuzz_targets/fuzz_layout.rs");
+        let text = std::fs::read_to_string(&src)
+            .unwrap_or_else(|err| panic!("อ่าน {} ไม่ได้: {err}", src.display()));
+
+        // ลำดับที่ตัวเขียน seed พึ่งพา — ต้องปรากฏใน target ตามลำดับนี้เป๊ะ
+        let order = [
+            "data[at] % 5",                // ไบต์ 0 = engine
+            "at += 1",                     //
+            "width: take_f32",             // f32 #1
+            "gap: take_f32",               // f32 #2
+            "target_row_height: take_f32", // f32 #3
+            "columns:",                    // 2 ไบต์
+            "at += 2",                     //
+            "at + 8 <= data.len()",        // จากนี้เป็นคู่ f32
+        ];
+        let mut from = 0usize;
+        for needle in order {
+            let found = text[from..].find(needle).unwrap_or_else(|| {
+                panic!(
+                    "ไม่เจอ {needle:?} ใน fuzz_layout.rs (หลังตำแหน่ง {from}) — \
+                     target เปลี่ยนวิธีอ่านไบต์แล้ว แต่ตัวเขียน seed ใน \
+                     xtask/src/seeds.rs ยังเขียนแบบเดิม · seed ทั้งชุดกำลังสื่อ \
+                     ความหมายคนละอย่างกับที่ตั้งใจ"
+                )
+            });
+            from += found + needle.len();
+        }
+    }
+
+    /// ★ seed ของ layout ต้องมีครบทั้งห้า engine
+    ///
+    /// engine ที่ไม่มี seed = engine ที่ fuzzer ต้องสุ่มไบต์แรกให้ตรงเอง
+    /// ซึ่งมันทำได้ แต่เสียเวลาไปกับสิ่งที่เรารู้คำตอบอยู่แล้ว
+    #[test]
+    fn the_layout_seeds_cover_every_engine() {
+        let engines: std::collections::BTreeSet<u8> = layout_seeds()
+            .iter()
+            .filter_map(|(_, bytes)| bytes.first().map(|b| b % 5))
+            .collect();
+        assert_eq!(
+            engines.len(),
+            5,
+            "seed ครอบ engine ได้แค่ {:?} จากห้าตัว",
+            engines
+        );
     }
 
     /// ★★★ **seed ที่ commit ไว้ ต้องตรงกับสิ่งที่เครื่องนี้จะเขียนออกมา**
@@ -361,5 +711,57 @@ mod tests {
             "seed ที่ commit ไว้ไม่ตรงกับที่เครื่องนี้สร้าง — รัน `cargo xtask gen-fuzz-seeds` \
              แล้วดูว่า diff เป็นสิ่งที่ตั้งใจจริงไหม"
         );
+    }
+
+    /// ★★★ เหมือนข้างบน แต่ **ทุกไฟล์ ไม่ใช่ตัวแทนใบเดียว**
+    ///
+    /// สองตัวใหม่ทำได้เพราะตัวผลิตเป็นฟังก์ชันล้วน — เทียบได้ทั้งชุดโดยไม่ต้อง
+    /// แตะดิสก์ · `fuzz_packed` ยังเทียบใบเดียวเพราะมันต้องมีไฟล์จริงให้แพ็ก
+    #[test]
+    fn the_committed_document_and_layout_seeds_are_byte_for_byte_what_we_generate() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask อยู่ใต้รากของ workspace");
+
+        let mut all: Vec<(&str, String, Vec<u8>)> = Vec::new();
+        for (name, bytes) in document_seeds().expect("สร้าง seed ของเอกสารไม่ได้")
+        {
+            all.push((OUT_DOC, name, bytes));
+        }
+        for (name, bytes) in layout_seeds() {
+            all.push((OUT_LAYOUT, name, bytes));
+        }
+
+        for (dir, name, fresh) in &all {
+            let path = root.join(dir).join(name);
+            let want = std::fs::read(&path)
+                .unwrap_or_else(|err| panic!("อ่าน {} ไม่ได้: {err}", path.display()));
+            assert_eq!(
+                fresh,
+                &want,
+                "{} ไม่ตรงกับที่เครื่องนี้สร้าง — รัน `cargo xtask gen-fuzz-seeds`",
+                path.display()
+            );
+        }
+
+        // ★ ทิศกลับ: ไฟล์ที่อยู่ในโฟลเดอร์แต่ไม่มีใครสร้างแล้ว = ของค้างที่
+        //   fuzzer ยังโหลดอยู่ทุกรอบโดยไม่มีใครรู้ว่ามันมาจากไหน
+        for dir in [OUT_DOC, OUT_LAYOUT] {
+            let on_disk: std::collections::BTreeSet<String> = std::fs::read_dir(root.join(dir))
+                .expect("อ่านโฟลเดอร์ seed ไม่ได้")
+                .flatten()
+                .filter_map(|e| e.file_name().to_str().map(str::to_owned))
+                .collect();
+            let generated: std::collections::BTreeSet<String> = all
+                .iter()
+                .filter(|(d, _, _)| *d == dir)
+                .map(|(_, n, _)| n.clone())
+                .collect();
+            let stale: Vec<_> = on_disk.difference(&generated).collect();
+            assert!(
+                stale.is_empty(),
+                "{dir} มีไฟล์ที่ไม่มีตัวสร้างแล้ว: {stale:?} — ลบทิ้งหรือเพิ่มตัวสร้างกลับมา"
+            );
+        }
     }
 }
