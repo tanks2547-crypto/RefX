@@ -1,10 +1,15 @@
-# ★ "nightly" ในชื่อหมายถึง **toolchain** ไม่ใช่ตารางเวลา — ตารางคือ จ/พ/ศ
-#   (ลดจากทุกคืน 10 ส.ค. 2026 เพราะโควตา Actions หมดจน CI หยุดไปหลายวัน)
-#   สองรอบต่อสัปดาห์ที่หายไปเคยกิน ~46 นาทีของโควตาต่อคืนโดยที่ corpus
-#   ยังถูกเก็บต่อเนื่องเหมือนเดิม — fuzzer ไม่ได้เริ่มจากศูนย์ทุกรอบอยู่แล้ว
+# ★ "nightly" ในชื่อหมายถึง **toolchain** ไม่ใช่ตารางเวลา
+#
+# ประวัติความถี่ — ทุกคืน → จ/พ/ศ (10 ส.ค. 2026, โควตาหมดจน CI หยุดไปหลายวัน)
+# → สัปดาห์ละครั้ง (24 ก.ย. 2026, ตอนวัดต้นทุน CI)
+#
+# ★★★ 21 ก.ย. 2026: คอมเมนต์สองบรรทัดตรงนี้ยังเขียนว่า "จ/พ/ศ" อยู่ **สิบเจ็ดวัน**
+#     หลัง cron เปลี่ยนเป็นจันทร์อย่างเดียว — รูปเดียวกับคอมเมนต์
+#     `idle_produces_no_redraw (5 วินาที)` ที่ผิดไป 120 เท่า
+#     → job `cron-comment` ข้างล่างเกิดมาเพื่อให้เรื่องนี้เกิดซ้ำไม่ได้อีก
 name: Fuzz (nightly toolchain)
 on:
-  schedule: [{ cron: "0 3 * * 1" }]   # จันทร์ / พุธ / ศุกร์ 03:00 UTC
+  schedule: [{ cron: "0 3 * * 1" }]   # จันทร์ 03:00 UTC
   workflow_dispatch:
 
 # ★ ทำไมต้องตั้ง RUSTUP_TOOLCHAIN (แก้ 2 ส.ค. 2026)
@@ -57,16 +62,67 @@ jobs:
 
       # corpus ตั้งต้นถูก commit ไว้ที่ fuzz/seeds/ ส่วน fuzz/corpus/ อยู่ใน .gitignore
       # (ของที่ fuzzer งอกเองมีเป็นพันไฟล์ ไม่ควรอยู่ใน repo)
-      # ถ้าไม่คัดลอกเข้ามา ทุกคืนจะเริ่มจากศูนย์แล้วเสียเวลาไปกับการหา header ที่ถูกต้อง
+      #
+      # ★★★ 21 ก.ย. 2026 — **รอบนี้ไม่ต่อยอดจากรอบก่อน** และไม่เคยต่อยอดเลย
+      #
+      #   `fuzz/corpus/` อยู่ใน `.gitignore` · ไม่มี `actions/cache` ตัวไหนเก็บมัน ·
+      #   `Swatinem/rust-cache` เก็บแค่ registry กับ target dir · runner ถูกทิ้งทุกรอบ
+      #   → ทุกรอบเริ่มจาก `fuzz/seeds/` เท่าที่มี **แล้วทิ้งสิ่งที่งอกทั้งหมด**
+      #
+      #   คอมเมนต์หัวไฟล์เดิมเขียนว่า "corpus ยังถูกเก็บต่อเนื่อง — fuzzer ไม่ได้
+      #   เริ่มจากศูนย์ทุกรอบอยู่แล้ว" ซึ่ง**ไม่จริง** และมันเคยถูกใช้เป็นเหตุผล
+      #   ในการลดความถี่ · ขั้น "corpus งอกเท่าไร" ข้างล่างมีไว้ให้ตัวเลขนี้
+      #   มองเห็นทุกรอบ แทนที่จะต้องมีใครมาขุด
       - name: วาง corpus ตั้งต้น
         run: |
-          mkdir -p fuzz/corpus/${{ matrix.target }}
-          cp -n fuzz/seeds/${{ matrix.target }}/* fuzz/corpus/${{ matrix.target }}/ || true
+          set -uo pipefail
+          t=${{ matrix.target }}
+          mkdir -p "fuzz/corpus/$t"
+          # ★ seed ที่หายไปต้องดัง ไม่ใช่ `|| true` เงียบ ๆ
+          #   `fuzz_layout` กับ `fuzz_document` ไม่มีโฟลเดอร์ seed เลย → เริ่มจาก
+          #   ศูนย์จริง ๆ ทุกรอบ ซึ่งอ่านไม่ออกจากผลลัพธ์ที่เขียวเหมือนกันหมด
+          if [ -d "fuzz/seeds/$t" ] && [ -n "$(ls -A "fuzz/seeds/$t" 2>/dev/null)" ]; then
+            cp -n "fuzz/seeds/$t"/* "fuzz/corpus/$t/"
+            echo "::notice title=$t corpus ตั้งต้น::$(ls fuzz/corpus/$t | wc -l) ไฟล์จาก fuzz/seeds/$t"
+          else
+            echo "::warning title=$t ไม่มี seed::fuzz/seeds/$t ว่างหรือไม่มี — รอบนี้เริ่มจากศูนย์ ต้องเสียเวลาหา header ที่ถูกต้องใหม่ทั้งหมด"
+          fi
+          echo "CORPUS_BEFORE=$(ls fuzz/corpus/$t 2>/dev/null | wc -l)" >> "$GITHUB_ENV"
 
       - name: fuzz ${{ matrix.target }}
         run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=900
 
+      # ★ corpus งอกเท่าไรในรอบนี้ — ตัวเลขที่ตอบว่า "ยังหาทางใหม่เจออยู่ไหม"
+      #
+      #   งอกน้อยลงเรื่อย ๆ = fuzzer ตันแล้ว การยิงนานขึ้น/ถี่ขึ้นไม่ช่วย
+      #   งอกเยอะทุกรอบ = ยังมีพื้นที่ที่ไม่เคยถูกแตะ **และเราทิ้งมันทุกรอบ**
+      #   → พิมพ์เสมอ ทั้งตอนผ่านและไม่ผ่าน ด้วยเหตุผลเดียวกับ last-run-status.sh
+      - name: corpus งอกเท่าไร
+        if: always()
+        run: |
+          set -uo pipefail
+          t=${{ matrix.target }}
+          after=$(ls "fuzz/corpus/$t" 2>/dev/null | wc -l)
+          before=${CORPUS_BEFORE:-0}
+          echo "::notice title=$t corpus::$before → $after ไฟล์ (+$((after - before))) ในรอบนี้ — และ $after ไฟล์นี้จะถูกทิ้งไปกับ runner"
+
       # input ที่ทำให้ล้มคือหลักฐานชิ้นเดียวที่เราจะได้ — ห้ามปล่อยหายไปกับ runner
+      #
+      # ★★ ขั้นนี้ไม่เคยทำงานเลยสักครั้ง (ดู job `fuzz-nc`) · จึงต้องมีขั้นก่อนหน้า
+      #    ที่ **พิมพ์ว่ามีหลักฐานหรือไม่มี** — `if-no-files-found: ignore`
+      #    ทำให้ "อัปโหลดไฟล์ศูนย์ไฟล์" กับ "อัปโหลดหลักฐานสำเร็จ" หน้าตาเหมือนกัน
+      - name: มีหลักฐานให้เก็บไหม
+        if: failure()
+        run: |
+          set -uo pipefail
+          n=$(find fuzz/artifacts -type f 2>/dev/null | wc -l)
+          find fuzz/artifacts -type f 2>/dev/null | sed 's/^/  /'
+          if [ "$n" -eq 0 ]; then
+            echo "::warning title=แดงแต่ไม่มีไฟล์หลักฐาน::${{ matrix.target }} ล้มโดยไม่มีไฟล์ใน fuzz/artifacts/ — แปลว่าล้มก่อนถึง fuzzer (build/toolchain) ไม่ใช่เจอ input ที่ทำให้พัง"
+          else
+            echo "::notice title=มีหลักฐาน $n ไฟล์::กำลังอัปโหลดเป็น fuzz-artifacts-${{ matrix.target }}"
+          fi
+
       - name: เก็บ input ที่ทำให้ล้ม
         if: failure()
         uses: actions/upload-artifact@v4
@@ -74,6 +130,51 @@ jobs:
           name: fuzz-artifacts-${{ matrix.target }}
           path: fuzz/artifacts/
           if-no-files-found: ignore
+
+  # ★★★ negative control — **พิสูจน์ว่า fuzz แดงเป็น ไม่ใช่ว่ามันเขียวอยู่**
+  #
+  # 21 ก.ย. 2026: ไล่ดู 20 รอบล่าสุด แดง 4 รอบ และทั้งสี่รอบ `fuzz-lint` กับ
+  # `unwired-targets` แดงด้วย — สอง job ที่ไม่ได้ยิง fuzzer เลย · แปลว่าเส้นทาง
+  # **"เจอ crash → job แดง → เก็บ artifact" ไม่เคยถูกเดินจริงสักครั้ง**
+  #
+  # I-4 ทั้งข้อพึ่งเครื่องมือที่ไม่มีใครเคยเห็นมันทำงานตอนเจอของ · เกณฑ์
+  # "ไม่เจอ crash" วัดสองอย่างพร้อมกันโดยแยกไม่ออก: **"ไม่มีบั๊ก"** กับ
+  # **"มีบั๊กแต่เราไม่เห็น"** — **ความเงียบยาวนานไม่ใช่หลักฐานของสุขภาพ**
+  #
+  # job นี้ปลูกความผิดพลาดลงใน target จริงทีละตัว แล้วบังคับให้ได้ทั้งสองอย่าง:
+  # exit ไม่ใช่ศูนย์ **และ** ไฟล์หลักฐานที่ชื่อถูกกลไก · ครบสี่ target × สามชนิด
+  #
+  # ★ ทำไมต้องอยู่บน Linux: panic บน Windows ออกทาง `__fastfail` ซึ่งฆ่าโปรเซส
+  #   ก่อน libFuzzer ได้เขียนไฟล์ — ครึ่งหลังจึงวัดบนเครื่องพัฒนาไม่ได้เลย
+  #   (วัดจริงแล้ว 4/4 target) · **ที่นี่คือที่เดียวที่การพิสูจน์นับได้**
+  #
+  # ★ เดินครบสายแล้วที่ run 35561404557 — 12/12 เคสได้ไฟล์ชื่อตรงกลไก และขา
+  #   `fuzz` ทั้งสี่แดงพร้อมอัปโหลด `crash-*` ที่ดาวน์โหลดได้จริง (`docs/08 §3.9` ข้อ 1)
+  fuzz-nc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: ยืนยันว่าใช้ nightly จริง
+        run: |
+          rustc --version
+          if ! rustc --version | grep -q nightly; then
+            echo "::error::job นี้ไม่ได้รันบน nightly — rust-toolchain.toml ชนะอีกแล้ว"
+            exit 1
+          fi
+      - run: cargo install cargo-fuzz --locked
+      - name: ปลูกความผิดพลาดแล้วบังคับให้ fuzz แดง
+        run: bash scripts/fuzz-nc.sh
+      # ★ ไฟล์ที่ NC ทำให้เกิดคือหลักฐานว่าครึ่งหลังทำงาน — เก็บไว้ให้ดาวน์โหลดได้
+      #   ไม่ใช่เชื่อบรรทัด "ผ่าน" ในล็อก
+      - name: เก็บหลักฐานที่ NC ทำให้เกิด
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-nc-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: error
 
   # ★ กันไม่ให้เรื่องเดิมเกิดซ้ำ
   #
