@@ -1225,7 +1225,7 @@ mod tests {
 
     /// ★★★ **GL ต้องไม่ถูกคอมไพล์เข้ามาบน Windows — นี่คือบั๊กเสถียรภาพ ไม่ใช่เรื่องขนาด**
     ///
-    /// 14 ก.ย. 2026: `PostMessage(WM_INPUTLANGCHANGEREQUEST)` ทำหน้าต่างของ RefX
+    /// 13 ก.ย. 2026: `PostMessage(WM_INPUTLANGCHANGEREQUEST)` ทำหน้าต่างของ RefX
     /// **หยุดตอบภายใน 4–5 ข้อความ** มาตั้งแต่ 6 ก.ย. · ตัวการคือ backend `gles`
     /// ของ wgpu ซึ่งบน Windows ลาก WGL/EGL (`glutin_wgl_sys`) เข้ามาด้วย
     ///
