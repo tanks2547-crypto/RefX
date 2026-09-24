@@ -865,6 +865,52 @@ mod tests {
         host
     }
 
+    /// ★★ สรุปชนิด input บนบรรทัดปิดโปรแกรม — **ทั้งสองกิ่ง และสิ่งที่ไม่ถูกนับ**
+    ///
+    /// mutation sweep ของ `refx-platform` (run 35698490400, 22 ก.ย. 2026) พบว่า
+    /// `if self.input_kinds.is_empty()` **รอดจากทุกเทสต์** · เทสต์สองตัวที่มากับ
+    /// `c93ede9` คุมแค่ `event_kind()` ไม่เคยเรียก `input_kinds()` เลย
+    ///
+    /// กิ่งว่างไม่ใช่เรื่องประดับ: รอบวัด I-1 ที่ไม่มีใครแตะเมาส์ **คือ** รอบที่
+    /// สรุปนี้ว่าง · ถ้ากิ่งนั้นพังเป็นสตริงว่าง บรรทัด log จะเหลือ `inputs=`
+    /// ซึ่งอ่านเหมือน "ลืมพิมพ์" มากกว่า "ไม่มี input เลยจริง ๆ"
+    #[test]
+    fn the_input_summary_says_nothing_happened_when_nothing_did_and_counts_what_did() {
+        let quiet = host_with_window(SpyDelegate {
+            wants_frame: true,
+            ..SpyDelegate::default()
+        });
+        assert_eq!(quiet.input_kinds(), "ไม่มี input เลย");
+
+        let mut busy = host_with_window(SpyDelegate {
+            wants_frame: true,
+            ..SpyDelegate::default()
+        });
+        for event in [
+            WindowEvent::Occluded(false),
+            WindowEvent::Focused(true),
+            WindowEvent::Focused(false),
+        ] {
+            busy.handle_event(&event);
+        }
+        // เรียงตามชื่อเสมอ (BTreeMap) — log สองรอบเทียบกันได้ทีละบรรทัด
+        assert_eq!(busy.input_kinds(), "Focused=2 Occluded=1");
+
+        // ★ นับเฉพาะ input ที่ **ทำให้เกิดเฟรม** — คำถามของตัวนับนี้คือ
+        //   "อะไรทำให้วาด" ไม่ใช่ "อะไรวิ่งผ่าน"
+        let mut ignored = host_with_window(SpyDelegate {
+            wants_frame: false,
+            ..SpyDelegate::default()
+        });
+        ignored.handle_event(&WindowEvent::Focused(true));
+        assert_eq!(ignored.delegate.inputs, 1, "delegate ต้องได้เห็น event");
+        assert_eq!(
+            ignored.input_kinds(),
+            "ไม่มี input เลย",
+            "input ที่ไม่ได้ขอเฟรมถูกนับเป็นสาเหตุของการวาด"
+        );
+    }
+
     /// ★★★ `resumed()` มาซ้ำได้ — หน้าต่างต้องเกิดครั้งเดียว
     ///
     /// ถ้าสลักนี้ค้างที่ "ไม่ต้องสร้าง" โปรแกรมจะเปิดมาเป็นจอว่างตลอดไป

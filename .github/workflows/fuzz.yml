@@ -76,9 +76,14 @@ jobs:
       # ★ คีย์ไม่ซ้ำต่อรอบ + `restore-keys` เป็นคำนำหน้า = cache แบบกลิ้ง:
       #   รอบนี้คืนของรอบล่าสุดที่มี แล้วเซฟของตัวเองเป็นกองใหม่
       #   (คีย์เดิมซ้ำ ๆ จะเซฟแค่ครั้งแรกครั้งเดียวแล้วแช่แข็งตลอดไป)
+      #
+      # ★★ แยก restore กับ save เป็นสองขั้น ไม่ใช้ `actions/cache` ตัวรวม
+      #    ตัวรวมเซฟตอนจบ job **เฉพาะเมื่อ job เขียว** · รอบที่ fuzzer เจอ crash
+      #    คือรอบที่ job แดง → corpus ที่งอกมาทั้งรอบถูกทิ้ง ทั้งที่มันคือรอบที่
+      #    ไปได้ลึกที่สุด · ดูขั้น "เซฟ corpus ให้รอบหน้า" ข้างล่าง
       - name: คืน corpus ของรอบก่อน
         id: corpus
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: fuzz/corpus/${{ matrix.target }}
           key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
@@ -87,16 +92,25 @@ jobs:
       # ★★ NC ของ cache เอง: ลบ cache ของ target หนึ่งทิ้ง แล้วรอบถัดไป
       #    **ต้องพิมพ์ว่าเริ่มจากศูนย์** ไม่ใช่เงียบแล้วดูเหมือนปกติ
       #    · กลไกที่ไม่มีใครรู้ว่ามันทำงานไหม คือกลไกที่เราเพิ่งเสียไปกับ fuzz ทั้งตัว
+      #
+      # ★★★ ขั้นนี้ **พังในรอบแรกที่มันถูกใช้จริง** (run 35564526229, 21 ก.ย. 2026
+      #   · เจอ 24 ก.ย.)
+      #   และพังตรงทางที่มันเกิดมาเพื่อรายงาน: cache ไม่เจอ → โฟลเดอร์ยังไม่มี
+      #   → `ls` คืน 2 → `pipefail` ส่งต่อ → `bash -e` ของ Actions ฆ่าขั้นทิ้ง
+      #   · `2>/dev/null` กลืนข้อความ "No such file or directory" ไป **ล็อกจึงมีแค่
+      #   `exit code 2` ไม่มีคำอธิบายสักคำ** · fuzzer ไม่ได้รันเลยทั้งสี่ target
+      #   → นับไฟล์ด้วย `count_files` ที่ **ถามก่อนว่าโฟลเดอร์มีไหม** และไม่มี
+      #     `2>/dev/null` ที่ไหนในไฟล์นี้อีก (CLAUDE.md "ห้ามอ่าน exit code ผ่าน pipe")
       - name: cache คืนมาได้ไหม
         run: |
           set -uo pipefail
+          count_files() { if [ -d "$1" ]; then find "$1" -maxdepth 1 -type f | wc -l; else echo 0; fi; }
           t=${{ matrix.target }}
           matched='${{ steps.corpus.outputs.cache-matched-key }}'
-          n=$(ls "fuzz/corpus/$t" 2>/dev/null | wc -l)
           if [ -z "$matched" ]; then
-            echo "::notice title=$t เริ่มจากศูนย์::ไม่มี cache ของรอบก่อน — รอบนี้มีแต่ seed ที่ commit ไว้ · ปกติเมื่อเป็น target ใหม่ หรือ cache ถูกลบ/หมดอายุ 7 วัน"
+            echo "::notice title=$t เริ่มจากศูนย์::ไม่มี cache ของรอบก่อน — รอบนี้มีแต่ seed ที่ commit ไว้ · สาเหตุที่เป็นไปได้: target ใหม่ · cache ถูกลบ · ไม่ถูกแตะเกิน 7 วัน · ถูกไล่ออกเพราะ cache ของ repo เต็ม 10 GB"
           else
-            echo "::notice title=$t คืน corpus ได้::$n ไฟล์ จาก '$matched' ($(du -sh fuzz/corpus/$t 2>/dev/null | cut -f1))"
+            echo "::notice title=$t คืน corpus ได้::$(count_files "fuzz/corpus/$t") ไฟล์ จาก '$matched' ($(du -sh "fuzz/corpus/$t" | cut -f1))"
           fi
 
       # corpus ตั้งต้นถูก commit ไว้ที่ fuzz/seeds/ ส่วน fuzz/corpus/ อยู่ใน .gitignore
@@ -114,15 +128,20 @@ jobs:
           #
           #   ประตูฝั่งเครื่องอยู่ที่ `seeds::tests::every_wired_target_has_a_seed_folder_with_files_in_it`
           #   ซึ่งแดงก่อนถึง CI — ตรงนี้คือด่านสุดท้ายเผื่อมีใครมาถึงได้
-          if [ ! -d "fuzz/seeds/$t" ] || [ -z "$(ls -A "fuzz/seeds/$t" 2>/dev/null)" ]; then
+          count_files() { if [ -d "$1" ]; then find "$1" -maxdepth 1 -type f | wc -l; else echo 0; fi; }
+          seeds=$(count_files "fuzz/seeds/$t")
+          if [ "$seeds" -eq 0 ]; then
             echo "::error title=$t ไม่มี seed::fuzz/seeds/$t ว่างหรือไม่มี — target นี้จะยิงจากศูนย์ทุกรอบ · เพิ่มตัวสร้างใน xtask/src/seeds.rs แล้วรัน 'cargo xtask gen-fuzz-seeds'"
             exit 1
           fi
+          restored=$(count_files "fuzz/corpus/$t")
           cp -n "fuzz/seeds/$t"/* "fuzz/corpus/$t/"
-          echo "::notice title=$t corpus ก่อนยิง::$(ls fuzz/corpus/$t | wc -l) ไฟล์ (seed $(ls fuzz/seeds/$t | wc -l) ใบ + ของที่คืนมาจาก cache)"
-          echo "CORPUS_BEFORE=$(ls fuzz/corpus/$t 2>/dev/null | wc -l)" >> "$GITHUB_ENV"
+          before=$(count_files "fuzz/corpus/$t")
+          echo "::notice title=$t corpus ก่อนยิง::$before ไฟล์ = คืนจาก cache $restored + seed ใหม่ $((before - restored)) (seed ทั้งหมด $seeds ใบ)"
+          echo "CORPUS_BEFORE=$before" >> "$GITHUB_ENV"
 
       - name: fuzz ${{ matrix.target }}
+        id: fuzz
         run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=900
 
       # ★ corpus งอกเท่าไรในรอบนี้ — ตัวเลขที่ตอบว่า "ยังหาทางใหม่เจออยู่ไหม"
@@ -134,13 +153,28 @@ jobs:
       # ★★ นี่คือตัวเลขที่เรื่อง "ความถี่ควรเป็นเท่าไร" ต้องตั้งอยู่บน · ก่อนมี
       #    ขั้นนี้ เราเถียงกันเรื่องความถี่ของสิ่งที่ไม่มีใครวัดว่ามันคืบไปแค่ไหน
       - name: corpus งอกเท่าไร
-        if: always()
+        if: always() && steps.fuzz.outcome != 'skipped'
         run: |
           set -uo pipefail
+          count_files() { if [ -d "$1" ]; then find "$1" -maxdepth 1 -type f | wc -l; else echo 0; fi; }
           t=${{ matrix.target }}
-          after=$(ls "fuzz/corpus/$t" 2>/dev/null | wc -l)
+          after=$(count_files "fuzz/corpus/$t")
           before=${CORPUS_BEFORE:-0}
-          echo "::notice title=$t corpus::$before → $after ไฟล์ (+$((after - before))) ในรอบนี้ · $(du -sh fuzz/corpus/$t 2>/dev/null | cut -f1) — จะถูกเซฟเป็น cache ให้รอบหน้า"
+          echo "::notice title=$t corpus::$before → $after ไฟล์ (+$((after - before))) ในรอบนี้ · $(du -sh "fuzz/corpus/$t" | cut -f1)"
+
+      # ★★ เซฟ **แม้ job จะแดง** — ดูเหตุผลที่ขั้น "คืน corpus ของรอบก่อน"
+      #
+      #   เงื่อนไขคือ fuzzer **ได้รันจริง** (ไม่ถูกข้าม) · ถ้าขั้นก่อนหน้าพังจน
+      #   fuzzer ไม่ได้เริ่ม ไม่มีอะไรใหม่ให้เซฟ และการเซฟจะสร้าง cache ใหม่ที่
+      #   ไปแย่งที่ในเพดาน 10 GB โดยไม่มีประโยชน์
+      #   · libFuzzer **เพิ่ม**ไฟล์ลง corpus เท่านั้น ไม่ลบ (เราไม่ได้สั่ง `-merge`)
+      #     กองที่เซฟจึงไม่มีวันเล็กกว่ากองที่คืนมา
+      - name: เซฟ corpus ให้รอบหน้า
+        if: always() && steps.fuzz.outcome != 'skipped'
+        uses: actions/cache/save@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
 
       # input ที่ทำให้ล้มคือหลักฐานชิ้นเดียวที่เราจะได้ — ห้ามปล่อยหายไปกับ runner
       #
@@ -151,8 +185,14 @@ jobs:
         if: failure()
         run: |
           set -uo pipefail
-          n=$(find fuzz/artifacts -type f 2>/dev/null | wc -l)
-          find fuzz/artifacts -type f 2>/dev/null | sed 's/^/  /'
+          # ★ ถามก่อนว่ามีโฟลเดอร์ไหม — fuzzer ที่ไม่ได้เริ่มก็ไม่ได้สร้างมัน
+          #   และ `find` บนโฟลเดอร์ที่ไม่มี + `pipefail` + `bash -e` คือสิ่งที่ฆ่า
+          #   ขั้น "cache คืนมาได้ไหม" ในรอบ 35564526229
+          n=0
+          if [ -d fuzz/artifacts ]; then
+            n=$(find fuzz/artifacts -type f | wc -l)
+            find fuzz/artifacts -type f | sed 's/^/  /'
+          fi
           if [ "$n" -eq 0 ]; then
             echo "::warning title=แดงแต่ไม่มีไฟล์หลักฐาน::${{ matrix.target }} ล้มโดยไม่มีไฟล์ใน fuzz/artifacts/ — แปลว่าล้มก่อนถึง fuzzer (build/toolchain) ไม่ใช่เจอ input ที่ทำให้พัง"
           else
@@ -240,7 +280,12 @@ jobs:
             target="$1"; module="$2"
 
             # ฝั่ง (ก) มีโค้ดให้ยิงหรือยัง — ไฟล์ TODO บรรทัดเดียว = ยังไม่มี
-            lines=$(grep -cve '^[[:space:]]*$' "$module" || true)
+            #
+            # ★ นับด้วย `awk 'NF'` ไม่ใช่ `grep -c … || true` · `grep -c` คืน 1
+            #   เมื่อนับได้ศูนย์ จึงต้องมี `|| true` ห้อยท้าย ซึ่ง **กลบ exit 2 ของ
+            #   ไฟล์ที่ไม่มีอยู่ไปด้วย** — module หายไปทั้งไฟล์ต้องแดงเสียงดัง
+            #   ไม่ใช่ถูกนับเป็น "ศูนย์บรรทัด" แล้วไหลต่อ
+            lines=$(awk 'NF' "$module" | wc -l)
             has_code=0
             [ "${lines:-0}" -gt 2 ] && has_code=1
 
@@ -249,9 +294,13 @@ jobs:
             [ -f "fuzz/fuzz_targets/$target.rs" ] || wired=0
             grep -q "name = \"$target\"" fuzz/Cargo.toml || wired=0
             grep -q "$target" .github/workflows/fuzz.yml || wired=0
-            # target ที่มีแต่ไฟล์ว่าง ๆ ไม่นับว่าต่อ
-            tlines=$(grep -cve '^[[:space:]]*$' "fuzz/fuzz_targets/$target.rs" 2>/dev/null || echo 0)
-            [ "${tlines:-0}" -gt 12 ] || wired=0
+            # target ที่มีแต่ไฟล์ว่าง ๆ ไม่นับว่าต่อ · ไฟล์ที่ไม่มีเลยถูกจับที่บรรทัด
+            # `[ -f … ]` ข้างบนแล้ว จึงถามก่อนนับ แทนที่จะนับแล้วกลืน error
+            tlines=0
+            if [ -f "fuzz/fuzz_targets/$target.rs" ]; then
+              tlines=$(awk 'NF' "fuzz/fuzz_targets/$target.rs" | wc -l)
+            fi
+            [ "$tlines" -gt 12 ] || wired=0
 
             if [ "$has_code" = "1" ] && [ "$wired" = "1" ]; then
               echo "::notice::$target ต่อแล้วและ $module มีโค้ด ($lines บรรทัด) — ตรงกัน"
