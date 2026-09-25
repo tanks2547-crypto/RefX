@@ -54,10 +54,25 @@ pub struct ProcessMemory {
     /// | OS | อ่านจาก | นับอะไร |
     /// |---|---|---|
     /// | Windows | `PagefileUsage` (commit charge ของโปรเซส) | ทุกหน้าที่ commit แล้ว ไม่ว่าจะแตะหรือยัง |
-    /// | Linux | `RssAnon + VmSwap` | หน้า anonymous ที่แตะแล้ว ไม่ว่าจะอยู่ใน RAM หรือถูกย้ายไป swap |
+    /// | Linux | `RssAnon + RssShmem + VmSwap` | หน้า anonymous + shared memory ที่แตะแล้ว + anonymous ที่ถูกย้ายไป swap |
     ///
     /// สองแบบนี้ไม่เหมือนกันทุกประการ (Windows นับหน้าที่ commit แต่ยังไม่แตะด้วย)
     /// แต่มีคุณสมบัติเดียวที่เทสต์งบต้องการ: **เครื่องหน่วยความจำตึงแล้วค่าไม่หาย**
+    ///
+    /// ★★★ **ทำไม Linux ต้องมี `RssShmem`** (วัดบน ubuntu runner 26 ก.ย. 2026)
+    ///
+    /// รุ่นแรกใช้ `RssAnon + VmSwap` โดยไม่ได้วัด — แล้ว NC ของ `export_memory`
+    /// แดงบน CI: บัฟเฟอร์ GPU แบบ `MAP_READ` 64 MB → private **+0 MB** ·
+    /// พิมพ์ทุกช่องของ `/proc/self/status` รอบบัฟเฟอร์นั้นแล้วได้:
+    /// `RssShmem` 20 kB → **65,556 kB** · `RssAnon` / `RssFile` / `VmData` **ไม่ขยับเลย**
+    /// → driver Vulkan แบบซอฟต์แวร์จองหน่วยความจำที่ CPU มองเห็นเป็น shared memory
+    ///   ไม่ใช่ anonymous · มาตรที่ไม่มี `RssShmem` **มองไม่เห็นบัฟเฟอร์อ่านกลับทั้งก้อน**
+    ///   ซึ่งคือสิ่งที่เพดาน export มีไว้คุม
+    ///
+    /// ★ `RssFile` ไม่ถูกนับ — ไฟล์และไลบรารีที่ map ไว้ ซึ่ง OS ทิ้งได้และ export ไม่ได้จอง
+    /// ★ ข้อจำกัดที่รู้: `VmSwap` ไม่นับ shared memory ที่ถูกย้ายไป swap · ถ้าเครื่อง Linux
+    ///   ตึงจนสลับหน้า GPU ออกไป ส่วนนั้นจะหายจากมาตร · runner ไม่เคยสลับหน้า และอาการ
+    ///   working set ถูกตัดไม่เคยเกิดบน Linux เลย
     ///
     /// ทำไมถึงเพิ่มเข้ามา: ดู `docs/07 §6` — `export_memory` แดง 2 ใน 5 รอบ
     /// เพราะ working set ถูก OS ตัดระหว่างรันเทสต์ขนานกัน (25 ก.ย. 2026)
@@ -157,9 +172,12 @@ fn platform_process_memory() -> Option<ProcessMemory> {
     Some(ProcessMemory {
         current: field("VmRSS:")?,
         peak: field("VmHWM:")?,
-        // ★ ไม่ใช้ `VmData` แม้ชื่อจะใกล้ "commit" กว่า — มันนับพื้นที่ที่แค่จองไว้
-        //   (arena ของ allocator, stack ของเธรด) ซึ่งโตโดยไม่มีหน้าไหนถูกใช้จริง
-        private: field("RssAnon:")?.checked_add(field("VmSwap:")?)?,
+        // ★ `RssShmem` ต้องอยู่ — บัฟเฟอร์ GPU ของ driver ซอฟต์แวร์อยู่ในนั้นทั้งก้อน
+        //   (ดูตารางที่ `ProcessMemory::private`) · ไม่ใช้ `VmData` ซึ่งทั้งนับพื้นที่ที่แค่
+        //   จองไว้ **และวัดแล้วว่าไม่เห็นบัฟเฟอร์ GPU เลย** (+0 เหมือน `RssAnon`)
+        private: field("RssAnon:")?
+            .checked_add(field("RssShmem:")?)?
+            .checked_add(field("VmSwap:")?)?,
     })
 }
 
