@@ -162,9 +162,79 @@ jobs:
           echo "::notice title=$t corpus ก่อนยิง::$before ไฟล์ = คืนจาก cache $restored + seed ใหม่ $((before - restored)) (seed ทั้งหมด $seeds ใบ)"
           echo "CORPUS_BEFORE=$before" >> "$GITHUB_ENV"
 
+      # ★★★ งบเวลาต่อ target + **รูปของเส้น `cov` ภายในรอบเดียว** (25 ก.ย. 2026)
+      #
+      #   `fuzz_decode` ได้ 3,600 วินาที ตัวอื่น 900 · เหตุผลอยู่ในตารางหัวไฟล์:
+      #   สามตัวอิ่มในรอบเดียว ส่วน decode ติดที่ throughput ไม่ใช่จำนวนรอบ
+      #
+      #   ★ จุดปลายจุดเดียวตอบไม่ได้ว่าเวลาที่เพิ่มคุ้มไหม — ต้องเห็น **รูปของเส้น**
+      #     จึงพิมพ์ `cov` ทุก 15 นาที · เส้นยังชันที่นาที 60 = เวลายังให้ของ ·
+      #     แบนหลังนาที 30 = ถอยกลับ 1,800 (ตัดสินไว้ล่วงหน้าแล้ว)
+      #
+      #   ★★ ทำไมไม่แบ่งเป็นสี่ท่อนท่อนละ 900: ทุกการเริ่มใหม่ล้างสถานะภายในของ
+      #     libFuzzer (ตาราง entropic · dictionary ที่เก็บจาก CMP) · สี่ท่อนจึงวัด
+      #     **คนละสิ่ง**กับรอบเดียว 3,600 ที่เราจะใช้จริง
+      #   → รัน fuzzer **ครั้งเดียว** เขียนลงไฟล์ แล้วอ่านบรรทัด `cov:` ล่าสุดทุกหลัก
+      #     15 นาทีระหว่างที่มันยังรัน · `cov` ของ libFuzzer ไม่มีวันลด บรรทัดล่าสุด
+      #     ก่อนหลักเวลาจึงคือค่า ณ เวลานั้น
+      #
+      #   ★★ ห้ามอ่าน exit code ผ่าน pipe (CLAUDE.md) — ไม่ใช้ `| tee` · exit มาจาก
+      #     `wait` ตรง ๆ · สกัดตัวเลขด้วย `awk` ตัวเดียวซึ่งคืน 0 เสมอ ไม่ใช่
+      #     `grep | tail` ที่ `grep` ไม่เจอ = exit 1 = `bash -e` ฆ่าขั้นทิ้ง
+      #
+      #   `FUZZ_TICK` · `FUZZ_MARK` · `FUZZ_BUDGET` · `FUZZ_GRACE` มีไว้ให้จำลองขั้นนี้ในเครื่อง
+      #   ด้วยนาฬิกาเร็ว (`§3.9` ข้อ 2 — ตัวรายงานต้องถูกทดสอบบนสภาพที่ยังไม่มีอะไร)
+      #   CI ไม่ตั้งค่าเหล่านี้
       - name: fuzz ${{ matrix.target }}
         id: fuzz
-        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=900
+        run: |
+          set -u
+          t=${{ matrix.target }}
+          budget=900
+          if [ "$t" = fuzz_decode ]; then budget=3600; fi
+          budget=${FUZZ_BUDGET:-$budget}
+          tick=${FUZZ_TICK:-60}
+          mark=${FUZZ_MARK:-900}
+
+          # คอมไพล์ก่อน — ให้นาฬิกาเริ่มที่ fuzzer ไม่ใช่ที่คอมไพเลอร์
+          cargo fuzz build "$t"
+
+          log="${RUNNER_TEMP:-/tmp}/fuzz-$t.log"
+          cargo fuzz run "$t" -- -max_total_time="$budget" > "$log" 2>&1 &
+          pid=$!
+
+          cov_now() {
+            awk 'match($0, /cov: [0-9]+ ft: [0-9]+ corp: [0-9]+/) { l = substr($0, RSTART, RLENGTH) } END { print l }' "$log"
+          }
+
+          # ★ ถามตารางงานของ bash เอง (`jobs -rp`) ว่ายังรันอยู่ไหม — ไม่ใช่
+          #   `/proc/$pid` ซึ่งยังอยู่ตราบที่ลูกเป็น zombie ที่ยังไม่ถูกเก็บ
+          #   และไม่ใช่ `kill -0` ที่พ่น "No such process" ทุกครั้งที่มันตายแล้ว
+          # ★★ เพดานแข็ง: งบ + 10 นาที · ถ้าการตรวจข้างบนผิดบนแพลตฟอร์มไหนสักที่
+          #   ความผิดต้องเป็น "แดงพร้อมเหตุผลหลัง 70 นาที" ไม่ใช่ "ค้างจนชน 6 ชม."
+          elapsed=0
+          while [ -n "$(jobs -rp)" ]; do
+            if [ "$elapsed" -gt $((budget + ${FUZZ_GRACE:-600})) ]; then
+              echo "::error title=$t ไม่จบตามงบ::fuzzer ยังรันอยู่หลัง ${elapsed} วินาที (งบ ${budget}) — ฆ่าทิ้ง · ดูล็อกเต็มข้างล่าง"
+              kill "$pid"
+              break
+            fi
+            sleep "$tick"
+            elapsed=$((elapsed + tick))
+            if [ $((elapsed % mark)) -eq 0 ]; then
+              now=$(cov_now)
+              echo "::notice title=$t นาทีที่ $((elapsed / 60))::${now:-ยังไม่มีบรรทัด cov — fuzzer ยังโหลด corpus ไม่เสร็จ}"
+            fi
+          done
+
+          code=0
+          wait "$pid" || code=$?
+
+          echo "::group::ล็อกเต็มของ libFuzzer ($t)"
+          cat "$log"
+          echo "::endgroup::"
+          echo "::notice title=$t จบรอบ::หลังรัน ${elapsed} วินาที · $(cov_now) · exit $code"
+          exit "$code"
 
       # ★ corpus งอกเท่าไรในรอบนี้ — ตัวเลขที่ตอบว่า "ยังหาทางใหม่เจออยู่ไหม"
       #

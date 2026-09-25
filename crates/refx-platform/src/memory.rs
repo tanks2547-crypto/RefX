@@ -42,10 +42,26 @@ pub fn total_ram() -> u64 {
 /// ไม่ใช่อ่านค่าเดียวแล้วเชื่อ
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProcessMemory {
-    /// working set ปัจจุบัน (ไบต์)
+    /// working set ปัจจุบัน (ไบต์) — **ส่วนที่ OS ยอมให้อยู่ใน RAM ตอนนี้**
+    ///
+    /// ★ OS ตัดทิ้งได้ตลอดเวลาเมื่อเครื่องหน่วยความจำตึง · ใช้ดูได้ ห้ามใช้ assert
+    ///   เพดาน — ดู [`ProcessMemory::private`]
     pub current: u64,
     /// working set สูงสุดตั้งแต่โปรเซสเริ่ม (ไบต์)
     pub peak: u64,
+    /// ★★★ หน่วยความจำส่วนตัวที่โปรเซส **ถือไว้** (ไบต์) — OS ตัดทิ้งไม่ได้
+    ///
+    /// | OS | อ่านจาก | นับอะไร |
+    /// |---|---|---|
+    /// | Windows | `PagefileUsage` (commit charge ของโปรเซส) | ทุกหน้าที่ commit แล้ว ไม่ว่าจะแตะหรือยัง |
+    /// | Linux | `RssAnon + VmSwap` | หน้า anonymous ที่แตะแล้ว ไม่ว่าจะอยู่ใน RAM หรือถูกย้ายไป swap |
+    ///
+    /// สองแบบนี้ไม่เหมือนกันทุกประการ (Windows นับหน้าที่ commit แต่ยังไม่แตะด้วย)
+    /// แต่มีคุณสมบัติเดียวที่เทสต์งบต้องการ: **เครื่องหน่วยความจำตึงแล้วค่าไม่หาย**
+    ///
+    /// ทำไมถึงเพิ่มเข้ามา: ดู `docs/07 §6` — `export_memory` แดง 2 ใน 5 รอบ
+    /// เพราะ working set ถูก OS ตัดระหว่างรันเทสต์ขนานกัน (25 ก.ย. 2026)
+    pub private: u64,
 }
 
 /// ถาม OS ว่าโปรเซสนี้ใช้ RAM ไปเท่าไหร่
@@ -115,6 +131,10 @@ fn platform_process_memory() -> Option<ProcessMemory> {
         Some(ProcessMemory {
             current: counters.working_set_size as u64,
             peak: counters.peak_working_set_size as u64,
+            // ใน `PROCESS_MEMORY_COUNTERS` ช่องนี้คือ commit charge ของโปรเซส
+            // (ค่าเดียวกับ `PrivateUsage` ของรุ่น `_EX`) — ชื่อเก่าหลงเหลือจากยุคที่
+            // commit ทั้งหมดต้องมี pagefile รองรับ
+            private: counters.pagefile_usage as u64,
         })
     }
 }
@@ -137,6 +157,9 @@ fn platform_process_memory() -> Option<ProcessMemory> {
     Some(ProcessMemory {
         current: field("VmRSS:")?,
         peak: field("VmHWM:")?,
+        // ★ ไม่ใช้ `VmData` แม้ชื่อจะใกล้ "commit" กว่า — มันนับพื้นที่ที่แค่จองไว้
+        //   (arena ของ allocator, stack ของเธรด) ซึ่งโตโดยไม่มีหน้าไหนถูกใช้จริง
+        private: field("RssAnon:")?.checked_add(field("VmSwap:")?)?,
     })
 }
 
@@ -257,11 +280,17 @@ mod tests {
             return;
         };
         println!(
-            "RSS ตอนนี้ {} MB · สูงสุด {} MB",
+            "RSS ตอนนี้ {} MB · สูงสุด {} MB · private {} MB",
             mem.current >> 20,
-            mem.peak >> 20
+            mem.peak >> 20,
+            mem.private >> 20
         );
         assert!(mem.current > 0, "RSS เป็นศูนย์ — อ่านผิดแน่นอน");
+        assert!(
+            mem.private > 0 && mem.private < total_ram(),
+            "private = {} ไบต์ — ศูนย์หรือเกิน RAM ทั้งเครื่อง แปลว่าอ่านผิดช่อง",
+            mem.private
+        );
         assert!(
             mem.peak >= mem.current,
             "ยอดสูงสุด ({}) ต่ำกว่าค่าปัจจุบัน ({}) — เลย์เอาต์ของ struct น่าจะสลับฟิลด์",
@@ -315,5 +344,70 @@ mod tests {
         // กันไม่ให้ตัว optimizer ตัดบล็อกทิ้งก่อนถึงจุดวัด
         assert_eq!(hog[0], 1);
         drop(hog);
+    }
+
+    /// ★★★ **NC ของมาตร `private`: สั่งให้ OS ตัด working set ของเราทิ้งเดี๋ยวนี้**
+    /// แล้วดูว่ามาตรตัวไหนหาย ตัวไหนอยู่ (25 ก.ย. 2026)
+    ///
+    /// `export_memory` แดง 2 ใน 5 รอบของการรันทั้งชุด — มาตร working set อ่านได้
+    /// +4 MB แล้วก็ +22 MB จากการจองและแตะ 64 MB (ปกติ +63) · สมมติฐานคือ Windows
+    /// ตัด working set ทิ้งตอนเครื่องหน่วยความจำตึง
+    ///
+    /// รันทั้งชุดซ้ำหกรอบได้ `private` +64 ทุกรอบ ขณะที่ working set แกว่ง +63–+90
+    /// **แต่ไม่มีรอบไหนเกิดการตัดจริง** · รอให้บังเอิญเกิดคือการพิสูจน์ด้วยโชค
+    /// → เทสต์นี้ **สร้างเหตุการณ์นั้นเอง** ด้วย `SetProcessWorkingSetSize(-1, -1)`
+    ///   (ทางที่ Microsoft ระบุไว้ให้โปรเซสขอให้ตัว working set ของตัวเอง) ·
+    ///   แตะแค่โปรเซสนี้ ไม่ต้องกดดันหน่วยความจำของทั้งเครื่อง
+    ///
+    /// ต้องได้ทั้งสองข้อ — ข้อเดียวพิสูจน์อะไรไม่ได้:
+    /// 1. working set **ลดจริง** — ไม่งั้นเราไม่ได้สร้างเหตุการณ์ที่สงสัยเลย
+    /// 2. `private` **ไม่ลด** — มาตรใหม่ไม่ถูกเหตุการณ์นั้นแตะ
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn trimming_the_working_set_moves_rss_but_not_private_memory() {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetCurrentProcess() -> isize;
+            fn SetProcessWorkingSetSize(process: isize, min: usize, max: usize) -> i32;
+        }
+
+        const BLOCK: usize = 64 << 20;
+        let mut hog = vec![0u8; BLOCK];
+        for page in hog.chunks_mut(4096) {
+            page[0] = 1;
+        }
+        let held = process_memory().expect("Windows ต้องตอบได้");
+
+        // SAFETY: pseudo-handle ของโปรเซสตัวเองใช้ได้เสมอและไม่ต้องปิด · ค่า
+        // (usize::MAX, usize::MAX) คือ (SIZE_T)-1 ทั้งคู่ ซึ่งเอกสารระบุว่าแปลว่า
+        // "ตัด working set ทิ้งให้มากที่สุด" · API ไม่แตะหน่วยความจำของเรา แค่ย้าย
+        // หน้าออกจาก working set · หน้ายังอยู่ครบ แตะอีกครั้งก็ถูกดึงกลับมา
+        let ok = unsafe { SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX) };
+        assert_ne!(
+            ok, 0,
+            "SetProcessWorkingSetSize ล้ม — สร้างเหตุการณ์ที่ต้องการไม่ได้"
+        );
+
+        let trimmed = process_memory().expect("อ่านได้ครั้งแรกแล้วต้องอ่านได้อีก");
+        println!(
+            "ก่อนตัด: working set {} MB · private {} MB  →  หลังตัด: working set {} MB · private {} MB",
+            held.current >> 20,
+            held.private >> 20,
+            trimmed.current >> 20,
+            trimmed.private >> 20
+        );
+
+        assert!(
+            trimmed.current + (BLOCK as u64) / 2 <= held.current,
+            "working set ลดแค่ {} MB — เราไม่ได้สร้างเหตุการณ์ที่สงสัย การทดลองนี้จึงไม่พิสูจน์อะไร",
+            held.current.saturating_sub(trimmed.current) >> 20
+        );
+        assert!(
+            trimmed.private + (1 << 20) >= held.private,
+            "private ลดจาก {} MB เหลือ {} MB ตอน OS ตัด working set — มาตรใหม่ก็ถูกตัดเหมือนกัน",
+            held.private >> 20,
+            trimmed.private >> 20
+        );
+        assert_eq!(hog[0], 1);
     }
 }

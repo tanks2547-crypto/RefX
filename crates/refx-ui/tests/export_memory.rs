@@ -163,33 +163,46 @@ fn what_an_export_really_costs_in_process_memory() {
     }
     let dir = temp_dir();
 
+    // ★★★ **มาตรที่ใช้ assert คือ `private` ไม่ใช่ working set** (25 ก.ย. 2026)
+    //
+    //   เดิมใช้ working set (`current`) แล้วเทสต์นี้แดง 2 ใน 5 รอบของการรันทั้งชุด
+    //   — มาตรอ่าน +4 / +22 MB จากการจองและแตะ 64 MB · `memory::tests::
+    //   trimming_the_working_set_moves_rss_but_not_private_memory` สร้างเหตุการณ์
+    //   นั้นเองได้ทุกครั้ง: สั่งตัด working set แล้วมันลด 72 → 0 MB ขณะที่ `private`
+    //   อยู่ที่ 65 MB เท่าเดิม
+    //
+    //   ★ เราไม่เคยอยากรู้ว่า Windows **ยอมให้** เราถือ RAM เท่าไหร่ — เราอยากรู้ว่า
+    //     export **จอง** เกินเพดานไหม · เหตุผลเต็มอยู่ใน `docs/07 §6`
+    //   ★ ยังพิมพ์ working set ทุกขั้น — ห้ามซ่อนตัวเลขเดิม ตัวเลขสองตัวที่ไม่ตรงกัน
+    //     คือสิ่งที่บอกว่าเครื่องกำลังตึงในรอบนั้น
+
     // ---------- 1. มาตรวัดต้องพิสูจน์ว่ามันขยับจริง (`§3.9` ข้อ 9) ----------
     {
-        let before = refx_platform::memory::process_memory().unwrap().current;
+        let start = refx_platform::memory::process_memory().unwrap();
         const BLOCK: usize = 64 << 20;
         let mut hog = vec![0u8; BLOCK];
         for page in hog.chunks_mut(4096) {
             page[0] = 1;
         }
-        let growth = refx_platform::memory::process_memory()
-            .unwrap()
-            .current
-            .saturating_sub(before);
+        let now = refx_platform::memory::process_memory().unwrap();
+        let rss = now.current.saturating_sub(start.current);
+        let private = now.private.saturating_sub(start.private);
         println!(
-            "มาตรวัด: จอง {} MB แล้วแตะทุกหน้า → RSS +{} MB",
+            "มาตรวัด: จอง {} MB แล้วแตะทุกหน้า → private +{} MB · working set +{} MB",
             BLOCK >> 20,
-            growth >> 20
+            private >> 20,
+            rss >> 20
         );
         assert!(
-            growth >= (BLOCK as u64) / 2,
-            "มาตรวัดไม่ขยับ ({growth} ไบต์) — ตัวเลขทุกตัวข้างล่างเชื่อไม่ได้"
+            private >= (BLOCK as u64) / 2,
+            "มาตร private ไม่ขยับ ({private} ไบต์) — ตัวเลขทุกตัวข้างล่างเชื่อไม่ได้"
         );
         assert_eq!(hog[0], 1); // กัน optimizer ตัดบล็อกทิ้งก่อนถึงจุดวัด
     }
 
     // ---------- 2. NC: ทาง tile จตุรัสพังจริง ----------
     {
-        let before = refx_platform::memory::process_memory().unwrap().current;
+        let start = refx_platform::memory::process_memory().unwrap();
         let square = u64::from(refx_core::export::TILE_WIDTH)
             * u64::from(refx_core::export::TILE_WIDTH)
             * u64::from(refx_core::export::BYTES_PER_PIXEL);
@@ -199,7 +212,8 @@ fn what_an_export_really_costs_in_process_memory() {
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: true,
         });
-        // ★ เขียนลงไปจริงเพื่อให้มันเข้า working set (`BufferViewMut` เขียนได้อย่างเดียว)
+        // ★ เขียนลงไปจริงทุกไบต์ (`BufferViewMut` เขียนได้อย่างเดียว) — ทั้งสองมาตร
+        //   จึงเห็นมันเต็มก้อน ไม่ใช่เห็นเฉพาะส่วนที่บังเอิญถูกแตะ
         {
             let mut mapped = buffer.slice(..).get_mapped_range_mut();
             let page = vec![1u8; 1 << 20];
@@ -208,23 +222,30 @@ fn what_an_export_really_costs_in_process_memory() {
                 mapped.slice(at..at + page.len()).copy_from_slice(&page);
             }
         }
-        let growth = refx_platform::memory::process_memory()
-            .unwrap()
-            .current
-            .saturating_sub(before);
+        let now = refx_platform::memory::process_memory().unwrap();
+        let rss = now.current.saturating_sub(start.current);
+        let growth = now.private.saturating_sub(start.private);
+        // ★ วัด 25 ก.ย. 2026 บน RTX 4060: บัฟเฟอร์ 64 MB → private **+192 MB** ·
+        //   working set +92–+182 MB · commit เห็นหน่วยความจำ GPU ที่ map เข้ามา
+        //   **มากกว่า** working set ไม่ใช่น้อยกว่า — การเปลี่ยนมาตรจึงทำให้ NC นี้
+        //   เข้มขึ้น ไม่ใช่ผ่อนลง (ข้อที่ต้องวัดก่อนเปลี่ยน ไม่ใช่สันนิษฐาน)
         // ทางที่ไม่ได้เลือกต้องถือ **ทั้งสองอย่างพร้อมกัน**: บัฟเฟอร์อ่านกลับของ
         // tile จตุรัส และบัฟเฟอร์แถบที่ป้อนตัวเข้ารหัส
         let square_design = growth + refx_core::export::BAND_BUDGET as u64;
         println!(
-            "NC วิ่งผ่านจริง: บัฟเฟอร์อ่านกลับของ tile จตุรัส 4096² = {square} ไบต์ \
-             → RSS +{growth} ไบต์ · บวกบัฟเฟอร์แถบอีก {} MB = {} MB ซึ่งเกินเพดาน {} MB",
+            "NC วิ่งผ่านจริง: บัฟเฟอร์อ่านกลับของ tile จตุรัส 4096² = {} MB \
+             → private +{} MB · working set +{} MB · บวกบัฟเฟอร์แถบอีก {} MB = {} MB \
+             ซึ่งเกินเพดาน {} MB",
+            square >> 20,
+            growth >> 20,
+            rss >> 20,
             refx_core::export::BAND_BUDGET >> 20,
             square_design >> 20,
             PEAK_CEILING >> 20
         );
         assert!(
             growth >= square * 3 / 4,
-            "NC ไม่แดง — บัฟเฟอร์ {square} ไบต์ควรเข้า working set จริง แต่ RSS ขยับแค่ {growth}"
+            "NC ไม่แดง — บัฟเฟอร์ {square} ไบต์ควรถูกนับใน private จริง แต่ขยับแค่ {growth}"
         );
         assert!(
             square_design > PEAK_CEILING as u64,
@@ -257,20 +278,28 @@ fn what_an_export_really_costs_in_process_memory() {
 
         let stop = Arc::new(AtomicBool::new(false));
         let peak = Arc::new(AtomicU64::new(0));
+        let peak_private = Arc::new(AtomicU64::new(0));
         let sampler = {
-            let (stop, peak) = (Arc::clone(&stop), Arc::clone(&peak));
+            let (stop, peak, peak_private) = (
+                Arc::clone(&stop),
+                Arc::clone(&peak),
+                Arc::clone(&peak_private),
+            );
             std::thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
                     if let Some(mem) = refx_platform::memory::process_memory() {
                         peak.fetch_max(mem.current, Ordering::Relaxed);
+                        peak_private.fetch_max(mem.private, Ordering::Relaxed);
                     }
                     std::thread::sleep(std::time::Duration::from_millis(2));
                 }
             })
         };
 
-        let before = refx_platform::memory::process_memory().unwrap().current;
+        let start_mem = refx_platform::memory::process_memory().unwrap();
+        let before = start_mem.current;
         peak.fetch_max(before, Ordering::Relaxed);
+        peak_private.fetch_max(start_mem.private, Ordering::Relaxed);
         let start = std::time::Instant::now();
         let stats = export_board(
             GpuAccess {
@@ -291,17 +320,22 @@ fn what_an_export_really_costs_in_process_memory() {
         let _ = sampler.join();
         let top = peak.load(Ordering::Relaxed);
         let growth = top.saturating_sub(before);
+        let private_growth = peak_private
+            .load(Ordering::Relaxed)
+            .saturating_sub(start_mem.private);
 
         println!(
-            "{label} {side}²: RSS {} MB → {} MB (+{} MB) · ไฟล์ {} MB · {} แถบ · {elapsed:?}",
+            "{label} {side}²: RSS {} MB → {} MB (+{} MB) · private +{} MB · ไฟล์ {} MB · {} แถบ · {elapsed:?}",
             before >> 20,
             top >> 20,
             growth >> 20,
+            private_growth >> 20,
             stats.bytes >> 20,
             stats.bands
         );
         let _ = std::fs::remove_file(&path);
-        growth
+        // ★ ตัวที่เอาไป assert เพดานคือ private — working set พิมพ์ไว้ข้างบนให้เห็น
+        private_growth
     };
 
     // ★ รอบอุ่นเครื่อง — ครั้งแรกรวมค่าเปิด pipeline/ตัวจัดสรรของ wgpu ไว้ด้วย
@@ -330,7 +364,7 @@ fn what_an_export_really_costs_in_process_memory() {
         );
         assert!(
             at_16k <= ceiling,
-            "{label}: 16384² กิน RSS {} MB เกินเพดาน {} MB ({} MB ตามสเปก + 32 MB ให้ตัวเข้ารหัส)",
+            "{label}: 16384² กิน private {} MB เกินเพดาน {} MB ({} MB ตามสเปก + 32 MB ให้ตัวเข้ารหัส)",
             at_16k >> 20,
             ceiling >> 20,
             PEAK_CEILING >> 20
