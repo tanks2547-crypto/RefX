@@ -86,6 +86,10 @@ fn parse_args<I: Iterator<Item = String>>(args: I) -> Result<Cli, String> {
             //   ตอนผู้ใช้ดับเบิลคลิกไฟล์ `.refx` และเป็นทางเดียวที่ relink (P4-6)
             //   ถูกยืนยันบนแอปจริงได้ (native dialog ขับด้วยสคริปต์ไม่ได้ — HANDOFF §2.26)
             cli.args.open_document = Some(std::path::PathBuf::from(value));
+        } else if let Some(value) = arg.strip_prefix("--data-root=") {
+            // ★★★ ย้ายข้อมูลของแอปทั้งหมดไปไว้ใต้โฟลเดอร์นี้ — สำหรับการรันทดสอบ (P5-9e)
+            //   ดูเหตุผลที่ `AppPaths::under`
+            cli.args.data_root = Some(data_root_from(value)?);
         } else if let Some(value) = arg.strip_prefix("--open-dir=") {
             // สแกนโฟลเดอร์ตอนเริ่มโปรแกรม (ไม่ใช่ในลูปเฟรม) — ไม่ขัด I-2
             cli.args.open_files = scan_images(std::path::Path::new(value))?;
@@ -111,6 +115,25 @@ fn parse_args<I: Iterator<Item = String>>(args: I) -> Result<Cli, String> {
         }
     }
     Ok(cli)
+}
+
+/// ตรวจ path ของ `--data-root` — มันคือ path ที่ **ผู้ใช้พิมพ์** จึงผ่าน
+/// `validate_save_target()` เหมือนปลายทางของ export (`docs/06 §4`)
+///
+/// ★ **ต้องเป็น path เต็ม** — ตัดสินเองเพราะสเปกไม่ได้ระบุ: path สัมพัทธ์ถูกคลี่
+///   จากโฟลเดอร์ทำงานของโปรเซส ซึ่งใน shortcut ของ Windows คือที่ไหนก็ได้ ·
+///   ข้อมูลที่ตั้งใจแยกไว้จะไปงอกในที่ที่ไม่มีใครคิดจะไปหา
+fn data_root_from(value: &str) -> Result<std::path::PathBuf, String> {
+    let path = std::path::PathBuf::from(value);
+    if !path.is_absolute() {
+        return Err(format!(
+            "--data-root needs a full path (like C:\\refx-test), got {value:?}\n\
+             a relative path would land wherever the shortcut happens to start"
+        ));
+    }
+    refx_io::validate::validate_save_target(&path)
+        .map_err(|err| format!("--data-root cannot use {value:?}: {err}"))?;
+    Ok(path)
 }
 
 /// หาไฟล์ภาพในโฟลเดอร์ (ไม่ลงลึกในโฟลเดอร์ย่อย)
@@ -153,6 +176,9 @@ Options:
       --lang=en|th                     force the UI language (default: follow the system)
       --open=FILE.refx                 open a saved board (same as double-clicking it)
       --open-dir=PATH                  open every image in a folder (same as dragging it in)
+      --data-root=DIR                  keep ALL app data (recovery, pasted images, settings,
+                                       cache, logs) under DIR instead of the usual per-user
+                                       folders - for test runs; the status bar says so
       --demo-quads=N                   draw N random quads (exercises pipeline / pan-zoom)
       --bench-seconds=S                measure frame time for S seconds, then report
       --mode=canvas|arrange            mode to start in (default: Canvas)
@@ -189,7 +215,10 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let paths = AppPaths::discover()?;
+    let paths = match cli.args.data_root.as_deref() {
+        Some(root) => AppPaths::under(root),
+        None => AppPaths::discover()?,
+    };
     paths.ensure_exist()?;
 
     // log ต้องพร้อมก่อนอย่างอื่น ไม่งั้นปัญหาตอนเปิดโปรแกรมจะไม่ถูกบันทึก
@@ -197,6 +226,14 @@ fn main() -> anyhow::Result<()> {
     let _log_guard = logging::init(paths.log_dir())?;
     logging::install_panic_hook(paths.log_dir());
     tracing::info!(version = env!("CARGO_PKG_VERSION"), "RefX starting");
+    // ★★★ ประกาศเสียงดัง — ครึ่งหนึ่งของการประกาศ อีกครึ่งอยู่บนแถบสถานะ (P5-9e)
+    if let Some(root) = paths.override_root() {
+        tracing::warn!(
+            root = %root.display(),
+            "using a NON-DEFAULT data folder (--data-root): recovery, pasted images, \
+             settings, cache and logs all live here, NOT in the usual per-user folders"
+        );
+    }
 
     // ต้องถือ guard ไว้ถึงจบ main — drop เมื่อไหร่ = ปลดล็อกทันที
     // เปิดซ้ำสองตัวแล้วเขียน cache.sqlite พร้อมกันเสี่ยงข้อมูลเสีย (I-3)
@@ -275,6 +312,9 @@ mod tests {
             vec!["--force-device-lost-after-ms=x"],
             vec!["--what-is-this"],
             vec!["--open-dir=E:/no/such/folder/here"],
+            vec!["--data-root=relative/test-root"],
+            vec![r"--data-root=\\.\PhysicalDrive0"],
+            vec![r"--data-root=C:\refx\NUL"],
         ];
         for case in broken {
             let Err(err) = parse_args(args(&case).into_iter()) else {
@@ -286,6 +326,29 @@ mod tests {
             );
             assert!(!err.trim().is_empty(), "{case:?} ถูกปฏิเสธแบบเงียบ ๆ");
         }
+    }
+
+    /// ★★★ `--data-root` (P5-9e) — path เต็มผ่าน · ที่ไม่ใช่ path เต็มถูกปฏิเสธพร้อมเหตุผล
+    ///
+    /// ★ และ **ไม่ส่งธง = ไม่มีอะไรถูกย้าย** · ค่าปริยายต้องเป็นของผู้ใช้เสมอ
+    #[test]
+    fn data_root_takes_a_full_path_and_is_off_unless_asked_for() {
+        let plain = parse_args(args(&["--lang=en"]).into_iter()).unwrap();
+        assert_eq!(plain.args.data_root, None, "ไม่ส่งธงแต่ข้อมูลถูกย้าย");
+
+        let full = if cfg!(windows) {
+            r"C:\refx-test-root"
+        } else {
+            "/tmp/refx-test-root"
+        };
+        let cli = parse_args(args(&[&format!("--data-root={full}")]).into_iter()).unwrap();
+        assert_eq!(cli.args.data_root, Some(std::path::PathBuf::from(full)));
+
+        // ★ ข้อความต้องบอกว่า **ทำไม** — "path เต็ม" ไม่ใช่แค่ "ผิด"
+        let Err(err) = parse_args(args(&["--data-root=test-root"]).into_iter()) else {
+            panic!("path สัมพัทธ์ควรถูกปฏิเสธ");
+        };
+        assert!(err.contains("full path"), "ข้อความไม่บอกว่าต้องทำอะไร: {err}");
     }
 
     /// ★★★ `--version` ต้องพูดเวอร์ชันเดียวกับ `Cargo.toml` เป๊ะ

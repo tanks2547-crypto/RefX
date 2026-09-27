@@ -76,6 +76,11 @@ pub struct AppArgs {
     /// ทางเดียวที่ relink (P4-6) ถูกยืนยันบนแอปจริงได้ เพราะ native dialog
     /// ขับด้วยสคริปต์ไม่ได้ (HANDOFF §2.26)
     pub open_document: Option<std::path::PathBuf>,
+    /// ★★★ `--data-root` — ข้อมูลของแอปทั้งหมดอยู่ใต้ที่นี่แทนที่ของผู้ใช้ (P5-9e)
+    ///
+    /// ชั้น UI ใช้แค่ **แสดง** — ป้ายบนแถบสถานะที่ไม่มีข้อความชั่วคราวไหนทับได้
+    /// การย้าย path จริงเกิดใน `refx-app` ก่อนถึงที่นี่
+    pub data_root: Option<std::path::PathBuf>,
 }
 
 /// PRNG แบบ xorshift64* — **deterministic เสมอ**
@@ -2816,6 +2821,10 @@ impl RefxApp {
     #[must_use]
     pub fn new(args: AppArgs) -> Self {
         let lang = args.lang.unwrap_or_else(Lang::from_system);
+        let data_root = args
+            .data_root
+            .as_ref()
+            .map(|root| root.display().to_string());
         let mode = args.mode.unwrap_or_default();
         // ★ เพดานของเครื่องคำนวณครั้งเดียวตรงนี้ แล้วใช้ทั้งตอนอ่าน settings
         //   และตอนสร้าง pool — สองที่นี้ต้องเห็นเลขเดียวกัน ไม่งั้นค่าที่แผง
@@ -2832,6 +2841,7 @@ impl RefxApp {
                 //   ไม่รู้จักภาษา → อังกฤษ · P5-3 จะให้ผู้ใช้เลือกทับได้
                 lang,
                 mode,
+                data_root,
                 ..crate::shell::ShellState::default()
             },
             assets: None,

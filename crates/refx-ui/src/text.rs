@@ -1216,6 +1216,11 @@ pub enum Template {
     ///
     /// บอกชื่อไฟล์บนหัวกล่องเพราะผู้ใช้ที่มีภาพหายหลายใบต้องรู้ว่ากำลังหาใบไหนอยู่
     DialogFindNamedImage,
+    /// ★★★ `{dir}` — แอปไม่ได้ใช้โฟลเดอร์ปกติของผู้ใช้ (`--data-root` · P5-9e)
+    ///
+    /// ต้องบอกให้รู้ว่า **งานที่ทำตอนนี้ไปอยู่ที่ไหน** ไม่ใช่แค่ว่า โหมดทดสอบ —
+    /// คนที่เห็นป้ายนี้คือคนที่กำลังจะถามว่างานของเขาหายไปไหน
+    DataRootInUse,
 }
 
 /// เทมเพลตภาษาอังกฤษ — ต้องมีครบทุกตัว
@@ -1395,6 +1400,7 @@ Drag in a PNG, JPEG, WebP, GIF, BMP, TGA or TIFF instead."
         }
         Template::SidecarAskIn => "Images in {dir}",
         Template::DialogFindNamedImage => "Find {name}",
+        Template::DataRootInUse => "TEST DATA FOLDER: work is saved under {dir}",
     }
 }
 
@@ -1566,6 +1572,7 @@ fn template_th(template: Template) -> Option<&'static str> {
         }
         Template::SidecarAskIn => "ภาพในโฟลเดอร์ {dir}",
         Template::DialogFindNamedImage => "หาไฟล์ {name}",
+        Template::DataRootInUse => "โฟลเดอร์ข้อมูลทดสอบ: งานถูกเก็บไว้ที่ {dir}",
     })
 }
 
@@ -2024,6 +2031,7 @@ mod tests {
         Template::SidecarHandsOff,
         Template::SidecarAskIn,
         Template::DialogFindNamedImage,
+        Template::DataRootInUse,
         Template::ShowingFirstOf,
         Template::ItemCount,
         Template::GroupMembers,

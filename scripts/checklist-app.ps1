@@ -45,6 +45,12 @@ if ($already.Count -gt 0) {
 New-Item -ItemType Directory -Force -Path $Work | Out-Null
 $script:failures = 0
 
+# Never the user's real RefX data (ROADMAP P5-9e).  One root for the whole
+# checklist: the recovery checks kill the app and relaunch it, and only mean
+# something if the relaunch sees what the first launch wrote.
+. (Join-Path $PSScriptRoot 'refx-test-root.ps1')
+$RefxRoot = New-RefxTestRoot 'checklist'
+
 function Report {
     param([string]$Name, [bool]$Ok, [string]$Detail)
     $tag = if ($Ok) { "PASS" } else { "FAIL"; }
@@ -58,7 +64,7 @@ function Run-Refx {
     param([string[]]$RefxArgs, [int]$SettleSeconds = 6)
     $out = Join-Path $Work ("out-{0}.txt" -f [guid]::NewGuid())
     $err = [System.IO.Path]::ChangeExtension($out, ".err")
-    $p = Start-Process -FilePath $ExePath -ArgumentList $RefxArgs `
+    $p = Start-Process -FilePath $ExePath -ArgumentList (Add-RefxDataRoot $RefxArgs $RefxRoot) `
         -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
     $w = [System.Diagnostics.Stopwatch]::StartNew()
     while ((-not $p.HasExited) -and ($p.MainWindowHandle -eq 0) -and ($w.Elapsed.TotalSeconds -lt 30)) {

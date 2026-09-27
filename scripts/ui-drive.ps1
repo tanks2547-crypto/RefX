@@ -85,6 +85,10 @@
 # so non-ASCII comments come back as mojibake and can break parsing.
 param([string[]]$Steps, [switch]$Validate)
 
+# Every launch gets --data-root: a scripted run must never write into the
+# user's real RefX folders (ROADMAP P5-9e - see the header of that file).
+. (Join-Path $PSScriptRoot 'refx-test-root.ps1')
+
 # verb -> @(fewest fields, most fields) INCLUDING the verb itself.
 # ! keep in step with the switch below - a handler that starts reading one more
 #   field must widen its entry here, and that is the point: the table is the
@@ -365,16 +369,19 @@ if ($Validate) {
   exit 0
 }
 
+# One root for the whole step list: a list that launches, kills and relaunches
+# is testing what the second launch finds of the first one's work.
+$RefxRoot = New-RefxTestRoot 'ui-drive'
+
 foreach ($step in $Steps) {
   $parts = $step -split '\|'
   switch ($parts[0]) {
     'launch' {
-      if ($parts[2]) { $proc = Start-Process -FilePath $parts[1] -ArgumentList $parts[2] -PassThru }
-      else           { $proc = Start-Process -FilePath $parts[1] -PassThru }
+      $proc = Start-Process -FilePath $parts[1] -ArgumentList (Add-RefxDataRoot $parts[2] $RefxRoot) -PassThru
       Setup-Window $proc ""
     }
     'launchlog' {
-      $proc = Start-Process -FilePath $parts[1] -ArgumentList $parts[2] -PassThru -RedirectStandardOutput $parts[3]
+      $proc = Start-Process -FilePath $parts[1] -ArgumentList (Add-RefxDataRoot $parts[2] $RefxRoot) -PassThru -RedirectStandardOutput $parts[3]
       Setup-Window $proc "log=$($parts[3])"
     }
     'attach' {

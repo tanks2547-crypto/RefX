@@ -515,6 +515,12 @@ pub struct ShellState {
     /// อีก 6,928 ใบเข้าไม่ได้" — ถ้าทั้งหมดเป็นสีเดียวกัน ข้อความสำคัญจะกลืนหายไป
     /// กับข้อความประจำวัน · ใช้สีเดียวกับ RAM/VRAM ตอนใกล้เต็ม (เจ้าของโทนเดียวกัน)
     pub status_warn: bool,
+    /// ★★★ `--data-root` ที่ใช้อยู่ — `Some` = **ไม่ได้ใช้โฟลเดอร์ปกติของผู้ใช้** (P5-9e)
+    ///
+    /// แยกจาก `status` โดยตั้งใจ: `status` ถูกเขียนทับจากหลายสิบที่ ป้ายนี้ต้องอยู่
+    /// ตลอดอายุโปรเซส ไม่งั้นมันจะหายไปตอนโหลดภาพเสร็จ แล้ววันหนึ่งจะมีคนไล่บั๊ก
+    /// *"งานผมหายไปไหน"* ที่คำตอบคือธงที่ค้างอยู่ใน shortcut
+    pub data_root: Option<String>,
     /// จำนวน item บน board (ตอนนี้คือจำนวนสี่เหลี่ยมทดสอบ)
     pub item_count: usize,
     /// ระดับซูมปัจจุบัน — แสดงบน status bar
@@ -840,6 +846,7 @@ impl Default for ShellState {
             lang: Lang::default(),
             status: text::t(Lang::default(), Key::Ready).to_owned(),
             status_warn: false,
+            data_root: None,
             item_count: 0,
             zoom: 1.0,
             frames_drawn: 0,
@@ -1416,6 +1423,18 @@ pub fn draw_in_ui(
     // ---- ล่างสุด: status bar (ต้องประกาศก่อน panel ซ้าย/ขวาเพื่อให้กินเต็มความกว้าง) ----
     egui::Panel::bottom("refx-status").show_inside(ui, |ui| {
         ui.horizontal(|ui| {
+            // ★★★ ป้าย `--data-root` มาก่อน **แม้แต่ความคืบหน้า** (P5-9e)
+            //
+            //   ทุกอย่างที่เหลือบนแถบนี้เปลี่ยนไปตามงาน · ป้ายนี้ต้องอยู่ตลอดอายุโปรเซส
+            //   ในสีเตือน · มันคือคำตอบของ *"งานที่ผมเพิ่งทำไปอยู่ไหน"* ในวันที่ธงนี้
+            //   ค้างอยู่ใน shortcut โดยไม่มีใครจำได้
+            if let Some(root) = &state.data_root {
+                ui.colored_label(
+                    warn_color(ui),
+                    text::fill(lang, Template::DataRootInUse, &[("dir", root)]),
+                );
+                ui.separator();
+            }
             // ★ ความคืบหน้ามาก่อนทุกอย่าง — เป็นสิ่งเดียวที่ผู้ใช้อยากรู้ตอนกำลังโหลด
             //   (เงื่อนไขข้อ 3 ของ docs/05 §6 ที่ทำให้ cache เย็นยอมรับได้)
             if let Some(progress) = state.loading {
@@ -3098,6 +3117,7 @@ mod tests {
             lang: _,
             status: _,
             status_warn: _,
+            data_root: _,          // ป้ายแสดงอย่างเดียว — ตั้งครั้งเดียวตอนเปิด ไม่มีปุ่มให้กด
             arrange_sort: _,       // P3-4 ตัดสินให้การเรียงอยู่ชั้น UI (§2.17)
             arrange_descending: _, // เหมือนกัน
             arrange_filter: _,     // เหมือนกัน
@@ -3657,6 +3677,9 @@ mod tests {
             //     ไม่เคยผ่านประตูนี้เลยจนถึงวันที่ผู้ใช้เห็นมันจริง (`docs/03 §0`)
             sidecar_prompt: Some("E:/ภาพอ้างอิง/มังกร".to_owned()),
             status_warn: true,
+            // ★★★ ป้าย `--data-root` (P5-9e) — ค่าปริยายเป็น `None` ป้ายจึงไม่เคยถูกวาด
+            //     ถ้าไม่บังคับที่นี่ · ใช้ path ภาษาไทยให้ทั้งเทมเพลตและ path ผ่านประตู
+            data_root: Some("C:/ทดสอบ/refx-root".to_owned()),
             ..ShellState::default()
         };
 

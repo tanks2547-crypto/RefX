@@ -49,6 +49,11 @@ pub struct AppPaths {
     cache_dir: PathBuf,
     config_dir: PathBuf,
     log_dir: PathBuf,
+    /// ★ `Some` = ทุกโฟลเดอร์ถูกย้ายไปอยู่ใต้ที่นี่ด้วย `--data-root` (P5-9e)
+    ///
+    /// เก็บไว้ไม่ใช่เพื่อสร้าง path (สี่ช่องข้างบนคำนวณไว้แล้ว) แต่เพื่อให้แอป
+    /// **ประกาศได้เสมอ** ว่ากำลังใช้โฟลเดอร์ที่ไม่ใช่ค่าปริยาย — ดู [`Self::under`]
+    override_root: Option<PathBuf>,
 }
 
 impl AppPaths {
@@ -82,7 +87,48 @@ impl AppPaths {
             // directories ไม่มี log_dir บนทุก OS — เก็บไว้ใต้ cache ให้เหมือนกันทุกแพลตฟอร์ม
             // (log คือของที่ลบทิ้งได้ ไม่ใช่ config ของผู้ใช้)
             log_dir: dirs.cache_dir().join("logs"),
+            override_root: None,
         })
+    }
+
+    /// ★★★ ทุกโฟลเดอร์อยู่ใต้ `root` แทนที่ของ OS — **สำหรับการรันทดสอบ** (P5-9e)
+    ///
+    /// ## ทำไมต้องมี
+    ///
+    /// ตลอดสองเดือนแรก ทุกครั้งที่เราขับแอปจริงเพื่อเก็บหลักฐาน มันเขียนลง
+    /// `%LOCALAPPDATA%\RefX` **ของเครื่องที่เจ้าของโปรเจกต์ใช้ทำงานจริง** · 27 ก.ย. 2026
+    /// เกือบจะประทับ `.asked` ลง snapshot ของเขาที่ยังไม่เคยตอบ ซึ่งถอดเกราะ
+    /// "ห้ามลบก่อนผู้ใช้ได้เห็น" ของงานที่เขายังไม่ได้ตัดสินใจ (ROADMAP P5-9d)
+    ///
+    /// `directories` ถาม Windows ตรง ๆ (known folder) — ตัวแปรสภาพแวดล้อม
+    /// เปลี่ยนทางไม่ได้ จึงต้องมีทางของเราเอง · และข้าม `directories` ไปเลยใน
+    /// กรณีนี้ เพราะ path มาจากผู้ใช้อยู่แล้ว ไม่มีอะไรให้ถาม OS
+    ///
+    /// ## ★★ ผังเหมือนของ OS ทุกประการ — เส้นแบ่ง data / cache ยังอยู่ครบ
+    ///
+    /// `recovery/` และ `pasted/` ยังอยู่ใต้ `data/` ไม่ใช่ `cache/` · ย้ายที่ได้
+    /// แต่กฎของ `docs/07 §4` ย้ายตามไปด้วย ไม่ใช่ถูกทิ้งไว้ที่เดิม
+    ///
+    /// ★ ตรวจ path ที่ผู้เรียก (ดู `refx-app`) — ที่นี่แค่จัดผัง
+    #[must_use]
+    pub fn under(root: &Path) -> Self {
+        let cache_dir = root.join("cache");
+        Self {
+            data_dir: root.join("data"),
+            log_dir: cache_dir.join("logs"),
+            cache_dir,
+            config_dir: root.join("config"),
+            override_root: Some(root.to_path_buf()),
+        }
+    }
+
+    /// ★★★ `Some(root)` = **ไม่ได้ใช้โฟลเดอร์ปกติของผู้ใช้** — ต้องบอกให้เห็นเสมอ
+    ///
+    /// ไม่งั้นวันหนึ่งจะมีคนไล่บั๊ก *"งานผมหายไปไหน"* ที่คำตอบคือธงที่ค้างอยู่ใน
+    /// shortcut · ผู้เรียกต้องเขียน log **และ** แสดงบนแถบสถานะตลอดเวลา
+    #[must_use]
+    pub fn override_root(&self) -> Option<&Path> {
+        self.override_root.as_deref()
     }
 
     /// โฟลเดอร์ data — ของที่ **สร้างใหม่ไม่ได้** (ดูหัวโมดูล)
@@ -260,15 +306,46 @@ mod tests {
     fn ensure_exist_creates_the_recovery_dir_too() {
         let root = std::env::temp_dir().join(format!("refx-paths-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let paths = AppPaths {
-            data_dir: root.join("data"),
-            cache_dir: root.join("cache"),
-            config_dir: root.join("config"),
-            log_dir: root.join("cache").join("logs"),
-        };
+        let paths = AppPaths::under(&root);
         paths.ensure_exist().unwrap();
         assert!(paths.recovery_dir().is_dir());
         assert!(paths.spool_dir().is_dir());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// ★★★ `--data-root` ย้าย **ทุกโฟลเดอร์** — ไม่มีตัวไหนหลงไปเขียนที่ของผู้ใช้
+    ///
+    /// ถ้าตัวใดตัวหนึ่งยังชี้ไปที่ของ OS การรันทดสอบจะเขียนลงข้อมูลจริงบางส่วน
+    /// ซึ่งแย่กว่าไม่มีธงเลย เพราะทุกคนจะเชื่อว่าแยกแล้ว
+    #[test]
+    fn an_overridden_root_moves_every_folder_and_keeps_the_same_rules() {
+        let root = std::env::temp_dir().join(format!("refx-under-{}", std::process::id()));
+        let paths = AppPaths::under(&root);
+        for (name, dir) in [
+            ("data", paths.data_dir().to_path_buf()),
+            ("cache", paths.cache_dir().to_path_buf()),
+            ("config", paths.config_dir().to_path_buf()),
+            ("log", paths.log_dir().to_path_buf()),
+            ("recovery", paths.recovery_dir()),
+            ("spool", paths.spool_dir()),
+        ] {
+            assert!(
+                dir.starts_with(&root),
+                "{name} หลุดออกนอก --data-root: {}",
+                dir.display()
+            );
+        }
+        // กฎของ docs/07 §4 ย้ายตามไปด้วย ไม่ใช่ถูกทิ้งไว้
+        assert!(!paths.recovery_dir().starts_with(paths.cache_dir()));
+        assert!(!paths.spool_dir().starts_with(paths.cache_dir()));
+        assert_eq!(paths.override_root(), Some(root.as_path()));
+    }
+
+    /// ★ ค่าปริยายต้องบอกว่า **ไม่ได้** ถูกย้าย — ไม่งั้นแถบสถานะจะเตือนผู้ใช้ทุกคน
+    ///   ทุกวัน แล้วคำเตือนนั้นจะกลายเป็นสิ่งที่ทุกคนเมิน รวมถึงวันที่มันจริง
+    #[test]
+    fn the_usual_folders_do_not_claim_to_be_overridden() {
+        let paths = AppPaths::discover().unwrap();
+        assert_eq!(paths.override_root(), None);
     }
 }

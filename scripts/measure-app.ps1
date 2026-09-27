@@ -108,6 +108,13 @@ if ($already.Count -gt 0) {
     exit 1
 }
 
+# Never the user's real RefX data (ROADMAP P5-9e).  One root for the whole run
+# so the warm pass really is warm: it reuses the cache the cold pass just built,
+# and the cold pass is really cold -- it starts from an empty folder instead of
+# whatever the user's cache.sqlite happened to hold that day (docs/08 3.9 #16).
+. (Join-Path $PSScriptRoot 'refx-test-root.ps1')
+$RefxRoot = New-RefxTestRoot 'measure'
+
 $count = @(Get-ChildItem -Path $Images -File).Count
 Write-Output "dataset : $Images ($count files)"
 Write-Output "binary  : $Exe"
@@ -128,7 +135,7 @@ function Invoke-Pass {
 
     $watch = [System.Diagnostics.Stopwatch]::StartNew()
     $proc = Start-Process -FilePath (Resolve-Path $Exe).Path `
-        -ArgumentList @("--open-dir=$Images", "--bench-seconds=$BenchSeconds") `
+        -ArgumentList (Add-RefxDataRoot @("--open-dir=$Images", "--bench-seconds=$BenchSeconds") $RefxRoot) `
         -RedirectStandardOutput $outFile -RedirectStandardError $errFile `
         -PassThru
 
