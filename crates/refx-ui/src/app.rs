@@ -862,6 +862,11 @@ struct Doc {
     pending_snapshot: Option<Box<refx_io::autosave::Pending>>,
     /// ★★★ งานที่ผู้ใช้เคยสั่ง **"เก็บไว้ก่อน"** ของเอกสารฉบับนี้ (`docs/07 §4`)
     pending_kept: Option<Box<refx_io::autosave::Pending>>,
+    /// ★ ภาพใหม่ของแท็บนี้กำลังไหลลงบริเวณไหน (P5-9b) — ดู [`crate::placement`]
+    ///
+    /// ผูกกับกล้อง ณ ตอนที่มันเริ่ม · กล้องขยับเมื่อไหร่ ภาพใบถัดไปเริ่มไหลใหม่
+    /// ในบริเวณที่เห็นตอนนั้น · สถานะของมุมมอง ไม่ใช่ของเอกสาร — ไม่ถูกบันทึก
+    drop_flow: Option<crate::placement::Flow>,
     /// ★★★ คีย์งาน decode → `ItemId` **ของแท็บนี้** ที่ผลลัพธ์ต้องไปเกาะ
     ///
     /// ★★ ต้องอยู่ต่อแท็บเพราะค่าคือ `ItemId` ซึ่งไม่ผูกกับ board — เก็บรวมกัน
@@ -904,6 +909,7 @@ impl Doc {
             adopted_kept: None,
             pending_snapshot: None,
             pending_kept: None,
+            drop_flow: None,
             relink_targets: std::collections::HashMap::new(),
             sidecar: crate::sidecar::Folders::default(),
         }
@@ -3467,6 +3473,7 @@ impl RefxApp {
                 .map(std::path::Path::to_path_buf)
                 .unwrap_or_default();
             let board_id = self.docs.list[index].id;
+            let canvas = self.gfx.as_ref().map(|gfx| gfx.canvas.size);
             let doc = &mut self.docs.list[index];
 
             // ★★★ **เอกสารที่เปิดมาจากไฟล์: item มีอยู่แล้ว ห้ามสร้างใบใหม่**
@@ -3494,19 +3501,15 @@ impl RefxApp {
                 continue;
             }
 
-            // วางเป็นตารางเดียวกับภาพที่เปิดได้ — ใบที่เสียต้องอยู่ในลำดับที่ผู้ใช้
-            // ลากเข้ามา ไม่ใช่กองรวมกันที่มุมใดมุมหนึ่ง
-            let n = u32::try_from(doc.board.len()).unwrap_or(u32::MAX);
-            let (col, row) = (n % 16, n / 16);
-            let cell = 160.0;
-            // ไม่รู้สัดส่วนจริงเพราะอ่านหัวไฟล์ไม่ผ่าน — ใช้กรอบสี่เหลี่ยมกลาง ๆ
-            let size = Vec2::new(128.0, 96.0);
-            let top_left = Vec2::new(2000.0 + col as f32 * cell, 2000.0 + row as f32 * cell);
+            // ★ ไหลลงบริเวณที่เห็นเดียวกับภาพที่เปิดได้ (P5-9b) — ใบที่เสียต้องอยู่ใน
+            //   ลำดับที่ผู้ใช้ลากเข้ามา ไม่ใช่กองรวมกันที่มุมใดมุมหนึ่ง · ไม่รู้สัดส่วนจริง
+            //   เพราะอ่านหัวไฟล์ไม่ผ่าน → กรอบ 4:3 ตามขนาดของบริเวณที่เห็น
+            let (center, size) = Self::drop_flow(doc, canvas).place_missing();
             let item = Item::new(ItemKind::Missing {
                 original_path,
                 reason,
             })
-            .at(top_left + size * 0.5, size);
+            .at(center, size);
             let item = Item {
                 meta: ItemMeta {
                     added_at: now_ms(),
@@ -3622,21 +3625,15 @@ impl RefxApp {
                             drop.added += 1;
                             continue;
                         }
-                        // จัดเป็นตารางง่าย ๆ ไปก่อน — layout จริงมาใน P2/P3
-                        // ★ ตำแหน่งไปอยู่ใน `ItemCanvas` แล้ว ไม่ได้คำนวณลง quad ตรง ๆ
-                        let n = u32::try_from(doc.board.len()).unwrap_or(u32::MAX);
-                        let (col, row) = (n % 16, n / 16);
-                        let cell = 160.0;
-                        // คงอัตราส่วนภาพเดิมไว้ ไม่บีบให้เป็นจัตุรัส
-                        let (sw, sh) = (thumb.source_width.max(1), thumb.source_height.max(1));
-                        let scale =
-                            128.0 / f32::from(u16::try_from(sw.max(sh)).unwrap_or(u16::MAX));
-                        let size = Vec2::new(sw as f32 * scale, sh as f32 * scale);
-                        // ★ `transform` ของ quad ใช้ **มุมซ้ายบน** ส่วน `ItemCanvas::pos`
-                        //   คือ **จุดกึ่งกลาง** (docs/02 §2.1) — บวกครึ่งขนาดตอนแปลง
-                        //   ถ้าลืมข้อนี้ ภาพทุกใบจะเลื่อนไปครึ่งตัวจากที่เคยเป็น
-                        let top_left =
-                            Vec2::new(2000.0 + col as f32 * cell, 2000.0 + row as f32 * cell);
+                        // ★★★ **ขนาดจริง ในบริเวณที่เห็น** (P5-9b) — ดู `crate::placement`
+                        //
+                        //   เดิมที่นี่ย่อทุกใบให้ด้านยาว 128 แล้ววางเป็นตาราง 16 ช่องที่ (2000,
+                        //   2000) ตายตัว · ภาพ 4000×6641 ของเจ้าของโปรเจกต์กลายเป็น 77×128
+                        //   ≈ 30 px บนจอที่ซูม 25% · ตอนนี้ 1 หน่วย world = 1 พิกเซลตอนวาง
+                        //   และไหลลงบริเวณที่ผู้ใช้กำลังดูอยู่ โดย **ไม่แตะกล้อง**
+                        let (sw, sh) = (thumb.source_width, thumb.source_height);
+                        let (center, size) =
+                            Self::drop_flow(doc, Some(gfx.canvas.size)).place_image(sw, sh);
 
                         let item = Item::new(ItemKind::Image(AssetRef {
                             hash: asset_hash,
@@ -3662,7 +3659,7 @@ impl RefxApp {
                             mtime: meta.mtime_ms,
                             file_size: meta.bytes,
                         }))
-                        .at(top_left + size * 0.5, size);
+                        .at(center, size);
                         // ★ `added_at` **ไม่เคยมีใครเซ็ตมาก่อน** (เป็น 0 ทุกใบ) ทำให้
                         //   การเรียงตามเวลาที่เพิ่มตกไปที่ตัวตัดสินท้ายเสมอ · ที่นี่คือ
                         //   จุดเดียวที่ item ถูกสร้างจากไฟล์จริง จึงเป็นที่ของมัน
@@ -4370,6 +4367,27 @@ impl RefxApp {
         });
         shell.status = text::t(lang, Key::ReadingColour).to_owned();
         Some(hash)
+    }
+
+    /// ★ การไหลของภาพใหม่ในแท็บนี้ — **เริ่มใหม่ในบริเวณที่เห็น ถ้ากล้องขยับไปแล้ว** (P5-9b)
+    ///
+    /// `canvas` = ขนาดช่อง canvas เป็นพิกเซล · `None` (ยังไม่มีหน้าต่าง/ในเทสต์)
+    /// ใช้หน้าต่างขนาดปริยาย 1280×800 — ภาพยังลงรอบกล้อง ไม่ไปลงที่ใดที่หนึ่งตายตัว
+    fn drop_flow(doc: &mut Doc, canvas: Option<Vec2>) -> &mut crate::placement::Flow {
+        let key = crate::placement::ViewKey::new(doc.camera.center(), doc.camera.zoom());
+        let current = doc
+            .drop_flow
+            .as_ref()
+            .is_some_and(|flow| flow.belongs_to(key));
+        if !current {
+            let size = canvas
+                .filter(|s| s.is_finite() && s.x > 0.0 && s.y > 0.0)
+                .unwrap_or(Vec2::new(1280.0, 800.0));
+            let view = WorldRect::from_center_size(doc.camera.center(), size / doc.camera.zoom());
+            doc.drop_flow = Some(crate::placement::Flow::new(key, view));
+        }
+        doc.drop_flow
+            .get_or_insert_with(|| crate::placement::Flow::new(key, WorldRect::EMPTY))
     }
 
     /// กรอบที่มองเห็นอยู่ในหน่วย world — ขอบเขตของการค้นหาไกด์ (P2-9)
