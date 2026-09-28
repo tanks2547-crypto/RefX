@@ -70,6 +70,8 @@ pub struct Flow {
     row_bottom: f32,
     /// แถวปัจจุบันมีภาพแล้วหรือยัง — ภาพแรกของแถวไม่ถูกดันขึ้นแถวใหม่แม้จะกว้างกว่าจอ
     row_used: bool,
+    /// ★ การไหลนี้เริ่มบน **กระดานว่าง** — กล้อง fit ตามได้ (P5-9b ส่วนที่ 2)
+    fits: bool,
 }
 
 impl Flow {
@@ -85,13 +87,44 @@ impl Flow {
             next: start,
             row_bottom: start.y,
             row_used: false,
+            fits: false,
         }
+    }
+
+    /// ★★★ การไหลที่เริ่มบนกระดานว่าง — **กล้อง fit ตามภาพที่เข้ามาได้**
+    ///
+    /// | สภาพก่อนวาง | กล้อง |
+    /// |---|---|
+    /// | กระดานว่าง | fit ให้พอดี — ไม่มีมุมมองของผู้ใช้ให้รักษา |
+    /// | มีของอยู่แล้ว | **ห้ามขยับ** — การขยับมุมมองที่ผู้ใช้ไม่ได้ขอ คือการแย่งงานเขา |
+    ///
+    /// ★ fit ต่อไปตราบที่กล้องยังเป็นของเรา — ผู้ใช้ pan/zoom เมื่อไหร่ [`Self::belongs_to`]
+    ///   ตอบ `false` แล้วการไหลใหม่ (ซึ่งกระดานไม่ว่างแล้ว) จะไม่ fit อีก
+    #[must_use]
+    pub fn on_empty_board(mut self) -> Self {
+        self.fits = true;
+        self
+    }
+
+    /// กล้องควร fit ตามภาพใบที่เพิ่งวางไหม
+    #[must_use]
+    pub fn fits(&self) -> bool {
+        self.fits
     }
 
     /// ยังเป็นการไหลของกล้องตัวนี้อยู่ไหม
     #[must_use]
     pub fn belongs_to(&self, key: ViewKey) -> bool {
         self.key == key
+    }
+
+    /// ★★ กล้องขยับเพราะ **เรา fit เอง** ไม่ใช่ผู้ใช้ — การไหลยังเป็นชุดเดิม
+    ///
+    /// ถ้าไม่เรียก ภาพใบถัดไปจะเห็นกล้องใหม่แล้วเริ่มไหลใหม่ที่มุมบนซ้ายของ
+    /// บริเวณที่เห็นหลัง fit — **ซึ่งคือที่ที่ภาพใบแรก ๆ อยู่พอดี** = ทับกัน
+    /// · ผังยังเดินตามพิกัดเดิม ส่วนกล้องแค่ตามไปดู
+    pub fn rekey(&mut self, key: ViewKey) {
+        self.key = key;
     }
 
     /// ★ ที่วางของภาพขนาด `w × h` พิกเซล — คืน **(จุดกึ่งกลาง, ขนาด)** ในหน่วย world
@@ -239,6 +272,28 @@ mod tests {
                 "ซูม {zoom}: กรอบ Missing กว้าง {on_screen} px บนจอ"
             );
         }
+    }
+
+    /// ★★ fit ของเราเองไม่ทำให้ชุดเดียวกันไหลใหม่ทับตัวเอง
+    #[test]
+    fn our_own_fit_keeps_the_flow_going_instead_of_restarting_on_top_of_it() {
+        let (key, rect) = view(Vec2::ZERO, 0.25);
+        let mut flow = Flow::new(key, rect).on_empty_board();
+        assert!(flow.fits());
+        let (a, sa) = flow.place_image(2400, 1600);
+        // กล้องย้ายเพราะเรา fit → rekey · การไหลเดิมเดินต่อ
+        let fitted = ViewKey::new(a, 0.4);
+        flow.rekey(fitted);
+        assert!(flow.belongs_to(fitted));
+        let (b, sb) = flow.place_image(2400, 1600);
+        let (ra, rb) = (Rect::from_center_size(a, sa), Rect::from_center_size(b, sb));
+        let overlap = ra.min.x < rb.max.x
+            && rb.min.x < ra.max.x
+            && ra.min.y < rb.max.y
+            && rb.min.y < ra.max.y;
+        assert!(!overlap, "ภาพใบที่สองทับใบแรกหลัง fit");
+        // ค่าปริยาย: ไม่ fit (มีของอยู่แล้ว = ห้ามขยับกล้อง)
+        assert!(!Flow::new(key, rect).fits());
     }
 
     /// ★ การไหลรู้ว่ากล้องขยับแล้ว — ผู้เรียกใช้ตัวนี้ตัดสินว่าจะเริ่มไหลใหม่

@@ -3534,6 +3534,8 @@ impl RefxApp {
                 let canvas = item.canvas;
                 doc.index.insert(id, &canvas);
             }
+            // ★ ใบที่เสียก็เป็นส่วนหนึ่งของชุด — กล้องต้องเห็นมันด้วย (P5-9b)
+            Self::follow_new_items(doc, canvas);
             // ★ นับเป็น `added` เพราะ **ผู้ใช้เห็นมันบนกระดานจริง ๆ** ·
             //   `damaged` เป็นตัวนับแยกสำหรับข้อความสรุป — ถ้านับทั้งสองช่อง
             //   ลง `answered()` งวดจะจบเร็วไปหนึ่งเท่าตัว
@@ -3688,6 +3690,8 @@ impl RefxApp {
                             let canvas = item.canvas;
                             doc.index.insert(id, &canvas);
                         }
+                        // ★ กระดานที่ว่างก่อนชุดนี้ = กล้องตามภาพไปให้เห็นทั้งหมด (P5-9b)
+                        Self::follow_new_items(doc, Some(gfx.canvas.size));
                         doc.render_state.insert(
                             id,
                             ItemRender {
@@ -4384,10 +4388,48 @@ impl RefxApp {
                 .filter(|s| s.is_finite() && s.x > 0.0 && s.y > 0.0)
                 .unwrap_or(Vec2::new(1280.0, 800.0));
             let view = WorldRect::from_center_size(doc.camera.center(), size / doc.camera.zoom());
-            doc.drop_flow = Some(crate::placement::Flow::new(key, view));
+            let flow = crate::placement::Flow::new(key, view);
+            // ★ กระดานว่าง = ไม่มีมุมมองของผู้ใช้ให้รักษา → กล้อง fit ตามได้
+            //   มีของอยู่แล้ว = ห้ามขยับกล้อง (P5-9b · `Flow::on_empty_board`)
+            doc.drop_flow = Some(if doc.board.is_empty() {
+                flow.on_empty_board()
+            } else {
+                flow
+            });
         }
         doc.drop_flow
             .get_or_insert_with(|| crate::placement::Flow::new(key, WorldRect::EMPTY))
+    }
+
+    /// ★★★ ภาพใบหนึ่งเพิ่งเข้ามา — **fit กล้องเฉพาะเมื่อการไหลนี้เริ่มบนกระดานว่าง
+    /// และกล้องยังเป็นของเรา** (P5-9b ส่วนที่ 2)
+    ///
+    /// ★ **ไม่ผ่าน `Command`** — กล้องคือมุมมอง ไม่ใช่เอกสาร (`docs/02 §2.9`: การโหลด
+    ///   ไม่ใช่การแก้) · undo ต้องไม่ย้อนกล้อง
+    ///
+    /// ★ fit ทุกใบที่เข้ามา ไม่ใช่รอจบทั้งชุด — ชุดใหญ่ (หลักร้อยภาพ decode เป็นนาที)
+    ///   จะไหลล้นจอไปตลอดเวลาที่รอ
+    ///
+    /// ★★ **ที่หยุด fit เมื่อผู้ใช้แตะกล้องอยู่ที่ [`Self::drop_flow`] ไม่ใช่ที่นี่**
+    ///   ผู้ใช้ pan/zoom → ภาพใบถัดไปเห็นกล้องที่ไม่ใช่ของการไหลเดิม → เริ่มการไหลใหม่
+    ///   ซึ่ง **ไม่ fit** เพราะกระดานไม่ว่างแล้ว · รุ่นแรกถามซ้ำที่นี่ว่า "กล้องยังเป็นของ
+    ///   เราไหม" — NC พิสูจน์ว่าเงื่อนไขนั้นไม่มีวันเป็นเท็จ (ฟังก์ชันนี้ถูกเรียกต่อจาก
+    ///   `drop_flow` ของภาพใบเดียวกันเสมอ ไม่มี input ของผู้ใช้แทรกได้) จึงถอดออก
+    fn follow_new_items(doc: &mut Doc, canvas: Option<Vec2>) {
+        if !doc.drop_flow.as_ref().is_some_and(|flow| flow.fits()) {
+            return;
+        }
+        let Some(viewport) = canvas.filter(|s| s.is_finite() && s.x >= 1.0 && s.y >= 1.0) else {
+            return;
+        };
+        let Some(bounds) = Self::fit_bounds(doc, keymap::ZoomRequest::FitBoard) else {
+            return;
+        };
+        doc.camera.fit_to(bounds, viewport);
+        let fitted = crate::placement::ViewKey::new(doc.camera.center(), doc.camera.zoom());
+        if let Some(flow) = doc.drop_flow.as_mut() {
+            flow.rekey(fitted);
+        }
     }
 
     /// กรอบที่มองเห็นอยู่ในหน่วย world — ขอบเขตของการค้นหาไกด์ (P2-9)
@@ -12303,6 +12345,74 @@ mod tests {
             1
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// วางภาพหนึ่งใบผ่านทางเดียวกับการลากจริง: `drop_flow` → `AddItems` → `follow_new_items`
+    fn drop_one(doc: &mut Doc, w: u32, h: u32, viewport: Vec2) {
+        let (center, size) = RefxApp::drop_flow(doc, Some(viewport)).place_image(w, h);
+        let item = Item::new(image_kind(7, "E:/refs/new.png")).at(center, size);
+        doc.history
+            .apply(
+                &mut doc.board,
+                Box::new(refx_core::command::AddItems::new(vec![item]).unwrap()),
+            )
+            .unwrap();
+        RefxApp::follow_new_items(doc, Some(viewport));
+    }
+
+    fn sees_everything(doc: &Doc, viewport: Vec2) -> bool {
+        let view = WorldRect::from_center_size(doc.camera.center(), viewport / doc.camera.zoom());
+        doc.board.z_order().iter().all(|id| {
+            let b = doc.board.item(*id).unwrap().canvas.world_bounds();
+            b.min.x >= view.min.x - 0.5
+                && b.min.y >= view.min.y - 0.5
+                && b.max.x <= view.max.x + 0.5
+                && b.max.y <= view.max.y + 0.5
+        })
+    }
+
+    /// ★★★ **กระดานว่าง → กล้อง fit ทันที** · ภาพแนวตั้งใหญ่ที่ล้นจอต้องเห็นทั้งใบ (P5-9b)
+    #[test]
+    fn an_empty_board_fits_the_camera_to_what_was_dropped() {
+        let viewport = Vec2::new(840.0, 735.0);
+        let mut doc =
+            Doc::empty(<refx_core::arena::BoardId as refx_core::arena::ArenaKey>::from_parts(0, 0));
+        drop_one(&mut doc, 2400, 1600, viewport);
+        drop_one(&mut doc, 4000, 6641, viewport);
+        assert!(
+            sees_everything(&doc, viewport),
+            "กระดานว่างแต่กล้องไม่ fit — ภาพแนวตั้ง 6641 px ล้นจออยู่"
+        );
+    }
+
+    /// ★★★ **มีของอยู่แล้ว → ห้ามขยับกล้อง** — ข้อนี้สำคัญกว่าข้อบน (P5-9b)
+    ///
+    /// "การขยับมุมมองที่ผู้ใช้ไม่ได้ขอ คือการแย่งงานเขา"
+    #[test]
+    fn a_board_with_work_on_it_never_moves_the_camera() {
+        let viewport = Vec2::new(840.0, 735.0);
+        let mut doc =
+            Doc::empty(<refx_core::arena::BoardId as refx_core::arena::ArenaKey>::from_parts(0, 0));
+        drop_one(&mut doc, 800, 600, viewport);
+        // ผู้ใช้จัดมุมมองของเขาเอง
+        doc.camera = Camera::new(Vec2::new(-3_000.0, 900.0), 1.7);
+        let before = doc.camera;
+        drop_one(&mut doc, 4000, 6641, viewport);
+        drop_one(&mut doc, 2400, 1600, viewport);
+        assert_eq!(doc.camera, before, "มีของอยู่แล้วแต่กล้องขยับเอง");
+    }
+
+    /// ★★ ผู้ใช้แตะกล้องระหว่างชุดยังเข้าไม่ครบ → **หยุด fit ทันที**
+    #[test]
+    fn touching_the_camera_mid_batch_stops_the_fitting() {
+        let viewport = Vec2::new(840.0, 735.0);
+        let mut doc =
+            Doc::empty(<refx_core::arena::BoardId as refx_core::arena::ArenaKey>::from_parts(0, 0));
+        drop_one(&mut doc, 2400, 1600, viewport);
+        doc.camera.pan_by_screen_delta(Vec2::new(120.0, -40.0));
+        let touched = doc.camera;
+        drop_one(&mut doc, 2400, 1600, viewport);
+        assert_eq!(doc.camera, touched, "ผู้ใช้เพิ่ง pan แต่กล้องถูก fit ทับ");
     }
 
     /// ★★★ **แถบโผล่ = ไม่เขียนอะไร** · ปิดโปรแกรมโดยไม่ตอบ = ถามใหม่รอบหน้า (P5-9d)
