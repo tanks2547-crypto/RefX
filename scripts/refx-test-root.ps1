@@ -48,16 +48,46 @@ function Assert-RefxRootIsNotRealData {
     }
 }
 
-# A fresh, empty folder for this script run.  Printed so the evidence says
-# where it came from.
+# The folder this script run WOULD use if no launch brings its own.
+#
+# NOT created and NOT printed here.  The first version did both, then a caller
+# passed its own --data-root and the log proudly named a folder the app never
+# touched (28 Sep 2026) -- evidence that points at the wrong place.  The
+# folder is created, and the root announced, only by Add-RefxDataRoot, for
+# the root each launch actually gets.
 function New-RefxTestRoot {
     param([string]$Label = 'run')
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
     $root = Join-Path $env:TEMP ("refx-test-root\{0}-{1}-{2}" -f $stamp, $Label, $PID)
     Assert-RefxRootIsNotRealData $root
-    New-Item -ItemType Directory -Force -Path $root | Out-Null
-    Write-Host "refx data root : $root"
     return $root
+}
+
+# Say which root a launch really uses -- once per distinct root per run.
+$script:RefxAnnounced = @{}
+function Write-RefxRootInUse {
+    param([string]$Root, [string]$How)
+    if (-not $script:RefxAnnounced.ContainsKey($Root)) {
+        $script:RefxAnnounced[$Root] = $true
+        Write-Host "refx data root : $Root ($How)"
+    }
+}
+
+# The only refx.exe processes a script may kill or drive: the ones started
+# with --data-root, i.e. started by a script.  Never the user's own RefX.
+#
+# Before 27 Sep 2026 "kill" meant `Get-Process refx | Stop-Process -Force` and
+# "attach" meant `Get-Process refx` -- both reach whatever RefX is running,
+# including one the user opened with unsaved work in it.  That was only
+# unavoidable while RefX was single-instance per user; with --data-root the
+# test instance and the user's instance hold different locks and coexist.
+function Get-RefxTestProcesses {
+    $found = @(Get-CimInstance Win32_Process -Filter "Name = 'refx.exe'" |
+        Where-Object { $_.CommandLine -match '--data-root=' })
+    foreach ($p in $found) {
+        $proc = Get-Process -Id $p.ProcessId -ErrorAction SilentlyContinue
+        if ($proc) { $proc }
+    }
 }
 
 # Add --data-root to a launch's arguments.  Accepts the string form
@@ -71,11 +101,18 @@ function Add-RefxDataRoot {
     elseif ($ArgumentList)         { $items = @([string]$ArgumentList) }
 
     foreach ($item in $items) {
-        if ($item -match '--data-root=("?)([^"]+)\1') {
-            Assert-RefxRootIsNotRealData $Matches[2]
+        # quoted value: up to the closing quote · unquoted: up to the next space
+        # (the first version read an unquoted value to the END of the string, so
+        # "--data-root=C:\x --lang=th" checked "C:\x --lang=th" -- wrong path)
+        if ($item -match '--data-root=(?:"([^"]+)"|(\S+))') {
+            $given = if ($Matches[1]) { $Matches[1] } else { $Matches[2] }
+            Assert-RefxRootIsNotRealData $given
+            Write-RefxRootInUse $given 'given by the caller'
             return $ArgumentList
         }
     }
+    New-Item -ItemType Directory -Force -Path $Root | Out-Null
+    Write-RefxRootInUse $Root 'fresh for this run'
     # Quoted: Windows PowerShell 5.1 does not quote array elements that contain
     # spaces, and %TEMP% can contain them.
     $flag = '--data-root="' + $Root + '"'

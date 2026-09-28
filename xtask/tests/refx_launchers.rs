@@ -120,6 +120,48 @@ fn every_scripted_launch_goes_through_its_own_data_root() {
     );
 }
 
+/// ★★★ **สคริปต์ฆ่าหรือขับได้เฉพาะ RefX ที่สคริปต์เปิดเอง** (P5-9e)
+///
+/// ก่อน 27 ก.ย. 2026 `kill` ของ `ui-drive.ps1` กับ `Stop-Refx` ของ checklist คือ
+/// `Get-Process refx | Stop-Process -Force` · และ `attach` คือ `Get-Process refx`
+/// — ทั้งสองไปถึง **RefX ตัวไหนก็ได้ที่เปิดอยู่** รวมถึงตัวที่ผู้ใช้เปิดทำงาน
+/// ค้างไว้ · ฆ่า = งานที่ยังไม่ได้บันทึกของเขาต้องพึ่งการกู้คืน · ขับ = คลิกของเรา
+/// ลงไปในงานจริงของเขา
+///
+/// ตอนนี้มี `Get-RefxTestProcesses` ที่คืนแต่ตัวที่เปิดด้วย `--data-root` ·
+/// เทสต์นี้ห้าม `Get-Process refx` ถูกใช้ทำอย่างอื่นนอกจาก **อ่านว่ามีตัวที่เปิดอยู่ไหม**
+#[test]
+fn no_script_kills_or_drives_a_refx_it_did_not_start() {
+    let mut wrong = Vec::new();
+    let mut paths = scripts();
+    paths.push(root().join("scripts").join(HELPER));
+    for path in paths {
+        let text = std::fs::read_to_string(&path).expect("อ่านสคริปต์ไม่ได้");
+        for (i, line) in text.lines().enumerate() {
+            let code = line.trim_start();
+            if code.starts_with('#') || !code.contains("Get-Process refx") {
+                continue;
+            }
+            let kills = code.contains("Stop-Process") || code.contains(".Kill(");
+            let drives = code.contains("$proc =") || code.contains("$proc=");
+            if kills || drives {
+                wrong.push(format!(
+                    "{}:{} — {} RefX ตัวไหนก็ได้ที่เปิดอยู่ (รวมตัวของผู้ใช้): {}",
+                    name(&path),
+                    i + 1,
+                    if kills { "ฆ่า" } else { "ขับ" },
+                    code.trim()
+                ));
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "ใช้ Get-RefxTestProcesses แทน — มันคืนแต่ตัวที่สคริปต์เปิดด้วย --data-root:\n  {}",
+        wrong.join("\n  ")
+    );
+}
+
 /// ★★ ฝั่ง Rust: `xtask` เปิดไบนารีได้ **แค่ `--version`** — ทางเดียวที่คืนค่า
 /// ก่อน `AppPaths::discover()` จึงไม่แตะโฟลเดอร์ไหนเลย (ดู `refx-app/src/main.rs`)
 ///

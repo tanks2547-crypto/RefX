@@ -46,7 +46,11 @@ $KEYUP = 0x0002
 $VK_LWIN = 0x5B
 $VK_SPACE = 0x20
 
-$proc = Get-Process refx -ErrorAction Stop
+# ONLY a RefX a script started (--data-root) - never the user's own window,
+# which would receive our layout switches and keys (ROADMAP P5-9e)
+. (Join-Path $PSScriptRoot 'refx-test-root.ps1')
+$proc = @(Get-RefxTestProcesses)[0]
+if (-not $proc) { throw "no RefX started with --data-root is running - start one with ui-drive.ps1 first (the user's own RefX is never driven)" }
 $hwnd = $proc.MainWindowHandle
 
 function Layout-Now {

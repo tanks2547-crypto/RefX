@@ -83,7 +83,8 @@ function Stop-Refx {
         [void]$R.Proc.CloseMainWindow()
         if (-not $R.Proc.WaitForExit(4000)) { try { $R.Proc.Kill() } catch { } }
     }
-    Get-Process refx -ErrorAction SilentlyContinue | Stop-Process -Force
+    # ONLY the instances this checklist started - never the user's own RefX (P5-9e)
+    Get-RefxTestProcesses | Stop-Process -Force
     Start-Sleep -Milliseconds 700
 }
 

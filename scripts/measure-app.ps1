@@ -104,7 +104,7 @@ $already = @(Get-Process refx -ErrorAction SilentlyContinue)
 if ($already.Count -gt 0) {
     Write-Output ("refx.exe is ALREADY RUNNING (pid " + ($already.Id -join ", ") + ")")
     Write-Output "RefX is single-instance, so every pass would exit instantly holding no lock."
-    Write-Output "Close it (or: Get-Process refx | Stop-Process -Force) and run this again."
+    Write-Output "Close it from its own window (save first if it holds work) and run this again."
     exit 1
 }
 

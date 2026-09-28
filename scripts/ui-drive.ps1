@@ -385,7 +385,10 @@ foreach ($step in $Steps) {
       Setup-Window $proc "log=$($parts[3])"
     }
     'attach' {
-      $proc = Get-Process refx -ErrorAction Stop
+      # ONLY a RefX a script started (--data-root): attaching to the user's own
+      # window would send our clicks and keys into his real work (P5-9e)
+      $proc = @(Get-RefxTestProcesses)[0]
+      if (-not $proc) { throw "attach: no RefX started with --data-root is running (the user's own RefX is never driven)" }
       $script:pid2 = $proc.Id
       $script:hwnd = $proc.MainWindowHandle
       # ! liveness FIRST - MoveWindow/ShowWindow/SetForegroundWindow all send
@@ -523,9 +526,11 @@ foreach ($step in $Steps) {
     'kill'   {
       # the single-instance lock lives as long as the process does; launching
       # again too early just prints "another RefX instance already holds the lock"
-      Get-Process refx -ErrorAction SilentlyContinue | Stop-Process -Force
+      # ONLY the instances a script started (--data-root) - never the user's own
+      # RefX, which may be open right now with unsaved work (ROADMAP P5-9e)
+      Get-RefxTestProcesses | Stop-Process -Force
       for ($i = 0; $i -lt 20; $i++) {
-        if (-not (Get-Process refx -ErrorAction SilentlyContinue)) { break }
+        if (-not @(Get-RefxTestProcesses).Count) { break }
         Start-Sleep -Milliseconds 300
       }
       Start-Sleep -Milliseconds 1200
