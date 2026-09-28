@@ -5502,12 +5502,17 @@ impl RefxApp {
             return;
         };
 
-        // ★★★ ประทับว่า "ถามแล้ว" **ตอนที่แถบโผล่ขึ้นจอ** ไม่ใช่ตอนผู้ใช้ตอบ
+        // ★★★ **ไม่ประทับอะไรตอนแถบโผล่** — ประทับตอนผู้ใช้ตอบ (ROADMAP P5-9d)
         //
-        //   ถ้าประทับตอนตอบ ผู้ใช้ที่ปิดโปรแกรมทิ้งโดยไม่แตะแถบเลย จะทำให้ไฟล์นั้น
-        //   ไม่มีวันเข้าเกณฑ์เก็บกวาด แล้วโฟลเดอร์โตไม่รู้จบ · ส่วนการประทับตอนนี้
-        //   ให้ความหมายตรงกับที่ `docs/07 §4` เขียนพอดี: **"ผู้ใช้ได้เห็นแล้ว"**
-        refx_io::recovery::mark_asked(&found.path);
+        //   เดิมประทับ `.asked` ตรงนี้ โดยให้เหตุผลว่า "โผล่ = ผู้ใช้ได้เห็นแล้ว"
+        //   · แต่ **โผล่ให้เห็น ไม่ใช่ได้เห็น และไม่ใช่ตัดสินใจแล้ว**: เปิดโปรแกรม
+        //   แล้วปิดไปก่อนทันอ่าน = snapshot เสียเกราะ "ห้ามลบก่อนผู้ใช้ได้เห็น"
+        //   ทั้งที่เขาไม่เคยตอบ · เจอ 27 ก.ย. 2026 ตอนจะเปิดแอปทับเครื่องของเจ้าของ
+        //   โปรเจกต์ซึ่งมี snapshot ที่เขายังไม่ได้ตอบค้างอยู่
+        //
+        //   ★ เหตุผลเดิมยังจริง — ไฟล์ที่ไม่เคยถูกตอบจะไม่เข้าเกณฑ์เก็บกวาด ·
+        //     ทางออกตามสเปกคือ "ถาม N รอบยังไม่ตอบ → ย้ายไปที่ปลอดภัย" ไม่ใช่
+        //     ถอดเกราะเร็วขึ้น (ยังรอสเปกของที่ปลอดภัยสำหรับงานกำพร้า — P5-9d)
         self.shell.recover_prompt = Some(crate::shell::RecoverView {
             when: found.when.clone(),
             items: found.items,
@@ -5589,6 +5594,12 @@ impl RefxApp {
         let Some(found) = self.pending_recovery.take() else {
             return;
         };
+        // ★★★ **กดปุ่มใดปุ่มหนึ่งในสามปุ่ม = ตัดสินใจแล้ว** — จังหวะเดียวที่ประทับ
+        //     `.asked` ได้ (ROADMAP P5-9d · ดู `offer_next_orphan`)
+        //
+        //   ประทับก่อนแยกทาง: "ทิ้งไป" ลบทั้งตระกูลรวมไฟล์ประทับอยู่แล้ว ·
+        //   "กู้คืน" ที่อ่านไฟล์ไม่ออกก็คือผู้ใช้ตอบแล้วเหมือนกัน
+        refx_io::recovery::mark_asked(&found.path);
         match choice {
             RecoverChoice::Restore => {
                 // ★★★ **งานกำพร้าแต่ละใบได้แท็บของตัวเอง** (P4-7c)
@@ -5631,9 +5642,9 @@ impl RefxApp {
                 remove_recovery_file(&found.path);
                 self.shell.status = text::t(self.shell.lang, Key::Ready).to_owned();
             }
-            // ★★★ **ไม่แตะไฟล์เลยแม้แต่นิดเดียว** — นี่คือทั้งหมดของตัวเลือกที่สาม
+            // ★★★ **ไม่แตะตัวไฟล์เลยแม้แต่นิดเดียว** — นี่คือทั้งหมดของตัวเลือกที่สาม
             //     ไฟล์ยังอยู่ ถูกถามใหม่รอบหน้า และเข้าเกณฑ์เก็บกวาดได้แล้ว
-            //     เพราะถูกประทับ `.asked` ไปตอนแถบโผล่
+            //     เพราะผู้ใช้เพิ่ง **ตอบ** (ประทับไว้ก่อนแยกทางข้างบน)
             RecoverChoice::Later => {}
         }
         // ★ เก็บกวาดตามเพดาน **หลังผู้ใช้ตอบเสมอ** — ตอนนี้ไฟล์ที่เพิ่งถูกถาม
@@ -12274,6 +12285,113 @@ mod tests {
             1
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ★★★ **แถบโผล่ = ไม่เขียนอะไร** · ปิดโปรแกรมโดยไม่ตอบ = ถามใหม่รอบหน้า (P5-9d)
+    ///
+    /// เดิม `offer_next_orphan` ประทับ `.asked` ทันทีที่แถบขึ้นจอ · เปิดแล้วปิดไป
+    /// ก่อนทันอ่าน = snapshot เสียเกราะ "ห้ามลบก่อนผู้ใช้ได้เห็น" ทั้งที่ไม่เคยตอบ
+    /// · เจอ 27 ก.ย. 2026 ตอนจะขับแอปบนเครื่องของเจ้าของโปรเจกต์ซึ่งมี snapshot
+    /// ที่เขายังไม่ได้ตอบค้างอยู่
+    #[test]
+    fn showing_the_recovery_question_marks_nothing_until_it_is_answered() {
+        use refx_platform::fsops::rename_durable;
+        let dir = std::env::temp_dir().join(format!("refx-unasked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = refx_io::recovery::SessionId::new_unique();
+        refx_io::recovery::write_snapshot(
+            &dir,
+            &session,
+            &refx_core::board::Board::default(),
+            rename_durable,
+        )
+        .unwrap();
+        let path = refx_io::recovery::snapshot_path(&dir, &session);
+
+        {
+            let mut app = RefxApp::new(AppArgs::default());
+            app.recovery_dir = Some(dir.clone());
+            app.recovery_queue.push_back(PendingRecovery {
+                path: path.clone(),
+                when: None,
+                items: 0,
+            });
+            app.offer_next_orphan();
+            assert!(
+                app.shell.recover_prompt.is_some(),
+                "แถบไม่โผล่ — เทสต์นี้ไม่ได้ทดสอบอะไร"
+            );
+            assert!(
+                !refx_io::recovery::asked_marker(&path).exists(),
+                "แถบแค่โผล่ ผู้ใช้ยังไม่ได้ตอบ แต่ไฟล์ถูกประทับว่าถามแล้ว"
+            );
+            // ← ผู้ใช้ปิดโปรแกรมตรงนี้โดยไม่แตะแถบ
+        }
+
+        // รอบหน้า: ไฟล์ยังอยู่ ยังถูกนับว่า "ยังไม่เคยตอบ" จึงยังได้เกราะเต็ม
+        let next = refx_io::recovery::SessionId::new_unique();
+        let orphans = refx_io::recovery::scan(&dir, std::slice::from_ref(&next));
+        assert_eq!(orphans.len(), 1, "ไฟล์หายไปทั้งที่ผู้ใช้ไม่เคยตอบ");
+        assert!(
+            !orphans[0].asked,
+            "ปิดโปรแกรมโดยไม่ตอบ แต่รอบหน้าไฟล์ถูกนับว่าถามแล้ว — เสียเกราะของ prune"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ★★★ **กดปุ่มใดปุ่มหนึ่งในสามปุ่ม = ประทับ** (P5-9d)
+    ///
+    /// คู่ของข้อบน — ถ้าข้อบนผ่านเพราะ **ไม่มีทางไหนประทับเลย** ไฟล์จะไม่มีวันเข้า
+    /// เกณฑ์เก็บกวาด และโฟลเดอร์โตไม่รู้จบ (เหตุผลที่โค้ดเดิมประทับตอนแสดง)
+    #[test]
+    fn every_answer_to_the_recovery_question_counts_as_answered() {
+        use crate::shell::RecoverChoice;
+        use refx_platform::fsops::rename_durable;
+
+        for (label, choice) in [
+            ("later", RecoverChoice::Later),
+            ("restore", RecoverChoice::Restore),
+            ("discard", RecoverChoice::Discard),
+        ] {
+            let dir =
+                std::env::temp_dir().join(format!("refx-answered-{label}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let session = refx_io::recovery::SessionId::new_unique();
+            refx_io::recovery::write_snapshot(
+                &dir,
+                &session,
+                &refx_core::board::Board::default(),
+                rename_durable,
+            )
+            .unwrap();
+            let path = refx_io::recovery::snapshot_path(&dir, &session);
+
+            let mut app = RefxApp::new(AppArgs::default());
+            app.recovery_dir = Some(dir.clone());
+            app.recovery_queue.push_back(PendingRecovery {
+                path: path.clone(),
+                when: None,
+                items: 0,
+            });
+            app.offer_next_orphan();
+            app.apply_recover_choice(choice);
+
+            let marker = refx_io::recovery::asked_marker(&path);
+            if matches!(choice, RecoverChoice::Discard) {
+                // ทิ้งไป = ลบทั้งตระกูล · ไฟล์ประทับต้องไม่ค้างเป็นขยะกำพร้า
+                assert!(!path.exists(), "{label}: กดทิ้งแล้วไฟล์ยังอยู่");
+                assert!(!marker.exists(), "{label}: ไฟล์ประทับค้างเป็นขยะ");
+            } else {
+                assert!(path.exists(), "{label}: ไฟล์หายทั้งที่ไม่ได้สั่งทิ้ง");
+                assert!(
+                    marker.exists(),
+                    "{label}: ผู้ใช้ตอบแล้วแต่ไม่ถูกประทับ — จะไม่มีวันเข้าเกณฑ์เก็บกวาด"
+                );
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     /// ★ negative control ของข้อบน — "ทิ้งไป" ต้องลบจริง
