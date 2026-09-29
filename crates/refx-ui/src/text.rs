@@ -308,6 +308,8 @@ pub enum Key {
     CloseDiscard,
     /// คำเตือนของปุ่มปิดโดยไม่บันทึก
     CloseDiscardHint,
+    /// ★ ตอบอย่างซื่อสัตย์ไม่ได้ว่าอะไรจะหาย — พูดแบบทั่วไป ไม่แต่งตัวเลข (P5-9a)
+    CloseLossUnknown,
 
     // ---- P4-4: กู้คืนงานที่ยังไม่เคยบันทึก ----
     /// หัวข้อของแถบกู้คืน
@@ -588,6 +590,7 @@ fn en(key: Key) -> &'static str {
         Key::CloseCancel => "Keep working",
         Key::CloseDiscard => "Close without saving",
         Key::CloseDiscardHint => "Everything since the last save will be lost",
+        Key::CloseLossUnknown => "Changes made since the last save have not been saved",
         Key::RecoverTitle => "Unsaved work from last time",
         Key::RecoverRestore => "Bring it back",
         Key::RecoverLater => "Keep it, decide later",
@@ -861,6 +864,7 @@ fn th(key: Key) -> Option<&'static str> {
         Key::CloseCancel => "ทำงานต่อ",
         Key::CloseDiscard => "ปิดโดยไม่บันทึก",
         Key::CloseDiscardHint => "ทุกอย่างตั้งแต่บันทึกครั้งล่าสุดจะหายไป",
+        Key::CloseLossUnknown => "มีการเปลี่ยนแปลงหลังบันทึกครั้งล่าสุดที่ยังไม่ได้บันทึก",
         Key::RecoverTitle => "เจองานที่ยังไม่ได้บันทึกจากรอบก่อน",
         Key::RecoverRestore => "เอากลับมา",
         Key::RecoverLater => "เก็บไว้ก่อน ตัดสินใจทีหลัง",
@@ -1221,6 +1225,18 @@ pub enum Template {
     /// ต้องบอกให้รู้ว่า **งานที่ทำตอนนี้ไปอยู่ที่ไหน** ไม่ใช่แค่ว่า โหมดทดสอบ —
     /// คนที่เห็นป้ายนี้คือคนที่กำลังจะถามว่างานของเขาหายไปไหน
     DataRootInUse,
+    /// ★★★ `{n}` — กระดานที่ไม่เคยบันทึกเลย: ทุกอย่างบนมันจะหาย (P5-9a · `docs/03 §0` ข้อ 5)
+    CloseLossNeverSaved,
+    /// `{list}` — การเปลี่ยนแปลงตั้งแต่บันทึกล่าสุด (รายการของสามตัวข้างล่าง)
+    CloseLossSince,
+    /// `{n}` — รายการที่เพิ่มมา
+    CloseLossAdded,
+    /// `{n}` — รายการที่ลบไป
+    CloseLossRemoved,
+    /// `{n}` — จำนวนขั้นของการแก้
+    CloseLossEdited,
+    /// ★★ `{n}` — ปิดหน้าต่าง: อีกกี่แท็บที่ยังไม่บันทึกและจะถูกถามต่อ
+    CloseMoreTabs,
 }
 
 /// เทมเพลตภาษาอังกฤษ — ต้องมีครบทุกตัว
@@ -1401,6 +1417,14 @@ Drag in a PNG, JPEG, WebP, GIF, BMP, TGA or TIFF instead."
         Template::SidecarAskIn => "Images in {dir}",
         Template::DialogFindNamedImage => "Find {name}",
         Template::DataRootInUse => "TEST DATA FOLDER: work is saved under {dir}",
+        Template::CloseLossNeverSaved => {
+            "This board has never been saved - all {n} items on it would be lost"
+        }
+        Template::CloseLossSince => "Not saved yet: {list}",
+        Template::CloseLossAdded => "{n} added",
+        Template::CloseLossRemoved => "{n} removed",
+        Template::CloseLossEdited => "{n} edits",
+        Template::CloseMoreTabs => "{n} more unsaved tabs will be asked about after this one",
     }
 }
 
@@ -1573,6 +1597,12 @@ fn template_th(template: Template) -> Option<&'static str> {
         Template::SidecarAskIn => "ภาพในโฟลเดอร์ {dir}",
         Template::DialogFindNamedImage => "หาไฟล์ {name}",
         Template::DataRootInUse => "โฟลเดอร์ข้อมูลทดสอบ: งานถูกเก็บไว้ที่ {dir}",
+        Template::CloseLossNeverSaved => "กระดานนี้ไม่เคยถูกบันทึกเลย - ทั้ง {n} รายการจะหายไป",
+        Template::CloseLossSince => "ยังไม่ได้บันทึก: {list}",
+        Template::CloseLossAdded => "เพิ่มมา {n} รายการ",
+        Template::CloseLossRemoved => "ลบไป {n} รายการ",
+        Template::CloseLossEdited => "แก้ไข {n} ครั้ง",
+        Template::CloseMoreTabs => "หลังจากนี้จะถามต่ออีก {n} แท็บที่ยังไม่ได้บันทึก",
     })
 }
 
@@ -1938,6 +1968,7 @@ mod tests {
         Key::CloseCancel,
         Key::CloseDiscard,
         Key::CloseDiscardHint,
+        Key::CloseLossUnknown,
         Key::RecoverTitle,
         Key::RecoverRestore,
         Key::RecoverLater,
@@ -2032,6 +2063,12 @@ mod tests {
         Template::SidecarAskIn,
         Template::DialogFindNamedImage,
         Template::DataRootInUse,
+        Template::CloseLossNeverSaved,
+        Template::CloseLossSince,
+        Template::CloseLossAdded,
+        Template::CloseLossRemoved,
+        Template::CloseLossEdited,
+        Template::CloseMoreTabs,
         Template::ShowingFirstOf,
         Template::ItemCount,
         Template::GroupMembers,

@@ -6302,6 +6302,23 @@ impl RefxApp {
         }
     }
 
+    /// ★★★ สิ่งที่จะหายถ้าปิดแท็บนี้โดยไม่บันทึก — **เป็นรูปธรรม** (P5-9a · `docs/03 §0` ข้อ 5)
+    ///
+    /// กระดานที่ไม่มี path = ไม่เคยอยู่ในไฟล์เลย → ทุกอย่างบนมันคือสิ่งที่จะหาย
+    /// ไม่ว่าประวัติจะว่าอย่างไร (`History::new` ถือว่ากระดานว่างตอนเริ่ม = "บันทึกแล้ว"
+    /// ซึ่งจริงเฉพาะในความหมายของ undo ไม่ใช่ของไฟล์)
+    fn close_loss_of(doc: &Doc) -> crate::shell::CloseLoss {
+        use crate::shell::CloseLoss;
+        if doc.path.is_none() {
+            return CloseLoss::NeverSaved {
+                items: doc.board.len(),
+            };
+        }
+        doc.history
+            .changes_since_save()
+            .map_or(CloseLoss::Unknown, CloseLoss::Since)
+    }
+
     /// ★★★ `Ctrl+W` / กดกากบาทบนแท็บ — **ถามก่อนถ้ายังไม่บันทึก** (`docs/03 §5`)
     ///
     /// ใช้แถบยืนยันตัวเดียวกับตอนปิดหน้าต่าง (`docs/03 §1`: คำถามชนิดเดียวกัน
@@ -6312,6 +6329,8 @@ impl RefxApp {
         };
         if self.gfx.is_some() && doc.board.is_dirty() {
             self.closing_tab = Some(doc.id);
+            self.shell.close_loss = Self::close_loss_of(doc);
+            self.shell.close_more_tabs = 0;
             self.shell.close_prompt = true;
             self.shell.close_scope_tab = true;
             // ★ พาผู้ใช้ไปดูแท็บที่กำลังจะปิดก่อนถาม — ถามถึงงานที่เขามองไม่เห็น
@@ -6953,7 +6972,18 @@ impl RefxApp {
                         self.close_tab_now(index);
                     }
                 }
-                None => self.closing = true,
+                // ★★★ ปิดหน้าต่าง = **ทิ้งเฉพาะแท็บที่ถามอยู่** แล้วถามแท็บถัดไป (P5-9a)
+                //
+                //   เดิม `closing = true` ทันที = ทิ้ง **ทุก** แท็บที่ยังไม่บันทึก ทั้งที่
+                //   คำถามพูดถึงแท็บเดียว (แท็บที่ถูกพามาดู) · ผู้ใช้ตอบเรื่องหนึ่งแล้วได้ผล
+                //   ของอีกหลายเรื่อง — ตรงข้ามกับ `docs/03 §0` ข้อ 5
+                None => {
+                    let index = self.docs.active.min(self.docs.list.len().saturating_sub(1));
+                    self.close_tab_now(index);
+                    if self.on_close_requested() {
+                        self.closing = true;
+                    }
+                }
             },
             CloseChoice::Cancel => {
                 self.after_save = AfterSave::Stay;
@@ -7231,7 +7261,15 @@ impl RefxApp {
                 }
                 match self.after_save {
                     AfterSave::Close => {
-                        self.closing = true;
+                        // ★★★ บันทึกแท็บที่ถามเสร็จแล้ว — **ถามแท็บถัดไปที่ยังค้าง** (P5-9a)
+                        //
+                        //   เดิม `closing = true` ทันที แล้วคำขอปิดรอบถัดไปคืน `true`
+                        //   ทันทีโดยไม่ดูแท็บอื่นเลย = แท็บที่ยังไม่บันทึกที่เหลือถูกปิดไป
+                        //   โดยไม่มีใครถาม ทั้งที่ผู้ใช้เพิ่งกด "บันทึก" และเชื่อว่าปลอดภัย
+                        self.after_save = AfterSave::Stay;
+                        if self.on_close_requested() {
+                            self.closing = true;
+                        }
                         if let Some(gfx) = self.gfx.as_ref() {
                             gfx.window.request_redraw();
                         }
@@ -9117,6 +9155,14 @@ impl AppDelegate for RefxApp {
             //    space เป็นอักขระจริงในโน้ต (HANDOFF §2.2 ข้อ 2)
             WindowEvent::KeyboardInput { .. } if gfx.egui_ctx.egui_wants_keyboard_input() => {}
 
+            // ★★★ **dialog ยืนยันตอนปิดเปิดอยู่ = คีย์ลัดของกระดานหยุดทั้งหมด** (P5-9a)
+            //
+            //   egui ได้ปุ่มไปก่อนแล้ว (`Esc` = ยกเลิก · `Enter` = ปุ่มที่ focus อยู่ ·
+            //   `Tab` = ย้าย focus) · ถ้าไม่กั้นตรงนี้ ปุ่มเดียวกันจะไปถึง keymap ด้วย
+            //   — `Delete` ลบภาพที่เลือกอยู่ข้างหลังกล่อง หรือ `Ctrl+S` เปิดการบันทึก
+            //   ซ้อนกับคำถามที่กำลังถามเรื่องบันทึกอยู่
+            WindowEvent::KeyboardInput { .. } if self.shell.close_prompt => {}
+
             WindowEvent::KeyboardInput { event, .. } => {
                 // ★★★ **ทางเดียวของคีย์บอร์ดทั้งหมด** (หนี้ §6 — ยุบ `on_input`)
                 //
@@ -9257,6 +9303,15 @@ impl AppDelegate for RefxApp {
             return true;
         };
         self.focus_tab(index);
+        // ★★ บอกสิ่งที่จะหาย **ของแท็บนี้** และบอกว่ายังมีอีกกี่แท็บที่จะถูกถามต่อ
+        //    (P5-9a) — ปิดหน้าต่างถามทีละแท็บ ดู `apply_close_choice`
+        self.shell.close_loss = Self::close_loss_of(self.docs.active());
+        self.shell.close_more_tabs = self
+            .docs
+            .iter()
+            .filter(|doc| doc.board.is_dirty())
+            .count()
+            .saturating_sub(1);
         self.close_confirm = true;
         self.shell.close_prompt = true;
         self.shell.close_scope_tab = false;
@@ -12345,6 +12400,77 @@ mod tests {
             1
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ★★★ **`Esc` / ยกเลิก ตอน dialog ปิดเปิดอยู่ → งานยังอยู่ครบ** (P5-9a)
+    ///
+    /// ครึ่งแรก (Esc → `Cancel`) คุมไว้ที่ `shell::tests::escape_cancels_the_close_and_enter_saves`
+    /// · ข้อนี้คุมครึ่งหลัง: `Cancel` ไม่แตะกระดาน ไม่ปิด ไม่ล้างธงยังไม่บันทึก
+    #[test]
+    fn cancelling_the_close_leaves_the_work_exactly_as_it_was() {
+        let mut app = RefxApp::new(AppArgs::default());
+        let doc = app.docs.active_mut();
+        let item = Item::new(image_kind(3, "E:/refs/keep.png"));
+        doc.history
+            .apply(
+                &mut doc.board,
+                Box::new(refx_core::command::AddItems::new(vec![item]).unwrap()),
+            )
+            .unwrap();
+        assert!(doc.board.is_dirty());
+        app.shell.close_prompt = true;
+
+        app.apply_close_choice(crate::shell::CloseChoice::Cancel);
+
+        let doc = app.docs.active();
+        assert_eq!(doc.board.len(), 1, "ยกเลิกการปิดแล้วงานหาย");
+        assert!(doc.board.is_dirty(), "ยกเลิกแล้วธงยังไม่บันทึกหายไป");
+        assert!(!app.closing, "ยกเลิกแล้วโปรแกรมยังจะปิด");
+        assert!(!app.shell.close_prompt, "ยกเลิกแล้ว dialog ยังค้าง");
+    }
+
+    /// ★★★ **สิ่งที่จะหายเป็นรูปธรรม** — กระดานที่ไม่เคยบันทึก vs เอกสารที่บันทึกแล้ว (P5-9a)
+    #[test]
+    fn the_close_question_names_what_would_be_lost() {
+        use crate::shell::CloseLoss;
+        let mut app = RefxApp::new(AppArgs::default());
+        let doc = app.docs.active_mut();
+        let four: Vec<Item> = (0..4)
+            .map(|i| Item::new(image_kind(i, "E:/refs/x.png")))
+            .collect();
+        doc.history
+            .apply(
+                &mut doc.board,
+                Box::new(refx_core::command::AddItems::new(four).unwrap()),
+            )
+            .unwrap();
+        // ไม่มี path = ไม่เคยอยู่ในไฟล์ → ทุกอย่างบนกระดานคือสิ่งที่จะหาย
+        assert_eq!(
+            RefxApp::close_loss_of(app.docs.active()),
+            CloseLoss::NeverSaved { items: 4 }
+        );
+
+        // บันทึกแล้วเพิ่มอีกสองใบ → บอกแค่สองใบนั้น ไม่ใช่ทั้งกระดาน
+        let doc = app.docs.active_mut();
+        doc.path = Some(std::path::PathBuf::from("E:/boards/mood.refx"));
+        doc.history.mark_saved(&mut doc.board);
+        let two: Vec<Item> = (10..12)
+            .map(|i| Item::new(image_kind(i, "E:/refs/y.png")))
+            .collect();
+        doc.history
+            .apply(
+                &mut doc.board,
+                Box::new(refx_core::command::AddItems::new(two).unwrap()),
+            )
+            .unwrap();
+        assert_eq!(
+            RefxApp::close_loss_of(app.docs.active()),
+            CloseLoss::Since(refx_core::command::ChangeSummary {
+                added: 2,
+                removed: 0,
+                edited: 0,
+            })
+        );
     }
 
     /// วางภาพหนึ่งใบผ่านทางเดียวกับการลากจริง: `drop_flow` → `AddItems` → `follow_new_items`

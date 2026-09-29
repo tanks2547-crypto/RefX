@@ -44,6 +44,21 @@ pub enum CmdError {
     Empty,
 }
 
+/// ★★★ คำสั่งหนึ่งขั้นทำอะไรกับงานของผู้ใช้ — **ในภาษาที่ผู้ใช้เข้าใจ** (P5-9a)
+///
+/// มีไว้ตอบคำถามเดียว: *"ถ้าปิดตอนนี้โดยไม่บันทึก อะไรจะหาย"* · `docs/03 §0` ข้อ 5
+/// บังคับให้คำถามนั้นบอก **สิ่งที่จะหายเป็นรูปธรรม** ("4 ภาพที่เพิ่มมา") ไม่ใช่
+/// "unsaved changes" ซึ่งผู้ใช้อ่านไม่ออกว่ามากหรือน้อย
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkChange {
+    /// เพิ่ม item เข้ามากี่ใบ
+    Added(usize),
+    /// เอา item ออกไปกี่ใบ
+    Removed(usize),
+    /// แก้ของที่มีอยู่ (ย้าย · ครอป · ฟิลเตอร์ · แท็ก · ข้อความ · กลุ่ม …)
+    Edited,
+}
+
 /// การแก้ `Board` หนึ่งครั้งที่ย้อนกลับได้
 ///
 /// `Any` เป็น supertrait เพราะ [`Command::merge`] ต้องรู้ว่าคำสั่งถัดไปเป็นชนิดเดียวกัน
@@ -88,6 +103,13 @@ pub trait Command: Send + std::fmt::Debug + Any {
 
     /// ชื่อที่แสดงในเมนู undo (อังกฤษ — `refx-ui` แปลจากค่านี้)
     fn label(&self) -> &'static str;
+
+    /// ★★ คำสั่งนี้ทำอะไรกับงานของผู้ใช้ — ดู [`WorkChange`]
+    ///
+    /// **ไม่มีค่าเริ่มต้นโดยตั้งใจ** ด้วยเหตุผลเดียวกับ [`Command::heap_size`]: ถ้า default
+    /// เป็น `Edited` คำสั่งใหม่ที่ลบภาพจะถูกบรรยายว่า "แก้ไข" เงียบ ๆ แล้ว dialog ตอนปิด
+    /// จะบอกสิ่งที่จะหาย **น้อยกว่าความจริง** — ตัวที่ต้องห้ามพลาดที่สุดในคำถามนั้น
+    fn change(&self) -> WorkChange;
 
     /// หน่วยความจำที่คำสั่งนี้ถือไว้โดยประมาณ (ไบต์)
     ///
@@ -207,6 +229,10 @@ impl Command for AddItems {
         self.ids()
     }
 
+    fn change(&self) -> WorkChange {
+        WorkChange::Added(self.placed.len().max(self.pending.len()))
+    }
+
     fn label(&self) -> &'static str {
         "Add items"
     }
@@ -295,6 +321,14 @@ impl Command for RemoveItems {
     /// ผู้ใช้ที่ลบ 5 ภาพแล้วกด Ctrl+Z ต้องได้ 5 ภาพนั้นกลับมา **พร้อมถูกเลือกอยู่**
     fn affected(&self) -> Vec<ItemId> {
         self.targets.clone()
+    }
+
+    fn change(&self) -> WorkChange {
+        WorkChange::Removed(if self.removed.is_empty() {
+            self.targets.len()
+        } else {
+            self.removed.len()
+        })
     }
 
     fn label(&self) -> &'static str {
@@ -424,6 +458,10 @@ impl Command for TransformItems {
         self.changes.iter().map(|change| change.id).collect()
     }
 
+    fn change(&self) -> WorkChange {
+        WorkChange::Edited
+    }
+
     fn label(&self) -> &'static str {
         "Transform items"
     }
@@ -490,6 +528,10 @@ impl Command for SetCrop {
 
     fn affected(&self) -> Vec<ItemId> {
         self.inner.affected()
+    }
+
+    fn change(&self) -> WorkChange {
+        WorkChange::Edited
     }
 
     fn label(&self) -> &'static str {
@@ -621,6 +663,10 @@ impl Command for ApplyLayout {
         self.inner.affected()
     }
 
+    fn change(&self) -> WorkChange {
+        WorkChange::Edited
+    }
+
     fn label(&self) -> &'static str {
         "Apply layout"
     }
@@ -683,6 +729,10 @@ impl Command for SetFilter {
 
     fn affected(&self) -> Vec<ItemId> {
         self.inner.affected()
+    }
+
+    fn change(&self) -> WorkChange {
+        WorkChange::Edited
     }
 
     fn label(&self) -> &'static str {
@@ -759,6 +809,10 @@ impl Command for ReorderZ {
     fn affected(&self) -> Vec<ItemId> {
         // การเรียงชั้นไม่ได้ "แตะ" ตัวไหนเป็นพิเศษ — ปล่อยให้ selection เดิมอยู่ต่อ
         Vec::new()
+    }
+
+    fn change(&self) -> WorkChange {
+        WorkChange::Edited
     }
 
     fn label(&self) -> &'static str {
@@ -889,6 +943,10 @@ impl Command for RelinkAssets {
 
     fn affected(&self) -> Vec<ItemId> {
         self.changes.iter().map(|change| change.id).collect()
+    }
+
+    fn change(&self) -> WorkChange {
+        WorkChange::Edited
     }
 
     fn label(&self) -> &'static str {
@@ -1046,6 +1104,10 @@ impl Command for EditMeta {
 
     fn affected(&self) -> Vec<ItemId> {
         self.changes.iter().map(|change| change.id).collect()
+    }
+
+    fn change(&self) -> WorkChange {
+        WorkChange::Edited
     }
 
     fn label(&self) -> &'static str {
@@ -1217,6 +1279,10 @@ impl Command for TagItems {
         self.targets.clone()
     }
 
+    fn change(&self) -> WorkChange {
+        WorkChange::Edited
+    }
+
     fn label(&self) -> &'static str {
         if self.attach { "Add tag" } else { "Remove tag" }
     }
@@ -1303,6 +1369,10 @@ impl Command for EditText {
 
     fn affected(&self) -> Vec<ItemId> {
         vec![self.id]
+    }
+
+    fn change(&self) -> WorkChange {
+        WorkChange::Edited
     }
 
     fn label(&self) -> &'static str {
@@ -1515,6 +1585,10 @@ impl Command for GroupItems {
         self.targets.clone()
     }
 
+    fn change(&self) -> WorkChange {
+        WorkChange::Edited
+    }
+
     fn label(&self) -> &'static str {
         "Group items"
     }
@@ -1618,6 +1692,10 @@ impl Command for Ungroup {
 
     fn affected(&self) -> Vec<ItemId> {
         self.targets.clone()
+    }
+
+    fn change(&self) -> WorkChange {
+        WorkChange::Edited
     }
 
     fn label(&self) -> &'static str {
@@ -1735,6 +1813,10 @@ impl Command for SetGroup {
         Vec::new()
     }
 
+    fn change(&self) -> WorkChange {
+        WorkChange::Edited
+    }
+
     fn label(&self) -> &'static str {
         match self.field {
             GroupField::Name => "Rename group",
@@ -1764,6 +1846,17 @@ impl Command for SetGroup {
 pub const DEFAULT_MAX_ENTRIES: usize = 200;
 /// เพดานหน่วยความจำของ undo stack (I-6 — ไม่มี cache ไหนโตได้ไม่จำกัด)
 pub const DEFAULT_MAX_BYTES: usize = 64 << 20;
+
+/// ผลรวมของ [`WorkChange`] ตั้งแต่บันทึกครั้งล่าสุด — ดู [`History::changes_since_save`]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChangeSummary {
+    /// item ที่เพิ่มเข้ามา
+    pub added: usize,
+    /// item ที่เอาออกไป
+    pub removed: usize,
+    /// **จำนวนขั้น** ของการแก้ของที่มีอยู่ (ลากหนึ่งครั้ง = หนึ่งขั้น ไม่ใช่หนึ่งร้อยเฟรม)
+    pub edited: usize,
+}
 
 /// undo/redo stack พร้อมเพดานและหน้าต่าง merge
 ///
@@ -1992,6 +2085,30 @@ impl History {
         self.sync_dirty(board);
     }
 
+    /// ★★★ อะไรเปลี่ยนไปตั้งแต่บันทึกครั้งล่าสุด — **รวมตามชนิด** (P5-9a · `docs/03 §0` ข้อ 5)
+    ///
+    /// `None` = **ตอบอย่างซื่อสัตย์ไม่ได้** ผู้เรียกต้องใช้ข้อความทั่วไปแทน ไม่ใช่เดา:
+    /// * ไม่รู้จุดที่บันทึก (`mark_unsaved` · ประวัติถูกตัดจนเลยจุดนั้น)
+    /// * ผู้ใช้ย้อนไป **ก่อน** จุดที่บันทึก — ของที่ต่างจากไฟล์อยู่ในสาย redo
+    ///   และความหมายของมันกลับด้าน (ภาพที่ "เพิ่ม" ในสาย redo คือภาพที่ *หายไป*
+    ///   จากกระดานตอนนี้) · สรุปผิดทิศแย่กว่าไม่สรุป
+    #[must_use]
+    pub fn changes_since_save(&self) -> Option<ChangeSummary> {
+        let saved = self.saved_depth?;
+        if saved > self.undo.len() {
+            return None;
+        }
+        let mut summary = ChangeSummary::default();
+        for command in self.undo.iter().skip(saved) {
+            match command.change() {
+                WorkChange::Added(n) => summary.added += n,
+                WorkChange::Removed(n) => summary.removed += n,
+                WorkChange::Edited => summary.edited += 1,
+            }
+        }
+        Some(summary)
+    }
+
     /// จำนวนขั้นที่ย้อนได้
     #[must_use]
     pub fn undo_depth(&self) -> usize {
@@ -2091,6 +2208,78 @@ mod tests {
             pos: Vec2::new(x, y),
             ..ItemCanvas::default()
         }
+    }
+
+    // ---------- P5-9a: อะไรจะหายถ้าปิดตอนนี้ ----------
+
+    /// ★★★ สรุปการเปลี่ยนแปลงตั้งแต่บันทึก — **ตัวเลขที่ dialog ตอนปิดจะพูด**
+    ///
+    /// `docs/03 §0` ข้อ 5: บอกสิ่งที่จะหายเป็นรูปธรรม ("4 ภาพที่เพิ่มมา")
+    #[test]
+    fn what_changed_since_the_save_is_counted_by_kind() {
+        let (mut board, ids) = board_with(3);
+        let mut history = History::default();
+        assert_eq!(
+            history.changes_since_save(),
+            Some(ChangeSummary::default()),
+            "ยังไม่ได้ทำอะไรเลยแต่รายงานว่ามีการเปลี่ยนแปลง"
+        );
+
+        let four: Vec<Item> = (10..14).map(image_item).collect();
+        history
+            .apply(&mut board, Box::new(AddItems::new(four).unwrap()))
+            .unwrap();
+        history
+            .apply(
+                &mut board,
+                Box::new(RemoveItems::new(vec![ids[0]]).unwrap()),
+            )
+            .unwrap();
+        history
+            .apply(
+                &mut board,
+                Box::new(TransformItems::new(vec![(ids[1], moved_to(9.0, 9.0))]).unwrap()),
+            )
+            .unwrap();
+        assert_eq!(
+            history.changes_since_save(),
+            Some(ChangeSummary {
+                added: 4,
+                removed: 1,
+                edited: 1,
+            })
+        );
+
+        // บันทึกแล้ว → นับจากศูนย์ใหม่
+        history.mark_saved(&mut board);
+        assert_eq!(history.changes_since_save(), Some(ChangeSummary::default()));
+    }
+
+    /// ★★ **ตอบไม่ได้ = บอกว่าตอบไม่ได้** ไม่ใช่เดา
+    ///
+    /// ย้อนไปก่อนจุดที่บันทึก: ของที่ต่างจากไฟล์อยู่ในสาย redo และความหมายกลับด้าน
+    /// — ถ้านับแบบปกติ ภาพที่ *หายไป* จากกระดานจะถูกบรรยายว่า "เพิ่มมา"
+    #[test]
+    fn what_changed_is_unknown_rather_than_wrong() {
+        let (mut board, _) = board_with(1);
+        let mut history = History::default();
+        history
+            .apply(
+                &mut board,
+                Box::new(AddItems::new(vec![image_item(5)]).unwrap()),
+            )
+            .unwrap();
+        history.mark_saved(&mut board);
+        history.undo(&mut board).unwrap();
+        assert_eq!(
+            history.changes_since_save(),
+            None,
+            "ย้อนไปก่อนจุดที่บันทึก แต่ยังสรุปเหมือนเดินหน้า"
+        );
+
+        let mut recovered = History::default();
+        recovered.mark_unsaved(&mut board);
+        assert_eq!(recovered.changes_since_save(), None, "ไม่รู้จุดที่บันทึกแต่ยังสรุป");
     }
 
     // ---------- P4-6: RelinkAssets ----------

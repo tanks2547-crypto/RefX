@@ -163,6 +163,76 @@ pub enum SaveAsChoice {
     Cancel,
 }
 
+/// ★★★ คำถามที่รอคำตอบจากผู้ใช้ — **บนจอได้ทีละข้อเท่านั้น** (P5-9a · `docs/03 §0` ข้อ 4)
+///
+/// เจ้าของโปรเจกต์ลอง rc.1 แล้วเจอแถบกู้งานเก่ากับแถบงานยังไม่บันทึก **ซ้อนกัน**
+/// · แต่ละแถบตัดสินเองว่าจะโผล่ไหม จึงไม่มีอะไรห้ามสองตัวโผล่พร้อมกัน
+///
+/// ★ ตอนนี้ **มีทางเดียวที่คำถามจะถูกวาด**: `draw_in_ui` ถาม [`question_on_screen`]
+///   แล้ววาดเฉพาะข้อที่มันตอบ · ฟังก์ชันวาดของแต่ละข้อเป็น private และถูกเรียกจาก
+///   `match` นั้นที่เดียว — การวาดสองข้อพร้อมกันต้องเขียนกิ่งที่สองของ `match` เดียว
+///   ซึ่งเป็นไปไม่ได้
+///
+/// ★★ เพิ่มคำถามใหม่ = เพิ่ม variant + ที่ใน [`Question::QUEUE`] + กิ่งใน `match` ·
+///   compiler บังคับครบทั้งสามจุดเพราะทั้ง `pending` และ `match` ไม่มีกิ่ง `_`
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Question {
+    /// ปิดทั้งที่ยังไม่ได้บันทึก — **dialog** เพราะคำตอบหนึ่งทำให้งานหาย
+    CloseUnsaved,
+    /// บันทึกเป็นแบบไหน (linked / packed)
+    SaveAs,
+    /// ขอเขียน `.refx-meta` ลงโฟลเดอร์ของผู้ใช้
+    Sidecar,
+    /// เจองานกู้คืน — แถบ เพราะเป็นข้อมูลที่รอได้
+    Recover,
+}
+
+impl Question {
+    /// ลำดับความสำคัญ — ข้อแรกที่ค้างอยู่คือข้อเดียวที่ขึ้นจอ
+    ///
+    /// ปิดโปรแกรมมาก่อน (ผู้ใช้เพิ่งขอเดี๋ยวนี้ และมันบล็อกทุกอย่างอยู่แล้ว) ·
+    /// บันทึกเป็น ตามมา (ผู้ใช้เพิ่งกด) · กู้งานเก่าอยู่ท้ายสุด เพราะมันรอได้
+    pub const QUEUE: [Self; 4] = [
+        Self::CloseUnsaved,
+        Self::SaveAs,
+        Self::Sidecar,
+        Self::Recover,
+    ];
+
+    fn pending(self, state: &ShellState) -> bool {
+        match self {
+            Self::CloseUnsaved => state.close_prompt,
+            Self::SaveAs => state.save_as_prompt,
+            Self::Sidecar => state.sidecar_prompt.is_some(),
+            Self::Recover => state.recover_prompt.is_some(),
+        }
+    }
+}
+
+/// คำถามข้อที่ขึ้นจอในเฟรมนี้ — **ข้อเดียว หรือไม่มีเลย**
+#[must_use]
+pub fn question_on_screen(state: &ShellState) -> Option<Question> {
+    Question::QUEUE.into_iter().find(|q| q.pending(state))
+}
+
+/// ★★★ สิ่งที่จะหายถ้าปิดโดยไม่บันทึก — **เป็นรูปธรรม** (`docs/03 §0` ข้อ 5)
+///
+/// ชั้น `app` เติมตอนยกคำถามขึ้น · ไม่เปลี่ยนระหว่างที่ dialog เปิด เพราะ dialog
+/// บล็อกทุกการแก้อยู่แล้ว
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CloseLoss {
+    /// กระดานที่ **ไม่เคยถูกบันทึกเลย** — ทุกอย่างบนมันคือสิ่งที่จะหาย
+    NeverSaved {
+        /// จำนวนรายการบนกระดาน
+        items: usize,
+    },
+    /// การเปลี่ยนแปลงตั้งแต่บันทึกครั้งล่าสุด
+    Since(refx_core::command::ChangeSummary),
+    /// ★ ตอบอย่างซื่อสัตย์ไม่ได้ (ดู `History::changes_since_save`) — พูดแบบทั่วไป
+    #[default]
+    Unknown,
+}
+
 /// ผู้ใช้ตอบอะไรกับคำถาม "ปิดทั้งที่ยังไม่ได้บันทึก" (P4-2)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloseChoice {
@@ -631,6 +701,13 @@ pub struct ShellState {
     pub close_scope_tab: bool,
     /// ผู้ใช้ตอบแล้วในเฟรมนี้ — `None` = ยังไม่ตอบ
     pub close_choice: Option<CloseChoice>,
+    /// ★★★ สิ่งที่จะหายถ้าตอบ "ปิดโดยไม่บันทึก" — ค่าสำหรับแสดง (P5-9a)
+    pub close_loss: CloseLoss,
+    /// ★★ ปิดทั้งหน้าต่าง: **อีกกี่แท็บ** ที่ยังไม่บันทึกและจะถูกถามต่อ (P5-9a)
+    ///
+    /// ปิดหน้าต่างถามทีละแท็บ — ผู้ใช้ต้องรู้ว่าคำถามนี้ไม่ใช่ข้อสุดท้าย ไม่งั้น
+    /// เขาจะเชื่อว่า "บันทึกแล้วปิด" บันทึกทุกอย่างให้แล้ว
+    pub close_more_tabs: usize,
     /// ★★★ **สภาวะ: ภาพเก็บไว้ที่ไหน** (P4-5) — ดู [`StorageView`]
     ///
     /// **ค่าสำหรับแสดงเท่านั้น** ชั้น `app` เติมทุกเฟรม
@@ -878,6 +955,8 @@ impl Default for ShellState {
             group: None,
             close_prompt: false,
             close_choice: None,
+            close_loss: CloseLoss::Unknown,
+            close_more_tabs: 0,
             storage: StorageView::default(),
             storage_request: None,
             save_as_prompt: false,
@@ -902,6 +981,278 @@ impl Default for ShellState {
             settings_notes_dismissed: false,
             keymap: KeymapView::default(),
         }
+    }
+}
+
+/// สีของปุ่มที่ **ทำลายงาน** — ต่างจากทุกปุ่มอื่นบนจอโดยตั้งใจ (`docs/03 §0` ข้อ 3)
+fn danger_color(ui: &egui::Ui) -> egui::Color32 {
+    if ui.visuals().dark_mode {
+        egui::Color32::from_rgb(160, 38, 38)
+    } else {
+        egui::Color32::from_rgb(196, 43, 43)
+    }
+}
+
+/// ★★ ประโยคบอกสิ่งที่จะหาย — ดู [`CloseLoss`]
+fn close_loss_text(lang: Lang, loss: CloseLoss) -> String {
+    match loss {
+        CloseLoss::NeverSaved { items } => text::fill(
+            lang,
+            Template::CloseLossNeverSaved,
+            &[("n", &items.to_string())],
+        ),
+        CloseLoss::Since(summary) => {
+            let mut parts = Vec::new();
+            for (n, which) in [
+                (summary.added, Template::CloseLossAdded),
+                (summary.removed, Template::CloseLossRemoved),
+                (summary.edited, Template::CloseLossEdited),
+            ] {
+                if n > 0 {
+                    parts.push(text::fill(lang, which, &[("n", &n.to_string())]));
+                }
+            }
+            if parts.is_empty() {
+                // สกปรกแต่ไม่มีขั้นไหนให้นับ (เช่นเพิ่งกู้คืนมา) — พูดแบบทั่วไป ไม่แต่งตัวเลข
+                text::t(lang, Key::CloseLossUnknown).to_owned()
+            } else {
+                text::fill(
+                    lang,
+                    Template::CloseLossSince,
+                    &[("list", &parts.join(" · "))],
+                )
+            }
+        }
+        CloseLoss::Unknown => text::t(lang, Key::CloseLossUnknown).to_owned(),
+    }
+}
+
+/// ★★★ **dialog** ยืนยันตอนปิดทั้งที่ยังไม่ได้บันทึก (P5-9a · กติกาหกข้อใน `docs/03 §0`)
+///
+/// rc.1 เป็นแถบบาง ๆ ใต้แท็บที่หน้าตาเหมือนส่วนหนึ่งของ toolbar — **เมินได้**
+/// และปุ่ม "ปิดโดยไม่บันทึก" หน้าตาเหมือน "บันทึกแล้วปิด" เป๊ะ
+///
+/// | กติกา | ที่นี่ |
+/// |---|---|
+/// | 1 คำตอบหนึ่งทำให้งานหาย = modal | `egui::Modal` — backdrop กินทุกคลิก ทำอย่างอื่นไม่ได้จนกว่าจะตอบ |
+/// | 2 ปุ่มปลอดภัยเป็นค่าตั้งต้น | focus อยู่ที่ "บันทึกแล้วปิด" · `Enter` = บันทึก · **`Esc` / คลิกนอกกล่อง = ยกเลิกการปิด** ไม่ใช่ทิ้งงาน |
+/// | 3 ปุ่มทำลายต่างทั้งสีและตำแหน่ง | สีแดง ซ้ายสุด · สองปุ่มปลอดภัยอยู่ขวาสุด คั่นด้วยช่องว่างทั้งแถว |
+/// | 4 ห้ามสองคำถามพร้อมกัน | [`question_on_screen`] |
+/// | 5 บอกสิ่งที่จะหายเป็นรูปธรรม | [`CloseLoss`] + จำนวนแท็บที่จะถูกถามต่อ |
+fn close_dialog(ui: &mut egui::Ui, state: &mut ShellState, lang: Lang) {
+    let modal = egui::Modal::new(egui::Id::new("refx-close-confirm")).show(ui.ctx(), |ui| {
+        ui.set_max_width(480.0);
+        // ★ หัวข้อต้องพูดตรงกับ **ขอบเขต** ที่ถาม (ปิดแท็บ vs ปิดโปรแกรม)
+        let title = if state.close_scope_tab {
+            Key::CloseTabTitle
+        } else {
+            Key::CloseUnsavedTitle
+        };
+        ui.label(
+            egui::RichText::new(text::t(lang, title))
+                .strong()
+                .size(16.0),
+        );
+        ui.add_space(6.0);
+        ui.label(close_loss_text(lang, state.close_loss));
+        if !state.close_scope_tab && state.close_more_tabs > 0 {
+            ui.label(
+                egui::RichText::new(text::fill(
+                    lang,
+                    Template::CloseMoreTabs,
+                    &[("n", &state.close_more_tabs.to_string())],
+                ))
+                .weak(),
+            );
+        }
+        ui.add_space(14.0);
+
+        let mut choice = None;
+        ui.horizontal(|ui| {
+            // ★★ ปุ่มทำลาย: **ซ้ายสุด สีแดง** — ไม่ติดกับปุ่มไหนที่รักษางาน
+            let discard = ui
+                .add(
+                    egui::Button::new(
+                        egui::RichText::new(text::t(lang, Key::CloseDiscard))
+                            .color(egui::Color32::WHITE),
+                    )
+                    .fill(danger_color(ui)),
+                )
+                .on_hover_text(text::t(lang, Key::CloseDiscardHint));
+            if discard.clicked() {
+                choice = Some(CloseChoice::DiscardAndClose);
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // ขวาไปซ้าย: "บันทึกแล้วปิด" ขวาสุด แล้วค่อย "ทำงานต่อ"
+                let save = ui.add(
+                    egui::Button::new(
+                        egui::RichText::new(text::t(lang, Key::CloseSaveFirst)).strong(),
+                    )
+                    .fill(ui.visuals().selection.bg_fill),
+                );
+                let cancel = ui.button(text::t(lang, Key::CloseCancel));
+                // ★★ `Enter` = บันทึก เพราะ focus อยู่ที่ปุ่มนั้น — **เว้นแต่ผู้ใช้ย้าย
+                //    focus เองด้วย Tab** ไปปุ่มอื่นของกล่องนี้ (ห้ามดึงกลับทุกเฟรม)
+                let ours = [save.id, cancel.id, discard.id];
+                if !ui.memory(|m| m.focused().is_some_and(|f| ours.contains(&f))) {
+                    save.request_focus();
+                }
+                if save.clicked() {
+                    choice = Some(CloseChoice::SaveThenClose);
+                }
+                if cancel.clicked() {
+                    choice = Some(CloseChoice::Cancel);
+                }
+            });
+        });
+        choice
+    });
+
+    if let Some(choice) = modal.inner {
+        state.close_choice = Some(choice);
+    } else if modal.should_close() {
+        // ★★★ `Esc` หรือคลิกนอกกล่อง = **ยกเลิกการปิด** ไม่ใช่ทิ้งงาน (`docs/03 §0` ข้อ 2)
+        state.close_choice = Some(CloseChoice::Cancel);
+    }
+}
+
+/// แถบ "บันทึกเป็นแบบไหน" — เรียกจาก [`question_on_screen`] เท่านั้น
+fn save_as_bar(ui: &mut egui::Ui, state: &mut ShellState, lang: Lang) {
+    // ---- ★★ แถบ "บันทึกเป็นแบบไหน" (P4-5 · `docs/07 §2`) ----
+    //
+    //   native dialog ของ `rfd` ใส่ตัวเลือกของเราเองเข้าไปไม่ได้ · ถามในหน้าต่าง
+    //   ก่อนแล้วค่อยเปิด dialog จึงเป็นทางเดียว — และมันไม่บล็อก UI thread (I-2)
+    //
+    //   ★ ถามเฉพาะ **บันทึกเป็น** เท่านั้น · `Ctrl+S` ใช้โหมดเดิมของเอกสารเงียบ ๆ
+    //     (คำถามที่โผล่ทุกครั้งที่กดบันทึก คือคำถามที่คนกดผ่านโดยไม่อ่าน)
+    if state.save_as_prompt {
+        egui::Panel::top("refx-save-as").show_inside(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new(text::t(lang, Key::SaveModeTitle)).strong());
+                ui.separator();
+                // ★ ค่าปริยายของ docs/07 §2 มาก่อน — และเป็นตัวที่ผู้ใช้ส่วนใหญ่ต้องการ
+                if ui
+                    .button(text::t(lang, Key::SaveModeLinked))
+                    .on_hover_text(text::t(lang, Key::SaveModeLinkedHint))
+                    .clicked()
+                {
+                    state.save_as_choice = Some(SaveAsChoice::Linked);
+                }
+                if ui
+                    .button(text::t(lang, Key::SaveModePacked))
+                    .on_hover_text(text::t(lang, Key::SaveModePackedHint))
+                    .clicked()
+                {
+                    state.save_as_choice = Some(SaveAsChoice::Packed);
+                }
+                ui.separator();
+                if ui.button(text::t(lang, Key::CloseCancel)).clicked() {
+                    state.save_as_choice = Some(SaveAsChoice::Cancel);
+                }
+            });
+        });
+    }
+}
+
+/// แถบถามก่อนเขียน `.refx-meta` — เรียกจาก [`question_on_screen`] เท่านั้น
+fn sidecar_bar(ui: &mut egui::Ui, state: &mut ShellState, lang: Lang) {
+    // ---- ★★★ ถามก่อนเขียนไฟล์ลงโฟลเดอร์ของผู้ใช้ (P5-5 · `docs/07 §5`) ----
+    //
+    //   opt-in คือกฎ ไม่ใช่มารยาท: โปรแกรมห้ามเขียนไฟล์ลงโฟลเดอร์ผู้ใช้โดยไม่ได้ขอ
+    //   ★ คำตอบถูกจำที่ `settings.toml` **ไม่ใช่ในโฟลเดอร์นั้น** — การจำคำว่า "ไม่"
+    //     ด้วยการเขียนไฟล์ คือการทำสิ่งที่เขาเพิ่งห้าม
+    if let Some(dir) = state.sidecar_prompt.clone() {
+        egui::Panel::top("refx-sidecar-ask").show_inside(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new(text::t(lang, Key::SidecarAskTitle)).strong());
+                ui.label(text::fill(lang, Template::SidecarAskIn, &[("dir", &dir)]));
+                ui.separator();
+                // ★★ ทางที่ **ไม่แตะดิสก์** มาก่อนเสมอ สำหรับคนที่กดเร็วโดยไม่อ่าน
+                if ui.button(text::t(lang, Key::SidecarAskNo)).clicked() {
+                    state.sidecar_choice = Some(false);
+                }
+                if ui
+                    .button(text::t(lang, Key::SidecarAskYes))
+                    .on_hover_text(text::t(lang, Key::SettingsSidecarHint))
+                    .clicked()
+                {
+                    state.sidecar_choice = Some(true);
+                }
+            });
+        });
+    }
+}
+
+/// ★ แถบกู้งานเก่า — **ยังเป็นแถบ** ไม่ใช่ dialog: มันเป็นข้อมูลที่รอได้ ไม่มีคำตอบไหน
+/// ทำให้ของหาย (`docs/03 §0` · ปุ่ม "ทิ้ง" ยังมีทางเดียวที่ลบ และมันไม่ใช่ปุ่มแรก)
+/// · เรียกจาก [`question_on_screen`] เท่านั้น
+fn recover_bar(ui: &mut egui::Ui, state: &mut ShellState, lang: Lang) {
+    // ---- ★★★ แถบกู้คืนงานที่ยังไม่ได้บันทึกจากรอบก่อน (P4-4) ----
+    //
+    //   วางไว้ที่เดียวกับแถบยืนยันตอนปิด ด้วยเหตุผลเดียวกัน (เห็นแน่ แต่ยัง
+    //   เห็นงานข้างหลัง · ไม่บล็อก UI thread แบบ native dialog — I-2)
+    if let Some(found) = state.recover_prompt.clone() {
+        egui::Panel::top("refx-recover").show_inside(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                // ★ ประโยคต้องตรงกับที่มาของงาน ไม่ใช่ประโยคเดียวใช้ทุกกรณี
+                let title = match found.scope {
+                    RecoverScope::LastSession => Key::RecoverTitle,
+                    RecoverScope::ThisDocument => Key::RecoverDocTitle,
+                    RecoverScope::KeptForLater => Key::RecoverKeptTitle,
+                };
+                ui.label(
+                    egui::RichText::new(text::t(lang, title))
+                        .strong()
+                        .color(warn_color(ui)),
+                );
+                ui.label(text::fill(
+                    lang,
+                    Template::RecoverFound,
+                    &[
+                        ("items", &found.items.to_string()),
+                        (
+                            "when",
+                            found
+                                .when
+                                .as_deref()
+                                .unwrap_or_else(|| text::t(lang, Key::RecoverWhenUnknown)),
+                        ),
+                    ],
+                ));
+                ui.separator();
+                // ★★ เรียงตาม **ความปลอดภัย** เหมือนแถบตอนปิด: ทางที่ไม่ทำงานหาย
+                //    ต้องมาก่อนเสมอสำหรับคนที่กดเร็วโดยไม่อ่าน
+                if ui.button(text::t(lang, Key::RecoverRestore)).clicked() {
+                    state.recover_choice = Some(RecoverChoice::Restore);
+                }
+                // ★★★ ตัวที่สาม — สำคัญที่สุดตาม docs/07 §4 · **ไม่แตะไฟล์เลย**
+                // ★★ คำอธิบายของ "เก็บไว้ก่อน" ต้อง **บอกความจริงของแต่ละกรณี**:
+                //    snapshot ของ session ก่อนอยู่คนละไฟล์กับที่เราเขียน จึงรอดแน่
+                //    ส่วนของเอกสารอยู่ที่ `<doc>.refx.autosave` ซึ่งเป็นไฟล์เดียวกับ
+                //    ที่ autosave ของเราจะเขียนทับเมื่อผู้ใช้แก้อะไรต่อ — ปิดบังข้อนี้
+                //    แล้วปุ่มจะกลายเป็นคำโกหกในอีกสิบวินาทีถัดมา
+                let later_hint = match found.scope {
+                    RecoverScope::LastSession | RecoverScope::KeptForLater => Key::RecoverLaterHint,
+                    // ★ ตัวนี้ย้ายไฟล์จริง จึงพูดได้เต็มปากว่าไม่มีอะไรถูกเขียนทับ
+                    RecoverScope::ThisDocument => Key::RecoverDocLaterHint,
+                };
+                if ui
+                    .button(text::t(lang, Key::RecoverLater))
+                    .on_hover_text(text::t(lang, later_hint))
+                    .clicked()
+                {
+                    state.recover_choice = Some(RecoverChoice::Later);
+                }
+                ui.separator();
+                if ui
+                    .button(text::t(lang, Key::RecoverDiscard))
+                    .on_hover_text(text::t(lang, Key::RecoverDiscardHint))
+                    .clicked()
+                {
+                    state.recover_choice = Some(RecoverChoice::Discard);
+                }
+            });
+        });
     }
 }
 
@@ -992,79 +1343,17 @@ pub fn draw_in_ui(
         });
     });
 
-    // ---- ★ แถบยืนยันตอนปิดทั้งที่ยังไม่ได้บันทึก (P4-2) ----
+    // ---- ★★★ คำถามที่รอคำตอบ — **ขึ้นจอได้ทีละข้อเท่านั้น** (P5-9a · `docs/03 §0` ข้อ 4) ----
     //
-    //   วางไว้ **บนสุดใต้แท็บ** เพื่อให้เห็นแน่ ๆ แต่ยังเห็นงานข้างหลังอยู่
-    //   — ต่างจาก native dialog ที่บังทุกอย่างและบล็อก UI thread (I-2)
-    if state.close_prompt {
-        egui::Panel::top("refx-close-confirm").show_inside(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                // ★ หัวข้อต้องพูดตรงกับ **ขอบเขต** ที่ถาม — ปุ่มชุดเดียวกันแต่
-                //   สิ่งที่หายถ้าตอบผิดต่างกัน (ปิดแท็บใบเดียว vs ปิดทั้งโปรแกรม)
-                let title = if state.close_scope_tab {
-                    Key::CloseTabTitle
-                } else {
-                    Key::CloseUnsavedTitle
-                };
-                ui.label(
-                    egui::RichText::new(text::t(lang, title))
-                        .strong()
-                        .color(warn_color(ui)),
-                );
-                ui.separator();
-                // ★ ปุ่มที่ **ปลอดภัยที่สุดมาก่อน** — ผู้ใช้ที่กดเร็วโดยไม่อ่าน
-                //   ต้องเจอทางที่ไม่ทำงานหายก่อนเสมอ
-                if ui.button(text::t(lang, Key::CloseSaveFirst)).clicked() {
-                    state.close_choice = Some(CloseChoice::SaveThenClose);
-                }
-                if ui.button(text::t(lang, Key::CloseCancel)).clicked() {
-                    state.close_choice = Some(CloseChoice::Cancel);
-                }
-                ui.separator();
-                if ui
-                    .button(text::t(lang, Key::CloseDiscard))
-                    .on_hover_text(text::t(lang, Key::CloseDiscardHint))
-                    .clicked()
-                {
-                    state.close_choice = Some(CloseChoice::DiscardAndClose);
-                }
-            });
-        });
-    }
-
-    // ---- ★★ แถบ "บันทึกเป็นแบบไหน" (P4-5 · `docs/07 §2`) ----
-    //
-    //   native dialog ของ `rfd` ใส่ตัวเลือกของเราเองเข้าไปไม่ได้ · ถามในหน้าต่าง
-    //   ก่อนแล้วค่อยเปิด dialog จึงเป็นทางเดียว — และมันไม่บล็อก UI thread (I-2)
-    //
-    //   ★ ถามเฉพาะ **บันทึกเป็น** เท่านั้น · `Ctrl+S` ใช้โหมดเดิมของเอกสารเงียบ ๆ
-    //     (คำถามที่โผล่ทุกครั้งที่กดบันทึก คือคำถามที่คนกดผ่านโดยไม่อ่าน)
-    if state.save_as_prompt {
-        egui::Panel::top("refx-save-as").show_inside(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(egui::RichText::new(text::t(lang, Key::SaveModeTitle)).strong());
-                ui.separator();
-                // ★ ค่าปริยายของ docs/07 §2 มาก่อน — และเป็นตัวที่ผู้ใช้ส่วนใหญ่ต้องการ
-                if ui
-                    .button(text::t(lang, Key::SaveModeLinked))
-                    .on_hover_text(text::t(lang, Key::SaveModeLinkedHint))
-                    .clicked()
-                {
-                    state.save_as_choice = Some(SaveAsChoice::Linked);
-                }
-                if ui
-                    .button(text::t(lang, Key::SaveModePacked))
-                    .on_hover_text(text::t(lang, Key::SaveModePackedHint))
-                    .clicked()
-                {
-                    state.save_as_choice = Some(SaveAsChoice::Packed);
-                }
-                ui.separator();
-                if ui.button(text::t(lang, Key::CloseCancel)).clicked() {
-                    state.save_as_choice = Some(SaveAsChoice::Cancel);
-                }
-            });
-        });
+    //   rc.1 มีแถบกู้งานเก่ากับแถบงานยังไม่บันทึก **ซ้อนกันบนจอ** · ผู้ใช้เจอสองคำถาม
+    //   โดยไม่รู้ว่าอันไหนเกี่ยวกับอะไร · ทุกคำถามจึงถูกวาดผ่าน `match` ตัวนี้ตัวเดียว
+    //   — ข้อที่ไม่ได้ขึ้นจอยังค้างอยู่ใน `ShellState` และขึ้นต่อทันทีที่ข้อก่อนหน้าถูกตอบ
+    match question_on_screen(state) {
+        Some(Question::CloseUnsaved) => close_dialog(ui, state, lang),
+        Some(Question::SaveAs) => save_as_bar(ui, state, lang),
+        Some(Question::Sidecar) => sidecar_bar(ui, state, lang),
+        Some(Question::Recover) => recover_bar(ui, state, lang),
+        None => {}
     }
 
     // ---- ★★ แถบส่งออกภาพ (P5-4 · `docs/07 §6`) ----
@@ -1248,100 +1537,6 @@ pub fn draw_in_ui(
                     ui.label(text::t(lang, Key::ExportCancelling));
                 } else if ui.button(text::t(lang, Key::ExportCancel)).clicked() {
                     state.export_request = Some(ExportRequest::Cancel);
-                }
-            });
-        });
-    }
-
-    // ---- ★★★ ถามก่อนเขียนไฟล์ลงโฟลเดอร์ของผู้ใช้ (P5-5 · `docs/07 §5`) ----
-    //
-    //   opt-in คือกฎ ไม่ใช่มารยาท: โปรแกรมห้ามเขียนไฟล์ลงโฟลเดอร์ผู้ใช้โดยไม่ได้ขอ
-    //   ★ คำตอบถูกจำที่ `settings.toml` **ไม่ใช่ในโฟลเดอร์นั้น** — การจำคำว่า "ไม่"
-    //     ด้วยการเขียนไฟล์ คือการทำสิ่งที่เขาเพิ่งห้าม
-    if let Some(dir) = state.sidecar_prompt.clone() {
-        egui::Panel::top("refx-sidecar-ask").show_inside(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(egui::RichText::new(text::t(lang, Key::SidecarAskTitle)).strong());
-                ui.label(text::fill(lang, Template::SidecarAskIn, &[("dir", &dir)]));
-                ui.separator();
-                // ★★ ทางที่ **ไม่แตะดิสก์** มาก่อนเสมอ สำหรับคนที่กดเร็วโดยไม่อ่าน
-                if ui.button(text::t(lang, Key::SidecarAskNo)).clicked() {
-                    state.sidecar_choice = Some(false);
-                }
-                if ui
-                    .button(text::t(lang, Key::SidecarAskYes))
-                    .on_hover_text(text::t(lang, Key::SettingsSidecarHint))
-                    .clicked()
-                {
-                    state.sidecar_choice = Some(true);
-                }
-            });
-        });
-    }
-
-    // ---- ★★★ แถบกู้คืนงานที่ยังไม่ได้บันทึกจากรอบก่อน (P4-4) ----
-    //
-    //   วางไว้ที่เดียวกับแถบยืนยันตอนปิด ด้วยเหตุผลเดียวกัน (เห็นแน่ แต่ยัง
-    //   เห็นงานข้างหลัง · ไม่บล็อก UI thread แบบ native dialog — I-2)
-    if let Some(found) = state.recover_prompt.clone() {
-        egui::Panel::top("refx-recover").show_inside(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                // ★ ประโยคต้องตรงกับที่มาของงาน ไม่ใช่ประโยคเดียวใช้ทุกกรณี
-                let title = match found.scope {
-                    RecoverScope::LastSession => Key::RecoverTitle,
-                    RecoverScope::ThisDocument => Key::RecoverDocTitle,
-                    RecoverScope::KeptForLater => Key::RecoverKeptTitle,
-                };
-                ui.label(
-                    egui::RichText::new(text::t(lang, title))
-                        .strong()
-                        .color(warn_color(ui)),
-                );
-                ui.label(text::fill(
-                    lang,
-                    Template::RecoverFound,
-                    &[
-                        ("items", &found.items.to_string()),
-                        (
-                            "when",
-                            found
-                                .when
-                                .as_deref()
-                                .unwrap_or_else(|| text::t(lang, Key::RecoverWhenUnknown)),
-                        ),
-                    ],
-                ));
-                ui.separator();
-                // ★★ เรียงตาม **ความปลอดภัย** เหมือนแถบตอนปิด: ทางที่ไม่ทำงานหาย
-                //    ต้องมาก่อนเสมอสำหรับคนที่กดเร็วโดยไม่อ่าน
-                if ui.button(text::t(lang, Key::RecoverRestore)).clicked() {
-                    state.recover_choice = Some(RecoverChoice::Restore);
-                }
-                // ★★★ ตัวที่สาม — สำคัญที่สุดตาม docs/07 §4 · **ไม่แตะไฟล์เลย**
-                // ★★ คำอธิบายของ "เก็บไว้ก่อน" ต้อง **บอกความจริงของแต่ละกรณี**:
-                //    snapshot ของ session ก่อนอยู่คนละไฟล์กับที่เราเขียน จึงรอดแน่
-                //    ส่วนของเอกสารอยู่ที่ `<doc>.refx.autosave` ซึ่งเป็นไฟล์เดียวกับ
-                //    ที่ autosave ของเราจะเขียนทับเมื่อผู้ใช้แก้อะไรต่อ — ปิดบังข้อนี้
-                //    แล้วปุ่มจะกลายเป็นคำโกหกในอีกสิบวินาทีถัดมา
-                let later_hint = match found.scope {
-                    RecoverScope::LastSession | RecoverScope::KeptForLater => Key::RecoverLaterHint,
-                    // ★ ตัวนี้ย้ายไฟล์จริง จึงพูดได้เต็มปากว่าไม่มีอะไรถูกเขียนทับ
-                    RecoverScope::ThisDocument => Key::RecoverDocLaterHint,
-                };
-                if ui
-                    .button(text::t(lang, Key::RecoverLater))
-                    .on_hover_text(text::t(lang, later_hint))
-                    .clicked()
-                {
-                    state.recover_choice = Some(RecoverChoice::Later);
-                }
-                ui.separator();
-                if ui
-                    .button(text::t(lang, Key::RecoverDiscard))
-                    .on_hover_text(text::t(lang, Key::RecoverDiscardHint))
-                    .clicked()
-                {
-                    state.recover_choice = Some(RecoverChoice::Discard);
                 }
             });
         });
@@ -3095,6 +3290,8 @@ mod tests {
             active_tab: _,      // ดัชนีที่แสดงว่าใบไหนถูกเน้น — คำขอสลับอยู่ที่ `tab_request`
             close_scope_tab: _, // คำถามที่ค้างอยู่พูดถึงแท็บหรือทั้งหน้าต่าง
             close_prompt: _,    // บอกแค่ว่าแถบยืนยันโผล่อยู่ไหม ไม่ใช่คำขอแก้อะไร
+            close_loss: _,      // ค่าสำหรับแสดงใน dialog — ไม่ใช่คำขอแก้อะไร
+            close_more_tabs: _, // เช่นกัน
             recover_prompt: _,  // เหมือนกัน — แค่ "มีอะไรค้างให้ถามไหม"
             // ★ คำถามเรื่อง `.refx-meta` ไม่แตะเอกสารเลย — มันตัดสินว่าจะเขียน
             //   **ไฟล์ในโฟลเดอร์ภาพ** ซึ่งอยู่คนละที่กับ `Board` ทั้งก้อน
@@ -3845,6 +4042,170 @@ mod tests {
     ///
     /// `LayoutJob` แบ่งข้อความเป็น section ที่มี `font_id` ของตัวเอง — ตัวเดียว
     /// ที่บอกได้ว่าอักขระตัวนี้ถูกวาดด้วยฟอนต์ตระกูลไหน
+    /// วาด shell สองเฟรม (egui ใช้ layout ของรอบก่อน) พร้อม event ในเฟรมที่สอง
+    fn two_frames(
+        ctx: &egui::Context,
+        state: &mut ShellState,
+        events: Vec<egui::Event>,
+    ) -> Vec<(egui::FontId, String)> {
+        let mut last = Vec::new();
+        for frame in 0..2 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 800.0),
+                )),
+                events: if frame == 1 {
+                    events.clone()
+                } else {
+                    Vec::new()
+                },
+                ..Default::default()
+            };
+            let output = ctx.run_ui(input, |ui| {
+                let _ = draw_in_ui(ui, state, |_, _| {});
+            });
+            last = drawn_runs(&output);
+        }
+        last
+    }
+
+    fn key(key: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    fn all_four_questions(lang: Lang) -> ShellState {
+        ShellState {
+            lang,
+            close_prompt: true,
+            close_scope_tab: false,
+            close_loss: CloseLoss::Since(refx_core::command::ChangeSummary {
+                added: 4,
+                removed: 1,
+                edited: 7,
+            }),
+            close_more_tabs: 2,
+            save_as_prompt: true,
+            sidecar_prompt: Some("E:/ภาพอ้างอิง/มังกร".to_owned()),
+            recover_prompt: Some(RecoverView {
+                when: Some("2 ชม.".to_owned()),
+                items: 3,
+                scope: RecoverScope::LastSession,
+            }),
+            ..ShellState::default()
+        }
+    }
+
+    /// ★★★ **สี่คำถามค้างพร้อมกัน ก็ยังเห็นข้อเดียว** — และทุกตัวอักษรของมันมี glyph (P5-9a)
+    ///
+    /// rc.1: แถบกู้งานเก่ากับแถบงานยังไม่บันทึกซ้อนกันบนจอ (`docs/03 §0` ข้อ 4)
+    /// · ตอบทีละข้อแล้วข้อถัดไปต้องขึ้นตามลำดับใน [`Question::QUEUE`]
+    ///
+    /// ★ ทำหน้าที่ประตู tofu ของ dialog ด้วย — ประตูเดิมบังคับให้แถบ `.refx-meta`
+    ///   โผล่ ซึ่งตอนนี้ชนะ dialog ไม่ได้ ข้อความของ dialog จึงไม่เคยถูกวาดที่นั่น
+    #[test]
+    fn only_one_question_is_ever_on_screen_and_every_character_of_it_has_a_glyph() {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx);
+        for lang in [Lang::En, Lang::Th] {
+            let mut state = all_four_questions(lang);
+            let marker = |q: Question| match q {
+                Question::CloseUnsaved => text::t(lang, Key::CloseUnsavedTitle),
+                Question::SaveAs => text::t(lang, Key::SaveModeTitle),
+                Question::Sidecar => text::t(lang, Key::SidecarAskTitle),
+                Question::Recover => text::t(lang, Key::RecoverTitle),
+            };
+            for expected in Question::QUEUE {
+                assert_eq!(question_on_screen(&state), Some(expected));
+                let drawn = two_frames(&ctx, &mut state, Vec::new());
+                for q in Question::QUEUE {
+                    let shown = drawn.iter().any(|(_, t)| t.contains(marker(q)));
+                    assert_eq!(
+                        shown,
+                        q == expected,
+                        "{lang:?}: ตอนที่ {expected:?} ควรอยู่บนจอข้อเดียว แต่ {q:?} {}",
+                        if shown {
+                            "ก็ขึ้นมาด้วย"
+                        } else {
+                            "ไม่ขึ้น"
+                        }
+                    );
+                }
+                if expected == Question::CloseUnsaved {
+                    // ★★ สิ่งที่จะหายต้องถูกวาดจริง พร้อมจำนวนแท็บที่จะถามต่อ
+                    for needed in [
+                        close_loss_text(lang, state.close_loss),
+                        text::fill(lang, Template::CloseMoreTabs, &[("n", "2")]),
+                    ] {
+                        assert!(
+                            drawn.iter().any(|(_, t)| t.contains(&needed)),
+                            "{lang:?}: {needed:?} ไม่ได้ถูกวาดใน dialog"
+                        );
+                    }
+                }
+                let mut missing: Vec<char> = Vec::new();
+                for (font, t) in &drawn {
+                    for ch in t.chars() {
+                        if !ch.is_whitespace()
+                            && !ch.is_control()
+                            && !ctx.fonts_mut(|fonts| fonts.has_glyph(font, ch))
+                        {
+                            missing.push(ch);
+                        }
+                    }
+                }
+                missing.sort_unstable();
+                missing.dedup();
+                assert!(
+                    missing.is_empty(),
+                    "{lang:?} {expected:?}: อักขระที่จะเป็น tofu: {missing:?}"
+                );
+                // ตอบข้อนี้ → ข้อถัดไปต้องขึ้น
+                match expected {
+                    Question::CloseUnsaved => state.close_prompt = false,
+                    Question::SaveAs => state.save_as_prompt = false,
+                    Question::Sidecar => state.sidecar_prompt = None,
+                    Question::Recover => state.recover_prompt = None,
+                }
+            }
+            assert_eq!(question_on_screen(&state), None);
+        }
+    }
+
+    /// ★★★ **`Esc` = ยกเลิกการปิด ไม่ใช่ทิ้งงาน** · `Enter` = บันทึก (`docs/03 §0` ข้อ 2)
+    #[test]
+    fn escape_cancels_the_close_and_enter_saves() {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx);
+
+        let mut state = all_four_questions(Lang::Th);
+        let _ = two_frames(&ctx, &mut state, vec![key(egui::Key::Escape)]);
+        assert_eq!(
+            state.close_choice,
+            Some(CloseChoice::Cancel),
+            "Esc ใน dialog ไม่ได้ยกเลิกการปิด"
+        );
+
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx);
+        let mut state = all_four_questions(Lang::Th);
+        // เฟรมแรก ๆ ให้ focus ไปอยู่ที่ "บันทึกแล้วปิด" ก่อน แล้วค่อยกด Enter
+        let _ = two_frames(&ctx, &mut state, Vec::new());
+        assert_eq!(state.close_choice, None, "ยังไม่ได้กดอะไรแต่ได้คำตอบแล้ว");
+        let _ = two_frames(&ctx, &mut state, vec![key(egui::Key::Enter)]);
+        assert_eq!(
+            state.close_choice,
+            Some(CloseChoice::SaveThenClose),
+            "Enter ไม่ได้เลือกปุ่มปลอดภัย"
+        );
+    }
+
     fn drawn_runs(output: &egui::FullOutput) -> Vec<(egui::FontId, String)> {
         let mut runs = Vec::new();
         for shape in &output.shapes {
