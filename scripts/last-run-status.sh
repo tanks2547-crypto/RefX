@@ -59,30 +59,63 @@ branch="${GITHUB_DEFAULT_BRANCH:-main}"
 # รูปแบบที่ส่งกลับมา: `<conclusion> <runId> <sha> <updatedAt>` บรรทัดเดียว
 one_line='.[0] | "\(.conclusion) \(.databaseId) \(.headSha) \(.updatedAt)"'
 
+# ★★★ **ถาม GitHub ไม่สำเร็จ ≠ "job ถูกข้าม" ≠ "เก่าเกินไป"** (30 ก.ย. 2026)
+#
+#   ทุกการเรียก `gh` เคยปิดท้ายด้วย `2>/dev/null` · run 36606852464 แดงว่า
+#   **"Windows ผ่านล่าสุดเมื่อ 22 วันก่อน"** ทั้งที่ `check (windows-latest)` เขียวใน
+#   **ทุก** push สิบรอบล่าสุด (รวมรอบนั้นเอง) · สั่งรัน job นี้ซ้ำแล้วผ่าน = ชั่วคราว
+#   · สาเหตุจริง **ยังไม่รู้** เพราะข้อความ error ถูกโยนทิ้งไปพอดี
+#
+#   ความผิดของสคริปต์ที่แน่นอน: การเรียก jobs API ที่ล้ม คืนสตริงว่าง ซึ่ง **หน้าตา
+#   เหมือนรอบที่ job ถูกข้าม** → ลูปไล่ต่อไปรอบเก่ากว่าจนเจอรอบที่ตอบได้ → รายงาน
+#   "เก่า 22 วัน" · คำวินิจฉัยปลอมที่ชี้ไปที่ขา Windows ซึ่งไม่ได้เป็นอะไรเลย
+#   (`docs/08 §3.9` ข้อ 9 · CLAUDE.md "ห้ามอ่าน exit code ผ่าน pipe")
+#
+#   → ทุกการเรียกผ่าน `ask` : ลองซ้ำหนึ่งครั้งหลัง 5 วินาที (ของชั่วคราว) แล้วถ้ายังล้ม
+#     **แดงด้วยข้อความจริงของ GitHub** ว่า "ถามไม่สำเร็จ" ไม่ใช่เดาว่าเก่า
+ask_err=$(mktemp)
+trap 'rm -f "$ask_err"' EXIT
+ask() {
+  local out rc
+  for attempt in 1 2; do
+    out=$("$@" 2>"$ask_err")
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+      printf '%s' "$out"
+      return 0
+    fi
+    [ "$attempt" -eq 1 ] && sleep 5
+  done
+  echo "::error title=$LABEL: ถาม GitHub ไม่สำเร็จ (ไม่ใช่ผลของงาน)::exit $rc จาก '$1 $2' — $(tr '\n' ' ' < "$ask_err")" >&2
+  return 1
+}
+
 if [ -z "$JOB" ]; then
-  line=$(gh run list --repo "$GITHUB_REPOSITORY" \
+  line=$(ask gh run list --repo "$GITHUB_REPOSITORY" \
            --workflow "$WORKFLOW" --branch "$branch" \
            --status completed --limit 1 \
            --json conclusion,databaseId,updatedAt,headSha \
-           --jq "$one_line" 2>/dev/null)
+           --jq "$one_line") || exit 1
 else
   # ★ ไล่จากใหม่ไปเก่า หยุดที่รอบแรกที่ job นั้น **ไม่ถูกข้าม**
   #   จำกัด 30 รอบเพื่อไม่ให้ประตูนี้กลายเป็นงานหนักของมันเอง
+  runs=$(ask gh run list --repo "$GITHUB_REPOSITORY" \
+           --workflow "$WORKFLOW" --branch "$branch" \
+           --status completed --limit 30 \
+           --json databaseId,updatedAt,headSha \
+           --jq '.[] | "\(.databaseId) \(.headSha) \(.updatedAt)"') || exit 1
   line=""
   while read -r id sha when; do
     [ -n "$id" ] || continue
-    got=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?per_page=100" \
-            --jq "[.jobs[] | select(.name | contains(\"$JOB\")) | select(.conclusion != \"skipped\" and .conclusion != null)] | .[0].conclusion // empty" 2>/dev/null)
+    # ★ ล้ม = หยุดทั้งประตูพร้อมเหตุผล · **ไม่ข้ามไปรอบเก่ากว่า** (ดูกล่องข้างบน)
+    got=$(ask gh api "repos/$GITHUB_REPOSITORY/actions/runs/$id/jobs?per_page=100" \
+            --jq "[.jobs[] | select(.name | contains(\"$JOB\")) | select(.conclusion != \"skipped\" and .conclusion != null)] | .[0].conclusion // empty") || exit 1
     if [ -n "$got" ]; then
       line="$got $id $sha $when"
       break
     fi
   done <<EOF
-$(gh run list --repo "$GITHUB_REPOSITORY" \
-    --workflow "$WORKFLOW" --branch "$branch" \
-    --status completed --limit 30 \
-    --json databaseId,updatedAt,headSha \
-    --jq '.[] | "\(.databaseId) \(.headSha) \(.updatedAt)"' 2>/dev/null)
+$runs
 EOF
 fi
 
