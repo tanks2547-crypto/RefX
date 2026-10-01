@@ -326,6 +326,8 @@ pub enum Key {
     RecoverDiscardHint,
     /// เวลาที่เขียนไฟล์ที่ระบบไฟล์ไม่ยอมบอก
     RecoverWhenUnknown,
+    /// เขียนไว้ไม่ถึงนาที (`shell::Age::JustNow`)
+    AgeJustNow,
     /// กู้คืนแล้ว แต่ยังไม่ได้บันทึกลงไฟล์จริง
     RecoveredNotSavedYet,
     /// ★★ หัวข้อของแถบกู้คืนตอนที่**เอกสารที่เพิ่งเปิด**มีของค้าง (P4-3)
@@ -598,6 +600,7 @@ fn en(key: Key) -> &'static str {
         Key::RecoverDiscard => "Throw it away",
         Key::RecoverDiscardHint => "That work is deleted for good",
         Key::RecoverWhenUnknown => "an earlier session",
+        Key::AgeJustNow => "just now",
         Key::RecoveredNotSavedYet => {
             "Restored - this board still has no file, press Ctrl+S to keep it"
         }
@@ -872,6 +875,7 @@ fn th(key: Key) -> Option<&'static str> {
         Key::RecoverDiscard => "ทิ้งไป",
         Key::RecoverDiscardHint => "งานชุดนั้นจะถูกลบถาวร",
         Key::RecoverWhenUnknown => "รอบก่อน",
+        Key::AgeJustNow => "เมื่อสักครู่",
         Key::RecoveredNotSavedYet => "เอากลับมาแล้ว — กระดานนี้ยังไม่มีไฟล์ กด Ctrl+S เพื่อเก็บไว้",
         Key::RecoverDocTitle => "กระดานนี้มีการแก้ที่ยังไม่เคยถูกเขียนลงไฟล์",
         Key::RecoverKeptTitle => "คุณเก็บงานที่ยังไม่ได้บันทึกของกระดานนี้ไว้",
@@ -1242,6 +1246,12 @@ pub enum Template {
     /// ★ ต้องบอก **ไปไหน + เปิดยังไง + ไม่มีอะไรหาย** — ไฟล์ที่ไม่มีใครบอกว่าอยู่ไหน
     /// เท่ากับไฟล์ที่ถูกลบ
     RecoveryMovedToKept,
+    /// `{n}` — เขียนไว้กี่นาทีก่อน (`shell::Age`)
+    AgeMinutes,
+    /// `{n}` — กี่ชั่วโมงก่อน
+    AgeHours,
+    /// `{n}` — กี่วันก่อน
+    AgeDays,
 }
 
 /// เทมเพลตภาษาอังกฤษ — ต้องมีครบทุกตัว
@@ -1433,6 +1443,9 @@ Drag in a PNG, JPEG, WebP, GIF, BMP, TGA or TIFF instead."
         Template::RecoveryMovedToKept => {
             "{n} unsaved board(s) went unanswered for {rounds} launches and were moved to {dir} - open them with Ctrl+O · nothing was deleted"
         }
+        Template::AgeMinutes => "{n} min ago",
+        Template::AgeHours => "{n} h ago",
+        Template::AgeDays => "{n} d ago",
     }
 }
 
@@ -1443,7 +1456,9 @@ fn template_th(template: Template) -> Option<&'static str> {
         Template::ItemCount => "{n} รายการ",
         Template::GroupMembers => "{n} ใบในกลุ่มนี้",
         Template::Saved => "บันทึกลง {name} แล้ว",
-        Template::RecoverFound => "{items} ชิ้น จาก{when}",
+        // ★ วงเล็บ ไม่ใช่ "จาก" — "จาก" ต้องติดกับ "รอบก่อน" แต่ต้องเว้นวรรคกับตัวเลข
+        //   ("จาก5 นาที") · ประโยคเดียวรับไม่ได้ทั้งสองแบบ (เจอ "จากjust now" รอบ P5-9)
+        Template::RecoverFound => "{items} ชิ้น ({when})",
         Template::Opened => "เปิด {name} แล้ว",
         Template::Zoom => "ซูม {pct}%",
         Template::FramesDrawn => "เฟรมที่วาด {n}",
@@ -1614,6 +1629,9 @@ fn template_th(template: Template) -> Option<&'static str> {
         Template::RecoveryMovedToKept => {
             "งานที่ไม่ได้บันทึก {n} ชุดถูกถามมา {rounds} รอบแล้วไม่มีคำตอบ จึงย้ายไปเก็บไว้ที่ {dir} - เปิดได้ด้วย Ctrl+O · ไม่มีอะไรถูกลบ"
         }
+        Template::AgeMinutes => "{n} นาทีที่แล้ว",
+        Template::AgeHours => "{n} ชั่วโมงที่แล้ว",
+        Template::AgeDays => "{n} วันที่แล้ว",
     })
 }
 
@@ -1987,6 +2005,7 @@ mod tests {
         Key::RecoverDiscard,
         Key::RecoverDiscardHint,
         Key::RecoverWhenUnknown,
+        Key::AgeJustNow,
         Key::RecoveredNotSavedYet,
         Key::RecoverDocTitle,
         Key::RecoverDocLaterHint,
@@ -2081,6 +2100,9 @@ mod tests {
         Template::CloseLossEdited,
         Template::CloseMoreTabs,
         Template::RecoveryMovedToKept,
+        Template::AgeMinutes,
+        Template::AgeHours,
+        Template::AgeDays,
         Template::ShowingFirstOf,
         Template::ItemCount,
         Template::GroupMembers,

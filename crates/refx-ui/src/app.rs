@@ -2503,8 +2503,8 @@ fn probe_board_id() -> refx_core::arena::BoardId {
 struct PendingRecovery {
     /// ไฟล์ snapshot ตัวจริงบนดิสก์
     path: std::path::PathBuf,
-    /// เขียนไว้เมื่อไหร่ (ข้อความพร้อมแสดง) — `None` = ระบบไฟล์ไม่บอก
-    when: Option<String>,
+    /// เขียนไว้นานแค่ไหนแล้ว — `None` = ระบบไฟล์ไม่บอก
+    when: Option<crate::shell::Age>,
     /// มีกี่ชิ้นอยู่ในนั้น
     items: usize,
 }
@@ -2603,22 +2603,15 @@ fn file_label_of(path: &std::path::Path) -> String {
         .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
 }
 
-/// เวลาที่ไฟล์ถูกเขียน → ข้อความสั้น ๆ ที่ผู้ใช้อ่านรู้เรื่อง
+/// เวลาที่ไฟล์ถูกเขียน → อายุของมัน (แปลเป็นข้อความตอนวาด — `shell::age_text`)
 ///
 /// ★ ไม่มี dependency สำหรับจัดรูปแบบวันที่ใน `docs/09` (และการเพิ่มต้องขอก่อน)
 /// → บอกเป็น **ระยะเวลาที่ผ่านมา** แทนวันที่ ซึ่งตอบคำถามที่ผู้ใช้ถามจริง ๆ
 /// ได้ตรงกว่าอยู่แล้ว: *"เมื่อกี้นี้เอง หรือเมื่ออาทิตย์ที่แล้ว"*
-fn format_when(at: std::time::SystemTime) -> String {
-    let Ok(ago) = std::time::SystemTime::now().duration_since(at) else {
-        return "just now".to_owned(); // นาฬิกาเครื่องถอยหลัง — ไม่ใช่เรื่องต้องล้ม
-    };
-    let mins = ago.as_secs() / 60;
-    match mins {
-        0 => "just now".to_owned(),
-        1..60 => format!("{mins} min ago"),
-        60..1440 => format!("{} h ago", mins / 60),
-        _ => format!("{} d ago", mins / 1440),
-    }
+///
+/// ★★ เดิมคืน `String` ภาษาอังกฤษจาก worker ที่ไม่รู้ภาษา → UI ไทยขึ้น "จากjust now"
+fn format_when(at: std::time::SystemTime) -> crate::shell::Age {
+    crate::shell::Age::between(at, std::time::SystemTime::now())
 }
 
 /// ★★★ เปิดเอกสารไม่ได้ **เพราะอะไร** — และผู้ใช้ต้องทำคนละอย่างในแต่ละกรณี
@@ -2869,6 +2862,10 @@ impl RefxApp {
                 // ★ อ่าน locale ของ OS ครั้งเดียวตอนเปิดโปรแกรม (docs/03 §0 ข้อ 3)
                 //   ไม่รู้จักภาษา → อังกฤษ · P5-3 จะให้ผู้ใช้เลือกทับได้
                 lang,
+                // ★★ ต้องแปลด้วยภาษาที่เลือกจริง — `ShellState::default()` เติม "Ready"
+                //    ด้วย `Lang::default()` (อังกฤษ) ไว้ก่อน แล้วไม่มีใครเปลี่ยนจนกว่าจะมี
+                //    ข้อความใหม่ → UI ไทยขึ้น "Ready" ตั้งแต่เปิดโปรแกรม (เจอรอบ P5-9)
+                status: text::t(lang, Key::Ready).to_owned(),
                 mode,
                 data_root,
                 ..crate::shell::ShellState::default()
@@ -5633,7 +5630,7 @@ impl RefxApp {
         //    · แตะดิสก์ → เธรดอื่น (I-2)
         self.recovery_ask_count = spawn_ask_count(found.path.clone());
         self.shell.recover_prompt = Some(crate::shell::RecoverView {
-            when: found.when.clone(),
+            when: found.when,
             items: found.items,
             scope: crate::shell::RecoverScope::LastSession,
         });
@@ -12705,6 +12702,23 @@ mod tests {
             }
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    /// ★★ **เปิดโปรแกรมภาษาไทย ข้อความแรกบนแถบสถานะต้องเป็นไทย** (เจอ "Ready" รอบ P5-9)
+    ///
+    /// `ShellState::default()` แปล "Ready" ด้วย `Lang::default()` (อังกฤษ) ไว้ก่อน
+    /// · ทุกข้อความหลังจากนั้นแปลถูก แต่ข้อความแรกไม่มีใครแปลซ้ำ
+    /// · ★ NC อยู่ในตัว: อังกฤษต้องได้ "Ready" — ไม่งั้นข้อนี้อาจผ่านเพราะสองภาษาเหมือนกัน
+    #[test]
+    fn the_first_status_is_in_the_language_the_app_opened_in() {
+        for lang in [Lang::Th, Lang::En] {
+            let app = RefxApp::new(AppArgs {
+                lang: Some(lang),
+                ..AppArgs::default()
+            });
+            assert_eq!(app.shell.status, text::t(lang, Key::Ready), "{lang:?}");
+        }
+        assert_ne!(text::t(Lang::Th, Key::Ready), text::t(Lang::En, Key::Ready));
     }
 
     /// ★★ **แถบโผล่ = นับหนึ่งรอบ** — และไม่ประทับ `.asked` (`docs/07 §4` · P5-9d)

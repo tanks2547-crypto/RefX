@@ -280,11 +280,56 @@ pub enum RecoverScope {
     KeptForLater,
 }
 
+/// ★ ไฟล์ถูกเขียนไว้นานแค่ไหนแล้ว — **ยังไม่ใช่ข้อความ** (แปลตอนวาด)
+///
+/// เดิมเป็น `String` ที่ประกอบบน worker ซึ่งไม่รู้ภาษา → UI ไทยขึ้น
+/// *"1 ชิ้น จากjust now"* (เจอบนแอปจริงรอบ P5-9) · เก็บเป็นตัวเลขแล้วให้
+/// [`age_text`] แปลตามภาษาที่กำลังวาด ไม่มีทางเหลือภาษาผิดค้างอีก
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Age {
+    /// ไม่ถึงนาที (หรือนาฬิกาเครื่องถอยหลัง — ไม่ใช่เรื่องต้องล้ม)
+    JustNow,
+    /// นาที
+    Minutes(u64),
+    /// ชั่วโมง
+    Hours(u64),
+    /// วัน
+    Days(u64),
+}
+
+impl Age {
+    /// อายุของสิ่งที่เขียนไว้ตอน `at` เมื่อมองจาก `now`
+    #[must_use]
+    pub fn between(at: std::time::SystemTime, now: std::time::SystemTime) -> Self {
+        let Ok(ago) = now.duration_since(at) else {
+            return Self::JustNow;
+        };
+        match ago.as_secs() / 60 {
+            0 => Self::JustNow,
+            mins @ 1..60 => Self::Minutes(mins),
+            mins @ 60..1440 => Self::Hours(mins / 60),
+            mins => Self::Days(mins / 1440),
+        }
+    }
+}
+
+/// [`Age`] เป็นข้อความในภาษาที่กำลังวาด
+#[must_use]
+pub fn age_text(lang: Lang, age: Age) -> String {
+    let (template, n) = match age {
+        Age::JustNow => return text::t(lang, Key::AgeJustNow).to_owned(),
+        Age::Minutes(n) => (Template::AgeMinutes, n),
+        Age::Hours(n) => (Template::AgeHours, n),
+        Age::Days(n) => (Template::AgeDays, n),
+    };
+    text::fill(lang, template, &[("n", &n.to_string())])
+}
+
 /// งานค้างที่เจอตอนเปิดโปรแกรม/เปิดเอกสาร — **ค่าสำหรับแสดงเท่านั้น** (P4-4)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecoverView {
-    /// เขียนไว้เมื่อไหร่ (ข้อความพร้อมแสดงแล้ว) — `None` = ระบบไฟล์ไม่บอก
-    pub when: Option<String>,
+    /// เขียนไว้นานแค่ไหนแล้ว — `None` = ระบบไฟล์ไม่บอก
+    pub when: Option<Age>,
     /// มีกี่ชิ้นอยู่ในนั้น — ช่วยผู้ใช้จำว่าเป็นงานชิ้นไหน
     pub items: usize,
     /// มาจากไหน — ตัวเลือกที่ผู้ใช้เห็นเหมือนกัน แต่ข้อความต้องตรงกับความจริง
@@ -1205,19 +1250,14 @@ fn recover_bar(ui: &mut egui::Ui, state: &mut ShellState, lang: Lang) {
                         .strong()
                         .color(warn_color(ui)),
                 );
+                let when = found.when.map_or_else(
+                    || text::t(lang, Key::RecoverWhenUnknown).to_owned(),
+                    |age| age_text(lang, age),
+                );
                 ui.label(text::fill(
                     lang,
                     Template::RecoverFound,
-                    &[
-                        ("items", &found.items.to_string()),
-                        (
-                            "when",
-                            found
-                                .when
-                                .as_deref()
-                                .unwrap_or_else(|| text::t(lang, Key::RecoverWhenUnknown)),
-                        ),
-                    ],
+                    &[("items", &found.items.to_string()), ("when", &when)],
                 ));
                 ui.separator();
                 // ★★ เรียงตาม **ความปลอดภัย** เหมือนแถบตอนปิด: ทางที่ไม่ทำงานหาย
@@ -3207,7 +3247,7 @@ mod tests {
         let ask = |scope: RecoverScope| {
             let mut state = ShellState {
                 recover_prompt: Some(RecoverView {
-                    when: Some("2 h ago".to_owned()),
+                    when: Some(Age::Hours(2)),
                     items: 7,
                     scope,
                 }),
@@ -4107,7 +4147,7 @@ mod tests {
             save_as_prompt: true,
             sidecar_prompt: Some("E:/ภาพอ้างอิง/มังกร".to_owned()),
             recover_prompt: Some(RecoverView {
-                when: Some("2 ชม.".to_owned()),
+                when: Some(Age::Hours(2)),
                 items: 3,
                 scope: RecoverScope::LastSession,
             }),
@@ -4217,6 +4257,56 @@ mod tests {
             Some(CloseChoice::SaveThenClose),
             "Enter ไม่ได้เลือกปุ่มปลอดภัย"
         );
+    }
+
+    /// ★★ **อายุของงานค้างต้องพูดภาษาเดียวกับจอ** (เจอ "1 ชิ้น จากjust now" รอบ P5-9)
+    ///
+    /// วาดแถบกู้คืนจริงในภาษาไทยทุกช่วงอายุ แล้วถามว่ามีคำอังกฤษหลุดมาไหม
+    /// · ★ NC อยู่ในตัว: ภาษาอังกฤษต้องเห็นคำอังกฤษ — ไม่งั้นข้อนี้อาจผ่านเพราะแถบไม่ถูกวาด
+    #[test]
+    fn the_age_of_waiting_work_is_told_in_the_language_on_screen() {
+        use std::time::{Duration, SystemTime};
+        let now = SystemTime::now();
+        let ago = |secs: u64| Age::between(now - Duration::from_secs(secs), now);
+        assert_eq!(ago(30), Age::JustNow);
+        assert_eq!(ago(37 * 60), Age::Minutes(37));
+        assert_eq!(ago(5 * 3600), Age::Hours(5));
+        assert_eq!(ago(3 * 86_400), Age::Days(3));
+        // นาฬิกาเครื่องถอยหลัง — ไม่ล้ม
+        assert_eq!(
+            Age::between(now + Duration::from_secs(60), now),
+            Age::JustNow
+        );
+
+        let ctx = egui::Context::default();
+        for age in [
+            Some(Age::JustNow),
+            Some(Age::Minutes(37)),
+            Some(Age::Hours(5)),
+            Some(Age::Days(3)),
+            None,
+        ] {
+            for lang in [Lang::Th, Lang::En] {
+                let mut state = ShellState {
+                    lang,
+                    recover_prompt: Some(RecoverView {
+                        when: age,
+                        items: 1,
+                        scope: RecoverScope::LastSession,
+                    }),
+                    ..ShellState::default()
+                };
+                let shown = two_frames(&ctx, &mut state, Vec::new())
+                    .into_iter()
+                    .map(|(_, text)| text)
+                    .find(|text| text.starts_with("1 "))
+                    .expect("บรรทัดจำนวนชิ้นไม่ถูกวาด");
+                let english = ["ago", "just now", "from", "earlier"]
+                    .iter()
+                    .any(|word| shown.contains(word));
+                assert_eq!(english, lang == Lang::En, "{age:?} {lang:?}: {shown:?}");
+            }
+        }
     }
 
     /// ทุกก้อนข้อความที่ถูกวาด **พร้อมกรอบของมันบนจอ**
