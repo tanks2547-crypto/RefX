@@ -1616,8 +1616,20 @@ pub fn draw_in_ui(
     });
 
     // ---- ล่างสุด: status bar (ต้องประกาศก่อน panel ซ้าย/ขวาเพื่อให้กินเต็มความกว้าง) ----
+    //
+    // ★★★ **สองแถว และทั้งสองแถว "ตัดขึ้นบรรทัด" แทน "ล้นขอบ"** (1 ต.ค. 2026)
+    //
+    //   เดิมเป็น `ui.horizontal` แถวเดียว ~15 ช่อง · ที่ 1280 px ตัวเลขตั้งแต่ RAM
+    //   ไปตกขอบขวา **ทุกเฟรม** และเมื่อมีข้อความยาว (ย้ายงานไป `recovery/kept/`)
+    //   มันถูกตัดหลังคำว่า "ที่" พอดี — path กับวิธีเปิดหายทั้งคู่ ซึ่งคือสองอย่างที่
+    //   ข้อความนั้นมีไว้บอก (`docs/07 §4`: "ห้ามเงียบตอนย้าย")
+    //
+    //   แถวบน = **ข้อความถึงผู้ใช้** (ป้าย `--data-root` · สถานะ · สี · ไม้บรรทัด)
+    //   แถวล่าง = **ตัวเลขประจำเครื่อง** · แยกกันเพื่อให้ข้อความยาวไม่ไปเบียดตัวเลข
+    //   ออกนอกจอ และตัวเลขไม่ไปเบียดข้อความ · ประตู
+    //   `nothing_on_the_status_bar_is_pushed_off_the_screen`
     egui::Panel::bottom("refx-status").show_inside(ui, |ui| {
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             // ★★★ ป้าย `--data-root` มาก่อน **แม้แต่ความคืบหน้า** (P5-9e)
             //
             //   ทุกอย่างที่เหลือบนแถบนี้เปลี่ยนไปตามงาน · ป้ายนี้ต้องอยู่ตลอดอายุโปรเซส
@@ -1677,7 +1689,8 @@ pub fn draw_in_ui(
                     m.angle_deg()
                 ));
             }
-            ui.separator();
+        });
+        ui.horizontal_wrapped(|ui| {
             ui.label(text::fill(
                 lang,
                 Template::ItemCount,
@@ -4204,6 +4217,125 @@ mod tests {
             Some(CloseChoice::SaveThenClose),
             "Enter ไม่ได้เลือกปุ่มปลอดภัย"
         );
+    }
+
+    /// ทุกก้อนข้อความที่ถูกวาด **พร้อมกรอบของมันบนจอ**
+    fn drawn_boxes(output: &egui::FullOutput) -> Vec<(egui::Rect, String)> {
+        fn walk(shape: &egui::Shape, out: &mut Vec<(egui::Rect, String)>) {
+            match shape {
+                egui::Shape::Text(text) => out.push((
+                    text.galley.rect.translate(text.pos.to_vec2()),
+                    text.galley.job.text.clone(),
+                )),
+                egui::Shape::Vec(shapes) => shapes.iter().for_each(|s| walk(s, out)),
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for shape in &output.shapes {
+            walk(&shape.shape, &mut out);
+        }
+        out
+    }
+
+    /// ★★★ **ไม่มีข้อความไหนบนแถบสถานะถูกดันตกขอบจอ** (ข้อความย้ายไป `kept/` · `docs/07 §4`)
+    ///
+    /// เจอบนแอปจริง 1 ต.ค. 2026: ข้อความ *"ย้ายไปเก็บไว้ที่ <path> - เปิดได้ด้วย Ctrl+O"*
+    /// ถูกตัดที่ขอบขวาพอดีหลังคำว่า "ที่" — **path กับวิธีเปิดหายไปทั้งคู่** ซึ่งคือ
+    /// สองอย่างที่ข้อความนั้นมีไว้บอก · และที่ 1280 px ตัวเลข RAM/VRAM/Cache
+    /// ตกขอบอยู่แล้วทุกเฟรมแม้ไม่มีข้อความยาว (บั๊กที่จดไว้ตั้งแต่รอบ P5-9)
+    ///
+    /// ★ ถาม **กรอบของ galley เทียบกับขอบจอ** ไม่ใช่ข้อความ — galley เก็บข้อความครบ
+    /// เสมอแม้ส่วนที่เกินขอบจะไม่มีวันถูกเห็น (เหตุผลเดียวกับประตู tofu)
+    ///
+    /// ★★ **และต้องถามว่าทุกอย่างยังถูกวาดอยู่** — egui ไม่ผลิต shape ให้ข้อความที่
+    /// ตกขอบ *ทั้งก้อน* · รุ่นแรกของประตูนี้จึงเห็นแค่ข้อความย้าย (ตกขอบครึ่งเดียว)
+    /// ส่วน RAM/VRAM/Cache ที่ตกไปทั้งตัว **ไม่โผล่ในรายการเลย** · รายการ "สิ่งที่ต้อง
+    /// เห็น" จึงมาจากการวาดสถานะเดียวกันบนจอกว้าง 6000 px ที่ไม่มีอะไรล้นได้ —
+    /// สร้างจากโค้ด ไม่ใช่พิมพ์มือ (`docs/03 §0` กติกาของรอบ 1 ต.ค. 2026)
+    #[test]
+    fn nothing_on_the_status_bar_is_pushed_off_the_screen() {
+        let ctx = egui::Context::default();
+        crate::fonts::install(&ctx);
+        let kept = r"C:\Users\someone\AppData\Local\RefX\data\recovery\kept";
+        let draw = |state: &mut ShellState, width: f32| {
+            let mut boxes = Vec::new();
+            for _ in 0..2 {
+                let input = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 800.0),
+                    )),
+                    ..Default::default()
+                };
+                let output = ctx.run_ui(input, |ui| {
+                    let _ = draw_in_ui(ui, state, |_, _| {});
+                });
+                boxes = drawn_boxes(&output);
+            }
+            boxes
+        };
+        for width in [1280.0_f32, 1024.0] {
+            for lang in [Lang::En, Lang::Th] {
+                let mut state = ShellState {
+                    lang,
+                    data_root: Some(r"C:\Users\someone\AppData\Local\Temp\refx-test-root\20261001-230000-ui-drive-12345".to_owned()),
+                    status: text::fill(
+                        lang,
+                        Template::RecoveryMovedToKept,
+                        &[("n", "1"), ("rounds", "3"), ("dir", kept)],
+                    ),
+                    status_warn: true,
+                    item_count: 10_000,
+                    zoom: 2.58,
+                    frames_drawn: 123_456,
+                    quiet_redraws: Some((82, "EguiRepaint")),
+                    ram_used: 900 << 20,
+                    ram_limit: 1 << 30,
+                    vram_used: 700 << 20,
+                    vram_limit: 1 << 30,
+                    cache_thumbs: 9_999,
+                    cache_bytes: 512 << 20,
+                    working_used: 300 << 20,
+                    working_limit: 512 << 20,
+                    draw_calls: 42,
+                    working_evicted: 17,
+                    atlas_uploads: 1_234,
+                    decode_queued: 88,
+                    decode_cancelled: 5,
+                    ..ShellState::default()
+                };
+                let wanted: std::collections::BTreeSet<String> = draw(&mut state, 6000.0)
+                    .into_iter()
+                    .map(|(_, text)| text)
+                    .collect();
+                assert!(
+                    wanted.iter().any(|text| text.contains(kept)),
+                    "{lang:?}: ข้อความย้ายไม่ได้ถูกวาดแม้บนจอกว้าง — ข้อนี้ไม่ได้ตรวจมัน"
+                );
+                let boxes = draw(&mut state, width);
+                let mut problems: Vec<String> = boxes
+                    .iter()
+                    .filter(|(rect, _)| rect.max.x > width + 0.5 || rect.min.x < -0.5)
+                    .map(|(rect, text)| {
+                        format!("ตกขอบ x {:.0}..{:.0} {text:?}", rect.min.x, rect.max.x)
+                    })
+                    .collect();
+                let seen: std::collections::BTreeSet<&str> =
+                    boxes.iter().map(|(_, text)| text.as_str()).collect();
+                problems.extend(
+                    wanted
+                        .iter()
+                        .filter(|text| !seen.contains(text.as_str()))
+                        .map(|text| format!("หายไปทั้งก้อน {text:?}")),
+                );
+                assert!(
+                    problems.is_empty(),
+                    "{width} px {lang:?}: ข้อความที่ผู้ใช้มองไม่เห็น:\n{}",
+                    problems.join("\n")
+                );
+            }
+        }
     }
 
     fn drawn_runs(output: &egui::FullOutput) -> Vec<(egui::FontId, String)> {
