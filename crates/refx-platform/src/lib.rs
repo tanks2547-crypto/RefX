@@ -10,6 +10,7 @@ pub mod fsops; // สลับไฟล์แบบทนไฟดับ (fsync 
 pub mod locale; // ภาษาที่ผู้ใช้ตั้งไว้ใน OS (เลือกภาษาเริ่มต้นของ UI — docs/03 §0)
 pub mod memory; // ถาม OS ว่าเครื่องมี RAM เท่าไหร่ (ตั้งเพดาน max_pixels)
 pub mod paths; // cache/config/log dir ตามมาตรฐานแต่ละ OS
+pub mod pointer; // เคอร์เซอร์อยู่ไหนตอนนี้ (จุดปล่อยของการลากวาง — winit 0.30 ไม่บอก)
 pub mod redraw; // RedrawTracker — ประตูเดียวที่ขอวาดเฟรมได้ (I-1)
 pub mod single_instance;
 pub mod window; // winit ApplicationHandler wrapper

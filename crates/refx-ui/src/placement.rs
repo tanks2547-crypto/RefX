@@ -1,4 +1,4 @@
-//! ★★★ ภาพที่เพิ่งลากเข้ามา **ไปลงที่ไหน และใหญ่เท่าไหร่** (ROADMAP P5-9b)
+//! ★★★ ภาพที่เพิ่งลากเข้ามา **ไปลงที่ไหน และใหญ่เท่าไหร่** (ROADMAP P5-9b · ของใหม่ลงตรงที่ชี้)
 //!
 //! # ทำไมต้องมีโมดูลนี้
 //!
@@ -13,19 +13,27 @@
 //! | | |
 //! |---|---|
 //! | ขนาด | **1 หน่วย world = 1 พิกเซลของภาพ ตอนวาง** — 2400 px ที่ซูม 25% = 600 px บนจอ |
-//! | ที่วาง | **ในบริเวณที่มองเห็นอยู่** — ไหลซ้าย → ขวาจากมุมบนซ้าย ขึ้นแถวใหม่ที่ขอบขวา |
+//! | ที่วาง | **ตรงที่ผู้ใช้ชี้** ([`Anchor`]) — ใบแรกกึ่งกลางอยู่ที่จุดนั้น · ใบต่อไปไหลไปทางขวา ขึ้นแถวใหม่ที่ขอบขวาของบริเวณที่เห็นตอนวาง |
 //! | กล้อง | **ไม่แตะ** — "การขยับมุมมองที่ผู้ใช้ไม่ได้ขอ คือการแย่งงานเขา" (`docs/02 §2.9`) |
+//!
+//! ★★★ **ตรงที่ชี้** (ROADMAP — ตัดสิน 1 ต.ค. 2026): ลากวาง = จุดที่ปล่อยเมาส์ ·
+//! วางจาก clipboard = เคอร์เซอร์ถ้าอยู่เหนือผืนผ้าใบ ไม่งั้นกลางจอ · รุ่นก่อน (P5-9b)
+//! ไหลจากมุมบนซ้ายของจอเสมอ แล้ว **ทับของเดิม** ที่อยู่ตรงนั้นโดยผู้ใช้ไม่ได้เลือก
+//! · ตอนนี้ถ้ามันทับ นั่นคือที่ผู้ใช้ชี้เอง — **ไม่ขยับของให้** เพราะนักวาดตั้งใจวางซ้อน
+//! บ่อย และเครื่องมือที่หาที่ว่างให้เองเดาไม่ได้ว่าของจะไปไหน
 //!
 //! ★ `docs/02 §2.1` บอกว่า `ItemCanvas.size` **ไม่ใช่** ขนาดพิกเซลต้นฉบับ — ถูก:
 //!   มันเป็นอิสระจากกันหลังวาง (ผู้ใช้ย่อ/ขยายได้) · สเปกไม่ได้บอกว่า **เริ่มที่เท่าไหร่**
 //!   → ตัดสินที่นี่ว่าเริ่มที่ 1:1 ตามที่เจ้าของโปรเจกต์คาด และตามที่โปรแกรมกลุ่มเดียวกันทำ
 //!
-//! # ★★ การไหลต่อเนื่องได้ตราบที่กล้องยังไม่ขยับ
+//! # ★★ การไหลหนึ่งสาย = การชี้หนึ่งครั้ง
 //!
-//! ลากชุดที่สองเข้ามาขณะชุดแรกยัง decode อยู่ ต้องไม่ทับชุดแรก → [`Flow`] ไม่ได้
-//! ถูกรีเซ็ตต่อการลากหนึ่งครั้ง แต่ **ผูกกับกล้อง ณ ตอนที่มันเริ่ม** · ผู้ใช้ pan/zoom
-//! เมื่อไหร่ ภาพใบถัดไปเริ่มไหลใหม่ในบริเวณที่เห็นตอนนั้น — ซึ่งคือกติกาเดียวกัน
-//! ("ลงในบริเวณที่เห็น") ใช้กับมุมมองใหม่
+//! ไฟล์ที่ปล่อยพร้อมกันได้ [`Anchor`] เดียวกัน · ภาพ decode เสร็จทีละใบ **ไม่เรียงกัน
+//! และปนกับชุดอื่นได้** ถ้าผู้ใช้ลากชุดที่สองไปอีกที่ระหว่างที่ชุดแรกยังโหลด → ผู้เรียก
+//! ถือ [`Flow`] แยกตาม [`Anchor`] แล้วหยิบสายที่ตรงกับงานใบนั้น ไม่ใช่ "สายล่าสุด"
+//!
+//! ★ กล้องขยับหลังวาง **ไม่เปลี่ยนที่วาง** — จุดที่ชี้เป็นพิกัด world แล้ว · กล้องมีผลกับ
+//!   เรื่องเดียวคือ fit บนกระดานว่าง ([`Flow::fits`] · [`Flow::belongs_to`])
 //!
 //! ★ โมดูลนี้ไม่แตะ GPU ไม่แตะ `Board` — คืนแค่ตำแหน่ง/ขนาด ให้ผู้เรียกห่อเป็น
 //!   `AddItems` เอง (I-3 · ทุกการเพิ่มผ่าน `Command`)
@@ -34,7 +42,7 @@ use refx_core::geom::Rect;
 use refx_core::glam::Vec2;
 use refx_core::layout::MAX_SIDE;
 
-/// สัดส่วนของขอบรอบบริเวณที่เห็น — ภาพไม่ชิดขอบจอ
+/// สัดส่วนของขอบรอบบริเวณที่เห็น — ภาพไม่ชิดขอบจอตอนขึ้นแถวใหม่
 const MARGIN: f32 = 0.05;
 /// ช่องว่างระหว่างภาพ เทียบกับความกว้างของบริเวณที่เห็น
 const GAP: f32 = 0.02;
@@ -43,8 +51,14 @@ const GAP: f32 = 0.02;
 /// ★ ไม่รู้ขนาดจริงเพราะอ่านหัวไฟล์ไม่ผ่าน · ขนาดตายตัวในหน่วย world จะเล็กจนอ่านป้าย
 ///   ไม่ออกตอนซูมออก และใหญ่จนบังทั้งจอตอนซูมเข้า → ผูกกับสิ่งที่ผู้ใช้เห็นอยู่
 const MISSING_WIDTH: f32 = 0.2;
+/// ★ แท็บหนึ่งถือการไหลค้างได้กี่สาย (I-6) — เกินแล้วทิ้งสายเก่าสุด
+///
+/// สายที่ถูกทิ้งแปลว่าชุดนั้นถูกลากมานานแล้วและยังมีใบค้าง decode อยู่ · ใบที่เหลือ
+/// เริ่มสายใหม่ที่จุดเดิม (ทับใบแรก ๆ ของชุดตัวเองได้) — ยอมรับได้เพราะต้องลากเกิน
+/// แปดจุดระหว่างที่ชุดแรกยังไม่เสร็จ
+pub const MAX_FLOWS: usize = 8;
 
-/// กล้อง ณ ตอนที่การไหลเริ่ม — เปลี่ยนเมื่อไหร่ = เริ่มไหลใหม่
+/// กล้อง ณ จังหวะหนึ่ง — ใช้ตอบว่า "ผู้ใช้แตะกล้องไปแล้วหรือยัง"
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ViewKey {
     center: Vec2,
@@ -59,34 +73,62 @@ impl ViewKey {
     }
 }
 
-/// การไหลของภาพใหม่ในบริเวณที่เห็นหนึ่งบริเวณ
+/// ★★★ **ตรงที่ผู้ใช้ชี้** — จุดใน world และบริเวณที่เขาเห็นอยู่ตอนนั้น
+///
+/// บริเวณที่เห็นถูกจดไว้ด้วยเพราะขนาดช่องว่าง/ขอบขึ้นแถวใหม่/กรอบ `Missing`
+/// ต้องผูกกับสิ่งที่ผู้ใช้เห็น **ตอนวาง** ไม่ใช่ตอนที่ภาพใบนั้นบังเอิญ decode เสร็จ
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Anchor {
+    point: Vec2,
+    view: Rect,
+}
+
+impl Anchor {
+    /// ชี้ที่ `point` ขณะเห็น `view`
+    #[must_use]
+    pub fn new(point: Vec2, view: Rect) -> Self {
+        Self { point, view }
+    }
+
+    /// ไม่มีจุดชี้ (เคอร์เซอร์ไม่อยู่เหนือผืนผ้าใบ · เปิดจากบรรทัดคำสั่ง) → **กลางจอ**
+    #[must_use]
+    pub fn center_of(view: Rect) -> Self {
+        Self::new(view.center(), view)
+    }
+
+    /// จุดที่ชี้
+    #[must_use]
+    pub fn point(&self) -> Vec2 {
+        self.point
+    }
+}
+
+/// การไหลของภาพใหม่จากจุดที่ชี้หนึ่งจุด
 #[derive(Debug, Clone, PartialEq)]
 pub struct Flow {
+    anchor: Anchor,
+    /// กล้อง ณ ตอนที่การไหลเริ่ม (หรือหลัง fit ของเราเอง)
     key: ViewKey,
-    view: Rect,
-    /// มุมบนซ้ายของช่องถัดไป
-    next: Vec2,
+    /// มุมบนซ้ายของช่องถัดไป — `None` = ยังไม่มีภาพใบแรก
+    next: Option<Vec2>,
+    /// ขอบซ้ายของทุกแถว = ขอบซ้ายของภาพใบแรก
+    row_left: f32,
     /// ขอบล่างของแถวปัจจุบัน — แถวถัดไปเริ่มใต้ตรงนี้
     row_bottom: f32,
-    /// แถวปัจจุบันมีภาพแล้วหรือยัง — ภาพแรกของแถวไม่ถูกดันขึ้นแถวใหม่แม้จะกว้างกว่าจอ
-    row_used: bool,
     /// ★ การไหลนี้เริ่มบน **กระดานว่าง** — กล้อง fit ตามได้ (P5-9b ส่วนที่ 2)
     fits: bool,
 }
 
 impl Flow {
-    /// เริ่มไหลที่มุมบนซ้ายของบริเวณที่เห็น
+    /// เริ่มไหลจากจุดที่ชี้
     #[must_use]
-    pub fn new(key: ViewKey, view: Rect) -> Self {
-        let size = view.size();
-        let margin = size.x.min(size.y) * MARGIN;
-        let start = view.min + Vec2::splat(margin);
+    pub fn new(key: ViewKey, anchor: Anchor) -> Self {
         Self {
+            anchor,
             key,
-            view,
-            next: start,
-            row_bottom: start.y,
-            row_used: false,
+            next: None,
+            row_left: anchor.point.x,
+            row_bottom: anchor.point.y,
             fits: false,
         }
     }
@@ -97,9 +139,6 @@ impl Flow {
     /// |---|---|
     /// | กระดานว่าง | fit ให้พอดี — ไม่มีมุมมองของผู้ใช้ให้รักษา |
     /// | มีของอยู่แล้ว | **ห้ามขยับ** — การขยับมุมมองที่ผู้ใช้ไม่ได้ขอ คือการแย่งงานเขา |
-    ///
-    /// ★ fit ต่อไปตราบที่กล้องยังเป็นของเรา — ผู้ใช้ pan/zoom เมื่อไหร่ [`Self::belongs_to`]
-    ///   ตอบ `false` แล้วการไหลใหม่ (ซึ่งกระดานไม่ว่างแล้ว) จะไม่ fit อีก
     #[must_use]
     pub fn on_empty_board(mut self) -> Self {
         self.fits = true;
@@ -112,17 +151,32 @@ impl Flow {
         self.fits
     }
 
-    /// ยังเป็นการไหลของกล้องตัวนี้อยู่ไหม
+    /// ★★ ผู้ใช้แตะกล้องแล้ว — **เลิก fit ถาวร** สำหรับสายนี้
+    ///
+    /// ที่วางไม่เปลี่ยน (ผูกกับจุดที่ชี้ใน world แล้ว) แต่กล้องกลับเป็นของผู้ใช้
+    pub fn stop_fitting(&mut self) {
+        self.fits = false;
+    }
+
+    /// เป็นสายของการชี้ครั้งนี้ไหม
+    #[must_use]
+    pub fn from(&self, anchor: Anchor) -> bool {
+        self.anchor == anchor
+    }
+
+    /// จุดที่สายนี้เริ่ม
+    #[must_use]
+    pub fn anchor(&self) -> Anchor {
+        self.anchor
+    }
+
+    /// กล้องยังเป็นตัวเดียวกับที่สายนี้รู้จักไหม (ผู้ใช้ยังไม่ได้แตะ)
     #[must_use]
     pub fn belongs_to(&self, key: ViewKey) -> bool {
         self.key == key
     }
 
-    /// ★★ กล้องขยับเพราะ **เรา fit เอง** ไม่ใช่ผู้ใช้ — การไหลยังเป็นชุดเดิม
-    ///
-    /// ถ้าไม่เรียก ภาพใบถัดไปจะเห็นกล้องใหม่แล้วเริ่มไหลใหม่ที่มุมบนซ้ายของ
-    /// บริเวณที่เห็นหลัง fit — **ซึ่งคือที่ที่ภาพใบแรก ๆ อยู่พอดี** = ทับกัน
-    /// · ผังยังเดินตามพิกัดเดิม ส่วนกล้องแค่ตามไปดู
+    /// ★★ กล้องขยับเพราะ **เรา fit เอง** ไม่ใช่ผู้ใช้ — ยังเป็นกล้องของสายนี้
     pub fn rekey(&mut self, key: ViewKey) {
         self.key = key;
     }
@@ -142,28 +196,49 @@ impl Flow {
 
     /// ที่วางของภาพที่เปิดไม่ได้ — ไม่รู้ขนาดจริง ใช้กรอบ 4:3 ตามสัดส่วนของบริเวณที่เห็น
     pub fn place_missing(&mut self) -> (Vec2, Vec2) {
-        let width = (self.view.size().x * MISSING_WIDTH).max(1.0);
+        let width = (self.anchor.view.size().x * MISSING_WIDTH).max(1.0);
         self.take(Vec2::new(width, width * 0.75))
     }
 
     fn take(&mut self, size: Vec2) -> (Vec2, Vec2) {
-        let view = self.view.size();
-        let margin = view.x.min(view.y) * MARGIN;
+        let view = self.anchor.view.size();
         let gap = view.x * GAP;
-        let right = self.view.max.x - margin;
-
-        // ขึ้นแถวใหม่ถ้าล้นขอบขวา — ยกเว้นภาพแรกของแถว (ภาพที่กว้างกว่าจอเอง
-        // ขึ้นแถวใหม่ไปก็ยังล้นอยู่ดี และจะทิ้งแถวว่างไว้ข้างบน)
-        if self.row_used && self.next.x + size.x > right {
-            self.next = Vec2::new(self.view.min.x + margin, self.row_bottom + gap);
-            self.row_used = false;
-        }
-        let top_left = self.next;
-        self.next.x += size.x + gap;
+        let Some(next) = self.next else {
+            // ★★★ ใบแรก: **กึ่งกลางอยู่ตรงที่ชี้พอดี** — สิ่งที่ผู้ใช้คาดจากการปล่อยเมาส์
+            let top_left = self.anchor.point - size * 0.5;
+            self.row_left = top_left.x;
+            self.row_bottom = top_left.y + size.y;
+            self.next = Some(Vec2::new(top_left.x + size.x + gap, top_left.y));
+            return (self.anchor.point, size);
+        };
+        // ขึ้นแถวใหม่ถ้าล้นขอบขวาของบริเวณที่เห็นตอนวาง · แถวใหม่เริ่มที่ขอบซ้ายของใบแรก
+        let right = self.anchor.view.max.x - view.x.min(view.y) * MARGIN;
+        let top_left = if next.x + size.x > right {
+            Vec2::new(self.row_left, self.row_bottom + gap)
+        } else {
+            next
+        };
+        self.next = Some(Vec2::new(top_left.x + size.x + gap, top_left.y));
         self.row_bottom = self.row_bottom.max(top_left.y + size.y);
-        self.row_used = true;
         (top_left + size * 0.5, size)
     }
+}
+
+/// ★ หาสายของการชี้ครั้งนี้ — ไม่มีก็เริ่มใหม่ (เก็บไม่เกิน [`MAX_FLOWS`] สาย · I-6)
+///
+/// `start` ถูกเรียกเฉพาะตอนต้องเริ่มสายใหม่ — ผู้เรียกตัดสินที่นั่นว่ากระดานว่างไหม
+pub fn flow_for(flows: &mut Vec<Flow>, anchor: Anchor, start: impl FnOnce() -> Flow) -> &mut Flow {
+    let index = match flows.iter().position(|flow| flow.from(anchor)) {
+        Some(index) => index,
+        None => {
+            if flows.len() >= MAX_FLOWS {
+                flows.remove(0);
+            }
+            flows.push(start());
+            flows.len() - 1
+        }
+    };
+    &mut flows[index]
 }
 
 #[cfg(test)]
@@ -172,12 +247,16 @@ mod tests {
 
     use super::*;
 
+    /// หน้าต่าง 1280×800 เหมือนภาพหน้าจอที่ใช้วัด
     fn view(center: Vec2, zoom: f32) -> (ViewKey, Rect) {
-        // หน้าต่าง 1280×800 เหมือนภาพหน้าจอที่ใช้วัด
         (
             ViewKey::new(center, zoom),
             Rect::from_center_size(center, Vec2::new(1280.0, 800.0) / zoom),
         )
+    }
+
+    fn overlap(a: Rect, b: Rect) -> bool {
+        a.min.x < b.max.x && b.min.x < a.max.x && a.min.y < b.max.y && b.min.y < a.max.y
     }
 
     /// ★★★ **ภาพของจริงของเจ้าของโปรเจกต์** — ต้องได้ขนาดพิกเซลของมัน ไม่ใช่ 128
@@ -186,7 +265,7 @@ mod tests {
     #[test]
     fn the_images_from_the_real_drag_land_at_their_own_pixel_size() {
         let (key, rect) = view(Vec2::splat(2000.0), 0.25);
-        let mut flow = Flow::new(key, rect);
+        let mut flow = Flow::new(key, Anchor::center_of(rect));
         for (w, h) in [(2560, 3712), (3034, 4156), (4000, 6641)] {
             let (_, size) = flow.place_image(w, h);
             #[expect(clippy::cast_precision_loss, reason = "ขนาดทดสอบเล็ก")]
@@ -197,66 +276,121 @@ mod tests {
         }
     }
 
-    /// ★★ ภาพแรกต้อง **อยู่ในบริเวณที่เห็น** — ที่ไหนก็ได้บนโลก ไม่ใช่ที่ 2000 เสมอ
+    /// ★★★ **ใบแรกกึ่งกลางอยู่ตรงที่ชี้** — ที่ไหนก็ได้บนโลก ทุกระดับซูม
     #[test]
-    fn the_first_image_lands_inside_what_the_user_is_looking_at() {
-        for (center, zoom) in [
-            (Vec2::splat(2000.0), 0.25),
-            (Vec2::new(-50_000.0, 7_000.0), 1.0),
-            (Vec2::ZERO, 4.0),
+    fn the_first_image_is_centred_where_the_user_pointed() {
+        for (center, zoom, point) in [
+            (Vec2::splat(2000.0), 0.25, Vec2::new(1500.0, 2600.0)),
+            (
+                Vec2::new(-50_000.0, 7_000.0),
+                1.0,
+                Vec2::new(-50_400.0, 6_900.0),
+            ),
+            (Vec2::ZERO, 4.0, Vec2::new(10.0, -20.0)),
         ] {
             let (key, rect) = view(center, zoom);
-            let mut flow = Flow::new(key, rect);
-            let (pos, size) = flow.place_image(100, 80);
-            let item = Rect::from_center_size(pos, size);
-            assert!(
-                item.min.x >= rect.min.x
-                    && item.min.y >= rect.min.y
-                    && item.max.x <= rect.max.x
-                    && item.max.y <= rect.max.y,
-                "ภาพเล็กไปลงนอกบริเวณที่เห็น: {item:?} ไม่อยู่ใน {rect:?}"
-            );
+            let mut flow = Flow::new(key, Anchor::new(point, rect));
+            let (pos, _) = flow.place_image(100, 80);
+            assert_eq!(pos, point, "ภาพใบแรกไม่ได้อยู่ตรงที่ชี้");
+            let mut missing = Flow::new(key, Anchor::new(point, rect));
+            assert_eq!(missing.place_missing().0, point, "ใบที่เปิดไม่ได้ไม่ได้อยู่ตรงที่ชี้");
         }
     }
 
-    /// ★★ ภาพในชุดเดียวกัน **ไม่ทับกัน** — ทั้งในแถวเดียวกันและตอนขึ้นแถวใหม่
+    /// ★ ไม่มีจุดชี้ = กลางจอ (วางจาก clipboard ตอนเคอร์เซอร์อยู่นอกผืนผ้าใบ)
     #[test]
-    fn images_in_one_flow_never_overlap() {
-        let (key, rect) = view(Vec2::ZERO, 0.25);
-        let mut flow = Flow::new(key, rect);
-        let placed: Vec<Rect> = [
-            (2400, 1600),
-            (1200, 3000),
-            (800, 800),
-            (5000, 400),
-            (300, 300),
-            (4000, 6641),
-        ]
-        .iter()
-        .map(|&(w, h)| {
-            let (pos, size) = flow.place_image(w, h);
-            Rect::from_center_size(pos, size)
-        })
-        .collect();
-        for (i, a) in placed.iter().enumerate() {
-            for b in &placed[i + 1..] {
-                let overlap = a.min.x < b.max.x
-                    && b.min.x < a.max.x
-                    && a.min.y < b.max.y
-                    && b.min.y < a.max.y;
-                assert!(!overlap, "ภาพทับกัน: {a:?} กับ {b:?}");
+    fn with_nothing_pointed_at_it_lands_in_the_middle_of_the_view() {
+        let (key, rect) = view(Vec2::new(300.0, -40.0), 0.5);
+        let mut flow = Flow::new(key, Anchor::center_of(rect));
+        assert_eq!(flow.place_image(640, 480).0, rect.center());
+    }
+
+    /// ★★ ภาพในชุดเดียวกัน **ไม่ทับกันเอง** — ทั้งในแถวเดียวกันและตอนขึ้นแถวใหม่
+    ///
+    /// (ทับ **ของเดิม** บนกระดานได้ — นั่นคือที่ผู้ใช้ชี้เอง · ข้อนี้คุมแค่ชุดเดียวกัน)
+    #[test]
+    fn images_in_one_flow_never_overlap_each_other() {
+        for point in [
+            Vec2::ZERO,
+            Vec2::new(2000.0, 0.0),
+            Vec2::new(-2400.0, 1500.0),
+        ] {
+            let (key, rect) = view(Vec2::ZERO, 0.25);
+            let mut flow = Flow::new(key, Anchor::new(point, rect));
+            let placed: Vec<Rect> = [
+                (2400, 1600),
+                (1200, 3000),
+                (800, 800),
+                (5000, 400),
+                (300, 300),
+                (4000, 6641),
+            ]
+            .iter()
+            .map(|&(w, h)| {
+                let (pos, size) = flow.place_image(w, h);
+                Rect::from_center_size(pos, size)
+            })
+            .collect();
+            for (i, a) in placed.iter().enumerate() {
+                for b in &placed[i + 1..] {
+                    assert!(!overlap(*a, *b), "ชี้ที่ {point}: ภาพทับกัน {a:?} กับ {b:?}");
+                }
             }
         }
     }
 
-    /// ★ ภาพที่กว้างกว่าจอเองไม่ทิ้งแถวว่างไว้ข้างบน
+    /// ★★ ใบต่อไปไหลไปทางขวาของใบแรก — ไม่กระโดดกลับไปที่มุมจอ
     #[test]
-    fn an_image_wider_than_the_view_starts_its_own_row_without_an_empty_one_above() {
+    fn the_rest_of_the_batch_flows_on_from_the_pointed_spot() {
         let (key, rect) = view(Vec2::ZERO, 1.0);
-        let mut flow = Flow::new(key, rect);
-        let (first, _) = flow.place_image(5000, 100);
-        let top = rect.min.y + 800.0f32.min(1280.0) * MARGIN;
-        assert_eq!(first.y - 50.0, top, "ภาพแรกถูกดันลงแถวถัดไป");
+        let mut flow = Flow::new(key, Anchor::new(Vec2::new(-300.0, -200.0), rect));
+        let (a, sa) = flow.place_image(100, 100);
+        let (b, _) = flow.place_image(100, 100);
+        assert!(b.x > a.x + sa.x * 0.5, "ใบที่สองไม่ได้อยู่ทางขวาของใบแรก");
+        assert_eq!(b.y, a.y, "ใบที่สองไม่ได้อยู่แถวเดียวกัน");
+    }
+
+    /// ★★★ **สองการชี้ = สองสาย** แม้ผลจะกลับมาสลับกัน
+    ///
+    /// ลากชุด A ไปซ้าย แล้วลากชุด B ไปขวาระหว่างที่ A ยังโหลด · ผลกลับมา A B A B
+    /// → ทุกใบของ A ต้องอยู่ฝั่งซ้าย ทุกใบของ B ฝั่งขวา · ถ้าผู้เรียกใช้ "สายล่าสุด"
+    /// ใบที่สองของ A จะไปต่อท้าย B
+    #[test]
+    fn two_drops_at_two_places_keep_their_own_flows_while_results_interleave() {
+        let (key, rect) = view(Vec2::ZERO, 1.0);
+        let left = Anchor::new(Vec2::new(-400.0, 0.0), rect);
+        let right = Anchor::new(Vec2::new(400.0, 0.0), rect);
+        let mut flows = Vec::new();
+        let mut placed = Vec::new();
+        for anchor in [left, right, left, right, left] {
+            let flow = flow_for(&mut flows, anchor, || Flow::new(key, anchor));
+            placed.push((anchor, flow.place_image(50, 50).0));
+        }
+        assert_eq!(flows.len(), 2);
+        for (anchor, pos) in placed {
+            if anchor == left {
+                assert!(pos.x < 0.0, "ใบของชุดซ้ายไปตกฝั่งขวา: {pos}");
+            } else {
+                assert!(pos.x > 0.0, "ใบของชุดขวาไปตกฝั่งซ้าย: {pos}");
+            }
+        }
+        // NC — ใช้สายเดียวสำหรับทุกใบ แล้วใบของชุดซ้ายต้องไหลไปต่อท้ายจนข้ามฝั่ง
+        let mut one = Flow::new(key, left);
+        let xs: Vec<f32> = (0..5).map(|_| one.place_image(50, 50).0.x).collect();
+        assert!(xs.iter().any(|x| *x > -300.0), "NC ไม่แสดงความต่าง: {xs:?}");
+    }
+
+    /// ★ เก็บสายไม่เกินเพดาน (I-6) — สายเก่าสุดถูกทิ้ง
+    #[test]
+    fn a_tab_never_holds_more_than_the_cap_of_flows() {
+        let (key, rect) = view(Vec2::ZERO, 1.0);
+        let mut flows = Vec::new();
+        for i in 0..MAX_FLOWS * 3 {
+            #[expect(clippy::cast_precision_loss, reason = "ตัวเลขเล็ก")]
+            let anchor = Anchor::new(Vec2::new(i as f32 * 10.0, 0.0), rect);
+            let _ = flow_for(&mut flows, anchor, || Flow::new(key, anchor));
+        }
+        assert_eq!(flows.len(), MAX_FLOWS);
     }
 
     /// ★ `Missing` ผูกกับบริเวณที่เห็น — อ่านป้ายออกได้ทุกระดับซูม
@@ -264,7 +398,7 @@ mod tests {
     fn a_missing_image_frame_scales_with_the_view() {
         for zoom in [0.05, 1.0, 16.0] {
             let (key, rect) = view(Vec2::ZERO, zoom);
-            let mut flow = Flow::new(key, rect);
+            let mut flow = Flow::new(key, Anchor::center_of(rect));
             let (_, size) = flow.place_missing();
             let on_screen = size.x * zoom;
             assert!(
@@ -274,35 +408,20 @@ mod tests {
         }
     }
 
-    /// ★★ fit ของเราเองไม่ทำให้ชุดเดียวกันไหลใหม่ทับตัวเอง
+    /// ★★ fit ของเราเองไม่ทำให้สายเลิก fit · ผู้ใช้แตะกล้องแล้วเลิกถาวร
     #[test]
-    fn our_own_fit_keeps_the_flow_going_instead_of_restarting_on_top_of_it() {
+    fn our_own_fit_keeps_fitting_and_the_users_touch_stops_it() {
         let (key, rect) = view(Vec2::ZERO, 0.25);
-        let mut flow = Flow::new(key, rect).on_empty_board();
+        let mut flow = Flow::new(key, Anchor::center_of(rect)).on_empty_board();
         assert!(flow.fits());
-        let (a, sa) = flow.place_image(2400, 1600);
-        // กล้องย้ายเพราะเรา fit → rekey · การไหลเดิมเดินต่อ
+        let (a, _) = flow.place_image(2400, 1600);
         let fitted = ViewKey::new(a, 0.4);
         flow.rekey(fitted);
         assert!(flow.belongs_to(fitted));
-        let (b, sb) = flow.place_image(2400, 1600);
-        let (ra, rb) = (Rect::from_center_size(a, sa), Rect::from_center_size(b, sb));
-        let overlap = ra.min.x < rb.max.x
-            && rb.min.x < ra.max.x
-            && ra.min.y < rb.max.y
-            && rb.min.y < ra.max.y;
-        assert!(!overlap, "ภาพใบที่สองทับใบแรกหลัง fit");
+        assert!(!flow.belongs_to(ViewKey::new(a + Vec2::X, 0.4)));
+        flow.stop_fitting();
+        assert!(!flow.fits());
         // ค่าปริยาย: ไม่ fit (มีของอยู่แล้ว = ห้ามขยับกล้อง)
-        assert!(!Flow::new(key, rect).fits());
-    }
-
-    /// ★ การไหลรู้ว่ากล้องขยับแล้ว — ผู้เรียกใช้ตัวนี้ตัดสินว่าจะเริ่มไหลใหม่
-    #[test]
-    fn a_flow_knows_the_camera_it_started_with() {
-        let (key, rect) = view(Vec2::ZERO, 1.0);
-        let flow = Flow::new(key, rect);
-        assert!(flow.belongs_to(ViewKey::new(Vec2::ZERO, 1.0)));
-        assert!(!flow.belongs_to(ViewKey::new(Vec2::new(1.0, 0.0), 1.0)));
-        assert!(!flow.belongs_to(ViewKey::new(Vec2::ZERO, 0.5)));
+        assert!(!Flow::new(key, Anchor::center_of(rect)).fits());
     }
 }

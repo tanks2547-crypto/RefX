@@ -862,11 +862,11 @@ struct Doc {
     pending_snapshot: Option<Box<refx_io::autosave::Pending>>,
     /// ★★★ งานที่ผู้ใช้เคยสั่ง **"เก็บไว้ก่อน"** ของเอกสารฉบับนี้ (`docs/07 §4`)
     pending_kept: Option<Box<refx_io::autosave::Pending>>,
-    /// ★ ภาพใหม่ของแท็บนี้กำลังไหลลงบริเวณไหน (P5-9b) — ดู [`crate::placement`]
+    /// ★ ภาพใหม่ของแท็บนี้กำลังไหลจากจุดไหนบ้าง — **หนึ่งสายต่อการชี้หนึ่งครั้ง**
+    /// (ดู [`crate::placement`] · มีเพดาน `placement::MAX_FLOWS`)
     ///
-    /// ผูกกับกล้อง ณ ตอนที่มันเริ่ม · กล้องขยับเมื่อไหร่ ภาพใบถัดไปเริ่มไหลใหม่
-    /// ในบริเวณที่เห็นตอนนั้น · สถานะของมุมมอง ไม่ใช่ของเอกสาร — ไม่ถูกบันทึก
-    drop_flow: Option<crate::placement::Flow>,
+    /// สถานะของมุมมอง ไม่ใช่ของเอกสาร — ไม่ถูกบันทึก
+    drop_flows: Vec<crate::placement::Flow>,
     /// ★★★ คีย์งาน decode → `ItemId` **ของแท็บนี้** ที่ผลลัพธ์ต้องไปเกาะ
     ///
     /// ★★ ต้องอยู่ต่อแท็บเพราะค่าคือ `ItemId` ซึ่งไม่ผูกกับ board — เก็บรวมกัน
@@ -909,7 +909,7 @@ impl Doc {
             adopted_kept: None,
             pending_snapshot: None,
             pending_kept: None,
-            drop_flow: None,
+            drop_flows: Vec::new(),
             relink_targets: std::collections::HashMap::new(),
             sidecar: crate::sidecar::Folders::default(),
         }
@@ -1936,6 +1936,16 @@ pub struct RefxApp {
     ///
     /// ★ ล้างเมื่อผลกลับมาถึง หรือเมื่อแท็บถูกปิด — ดู [`RefxApp::forget_jobs_of`]
     job_owner: std::collections::HashMap<refx_asset::hash::ContentHash, refx_core::arena::BoardId>,
+    /// ★★★ **ตรงที่ผู้ใช้ชี้ตอนสั่งงานใบนี้** — ลากวาง / วาง (ROADMAP ตัดสิน 1 ต.ค. 2026)
+    ///
+    /// ผลกลับมาทีละใบไม่เรียงกัน และปนกับชุดที่ลากทีหลังได้ · การจำ "จุดล่าสุด" ไว้ที่
+    /// แท็บจะส่งใบที่เหลือของชุดแรกไปต่อท้ายชุดที่สอง · ล้างพร้อม `job_owner` เสมอ
+    job_anchor: std::collections::HashMap<refx_asset::hash::ContentHash, crate::placement::Anchor>,
+    /// ★ จุดที่ปล่อยเมาส์ของการลากวางที่กำลังรวมชุด (physical pixel บนหน้าต่าง)
+    ///
+    /// winit 0.30 รับจุดปล่อยจาก OS แล้วทิ้ง (`drop_handler.rs` — `_pt`) · อ่านจาก
+    /// `refx_platform::pointer` ตอนไฟล์แรกของชุดมาถึง ซึ่งเกิด **ระหว่าง** การปล่อยเมาส์
+    drop_point: Option<Vec2>,
     /// ★ โฟลเดอร์ `<data_dir>/recovery` — `None` = หาที่อยู่ไม่ได้ (ไม่มี home dir)
     ///
     /// **ห้ามตกมาที่ `cache_dir`** ถ้าหาไม่เจอ (`docs/07 §4`) — ยอมไม่มี autosave
@@ -2498,6 +2508,16 @@ fn probe_board_id() -> refx_core::arena::BoardId {
     refx_core::arena::BoardId::from_parts(u32::MAX, 0)
 }
 
+/// ภาพที่เปิดไม่ได้ซึ่งรอกลายเป็น `Missing` บนกระดาน:
+/// (คีย์งาน · แท็บเจ้าของ · ที่มา · ตรงที่ผู้ใช้ชี้ · เหตุผล)
+type DamagedJob = (
+    refx_asset::hash::ContentHash,
+    Option<refx_core::arena::BoardId>,
+    Option<refx_asset::pool::JobSource>,
+    Option<crate::placement::Anchor>,
+    refx_core::board::MissingReason,
+);
+
 /// งานค้างจาก session ก่อนที่กำลังรอให้ผู้ใช้ตัดสิน (P4-4)
 #[derive(Debug, Clone)]
 struct PendingRecovery {
@@ -2919,6 +2939,8 @@ impl RefxApp {
             recovery_ask_count: None,
             recovery_checked: false,
             job_owner: std::collections::HashMap::new(),
+            job_anchor: std::collections::HashMap::new(),
+            drop_point: None,
             // ผู้เรียก (`run`) เสียบให้ — ที่นี่ไม่รู้จัก `AppPaths`
             recovery_dir: None,
             spool_dir: None,
@@ -3075,6 +3097,10 @@ impl RefxApp {
         // ★★★ ภาพที่ลากเข้ามาเป็นของ **แท็บที่ผู้ใช้กำลังดูตอนที่เขาปล่อยเมาส์**
         //     — ไม่ใช่แท็บที่เขาบังเอิญสลับไปตอนงาน decode เสร็จ (P4-7c)
         let owner = self.docs.active().id;
+        // ★★★ **ลงที่จุดที่ปล่อยเมาส์** · ไฟล์ทั้งชุดได้จุดเดียวกัน แล้วไหลต่อจากตรงนั้น
+        //     · ไม่รู้จุด (`--open-dir` · OS ที่บอกไม่ได้) = กลางจอ
+        let pointer = self.drop_point.take();
+        let anchor = self.anchor_here(pointer);
         let mut submitted = Vec::with_capacity(paths.len());
         for (i, path) in paths.into_iter().enumerate() {
             // hash จาก path ไปก่อน — hash เนื้อไฟล์จริงเกิดบน worker (P1-2)
@@ -3091,7 +3117,7 @@ impl RefxApp {
                 target: refx_asset::pool::JobTarget::Thumbnail,
             });
         }
-        self.submit_thumbnail_jobs(owner, submitted);
+        self.submit_thumbnail_jobs(owner, Some(anchor), submitted);
         self.shell.status = text::fill(
             self.shell.lang,
             Template::OpeningFiles,
@@ -3124,8 +3150,18 @@ impl RefxApp {
 
         // ★★★ ภาพที่วางเป็นของแท็บที่ผู้ใช้กด `Ctrl+V` อยู่ (P4-7c)
         let owner = self.docs.active().id;
+        // ★★★ **ลงที่เคอร์เซอร์ถ้ามันอยู่เหนือผืนผ้าใบ ไม่งั้นกลางจอ** (ตัดสิน 1 ต.ค. 2026)
+        //     · egui รู้ตำแหน่งเคอร์เซอร์อยู่แล้ว (`hover_pos` = `None` เมื่ออยู่นอกหน้าต่าง)
+        let pointer = self.gfx.as_ref().and_then(|gfx| {
+            let ppp = gfx.egui_ctx.pixels_per_point();
+            gfx.egui_ctx
+                .input(|i| i.pointer.hover_pos())
+                .map(|pos| Vec2::new(pos.x, pos.y) * ppp)
+        });
+        let anchor = self.anchor_here(pointer);
         self.submit_thumbnail_jobs(
             owner,
+            Some(anchor),
             vec![refx_asset::pool::Job {
                 hash,
                 source: refx_asset::pool::JobSource::Clipboard,
@@ -3142,6 +3178,15 @@ impl RefxApp {
         self.shell.status = text::t(self.shell.lang, Key::ReadingClipboard).to_owned();
     }
 
+    /// ตรงที่ผู้ใช้ชี้บนแท็บที่ดูอยู่ — ดู [`Self::pointed_anchor`]
+    fn anchor_here(&self, pointer: Option<Vec2>) -> crate::placement::Anchor {
+        let canvas = self
+            .gfx
+            .as_ref()
+            .map_or_else(|| CanvasRect::full(1280, 800), |gfx| gfx.canvas);
+        Self::pointed_anchor(self.docs.active(), canvas, pointer)
+    }
+
     /// ★★★ **ทางเดียวที่งาน thumbnail ถูกส่งเข้า pool** — จดเจ้าของให้เสมอ
     ///
     /// ## ทำไมต้องเป็นประตูเดียว
@@ -3156,9 +3201,13 @@ impl RefxApp {
     /// (`docs/08 §3.9` ข้อ 5: บั๊กชนิด "ทุกชิ้นถูก ประกอบผิด")
     ///
     /// → รวมสามอย่างไว้ที่นี่ (คีย์ · ที่มา · เจ้าของ) ให้ลืมทีละอย่างไม่ได้
+    ///
+    /// ★ `anchor` = ตรงที่ผู้ใช้ชี้ (ภาพใหม่) · `None` = งานที่ไม่สร้างใบใหม่ (ภาพของ
+    ///   เอกสารที่เปิดมาจากไฟล์ — ตำแหน่งมาจากไฟล์แล้ว)
     fn submit_thumbnail_jobs(
         &mut self,
         owner: refx_core::arena::BoardId,
+        anchor: Option<crate::placement::Anchor>,
         jobs: Vec<refx_asset::pool::Job>,
     ) {
         for job in jobs {
@@ -3168,6 +3217,9 @@ impl RefxApp {
             );
             self.job_sources.insert(job.hash, job.source.clone());
             self.job_owner.insert(job.hash, owner);
+            if let Some(anchor) = anchor {
+                self.job_anchor.insert(job.hash, anchor);
+            }
             if let Some(assets) = self.assets.as_ref() {
                 assets.pool.submit(job);
             }
@@ -3272,12 +3324,7 @@ impl RefxApp {
         // ไฟล์ที่พบใน clipboard — ส่งต่อเข้าเส้นทาง drag & drop หลังปล่อย borrow
         let mut pasted_files: Vec<std::path::PathBuf> = Vec::new();
         // ★ ใบที่เปิดไม่ได้ — กลายเป็น `Missing` หลังจบลูป (ดูกิ่ง `Failed`)
-        let mut damaged: Vec<(
-            refx_asset::hash::ContentHash,
-            Option<refx_core::arena::BoardId>,
-            Option<refx_asset::pool::JobSource>,
-            refx_core::board::MissingReason,
-        )> = Vec::new();
+        let mut damaged: Vec<DamagedJob> = Vec::new();
         while let Some(result) = assets.pool.try_recv() {
             // งานวางจบแล้วไม่ว่าผลจะเป็นอะไร — เปิดทางให้กด Ctrl+V ครั้งต่อไปได้
             if self.paste_in_flight == Some(result.hash()) {
@@ -3377,6 +3424,7 @@ impl RefxApp {
                             //   ไม่เก็บกวาด = ตารางโตตลอดอายุโปรแกรม (I-6)
                             self.job_owner.remove(&hash);
                             self.job_sources.remove(&hash);
+                            self.job_anchor.remove(&hash);
                         }
                         // ★ ต้องปลดคีย์ออกจาก `working_pending` ด้วย ไม่งั้นภาพใบนั้น
                         //   จะ **ไม่มีวันถูกขอภาพคมอีกเลย** ตลอดอายุโปรแกรม —
@@ -3428,6 +3476,7 @@ impl RefxApp {
                                 hash,
                                 self.job_owner.remove(&hash),
                                 self.job_sources.remove(&hash),
+                                self.job_anchor.remove(&hash),
                                 refx_core::board::MissingReason::from(&reason),
                             ));
                         }
@@ -3481,7 +3530,7 @@ impl RefxApp {
         //   ช่องว่างไม่มีพิกเซลให้อัปขึ้น atlas · ถ้าไปผูกกับ `gfx.as_mut()`
         //   เหมือนบล็อกข้างล่าง การ return ตอนไม่มี GPU จะทำให้ใบพวกนี้ไม่ถูกนับ
         //   แล้ว `DropBatch::settled()` จะไม่มีวันเป็นจริง = แถบ "กำลังโหลด" ค้างถาวร
-        for (hash, owner, source, reason) in damaged {
+        for (hash, owner, source, anchor, reason) in damaged {
             let Some(index) = owner.and_then(|id| self.docs.list.iter().position(|d| d.id == id))
             else {
                 // แท็บถูกปิดไประหว่างที่งานเดินอยู่ — ไม่มีที่ให้ผลลง
@@ -3525,7 +3574,8 @@ impl RefxApp {
             // ★ ไหลลงบริเวณที่เห็นเดียวกับภาพที่เปิดได้ (P5-9b) — ใบที่เสียต้องอยู่ใน
             //   ลำดับที่ผู้ใช้ลากเข้ามา ไม่ใช่กองรวมกันที่มุมใดมุมหนึ่ง · ไม่รู้สัดส่วนจริง
             //   เพราะอ่านหัวไฟล์ไม่ผ่าน → กรอบ 4:3 ตามขนาดของบริเวณที่เห็น
-            let (center, size) = Self::drop_flow(doc, canvas).place_missing();
+            let anchor = Self::anchor_or_latest(doc, anchor, canvas);
+            let (center, size) = Self::drop_flow(doc, anchor).place_missing();
             let item = Item::new(ItemKind::Missing {
                 original_path,
                 reason,
@@ -3556,7 +3606,7 @@ impl RefxApp {
                 doc.index.insert(id, &canvas);
             }
             // ★ ใบที่เสียก็เป็นส่วนหนึ่งของชุด — กล้องต้องเห็นมันด้วย (P5-9b)
-            Self::follow_new_items(doc, canvas);
+            Self::follow_new_items(doc, anchor, canvas);
             // ★ นับเป็น `added` เพราะ **ผู้ใช้เห็นมันบนกระดานจริง ๆ** ·
             //   `damaged` เป็นตัวนับแยกสำหรับข้อความสรุป — ถ้านับทั้งสองช่อง
             //   ลง `answered()` งวดจะจบเร็วไปหนึ่งเท่าตัว
@@ -3576,6 +3626,7 @@ impl RefxApp {
                 shell,
                 spool_dir,
                 job_owner,
+                job_anchor,
                 ..
             } = self;
             let Some(gfx) = gfx.as_mut() else {
@@ -3589,6 +3640,7 @@ impl RefxApp {
                 //     สลับไปดูตอนงานเสร็จ · คีย์งานถูกผูกกับ board ตั้งแต่ตอนส่ง
                 //     (ดู `job_key_for`) ตารางนี้จึงตอบได้เสมอ
                 let owner = job_owner.remove(&hash);
+                let anchor = job_anchor.remove(&hash);
                 let Some(index) = owner.and_then(|id| docs.list.iter().position(|d| d.id == id))
                 else {
                     // แท็บถูกปิดไประหว่างที่งานเดินอยู่ = ไม่มีที่ให้ผลลง
@@ -3655,8 +3707,8 @@ impl RefxApp {
                         //   ≈ 30 px บนจอที่ซูม 25% · ตอนนี้ 1 หน่วย world = 1 พิกเซลตอนวาง
                         //   และไหลลงบริเวณที่ผู้ใช้กำลังดูอยู่ โดย **ไม่แตะกล้อง**
                         let (sw, sh) = (thumb.source_width, thumb.source_height);
-                        let (center, size) =
-                            Self::drop_flow(doc, Some(gfx.canvas.size)).place_image(sw, sh);
+                        let anchor = Self::anchor_or_latest(doc, anchor, Some(gfx.canvas.size));
+                        let (center, size) = Self::drop_flow(doc, anchor).place_image(sw, sh);
 
                         let item = Item::new(ItemKind::Image(AssetRef {
                             hash: asset_hash,
@@ -3712,7 +3764,7 @@ impl RefxApp {
                             doc.index.insert(id, &canvas);
                         }
                         // ★ กระดานที่ว่างก่อนชุดนี้ = กล้องตามภาพไปให้เห็นทั้งหมด (P5-9b)
-                        Self::follow_new_items(doc, Some(gfx.canvas.size));
+                        Self::follow_new_items(doc, anchor, Some(gfx.canvas.size));
                         doc.render_state.insert(
                             id,
                             ItemRender {
@@ -4394,35 +4446,72 @@ impl RefxApp {
         Some(hash)
     }
 
-    /// ★ การไหลของภาพใหม่ในแท็บนี้ — **เริ่มใหม่ในบริเวณที่เห็น ถ้ากล้องขยับไปแล้ว** (P5-9b)
+    /// บริเวณที่เห็นของแท็บนี้ในหน่วย world
     ///
     /// `canvas` = ขนาดช่อง canvas เป็นพิกเซล · `None` (ยังไม่มีหน้าต่าง/ในเทสต์)
     /// ใช้หน้าต่างขนาดปริยาย 1280×800 — ภาพยังลงรอบกล้อง ไม่ไปลงที่ใดที่หนึ่งตายตัว
-    fn drop_flow(doc: &mut Doc, canvas: Option<Vec2>) -> &mut crate::placement::Flow {
-        let key = crate::placement::ViewKey::new(doc.camera.center(), doc.camera.zoom());
-        let current = doc
-            .drop_flow
-            .as_ref()
-            .is_some_and(|flow| flow.belongs_to(key));
-        if !current {
-            let size = canvas
-                .filter(|s| s.is_finite() && s.x > 0.0 && s.y > 0.0)
-                .unwrap_or(Vec2::new(1280.0, 800.0));
-            let view = WorldRect::from_center_size(doc.camera.center(), size / doc.camera.zoom());
-            let flow = crate::placement::Flow::new(key, view);
-            // ★ กระดานว่าง = ไม่มีมุมมองของผู้ใช้ให้รักษา → กล้อง fit ตามได้
-            //   มีของอยู่แล้ว = ห้ามขยับกล้อง (P5-9b · `Flow::on_empty_board`)
-            doc.drop_flow = Some(if doc.board.is_empty() {
-                flow.on_empty_board()
-            } else {
-                flow
-            });
-        }
-        doc.drop_flow
-            .get_or_insert_with(|| crate::placement::Flow::new(key, WorldRect::EMPTY))
+    fn view_of(doc: &Doc, canvas: Option<Vec2>) -> WorldRect {
+        let size = canvas
+            .filter(|s| s.is_finite() && s.x > 0.0 && s.y > 0.0)
+            .unwrap_or(Vec2::new(1280.0, 800.0));
+        WorldRect::from_center_size(doc.camera.center(), size / doc.camera.zoom())
     }
 
-    /// ★★★ ภาพใบหนึ่งเพิ่งเข้ามา — **fit กล้องเฉพาะเมื่อการไหลนี้เริ่มบนกระดานว่าง
+    /// ★★★ **ตรงที่ผู้ใช้ชี้** (ROADMAP — ตัดสิน 1 ต.ค. 2026) — จุดใน world ของ `pointer`
+    ///
+    /// `pointer` = พิกัดบนหน้าต่างเป็น physical pixel · **อยู่นอกผืนผ้าใบหรือไม่รู้
+    /// = กลางจอ** (วางจาก clipboard ตอนเคอร์เซอร์อยู่บนแผงข้าง · เปิดจากบรรทัดคำสั่ง ·
+    /// OS ที่บอกจุดปล่อยของการลากไม่ได้)
+    fn pointed_anchor(
+        doc: &Doc,
+        canvas: CanvasRect,
+        pointer: Option<Vec2>,
+    ) -> crate::placement::Anchor {
+        let view = Self::view_of(doc, Some(canvas.size));
+        let local = pointer
+            .filter(|p| p.is_finite())
+            .map(|p| p - canvas.min)
+            .filter(|p| p.x >= 0.0 && p.y >= 0.0 && p.x <= canvas.size.x && p.y <= canvas.size.y);
+        match local {
+            Some(local) => {
+                crate::placement::Anchor::new(doc.camera.screen_to_world(local, canvas.size), view)
+            }
+            None => crate::placement::Anchor::center_of(view),
+        }
+    }
+
+    /// ★ สายการไหลของการชี้ครั้งนี้ในแท็บนี้ (ดู [`crate::placement`])
+    ///
+    /// ★★ ผู้ใช้แตะกล้องตั้งแต่สายนี้เริ่ม → กล้องเป็นของเขาแล้ว **เลิก fit ถาวร**
+    ///   · ที่วางไม่เปลี่ยน — มันเป็นพิกัด world ของจุดที่ชี้ไปแล้ว
+    fn drop_flow(doc: &mut Doc, anchor: crate::placement::Anchor) -> &mut crate::placement::Flow {
+        let key = crate::placement::ViewKey::new(doc.camera.center(), doc.camera.zoom());
+        // ★ กระดานว่าง = ไม่มีมุมมองของผู้ใช้ให้รักษา → กล้อง fit ตามได้
+        //   มีของอยู่แล้ว = ห้ามขยับกล้อง (P5-9b · `Flow::on_empty_board`)
+        let empty = doc.board.is_empty();
+        let flow = crate::placement::flow_for(&mut doc.drop_flows, anchor, || {
+            let flow = crate::placement::Flow::new(key, anchor);
+            if empty { flow.on_empty_board() } else { flow }
+        });
+        if !flow.belongs_to(key) {
+            flow.stop_fitting();
+        }
+        flow
+    }
+
+    /// จุดชี้ของงานใบนี้ — งานที่ไม่ได้จดไว้ (ไม่ควรเกิดกับภาพใหม่) ต่อสายล่าสุด
+    /// ของแท็บ หรือกลางจอถ้ายังไม่มีสายเลย
+    fn anchor_or_latest(
+        doc: &Doc,
+        anchor: Option<crate::placement::Anchor>,
+        canvas: Option<Vec2>,
+    ) -> crate::placement::Anchor {
+        anchor
+            .or_else(|| doc.drop_flows.last().map(crate::placement::Flow::anchor))
+            .unwrap_or_else(|| crate::placement::Anchor::center_of(Self::view_of(doc, canvas)))
+    }
+
+    /// ★★★ ภาพใบหนึ่งเพิ่งเข้ามา — **fit กล้องเฉพาะเมื่อสายนี้เริ่มบนกระดานว่าง
     /// และกล้องยังเป็นของเรา** (P5-9b ส่วนที่ 2)
     ///
     /// ★ **ไม่ผ่าน `Command`** — กล้องคือมุมมอง ไม่ใช่เอกสาร (`docs/02 §2.9`: การโหลด
@@ -4431,15 +4520,16 @@ impl RefxApp {
     /// ★ fit ทุกใบที่เข้ามา ไม่ใช่รอจบทั้งชุด — ชุดใหญ่ (หลักร้อยภาพ decode เป็นนาที)
     ///   จะไหลล้นจอไปตลอดเวลาที่รอ
     ///
-    /// ★★ **ที่หยุด fit เมื่อผู้ใช้แตะกล้องอยู่ที่ [`Self::drop_flow`] ไม่ใช่ที่นี่**
-    ///   ผู้ใช้ pan/zoom → ภาพใบถัดไปเห็นกล้องที่ไม่ใช่ของการไหลเดิม → เริ่มการไหลใหม่
-    ///   ซึ่ง **ไม่ fit** เพราะกระดานไม่ว่างแล้ว · รุ่นแรกถามซ้ำที่นี่ว่า "กล้องยังเป็นของ
-    ///   เราไหม" — NC พิสูจน์ว่าเงื่อนไขนั้นไม่มีวันเป็นเท็จ (ฟังก์ชันนี้ถูกเรียกต่อจาก
-    ///   `drop_flow` ของภาพใบเดียวกันเสมอ ไม่มี input ของผู้ใช้แทรกได้) จึงถอดออก
-    fn follow_new_items(doc: &mut Doc, canvas: Option<Vec2>) {
-        if !doc.drop_flow.as_ref().is_some_and(|flow| flow.fits()) {
+    /// ★★ ที่หยุด fit เมื่อผู้ใช้แตะกล้องอยู่ที่ [`Self::drop_flow`] (`stop_fitting`) —
+    ///   ฟังก์ชันนี้ถูกเรียกต่อจาก `drop_flow` ของภาพใบเดียวกันเสมอ
+    fn follow_new_items(doc: &mut Doc, anchor: crate::placement::Anchor, canvas: Option<Vec2>) {
+        let Some(index) = doc
+            .drop_flows
+            .iter()
+            .position(|flow| flow.from(anchor) && flow.fits())
+        else {
             return;
-        }
+        };
         let Some(viewport) = canvas.filter(|s| s.is_finite() && s.x >= 1.0 && s.y >= 1.0) else {
             return;
         };
@@ -4448,7 +4538,7 @@ impl RefxApp {
         };
         doc.camera.fit_to(bounds, viewport);
         let fitted = crate::placement::ViewKey::new(doc.camera.center(), doc.camera.zoom());
-        if let Some(flow) = doc.drop_flow.as_mut() {
+        if let Some(flow) = doc.drop_flows.get_mut(index) {
             flow.rekey(fitted);
         }
     }
@@ -6480,6 +6570,7 @@ impl RefxApp {
         for key in orphans {
             self.job_owner.remove(&key);
             self.job_sources.remove(&key);
+            self.job_anchor.remove(&key);
         }
     }
 
@@ -6764,7 +6855,7 @@ impl RefxApp {
             self.drop.start(jobs.len());
             self.batch_from_clipboard = false;
             // ★ ประตูเดียวกับ `submit_dropped`/`submit_paste` — ดู `submit_thumbnail_jobs`
-            self.submit_thumbnail_jobs(board, jobs);
+            self.submit_thumbnail_jobs(board, None, jobs);
         }
 
         // ★★★ บอกผู้ใช้เฉพาะตอนมีอะไรให้บอกจริง — เปิดไฟล์ที่ทุกอย่างอยู่ที่เดิม
@@ -9186,6 +9277,23 @@ impl AppDelegate for RefxApp {
         match event {
             // ★ ลากไฟล์เข้ามา — เส้นทางหลักที่ผู้ใช้เอาภาพเข้าโปรแกรม (P1-8)
             WindowEvent::DroppedFile(path) => {
+                // ★★★ **จุดที่ปล่อยเมาส์** — อ่านตอนไฟล์แรกของชุด (ROADMAP ตัดสิน 1 ต.ค. 2026)
+                //
+                //   winit ส่ง event นี้ **ระหว่าง** `IDropTarget::Drop` ของ OS ซึ่งคือ
+                //   จังหวะที่ผู้ใช้เพิ่งปล่อยปุ่ม · ถาม OS ตรงนี้จึงได้จุดปล่อยจริง ·
+                //   ★ ไม่ใช้ตำแหน่งเมาส์ที่ egui จำไว้ — ระหว่างลาก OS ไม่ส่ง mouse-move
+                //     มาให้หน้าต่างเลย ค่านั้นคือจุดที่เมาส์ *ออกจากหน้าต่างครั้งล่าสุด*
+                //     · ใช้เป็นทางสำรองบน OS ที่ถามไม่ได้เท่านั้น
+                if self.pending_drops.is_empty() {
+                    self.drop_point = refx_platform::pointer::cursor_in(&gfx.window)
+                        .map(|(x, y)| Vec2::new(x as f32, y as f32))
+                        .or_else(|| {
+                            let ppp = gfx.egui_ctx.pixels_per_point();
+                            gfx.egui_ctx
+                                .input(|i| i.pointer.latest_pos())
+                                .map(|pos| Vec2::new(pos.x, pos.y) * ppp)
+                        });
+                }
                 // winit ส่งมาทีละไฟล์ รวมเป็นชุดเดียวถ้ามาติด ๆ กัน
                 self.pending_drops.push(path.clone());
                 needs_redraw = true;
@@ -12529,9 +12637,14 @@ mod tests {
         );
     }
 
+    /// ตรงที่ผู้ใช้ชี้ตอน "ปล่อยเมาส์" — กลางผืนผ้าใบ ณ กล้องตอนนี้ (หนึ่งค่าต่อหนึ่งชุด)
+    fn dropped_here(doc: &Doc, viewport: Vec2) -> crate::placement::Anchor {
+        crate::placement::Anchor::center_of(RefxApp::view_of(doc, Some(viewport)))
+    }
+
     /// วางภาพหนึ่งใบผ่านทางเดียวกับการลากจริง: `drop_flow` → `AddItems` → `follow_new_items`
-    fn drop_one(doc: &mut Doc, w: u32, h: u32, viewport: Vec2) {
-        let (center, size) = RefxApp::drop_flow(doc, Some(viewport)).place_image(w, h);
+    fn drop_one(doc: &mut Doc, anchor: crate::placement::Anchor, w: u32, h: u32, viewport: Vec2) {
+        let (center, size) = RefxApp::drop_flow(doc, anchor).place_image(w, h);
         let item = Item::new(image_kind(7, "E:/refs/new.png")).at(center, size);
         doc.history
             .apply(
@@ -12539,7 +12652,7 @@ mod tests {
                 Box::new(refx_core::command::AddItems::new(vec![item]).unwrap()),
             )
             .unwrap();
-        RefxApp::follow_new_items(doc, Some(viewport));
+        RefxApp::follow_new_items(doc, anchor, Some(viewport));
     }
 
     fn sees_everything(doc: &Doc, viewport: Vec2) -> bool {
@@ -12559,12 +12672,86 @@ mod tests {
         let viewport = Vec2::new(840.0, 735.0);
         let mut doc =
             Doc::empty(<refx_core::arena::BoardId as refx_core::arena::ArenaKey>::from_parts(0, 0));
-        drop_one(&mut doc, 2400, 1600, viewport);
-        drop_one(&mut doc, 4000, 6641, viewport);
+        let batch = dropped_here(&doc, viewport);
+        drop_one(&mut doc, batch, 2400, 1600, viewport);
+        drop_one(&mut doc, batch, 4000, 6641, viewport);
         assert!(
             sees_everything(&doc, viewport),
             "กระดานว่างแต่กล้องไม่ fit — ภาพแนวตั้ง 6641 px ล้นจออยู่"
         );
+    }
+
+    /// ★★★ **ลงตรงที่ปล่อยเมาส์ — แม้ตรงนั้นจะมีของอยู่แล้ว** (ROADMAP ตัดสิน 1 ต.ค. 2026)
+    ///
+    /// ภาพใหม่ต้องขึ้นบนจอ **ใต้เคอร์เซอร์พอดี** (กึ่งกลางภาพ = จุดปล่อย) · กล้องไม่ขยับ
+    /// · ทับใบเดิมได้ — ไม่หาที่ว่างให้ เพราะนั่นคือที่ที่ผู้ใช้ชี้เอง
+    #[test]
+    fn a_drop_lands_under_the_pointer_even_on_top_of_existing_work() {
+        // ผืนผ้าใบอยู่ระหว่างแผงข้าง เหมือนหน้าต่างจริง 1280×800
+        let canvas = CanvasRect {
+            min: Vec2::new(200.0, 44.0),
+            size: Vec2::new(840.0, 735.0),
+        };
+        let mut doc =
+            Doc::empty(<refx_core::arena::BoardId as refx_core::arena::ArenaKey>::from_parts(0, 0));
+        let first = dropped_here(&doc, canvas.size);
+        drop_one(&mut doc, first, 800, 600, canvas.size);
+        // ผู้ใช้จัดมุมมองเอง — ภาพใบเดิมยังอยู่ในจอ ค่อนไปทางซ้ายบน
+        let old = doc.board.item(doc.board.z_order()[0]).unwrap().canvas.pos;
+        doc.camera = Camera::new(old + Vec2::new(250.0, 150.0), 0.6);
+        let before = doc.camera;
+        // ★ ปล่อยเมาส์ตรงภาพใบเดิมพอดี
+        let on_old = doc.camera.world_to_screen(old, canvas.size) + canvas.min;
+        assert!(
+            on_old.x > canvas.min.x && on_old.y > canvas.min.y,
+            "ภาพใบเดิมไม่อยู่ในจอ — ข้อนี้ไม่ได้ทดสอบการปล่อยทับ"
+        );
+
+        for pointer in [Vec2::new(300.0, 94.0), Vec2::new(1000.0, 700.0), on_old] {
+            let anchor = RefxApp::pointed_anchor(&doc, canvas, Some(pointer));
+            drop_one(&mut doc, anchor, 2400, 1600, canvas.size);
+            let placed = doc
+                .board
+                .item(*doc.board.z_order().last().unwrap())
+                .unwrap();
+            let on_screen = doc.camera.world_to_screen(placed.canvas.pos, canvas.size) + canvas.min;
+            assert!(
+                (on_screen - pointer).length() < 0.01,
+                "ปล่อยที่ {pointer} แต่ภาพไปอยู่ที่ {on_screen}"
+            );
+        }
+        assert_eq!(doc.camera, before, "มีของอยู่แล้วแต่กล้องขยับ");
+        let last = doc
+            .board
+            .item(*doc.board.z_order().last().unwrap())
+            .unwrap();
+        assert_eq!(last.canvas.pos, old, "ปล่อยบนภาพเดิมแล้วถูกย้ายไปหาที่ว่างให้");
+    }
+
+    /// ★★ เคอร์เซอร์ไม่อยู่เหนือผืนผ้าใบ (แผงข้าง · นอกหน้าต่าง · ไม่รู้) → **กลางจอ**
+    #[test]
+    fn a_pointer_off_the_canvas_means_the_middle_of_the_view() {
+        let canvas = CanvasRect {
+            min: Vec2::new(200.0, 44.0),
+            size: Vec2::new(840.0, 735.0),
+        };
+        let mut doc =
+            Doc::empty(<refx_core::arena::BoardId as refx_core::arena::ArenaKey>::from_parts(0, 0));
+        doc.camera = Camera::new(Vec2::new(512.0, -77.0), 2.0);
+        for pointer in [
+            None,
+            Some(Vec2::new(50.0, 300.0)),   // แผงคลังภาพ
+            Some(Vec2::new(1100.0, 300.0)), // แผงรายละเอียด
+            Some(Vec2::new(600.0, 10.0)),   // แถบเครื่องมือ
+            Some(Vec2::new(-40.0, 300.0)),  // นอกหน้าต่าง
+            Some(Vec2::new(f32::NAN, 0.0)),
+        ] {
+            let anchor = RefxApp::pointed_anchor(&doc, canvas, pointer);
+            assert_eq!(anchor.point(), doc.camera.center(), "{pointer:?}");
+        }
+        // NC — ตรงกลางผืนผ้าใบพอดี ก็คือกลางจอเหมือนกัน · ขยับไปนิดเดียวต้องไม่ใช่
+        let near = RefxApp::pointed_anchor(&doc, canvas, Some(Vec2::new(700.0, 400.0)));
+        assert_ne!(near.point(), doc.camera.center());
     }
 
     /// ★★★ **มีของอยู่แล้ว → ห้ามขยับกล้อง** — ข้อนี้สำคัญกว่าข้อบน (P5-9b)
@@ -12575,12 +12762,14 @@ mod tests {
         let viewport = Vec2::new(840.0, 735.0);
         let mut doc =
             Doc::empty(<refx_core::arena::BoardId as refx_core::arena::ArenaKey>::from_parts(0, 0));
-        drop_one(&mut doc, 800, 600, viewport);
+        let first = dropped_here(&doc, viewport);
+        drop_one(&mut doc, first, 800, 600, viewport);
         // ผู้ใช้จัดมุมมองของเขาเอง
         doc.camera = Camera::new(Vec2::new(-3_000.0, 900.0), 1.7);
         let before = doc.camera;
-        drop_one(&mut doc, 4000, 6641, viewport);
-        drop_one(&mut doc, 2400, 1600, viewport);
+        let second = dropped_here(&doc, viewport);
+        drop_one(&mut doc, second, 4000, 6641, viewport);
+        drop_one(&mut doc, second, 2400, 1600, viewport);
         assert_eq!(doc.camera, before, "มีของอยู่แล้วแต่กล้องขยับเอง");
     }
 
@@ -12590,10 +12779,11 @@ mod tests {
         let viewport = Vec2::new(840.0, 735.0);
         let mut doc =
             Doc::empty(<refx_core::arena::BoardId as refx_core::arena::ArenaKey>::from_parts(0, 0));
-        drop_one(&mut doc, 2400, 1600, viewport);
+        let batch = dropped_here(&doc, viewport);
+        drop_one(&mut doc, batch, 2400, 1600, viewport);
         doc.camera.pan_by_screen_delta(Vec2::new(120.0, -40.0));
         let touched = doc.camera;
-        drop_one(&mut doc, 2400, 1600, viewport);
+        drop_one(&mut doc, batch, 2400, 1600, viewport);
         assert_eq!(doc.camera, touched, "ผู้ใช้เพิ่ง pan แต่กล้องถูก fit ทับ");
     }
 
@@ -13728,6 +13918,7 @@ mod tests {
         let key = job_key_for(owner, std::path::Path::new("/work/a.png"));
         app.submit_thumbnail_jobs(
             owner,
+            None,
             vec![refx_asset::pool::Job {
                 hash: key,
                 source: refx_asset::pool::JobSource::File("/work/a.png".into()),
@@ -13778,6 +13969,7 @@ mod tests {
         for (key, owner) in [(mine, doomed), (theirs, survivor)] {
             app.submit_thumbnail_jobs(
                 owner,
+                None,
                 vec![refx_asset::pool::Job {
                     hash: key,
                     source: refx_asset::pool::JobSource::File("/work/x.png".into()),
