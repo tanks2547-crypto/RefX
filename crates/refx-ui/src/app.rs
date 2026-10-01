@@ -306,7 +306,7 @@ impl FrameStats {
             println!("⚠ ตัวเลขนี้ชนเพดาน vsync ของจอ — อ่านเป็นต้นทุนการวาดไม่ได้ และสรุปเรื่อง headroom ไม่ได้");
         } else {
             println!(
-                "เพดาน ARCHITECTURE §6: frame time ≤ 8 ms, p99 ≤ 16 ms  →  {}",
+                "เพดาน ARCHITECTURE §6: frame time ≤ 8 ms, p99 ≤ 16 ms  ->  {}",
                 if p50 <= 8.0 && p99 <= 16.0 {
                     "ผ่าน"
                 } else {
@@ -3817,7 +3817,7 @@ impl RefxApp {
                     );
                     write_relink_status(&mut self.shell, report);
                 } else if self.batch_from_clipboard {
-                    tracing::info!(ms, "clipboard paste → image on screen");
+                    tracing::info!(ms, "clipboard paste -> image on screen");
                     self.shell.status = text::fill(
                         self.shell.lang,
                         Template::PastedImage,
@@ -3831,7 +3831,7 @@ impl RefxApp {
                         // ★ หลักฐานว่าการเพิ่มภาพเดินผ่าน `AddItems` เข้า `History` จริง
                         //   ไม่ใช่ push เข้า Vec ตรง ๆ เหมือนก่อนย้าย — undo ได้ทุกใบ
                         undo_depth = self.docs.active().history.undo_depth(),
-                        "drag & drop → every image on screen"
+                        "drag & drop -> every image on screen"
                     );
                     // ★★ ต้องบอก **ทั้งสองจำนวน** — เดิมพิมพ์แต่ `requested` แล้วเติมคำว่า
                     //    "ครบ" ต่อท้าย ซึ่งอ่านว่า "ขึ้นจอครบทั้ง 20 ใบ" ทั้งที่ไฟล์ที่
@@ -3840,7 +3840,7 @@ impl RefxApp {
                     //    ตัดสินข้อ "ไฟล์เสีย 20 ไฟล์" ของ `docs/08 §3` — พิมพ์เลขที่
                     //    ไม่ตรงกับสิ่งที่ผู้ใช้เห็นบนจอ = ประตูที่เขียวโดยไม่ได้ตรวจอะไร
                     println!(
-                        "ลากไฟล์ {} ไฟล์ → ขึ้นจอ {} ใบใน {ms:.1} ms",
+                        "ลากไฟล์ {} ไฟล์ -> ขึ้นจอ {} ใบใน {ms:.1} ms",
                         self.drop.requested, self.drop.added
                     );
                     self.shell.status = text::fill(

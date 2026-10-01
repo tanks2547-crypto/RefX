@@ -245,6 +245,312 @@ mod tests {
         }
     }
 
+    // ---------- ★★★ ทุกอักขระในซอร์สที่วาดได้ ต้องมี glyph (1 ต.ค. 2026) ----------
+
+    /// ★★★ **ทุกลิเทอรัลในโค้ด production มี glyph ครบทั้งสองตระกูลฟอนต์**
+    ///
+    /// ## ทำไมต้องถามที่ซอร์ส ไม่ใช่ที่จอ
+    ///
+    /// tofu ครั้งที่สี่ (`⇄⇅` บนปุ่ม Flip) รอดประตู
+    /// `shell::tests::every_character_the_shell_draws_has_a_glyph` เพราะประตูนั้นวาด
+    /// **เฉพาะแผงที่สถานะของมันเปิดไว้** · แผงลักษณะภาพต้องมี `appearance: Some(..)`
+    /// ซึ่งไม่มีใครตั้ง · รายการแผงที่ต้องเปิดเป็นรายการพิมพ์มือ (`docs/03 §0`)
+    ///
+    /// รายการแผงสร้างจากโค้ดไม่ได้ในราคาที่สมเหตุสมผล — แผงคือกิ่ง `if let` ในโค้ด
+    /// วาด ไม่ใช่ข้อมูล · แต่อักขระที่แผงไหนก็วาดได้ **มาจากลิเทอรัลในซอร์สเสมอ**
+    /// (ข้อความแปลทุกตัวอยู่ใน `text.rs` · สัญลักษณ์อยู่ในลิเทอรัล/ค่าคงที่) ·
+    /// รายการลิเทอรัล **สร้างจากซอร์สได้ครบ** โดยไม่ต้องรู้ว่าแผงไหนเปิดเมื่อไหร่
+    /// → แผงที่ห้าที่เพิ่มพรุ่งนี้ถูกตรวจทันทีโดยไม่มีใครต้องจำ
+    ///
+    /// ★ ถามทั้ง `Proportional` **และ** `Monospace` — ไม่รู้ว่าลิเทอรัลไหนถูกวาดด้วย
+    /// ฟอนต์ไหน (บทเรียน `→` ที่มีใน proportional แต่ไม่มีใน monospace — P5-3b)
+    /// การบังคับทั้งสองจึงเข้มกว่าคำถามจริงเสมอ ไม่มีทางหลวมกว่า
+    ///
+    /// ★ ประตูที่ยังเหลือคู่กัน (`every_character_the_shell_draws_has_a_glyph`) ตรวจสิ่งที่
+    /// ข้อนี้มองไม่เห็น: อักขระที่ **egui เติมเอง** ตอนวาด
+    #[test]
+    fn every_character_in_the_source_that_can_reach_the_screen_has_a_glyph() {
+        let ctx = ctx_with_fonts();
+        let fonts = [
+            egui::FontId::proportional(14.0),
+            egui::FontId::monospace(14.0),
+        ];
+        let files = production_sources();
+        assert!(files.len() > 50, "เจอไฟล์ซอร์สแค่ {} ไฟล์ — หาผิดที่", files.len());
+        let mut checked = 0usize;
+        let mut missing: Vec<String> = Vec::new();
+        for (path, src) in &files {
+            for (line, literal) in production_literals(src) {
+                for ch in literal.chars() {
+                    if ch.is_whitespace() || ch.is_control() || ch.is_ascii() {
+                        continue;
+                    }
+                    checked += 1;
+                    for font in &fonts {
+                        if !ctx.fonts_mut(|f| f.has_glyph(font, ch)) {
+                            missing.push(format!(
+                                "{path}:{line} {ch:?} (U+{:04X}) ไม่มีใน {:?}",
+                                u32::from(ch),
+                                font.family
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        missing.sort();
+        missing.dedup();
+        assert!(
+            checked > 1000,
+            "ตรวจอักขระนอก ASCII แค่ {checked} ตัว — ตัวอ่านซอร์สพัง"
+        );
+        assert!(
+            missing.is_empty(),
+            "อักขระที่จะขึ้นเป็นสี่เหลี่ยม tofu ({} จุด):\n{}",
+            missing.len(),
+            missing.join("\n")
+        );
+    }
+
+    /// ★ NC ของตัวอ่านซอร์ส — ทุกรูปที่ต้องจับและทุกรูปที่ต้องข้าม
+    ///
+    /// ถ้าตัวอ่านพลาดเงียบ ๆ (เช่นคิดว่าทั้งไฟล์เป็น comment) ประตูข้างบนจะเขียว
+    /// โดยไม่ได้ตรวจอะไร (`docs/08 §3.9` ข้อ 1)
+    #[test]
+    fn the_source_reader_finds_literals_and_skips_tests_and_comments() {
+        let src = r##"
+// "ใน comment"
+/* "ใน block /* ซ้อน */ comment" */
+/// "ใน doc"
+fn a<'x>(v: &'x str) -> char { let _ = "ปุ่ม ⇄⇅"; let _ = r#"ดิบ "มี" คำพูด"#; '↔' }
+const ESC: &str = "\u{2192}\n";
+#[cfg(test)]
+const NOT_DRAWN: &str = "เทสต์ ●";
+#[cfg(test)]
+mod tests { fn t() { let _ = "ในเทสต์ ●"; let _ = '{'; } }
+fn b() { let _ = "หลังเทสต์"; }
+"##;
+        let found: Vec<String> = production_literals(src)
+            .into_iter()
+            .map(|(_, s)| s)
+            .collect();
+        assert_eq!(
+            found,
+            ["ปุ่ม ⇄⇅", "ดิบ \"มี\" คำพูด", "↔", "\u{2192}\n", "หลังเทสต์"],
+            "ตัวอ่านซอร์สจับผิด"
+        );
+    }
+
+    /// ไฟล์ `.rs` ทุกไฟล์ใต้ `crates/*/src/` — **ค้นเอง ไม่ใช่รายชื่อพิมพ์มือ**
+    #[allow(
+        clippy::disallowed_methods,
+        reason = "เทสต์อ่านซอร์สของตัวเอง ไม่ใช่ UI thread"
+    )]
+    fn production_sources() -> Vec<(String, String)> {
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let mut stack = Vec::new();
+        for entry in std::fs::read_dir(&crates).unwrap().flatten() {
+            stack.push(entry.path().join("src"));
+        }
+        let mut out = Vec::new();
+        while let Some(dir) = stack.pop() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let src = std::fs::read_to_string(&path).unwrap();
+                    let name = path
+                        .strip_prefix(&crates)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    out.push((name, src));
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// ลิเทอรัลสตริง/อักขระทุกตัว (ถอด escape แล้ว) พร้อมเลขบรรทัด —
+    /// **ข้าม comment ทุกชนิด และข้ามไอเท็มที่ติด `#[cfg(test)]` ทั้งก้อน**
+    fn production_literals(src: &str) -> Vec<(usize, String)> {
+        let chars: Vec<char> = src.chars().collect();
+        let at = |i: usize, pat: &str| {
+            pat.chars()
+                .enumerate()
+                .all(|(k, c)| chars.get(i + k) == Some(&c))
+        };
+        let ident = |c: char| c.is_alphanumeric() || c == '_';
+        let mut out = Vec::new();
+        let mut i = 0;
+        let mut line = 1;
+        // `Some(depth)` = กำลังข้ามไอเท็มที่ติด `#[cfg(test)]`
+        let mut skipping: Option<i32> = None;
+        while i < chars.len() {
+            let c = chars[i];
+            if c == '\n' {
+                line += 1;
+                i += 1;
+            } else if at(i, "//") {
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+            } else if at(i, "/*") {
+                let mut depth = 0;
+                while i < chars.len() {
+                    if at(i, "/*") {
+                        depth += 1;
+                        i += 2;
+                    } else if at(i, "*/") {
+                        depth -= 1;
+                        i += 2;
+                        if depth == 0 {
+                            break;
+                        }
+                    } else {
+                        line += usize::from(chars[i] == '\n');
+                        i += 1;
+                    }
+                }
+            } else if skipping.is_none() && at(i, "#[cfg(test)]") {
+                skipping = Some(0);
+                i += "#[cfg(test)]".len();
+            } else if c == 'r'
+                && (i == 0 || !ident(chars[i - 1]))
+                && matches!(chars.get(i + 1), Some('"' | '#'))
+                && {
+                    let mut j = i + 1;
+                    while chars.get(j) == Some(&'#') {
+                        j += 1;
+                    }
+                    chars.get(j) == Some(&'"')
+                }
+            {
+                let mut j = i + 1;
+                let mut hashes = 0;
+                while chars.get(j) == Some(&'#') {
+                    hashes += 1;
+                    j += 1;
+                }
+                j += 1;
+                let start = line;
+                let mut text = String::new();
+                while let Some(&ch) = chars.get(j) {
+                    if ch == '"' && (0..hashes).all(|k| chars.get(j + 1 + k) == Some(&'#')) {
+                        j += 1 + hashes;
+                        break;
+                    }
+                    line += usize::from(ch == '\n');
+                    text.push(ch);
+                    j += 1;
+                }
+                if skipping.is_none() {
+                    out.push((start, text));
+                }
+                i = j;
+            } else if c == '"' || (c == '\'' && is_char_literal(&chars, i)) {
+                let close = c;
+                let start = line;
+                let mut text = String::new();
+                let mut j = i + 1;
+                while let Some(&ch) = chars.get(j) {
+                    if ch == close {
+                        j += 1;
+                        break;
+                    }
+                    if ch == '\\' {
+                        let (decoded, used, lines) = unescape(&chars, j);
+                        text.extend(decoded);
+                        line += lines;
+                        j += used;
+                        continue;
+                    }
+                    line += usize::from(ch == '\n');
+                    text.push(ch);
+                    j += 1;
+                }
+                if skipping.is_none() {
+                    out.push((start, text));
+                }
+                i = j;
+            } else {
+                if let Some(depth) = skipping.as_mut() {
+                    match c {
+                        '{' => *depth += 1,
+                        '}' => {
+                            *depth -= 1;
+                            if *depth == 0 {
+                                skipping = None;
+                            }
+                        }
+                        ';' if *depth == 0 => skipping = None,
+                        _ => {}
+                    }
+                }
+                i += 1;
+            }
+        }
+        out
+    }
+
+    /// `'` ที่ตำแหน่ง `i` เปิดลิเทอรัลอักขระ (ไม่ใช่ lifetime) ไหม
+    fn is_char_literal(chars: &[char], i: usize) -> bool {
+        match chars.get(i + 1) {
+            Some('\\') => true,
+            Some(_) => chars.get(i + 2) == Some(&'\''),
+            None => false,
+        }
+    }
+
+    /// ถอด escape ที่ `chars[i] == '\\'` → (อักขระ, ใช้ไปกี่ตัว, ข้ามไปกี่บรรทัด)
+    fn unescape(chars: &[char], i: usize) -> (Option<char>, usize, usize) {
+        match chars.get(i + 1) {
+            Some('n') => (Some('\n'), 2, 0),
+            Some('r') => (Some('\r'), 2, 0),
+            Some('t') => (Some('\t'), 2, 0),
+            Some('0') => (Some('\0'), 2, 0),
+            Some(&c @ ('\\' | '\'' | '"')) => (Some(c), 2, 0),
+            Some('x') => {
+                let hex: String = chars.iter().skip(i + 2).take(2).collect();
+                (
+                    u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32),
+                    4,
+                    0,
+                )
+            }
+            Some('u') => {
+                let hex: String = chars
+                    .iter()
+                    .skip(i + 3)
+                    .take_while(|c| **c != '}')
+                    .collect();
+                let used = 3 + hex.len() + 1;
+                (
+                    u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32),
+                    used,
+                    0,
+                )
+            }
+            // `\` ท้ายบรรทัด = ต่อบรรทัด · ข้ามช่องว่างต้นบรรทัดถัดไปทั้งหมด
+            Some('\n') => {
+                let blank = chars
+                    .iter()
+                    .skip(i + 1)
+                    .copied()
+                    .take_while(|c| c.is_whitespace())
+                    .collect::<Vec<char>>();
+                let lines = blank.iter().filter(|c| **c == '\n').count();
+                (None, 1 + blank.len(), lines)
+            }
+            _ => (None, 2, 0),
+        }
+    }
+
     // ---------- ★ glyph ไทยต้องมีจริง ----------
 
     /// ตัวอักษรพื้นฐาน สระ และวรรณยุกต์ ต้องมี glyph ครบ

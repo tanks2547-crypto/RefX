@@ -2565,11 +2565,16 @@ fn canvas_inspector(ui: &mut egui::Ui, state: &mut ShellState) {
     ui.separator();
     ui.label(text::t(lang, Key::Flip));
     ui.horizontal(|ui| {
+        // ★★★ ASCII ทั้งแถว (`docs/03 §0` — ASCII เป็นค่าตั้งต้น) · `⇄⇅` ของปุ่ม "ทั้งสอง"
+        //     ขึ้นเป็น tofu มาตั้งแต่วันแรกเพราะฟอนต์ที่ฝังไม่มี glyph · ประตูมองไม่เห็น
+        //     เพราะไม่มีใครเปิดแผงนี้ในเทสต์ (tofu ครั้งที่สี่ · ปิดด้วย
+        //     `fonts::tests::every_character_in_the_source_that_can_reach_the_screen_has_a_glyph`)
+        //     · อีกสามปุ่มมี glyph แต่ถูกเปลี่ยนด้วยเพื่อให้แถวเดียวกันอ่านเป็นภาษาเดียวกัน
         for (flip, label) in [
-            (Flip::None, "—"),
-            (Flip::Horizontal, "↔"),
-            (Flip::Vertical, "↕"),
-            (Flip::Both, "⇄⇅"),
+            (Flip::None, "-"),
+            (Flip::Horizontal, "H"),
+            (Flip::Vertical, "V"),
+            (Flip::Both, "H+V"),
         ] {
             if ui
                 .selectable_label(appearance.flip == flip, label)
@@ -3930,6 +3935,18 @@ mod tests {
             // ★★★ ป้าย `--data-root` (P5-9e) — ค่าปริยายเป็น `None` ป้ายจึงไม่เคยถูกวาด
             //     ถ้าไม่บังคับที่นี่ · ใช้ path ภาษาไทยให้ทั้งเทมเพลตและ path ผ่านประตู
             data_root: Some("C:/ทดสอบ/refx-root".to_owned()),
+            // ★★★ แผงลักษณะภาพ — เป็น `None` ที่นี่มาตลอด แผงจึง **ไม่เคยถูกวาด** และ
+            //     `⇄⇅` บนปุ่ม Flip ขึ้นเป็น tofu มาตั้งแต่วันแรกโดยประตูนี้ไม่เห็น
+            //     (tofu ครั้งที่สี่ · 1 ต.ค. 2026) · ประตูที่ครบจริงอยู่ที่ซอร์ส:
+            //     `fonts::tests::every_character_in_the_source_that_can_reach_the_screen_has_a_glyph`
+            appearance: Some(Appearance {
+                opacity: 0.5,
+                grayscale: true,
+                invert: true,
+                brightness: 0.25,
+                contrast: -0.25,
+                flip: refx_core::board::Flip::Both,
+            }),
             ..ShellState::default()
         };
 
@@ -4038,6 +4055,16 @@ mod tests {
                 drawn.iter().any(|(_, text)| text.contains(&ceiling)),
                 "{ceiling:?} ไม่ได้ถูกวาด"
             );
+        }
+
+        // ★★ แผงลักษณะภาพต้องถูกวาดจริง — ไม่ใช่แค่ตั้ง `appearance` ไว้
+        for lang in [Lang::En, Lang::Th] {
+            for expected in [text::t(lang, Key::Flip), "H+V", text::t(lang, Key::Invert)] {
+                assert!(
+                    drawn.iter().any(|(_, text)| text.contains(expected)),
+                    "{expected:?} ไม่ได้ถูกวาด — แผงลักษณะภาพไม่ได้ผ่านประตูนี้"
+                );
+            }
         }
 
         // ★★ แถบถามเรื่อง `.refx-meta` และแถวในแผง Settings (P5-5) — ทั้งสองภาษา

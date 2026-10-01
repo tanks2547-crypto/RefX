@@ -195,7 +195,7 @@ pub enum PackError {
     /// ★ ไฟล์เปลี่ยนขนาดระหว่างที่กำลังฝัง (โดน sync/แก้ไขอยู่)
     ///
     /// ต้องล้มเสียงดัง ไม่ใช่เขียนต่อ — table จะชี้ผิดตำแหน่งทั้งก้อนหลังจากนั้น
-    #[error("{} changed while it was being embedded ({expected} → {actual} bytes)", path.display())]
+    #[error("{} changed while it was being embedded ({expected} -> {actual} bytes)", path.display())]
     AssetChanged {
         /// ไฟล์ที่เปลี่ยน
         path: PathBuf,

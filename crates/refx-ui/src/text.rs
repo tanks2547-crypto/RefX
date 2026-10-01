@@ -25,6 +25,34 @@ use refx_asset::pool::JobFailure;
 use refx_core::clipboard::ClipboardError;
 use refx_render::atlas::AtlasError;
 
+/// ★★★ enum ที่ **รู้จักสมาชิกของตัวเองครบ** — `ALL` สร้างจากนิยามของ enum
+///
+/// เดิมเทสต์ถือรายการ `ALL_KEYS` / `ALL_TEMPLATES` ที่พิมพ์มือ · 1 ต.ค. 2026 เจอว่า
+/// `ALL_TEMPLATES` ขาด `Export*` **เจ็ดตัว** (87 ตัวใน enum · 80 ในรายการ) → ประตู
+/// "ห้ามว่าง" · "ห้ามมีช่องว่างเกิน" · "ตัวยึดตรงกันสองภาษา" · "error ต้องบอกทางออก"
+/// **ไม่เคยตรวจข้อความส่งออกภาพเลยสักตัว** ตั้งแต่ P5-4 · รายการที่พิมพ์มือรู้จักแต่
+/// สิ่งที่มีอยู่ตอนพิมพ์ (`docs/03 §0` กติกาของรอบ 1 ต.ค. 2026 · รูปเดียวกับ `§3.9 ข้อ 18`)
+///
+/// → เพิ่มตัวใหม่ใน enum = อยู่ใน `ALL` ทันที ไม่มีทางลืม
+macro_rules! listed {
+    (
+        $(#[$meta:meta])*
+        pub enum $name:ident {
+            $( $(#[$vmeta:meta])* $variant:ident, )*
+        }
+    ) => {
+        $(#[$meta])*
+        pub enum $name {
+            $( $(#[$vmeta])* $variant, )*
+        }
+
+        impl $name {
+            /// ทุกตัวในลำดับที่ประกาศ — **สร้างจากนิยามของ enum ไม่ใช่พิมพ์มือ**
+            pub const ALL: &'static [Self] = &[$(Self::$variant,)*];
+        }
+    };
+}
+
 /// ภาษาของ UI
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Lang {
@@ -58,6 +86,7 @@ impl Lang {
     }
 }
 
+listed! {
 /// รหัสของข้อความคงที่ทุกตัวที่ผู้ใช้เห็น
 ///
 /// เพิ่มรายการใหม่ที่นี่เท่านั้น — คอมไพเลอร์จะบังคับให้ไปเติมข้อความอังกฤษให้ครบเอง
@@ -496,6 +525,7 @@ pub enum Key {
     SettingsKeymapHint,
     /// ★★ `keymap.toml` ใช้ไม่ได้ → กลับไปใช้ตารางค่าปริยาย **ทั้งชุด**
     KeymapFellBackToDefaults,
+}
 }
 
 /// ข้อความภาษาอังกฤษ — **ต้องมีครบทุก key เสมอ** (เป็นตัวสำรองสุดท้าย)
@@ -1044,6 +1074,7 @@ pub fn t(lang: Lang, key: Key) -> &'static str {
     }
 }
 
+listed! {
 /// เทมเพลตที่มีตัวแปร — ค่าที่ใส่ได้มีอะไรบ้างเขียนไว้ในคอมเมนต์ของแต่ละตัว
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Template {
@@ -1252,6 +1283,7 @@ pub enum Template {
     AgeHours,
     /// `{n}` — กี่วันก่อน
     AgeDays,
+}
 }
 
 /// เทมเพลตภาษาอังกฤษ — ต้องมีครบทุกตัว
@@ -1879,294 +1911,11 @@ mod tests {
 
     use super::*;
 
-    /// รายการ key ทั้งหมด — ต้องเติมเมื่อเพิ่ม key ใหม่
-    const ALL_KEYS: &[Key] = &[
-        Key::Ready,
-        Key::RunningWithoutCache,
-        Key::UntitledBoard,
-        Key::NewBoardHint,
-        Key::NewBoardOpened,
-        Key::TabClosed,
-        Key::CloseTabHint,
-        Key::CloseTabTitle,
-        Key::Library,
-        Key::LibraryPlaceholder,
-        Key::LibraryDropHint,
-        Key::Inspector,
-        Key::InspectorCanvasGeometry,
-        Key::InspectorCanvasTransform,
-        Key::InspectorArrangeMeta,
-        Key::InspectorArrangeGroup,
-        Key::ToolSelect,
-        Key::ToolMove,
-        Key::ToolCrop,
-        Key::ToolPicker,
-        Key::ToolMeasure,
-        Key::ToolText,
-        Key::ToolGrayscale,
-        Key::ToolSort,
-        Key::ToolFilter,
-        Key::ToolTag,
-        Key::ToolSendToCanvas,
-        Key::ReadingClipboard,
-        Key::NothingToUndo,
-        Key::NothingToRedo,
-        Key::NothingToDelete,
-        Key::InspectorNoSelection,
-        Key::FindFile,
-        Key::FindFileChoosing,
-        Key::Rotation,
-        Key::InspectorFile,
-        Key::Opacity,
-        Key::Invert,
-        Key::Brightness,
-        Key::Contrast,
-        Key::Flip,
-        Key::AlignLeft,
-        Key::AlignCentreX,
-        Key::AlignRight,
-        Key::AlignTop,
-        Key::AlignCentreY,
-        Key::AlignBottom,
-        Key::DistributeX,
-        Key::DistributeY,
-        Key::NothingToArrange,
-        Key::ReadingColour,
-        Key::NothingToPick,
-        Key::ColourUnavailable,
-        Key::Note,
-        Key::NoteHint,
-        Key::Rating,
-        Key::ColorLabelTitle,
-        Key::ColorLabelNone,
-        Key::ColorLabelUnknown,
-        Key::Pinned,
-        Key::Tags,
-        Key::AddTagHint,
-        Key::RemoveTagHint,
-        Key::MetaNote,
-        Key::SortAddedAt,
-        Key::SortName,
-        Key::SortRating,
-        Key::SortColorLabel,
-        Key::SortAspect,
-        Key::SortModifiedAt,
-        Key::SortFileSize,
-        Key::SortCanvasOrder,
-        Key::SortAscending,
-        Key::SortDescending,
-        Key::FilterAny,
-        Key::FilterSearchHint,
-        Key::FilterClear,
-        Key::FilterMinRating,
-        Key::FilterPinnedOnly,
-        Key::SendToCanvasHint,
-        Key::NothingToApply,
-        Key::SelectionCleared,
-        Key::NothingToFit,
-        Key::ZoomIsCanvasOnly,
-        Key::ExportTitle,
-        Key::ExportHint,
-        Key::ExportSize,
-        Key::ExportFormat,
-        Key::ExportPng,
-        Key::ExportPngHint,
-        Key::ExportJpeg,
-        Key::ExportJpegHint,
-        Key::ExportTransparent,
-        Key::ExportQuality,
-        Key::ExportBackground,
-        Key::ExportChoose,
-        Key::ExportChoosing,
-        Key::ExportStart,
-        Key::ExportOverwrite,
-        Key::ExportOverwriteHint,
-        Key::ExportClose,
-        Key::ExportCancel,
-        Key::ExportCancelling,
-        Key::ExportCancelled,
-        Key::ExportNothing,
-        Key::ExportBadTarget,
-        Key::ExportMissingWarning,
-        Key::SaveChoosing,
-        Key::SaveInProgress,
-        Key::SaveCancelled,
-        Key::SaveFailed,
-        Key::CloseUnsavedTitle,
-        Key::CloseSaveFirst,
-        Key::CloseCancel,
-        Key::CloseDiscard,
-        Key::CloseDiscardHint,
-        Key::CloseLossUnknown,
-        Key::RecoverTitle,
-        Key::RecoverRestore,
-        Key::RecoverLater,
-        Key::RecoverLaterHint,
-        Key::RecoverDiscard,
-        Key::RecoverDiscardHint,
-        Key::RecoverWhenUnknown,
-        Key::AgeJustNow,
-        Key::RecoveredNotSavedYet,
-        Key::RecoverDocTitle,
-        Key::RecoverDocLaterHint,
-        Key::RecoveredIntoDocument,
-        Key::RecoverKeptTitle,
-        Key::RecoverKeptSaved,
-        Key::RecoverKeepFailed,
-        Key::OpenFailed,
-        Key::OpenFailedNewer,
-        Key::OpenFailedDamaged,
-        Key::OpenFailedNotABoard,
-        Key::OpenFailedUnreadable,
-        Key::OpenInProgress,
-        Key::OpenChoosing,
-        Key::UnsavedHint,
-        Key::SavedHint,
-        Key::SaveModeAsk,
-        Key::SaveModeTitle,
-        Key::SaveModeLinked,
-        Key::SaveModeLinkedHint,
-        Key::SaveModePacked,
-        Key::SaveModePackedHint,
-        Key::StorageLinked,
-        Key::StoragePacked,
-        Key::StorageLinkedHint,
-        Key::StoragePackedHint,
-        Key::StorageUnsavedHint,
-        Key::GroupTitle,
-        Key::GroupNone,
-        Key::GroupDefaultName,
-        Key::GroupRenameHint,
-        Key::GroupCollapsed,
-        Key::GroupCollapsedHint,
-        Key::GroupMixed,
-        Key::SettingsHint,
-        Key::SettingsTitle,
-        Key::SettingsClose,
-        Key::SettingsTheme,
-        Key::SettingsThemeDark,
-        Key::SettingsThemeLight,
-        Key::SettingsPresent,
-        Key::SettingsPresentVsync,
-        Key::SettingsPresentUncapped,
-        Key::SettingsPresentUncappedHint,
-        Key::SettingsSidecar,
-        Key::SettingsSidecarHint,
-        Key::SettingsSidecarAsk,
-        Key::SettingsSidecarAlways,
-        Key::SettingsSidecarNever,
-        Key::SidecarAskTitle,
-        Key::SidecarAskYes,
-        Key::SidecarAskNo,
-        Key::DialogSaveBoard,
-        Key::DialogOpenBoard,
-        Key::DialogExportImage,
-        Key::DialogFindImage,
-        Key::SettingsMemory,
-        Key::SettingsRamLimit,
-        Key::SettingsRamLimitHint,
-        Key::SettingsVramLimit,
-        Key::SettingsVramLimitHint,
-        Key::SettingsVramAuto,
-        Key::SettingsMaxPixels,
-        Key::SettingsMaxPixelsHint,
-        Key::SettingsNeedsRestart,
-        Key::SettingsSaved,
-        Key::SettingsSaveFailed,
-        Key::SettingsNoConfigDir,
-        Key::SettingsProblemsTitle,
-        Key::SettingsProblemsDismiss,
-        Key::SettingsProblemsStatus,
-        Key::SettingsNoteUnparsable,
-        Key::SettingsKeymap,
-        Key::SettingsKeymapBuiltin,
-        Key::SettingsKeymapFromFile,
-        Key::SettingsKeymapHint,
-        Key::KeymapFellBackToDefaults,
-    ];
+    /// ทุก key — สร้างจากนิยามของ enum (`listed!`) ไม่ใช่รายการพิมพ์มือ
+    const ALL_KEYS: &[Key] = Key::ALL;
 
-    const ALL_TEMPLATES: &[Template] = &[
-        Template::SidecarRestored,
-        Template::SidecarStranded,
-        Template::SidecarCannotWrite,
-        Template::SidecarHandsOff,
-        Template::SidecarAskIn,
-        Template::DialogFindNamedImage,
-        Template::DataRootInUse,
-        Template::CloseLossNeverSaved,
-        Template::CloseLossSince,
-        Template::CloseLossAdded,
-        Template::CloseLossRemoved,
-        Template::CloseLossEdited,
-        Template::CloseMoreTabs,
-        Template::RecoveryMovedToKept,
-        Template::AgeMinutes,
-        Template::AgeHours,
-        Template::AgeDays,
-        Template::ShowingFirstOf,
-        Template::ItemCount,
-        Template::GroupMembers,
-        Template::Saved,
-        Template::RecoverFound,
-        Template::Opened,
-        Template::Zoom,
-        Template::FramesDrawn,
-        Template::QuietRedraws,
-        Template::Ram,
-        Template::Vram,
-        Template::CacheSummary,
-        Template::DecodeQueued,
-        Template::DecodeCancelled,
-        Template::WorkingTextures,
-        Template::AtlasUploads,
-        Template::ArrangeDrawn,
-        Template::Loading,
-        Template::OpeningFiles,
-        Template::OpenedFiles,
-        Template::LayoutApplied,
-        Template::FilterShowing,
-        Template::BoardFull,
-        Template::SwitchedMode,
-        Template::SelectedAll,
-        Template::ZoomSet,
-        Template::NotImplemented,
-        Template::ErrFileTooLarge,
-        Template::ErrImageTooLarge,
-        Template::ErrUnknownFormat,
-        Template::ErrFormatNotAllowed,
-        Template::ErrBadHeader,
-        Template::ErrDecoderPanic,
-        Template::ErrDecode,
-        Template::ErrReadFile,
-        Template::ErrNotAFile,
-        Template::ErrTimeout,
-        Template::ErrAtlasFull,
-        Template::ErrOutOfVram,
-        Template::PastedImage,
-        Template::ErrClipboardEmpty,
-        Template::ErrClipboardBusy,
-        Template::ErrClipboardUnavailable,
-        Template::ErrClipboardUndecodable,
-        Template::ErrMalformedPixels,
-        Template::SpoolOverCap,
-        Template::MissingImage,
-        Template::RelinkFound,
-        Template::RelinkMissing,
-        Template::RelinkUnpacked,
-        Template::StorageInside,
-        Template::OpenFailedDamagedBackup,
-        Template::SettingsNoteUnknownKey,
-        Template::SettingsNoteClamped,
-        Template::SettingsNoteCappedByRam,
-        Template::SettingsNoteUnknownValue,
-        Template::SettingsCeiling,
-        Template::SettingsMegabytes,
-        Template::KeymapProblemFile,
-        Template::KeymapProblemUnknownKey,
-        Template::KeymapProblemUnknownAction,
-        Template::KeymapProblemConflict,
-        Template::SettingsKeymapCount,
-    ];
+    /// ★ ทุกเทมเพลต — สร้างจากนิยามของ enum · รายการพิมพ์มือเดิมขาด `Export*` เจ็ดตัว
+    const ALL_TEMPLATES: &[Template] = Template::ALL;
 
     /// ★ กฎข้อ 2 ของ docs/03 §0: ห้ามมีทางที่ผู้ใช้จะเห็นช่องว่างหรือชื่อ key
     #[test]
