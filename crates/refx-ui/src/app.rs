@@ -1919,7 +1919,9 @@ pub struct RefxApp {
     /// ทำให้คนกด "ทิ้ง" รวดเดียวเพื่อให้มันหายไป) — เปลี่ยนแค่ว่าไม่ต้องรอรอบหน้า
     recovery_queue: std::collections::VecDeque<PendingRecovery>,
     /// งานสแกนโฟลเดอร์ recovery ตอนเปิดโปรแกรม (แตะดิสก์ → ต้องอยู่เธรดอื่น I-2)
-    recovery_scan: Option<crossbeam_channel::Receiver<Vec<PendingRecovery>>>,
+    recovery_scan: Option<crossbeam_channel::Receiver<RecoveryScan>>,
+    /// งานนับรอบการถามล่าสุด (`docs/07 §4`) — แอปไม่รอมัน · เก็บไว้ให้เทสต์รอได้
+    recovery_ask_count: Option<std::thread::JoinHandle<()>>,
     /// ★★ ถามเรื่องงานค้างไปแล้วในการรันครั้งนี้ — **ครั้งเดียวตลอดอายุโปรแกรม**
     ///
     /// `resumed()` ถูกเรียกซ้ำได้ตอนกู้ device (docs/04 §7) · ถ้าใช้ "ไม่มีงานค้าง
@@ -2520,11 +2522,17 @@ struct PendingRecovery {
 ///
 /// ★ `probe_board_id` ใช้ได้ตรงนี้เพราะ board ที่อ่านมาถูกใช้แค่ **นับชิ้น**
 /// แล้วทิ้ง · ตัวจริงถูกอ่านใหม่ด้วย id ของแท็บตอนผู้ใช้กด "เอากลับมา"
+///
+/// ★★★ **ย้ายของที่ถามครบแล้วก่อน แล้วค่อยสแกน** (`docs/07 §4`) — ลำดับนี้คือสิ่งที่
+/// ทำให้ "ย้ายแล้วไม่ถามอีก" เป็นจริงตั้งแต่รอบที่ย้าย
 fn scan_for_recovery(
     dir: &std::path::Path,
     live: &[refx_io::recovery::SessionId],
-) -> Vec<PendingRecovery> {
-    refx_io::recovery::scan(dir, live)
+    rename: refx_io::save::RenameFn,
+) -> RecoveryScan {
+    let moved =
+        refx_io::recovery::retire_unanswered(dir, live, refx_io::recovery::ASK_ROUNDS, rename);
+    let found = refx_io::recovery::scan(dir, live)
         .into_iter()
         .filter_map(|orphan| {
             // ★ อ่านทั้งไฟล์เพื่อ **นับชิ้น** ตรงนี้เลย — ตัวเลขนั้นคือสิ่งเดียวที่
@@ -2536,7 +2544,17 @@ fn scan_for_recovery(
                 items: board.len(),
             })
         })
-        .collect()
+        .collect();
+    RecoveryScan { found, moved }
+}
+
+/// ผลของการสแกนโฟลเดอร์ recovery ตอนเปิดโปรแกรม
+#[derive(Debug, Default)]
+struct RecoveryScan {
+    /// งานกำพร้าที่ต้องถาม — ใหม่สุดก่อน
+    found: Vec<PendingRecovery>,
+    /// ★★★ ไฟล์ที่เพิ่งถูกย้ายไป `recovery/kept/` รอบนี้ — **ต้องบอกผู้ใช้** (`docs/07 §4`)
+    moved: Vec<std::path::PathBuf>,
 }
 
 /// ★★★ คีย์ชั่วคราวของงาน decode หนึ่งใบ — **ผูกกับแท็บด้วย ไม่ใช่กับ path ล้วน**
@@ -2775,18 +2793,23 @@ fn worth_offering(
 }
 
 /// ลบ snapshot ที่ผู้ใช้สั่งทิ้ง พร้อมไฟล์บริวารของมัน
+///
+/// ★ ใช้รายการบริวารของ `refx_io` ชุดเดียว — เดิมที่นี่มีรายการของตัวเอง
+/// ซึ่งจะทิ้ง `.asks` ไว้เป็นขยะกำพร้าทันทีที่ตระกูลนี้มีสมาชิกใหม่
 fn remove_recovery_file(snapshot: &std::path::Path) {
-    for path in [
-        snapshot.to_path_buf(),
-        snapshot.with_extension(refx_io::save::BAK_SUFFIX),
-        refx_io::recovery::asked_marker(snapshot),
-    ] {
-        if let Err(err) = std::fs::remove_file(&path)
-            && err.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!(%err, path = %path.display(), "cannot remove the recovery file");
-        }
-    }
+    refx_io::recovery::discard_file(snapshot);
+}
+
+/// ★ นับรอบการถามของ snapshot นี้บนเธรดอื่น (I-2) — ดู `offer_next_orphan`
+///
+/// คืน handle ไว้ให้เทสต์รอได้ · ตัวแอปไม่รอ (เขียนไม่สำเร็จ = นับไม่ขึ้น
+/// = ถูกถามเพิ่มอีกรอบ ซึ่งเป็นทางที่ปลอดภัยกว่า)
+fn spawn_ask_count(snapshot: std::path::PathBuf) -> Option<std::thread::JoinHandle<()>> {
+    std::thread::Builder::new()
+        .name("refx-recovery-ask".to_owned())
+        .spawn(move || refx_io::recovery::count_ask(&snapshot))
+        .inspect_err(|err| tracing::warn!(%err, "cannot spawn the recovery ask counter"))
+        .ok()
 }
 
 /// ★★ snapshot ของ autosave รอบนี้จะไปลงที่ไหน
@@ -2896,6 +2919,7 @@ impl RefxApp {
             pending_recovery: None,
             recovery_queue: std::collections::VecDeque::new(),
             recovery_scan: None,
+            recovery_ask_count: None,
             recovery_checked: false,
             job_owner: std::collections::HashMap::new(),
             // ผู้เรียก (`run`) เสียบให้ — ที่นี่ไม่รู้จัก `AppPaths`
@@ -5520,7 +5544,11 @@ impl RefxApp {
         let spawned = std::thread::Builder::new()
             .name("refx-recovery-scan".to_owned())
             .spawn(move || {
-                let _ = tx.send(scan_for_recovery(&dir, &live));
+                let _ = tx.send(scan_for_recovery(
+                    &dir,
+                    &live,
+                    refx_platform::fsops::rename_durable,
+                ));
                 if let Some(wake) = wake {
                     wake.wake();
                 }
@@ -5535,18 +5563,43 @@ impl RefxApp {
         let Some(rx) = self.recovery_scan.as_ref() else {
             return;
         };
-        let found = match rx.try_recv() {
-            Ok(found) => found,
+        let scan = match rx.try_recv() {
+            Ok(scan) => scan,
             Err(crossbeam_channel::TryRecvError::Empty) => return,
-            Err(crossbeam_channel::TryRecvError::Disconnected) => Vec::new(),
+            Err(crossbeam_channel::TryRecvError::Disconnected) => RecoveryScan::default(),
         };
         self.recovery_scan = None;
+        self.announce_moved_to_kept(&scan.moved);
         // ★★ กวาด spool ตรงนี้ **ไม่ว่าจะมีงานค้างหรือไม่** — รายชื่อ snapshot
         //    ที่ต้องคุ้มครองนิ่งแล้วตั้งแต่การสแกนจบ · ถ้าผูกไว้กับ "ผู้ใช้ตอบ
         //    แถบกู้คืน" อย่างเดียว เครื่องที่ไม่เคย crash เลยจะไม่มีวันกวาด
         self.sweep_spool_folder();
-        self.recovery_queue = found.into();
+        self.recovery_queue = scan.found.into();
         self.offer_next_orphan();
+    }
+
+    /// ★★★ **ห้ามเงียบตอนย้าย** (`docs/07 §4`) — บอกครั้งเดียว ตอนที่ย้าย
+    ///
+    /// บอกสามอย่าง: ย้ายกี่ชิ้น · **ไปไหน (path เต็ม)** · เปิดยังไง · ไฟล์ใน
+    /// `kept/` เป็น `.refx` ที่ถูกต้องทุกประการ จึงเปิดด้วย `Ctrl+O` ได้ตรง ๆ
+    /// จนกว่าเมนู `File → เปิดโฟลเดอร์งานที่เก็บไว้` (P5-9c) จะมา
+    fn announce_moved_to_kept(&mut self, moved: &[std::path::PathBuf]) {
+        let Some(folder) = moved.first().and_then(|path| path.parent()) else {
+            return;
+        };
+        self.shell.status = text::fill(
+            self.shell.lang,
+            Template::RecoveryMovedToKept,
+            &[
+                ("n", &moved.len().to_string()),
+                ("rounds", &refx_io::recovery::ASK_ROUNDS.to_string()),
+                ("dir", &folder.display().to_string()),
+            ],
+        );
+        self.shell.status_warn = true;
+        if let Some(gfx) = self.gfx.as_ref() {
+            gfx.window.request_redraw();
+        }
     }
 
     /// ★★★ เสนองานกำพร้าใบถัดไปในคิว — **ทีละใบ** (P4-7c)
@@ -5572,7 +5625,13 @@ impl RefxApp {
         //
         //   ★ เหตุผลเดิมยังจริง — ไฟล์ที่ไม่เคยถูกตอบจะไม่เข้าเกณฑ์เก็บกวาด ·
         //     ทางออกตามสเปกคือ "ถาม N รอบยังไม่ตอบ → ย้ายไปที่ปลอดภัย" ไม่ใช่
-        //     ถอดเกราะเร็วขึ้น (ยังรอสเปกของที่ปลอดภัยสำหรับงานกำพร้า — P5-9d)
+        //     ถอดเกราะเร็วขึ้น
+        //
+        // ★★ สิ่งเดียวที่จดตอนแถบโผล่คือ **ตัวนับรอบ** (`docs/07 §4`) — มันไม่ถอด
+        //    เกราะอะไรเลย ผลเดียวของมันคือย้ายไป `recovery/kept/` ตอนเปิดรอบที่ 4
+        //    · แถบโผล่ได้ครั้งเดียวต่อไฟล์ต่อการเปิดโปรแกรม (คิวหยิบออกแล้วไม่ใส่คืน)
+        //    · แตะดิสก์ → เธรดอื่น (I-2)
+        self.recovery_ask_count = spawn_ask_count(found.path.clone());
         self.shell.recover_prompt = Some(crate::shell::RecoverView {
             when: found.when.clone(),
             items: found.items,
@@ -12645,6 +12704,127 @@ mod tests {
                 );
             }
             let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// ★★ **แถบโผล่ = นับหนึ่งรอบ** — และไม่ประทับ `.asked` (`docs/07 §4` · P5-9d)
+    ///
+    /// คู่กับ `showing_the_recovery_question_marks_nothing_until_it_is_answered`:
+    /// ตัวนับเป็นสิ่งเดียวที่แถบโผล่ได้จด เพราะผลของมันคือย้ายไปที่ปลอดภัย ไม่ใช่ถอดเกราะ
+    #[test]
+    fn showing_the_recovery_question_counts_one_round() {
+        use refx_platform::fsops::rename_durable;
+        let dir = std::env::temp_dir().join(format!("refx-ask-count-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let session = refx_io::recovery::SessionId::new_unique();
+        refx_io::recovery::write_snapshot(
+            &dir,
+            &session,
+            &refx_core::board::Board::default(),
+            rename_durable,
+        )
+        .unwrap();
+        let path = refx_io::recovery::snapshot_path(&dir, &session);
+
+        for round in 1..=2 {
+            let mut app = RefxApp::new(AppArgs::default());
+            app.recovery_dir = Some(dir.clone());
+            let scan = scan_for_recovery(&dir, &app.docs.live_sessions(), rename_durable);
+            assert!(scan.moved.is_empty());
+            app.recovery_queue = scan.found.into();
+            app.offer_next_orphan();
+            app.recovery_ask_count
+                .take()
+                .expect("แถบโผล่แล้วไม่ได้สั่งนับ")
+                .join()
+                .unwrap();
+            assert_eq!(refx_io::recovery::times_asked(&path), round);
+            assert!(!refx_io::recovery::asked_marker(&path).exists());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ★★★ **รอบที่ย้ายไป `kept/` ต้องบอกผู้ใช้ว่าไปไหน** (`docs/07 §4` — ห้ามเงียบตอนย้าย)
+    ///
+    /// เดินเส้นทางจริงทั้งเส้น: `scan_for_recovery` (ย้าย + สแกน) → ช่องสัญญาณ →
+    /// `poll_recovery_scan` → แถบสถานะ · ข้อความต้องมี **path เต็มของโฟลเดอร์**
+    /// ไม่ใช่แค่คำว่า "ย้ายแล้ว"
+    ///
+    /// ★ negative control: ถามแค่ 2 รอบ → ไม่ย้าย ไม่มีข้อความ และยังถูกถามตามปกติ
+    #[test]
+    fn the_launch_that_moves_work_to_kept_says_where_it_went() {
+        use refx_platform::fsops::rename_durable;
+        for (asks, should_move) in [
+            (refx_io::recovery::ASK_ROUNDS - 1, false),
+            (refx_io::recovery::ASK_ROUNDS, true),
+        ] {
+            let dir =
+                std::env::temp_dir().join(format!("refx-kept-says-{asks}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let session = refx_io::recovery::SessionId::new_unique();
+            refx_io::recovery::write_snapshot(
+                &dir,
+                &session,
+                &refx_core::board::Board::default(),
+                rename_durable,
+            )
+            .unwrap();
+            let path = refx_io::recovery::snapshot_path(&dir, &session);
+            for _ in 0..asks {
+                refx_io::recovery::count_ask(&path);
+            }
+
+            for lang in [Lang::En, Lang::Th] {
+                let mut app = RefxApp::new(AppArgs::default());
+                app.shell.lang = lang;
+                app.recovery_dir = Some(dir.clone());
+                let (tx, rx) = crossbeam_channel::bounded(1);
+                tx.send(scan_for_recovery(
+                    &dir,
+                    &app.docs.live_sessions(),
+                    rename_durable,
+                ))
+                .unwrap();
+                app.recovery_scan = Some(rx);
+                app.poll_recovery_scan();
+
+                let kept = refx_io::recovery::kept_dir(&dir).display().to_string();
+                if should_move && lang == Lang::En {
+                    assert!(
+                        app.shell.status.contains(&kept),
+                        "ย้ายแล้วไม่บอกว่าไปไหน: {:?}",
+                        app.shell.status
+                    );
+                    assert!(app.shell.status_warn, "ข้อความย้ายต้องเด่น ไม่ใช่ข้อความปกติ");
+                    assert!(app.shell.recover_prompt.is_none(), "ย้ายแล้วยังถามอีก");
+                } else if should_move {
+                    // รอบที่สอง (ไทย) ไฟล์ย้ายไปแล้วตั้งแต่รอบแรก → ไม่มีอะไรต้องบอกซ้ำ
+                    assert!(!app.shell.status.contains(&kept), "บอกซ้ำทุกครั้งที่เปิด");
+                } else {
+                    assert!(!app.shell.status.contains(&kept), "ยังไม่ครบรอบแต่บอกว่าย้าย");
+                    assert!(app.shell.recover_prompt.is_some(), "ยังไม่ครบรอบต้องถามตามปกติ");
+                }
+            }
+            assert_eq!(path.exists(), !should_move);
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// ★★ ข้อความย้ายต้องบอกครบในทั้งสองภาษา: ไปไหน (path เต็ม) · เปิดยังไง
+    #[test]
+    fn the_moved_to_kept_message_says_where_and_how_to_open_it() {
+        let dir = r"C:\Users\someone\AppData\Local\RefX\data\recovery\kept";
+        for lang in [Lang::En, Lang::Th] {
+            let text = text::fill(
+                lang,
+                Template::RecoveryMovedToKept,
+                &[("n", "2"), ("rounds", "3"), ("dir", dir)],
+            );
+            assert!(text.contains(dir), "{lang:?}: ไม่บอกว่าไปไหน — {text}");
+            assert!(text.contains("Ctrl+O"), "{lang:?}: ไม่บอกว่าเปิดยังไง — {text}");
+            assert!(!text.contains('{'), "{lang:?}: ตัวยึดค้าง — {text}");
         }
     }
 

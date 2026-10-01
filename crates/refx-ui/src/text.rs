@@ -1237,6 +1237,11 @@ pub enum Template {
     CloseLossEdited,
     /// ★★ `{n}` — ปิดหน้าต่าง: อีกกี่แท็บที่ยังไม่บันทึกและจะถูกถามต่อ
     CloseMoreTabs,
+    /// ★★★ `{n}` `{rounds}` `{dir}` — ย้ายงานที่ไม่มีใครตอบไป `recovery/kept/` (`docs/07 §4`)
+    ///
+    /// ★ ต้องบอก **ไปไหน + เปิดยังไง + ไม่มีอะไรหาย** — ไฟล์ที่ไม่มีใครบอกว่าอยู่ไหน
+    /// เท่ากับไฟล์ที่ถูกลบ
+    RecoveryMovedToKept,
 }
 
 /// เทมเพลตภาษาอังกฤษ — ต้องมีครบทุกตัว
@@ -1425,6 +1430,9 @@ Drag in a PNG, JPEG, WebP, GIF, BMP, TGA or TIFF instead."
         Template::CloseLossRemoved => "{n} removed",
         Template::CloseLossEdited => "{n} edits",
         Template::CloseMoreTabs => "{n} more unsaved tabs will be asked about after this one",
+        Template::RecoveryMovedToKept => {
+            "{n} unsaved board(s) went unanswered for {rounds} launches and were moved to {dir} - open them with Ctrl+O · nothing was deleted"
+        }
     }
 }
 
@@ -1603,6 +1611,9 @@ fn template_th(template: Template) -> Option<&'static str> {
         Template::CloseLossRemoved => "ลบไป {n} รายการ",
         Template::CloseLossEdited => "แก้ไข {n} ครั้ง",
         Template::CloseMoreTabs => "หลังจากนี้จะถามต่ออีก {n} แท็บที่ยังไม่ได้บันทึก",
+        Template::RecoveryMovedToKept => {
+            "งานที่ไม่ได้บันทึก {n} ชุดถูกถามมา {rounds} รอบแล้วไม่มีคำตอบ จึงย้ายไปเก็บไว้ที่ {dir} - เปิดได้ด้วย Ctrl+O · ไม่มีอะไรถูกลบ"
+        }
     })
 }
 
@@ -2069,6 +2080,7 @@ mod tests {
         Template::CloseLossRemoved,
         Template::CloseLossEdited,
         Template::CloseMoreTabs,
+        Template::RecoveryMovedToKept,
         Template::ShowingFirstOf,
         Template::ItemCount,
         Template::GroupMembers,

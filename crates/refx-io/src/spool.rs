@@ -305,25 +305,35 @@ pub fn sweep(
 /// ★ อ่านทุก snapshot ในโฟลเดอร์ — งานดิสก์จริง จึงต้องอยู่บน worker (I-2)
 /// · snapshot ที่อ่านไม่ออกถูกข้าม (มันกู้อะไรไม่ได้อยู่แล้ว จึงไม่มี asset
 /// ที่ต้องคุ้มครองแทนมัน)
+///
+/// ★★★ **รวม `recovery/kept/` ด้วย** (`docs/07 §4` — *"เพดานไบต์ของ spool:
+/// ยกเว้น `kept/`"*) · งานที่ถูกย้ายไปเก็บเพราะไม่มีใครตอบ ไม่มีวันถูกลบอัตโนมัติ
+/// ถ้าภาพของมันถูกกวาดออกจาก spool ผู้ใช้จะเปิดมันเจอแต่ `Missing` —
+/// ไฟล์อยู่ครบทุกไบต์แต่งานหายอยู่ดี
 #[must_use]
 pub fn referenced_by_recovery(
     recovery_dir: &Path,
     id: refx_core::arena::BoardId,
 ) -> BTreeSet<ContentHash> {
-    let Ok(entries) = std::fs::read_dir(recovery_dir) else {
-        return BTreeSet::new();
-    };
     let mut all = BTreeSet::new();
-    for path in entries
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.extension()
-                .is_some_and(|ext| ext == crate::recovery::SNAPSHOT_EXT)
-        })
-    {
-        if let Some(board) = crate::recovery::load(&path, id) {
-            all.extend(hashes_of(&board));
+    for dir in [
+        recovery_dir.to_path_buf(),
+        crate::recovery::kept_dir(recovery_dir),
+    ] {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue; // ยังไม่มีโฟลเดอร์ = ไม่มีอะไรต้องคุ้มครอง
+        };
+        for path in entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|ext| ext == crate::recovery::SNAPSHOT_EXT)
+            })
+        {
+            if let Some(board) = crate::recovery::load(&path, id) {
+                all.extend(hashes_of(&board));
+            }
         }
     }
     all
@@ -576,6 +586,64 @@ mod tests {
         );
 
         assert!(pasted.exists(), "ตอบ 'เก็บไว้ก่อน' แล้วภาพของมันถูกลบ");
+    }
+
+    /// ★★★ **งานที่ถูกย้ายไป `recovery/kept/` ยังคุ้มครองภาพของมัน** (`docs/07 §4`)
+    ///
+    /// ย้ายด้วย [`crate::recovery::retire_unanswered`] ตัวจริง ไม่ได้วางไฟล์เองใน
+    /// `kept/` — เทสต์ที่วางเองพิสูจน์ได้แค่ว่าเราอ่านโฟลเดอร์ที่เราคิดว่ามันย้ายไป
+    ///
+    /// ★ negative control อยู่ในตัว: ถามแค่โฟลเดอร์บนสุดแบบรุ่นเก่า (`read_dir`
+    /// ของ `recovery/` อย่างเดียว) แล้วต้องเห็นว่าภาพ **ไม่** ได้รับการคุ้มครอง
+    #[test]
+    fn a_snapshot_moved_to_kept_still_protects_its_images() {
+        let dir = temp_dir("kept");
+        let spool_dir = dir.join("pasted");
+        let recovery_dir = dir.join("recovery");
+        std::fs::create_dir_all(&spool_dir).unwrap();
+        std::fs::create_dir_all(&recovery_dir).unwrap();
+
+        let pasted = store(&spool_dir, hash_of(7), &[7; 64], rename_durable).unwrap();
+        let session = crate::recovery::SessionId::new_unique();
+        crate::recovery::write_snapshot(&recovery_dir, &session, &board_of(&[7]), rename_durable)
+            .unwrap();
+        let snapshot = crate::recovery::snapshot_path(&recovery_dir, &session);
+        for _ in 0..crate::recovery::ASK_ROUNDS {
+            crate::recovery::count_ask(&snapshot);
+        }
+        let moved = crate::recovery::retire_unanswered(
+            &recovery_dir,
+            &[crate::recovery::SessionId::new_unique()],
+            crate::recovery::ASK_ROUNDS,
+            rename_durable,
+        );
+        assert_eq!(moved.len(), 1, "ไม่ได้ย้าย — เทสต์นี้ไม่ได้ทดสอบ kept/");
+        assert!(!snapshot.exists());
+
+        // negative control — รุ่นเก่าที่อ่านแค่ `recovery/` ชั้นบน
+        let top_only: BTreeSet<ContentHash> = std::fs::read_dir(&recovery_dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter_map(|e| crate::recovery::load(&e.path(), board_id()))
+            .flat_map(|board| hashes_of(&board))
+            .collect();
+        assert!(
+            !top_only.contains(&hash_of(7)),
+            "ชั้นบนยังเห็นภาพนี้ — การย้ายไม่ได้เกิดขึ้นจริง"
+        );
+
+        let referenced = referenced_by_recovery(&recovery_dir, board_id());
+        sweep(
+            &spool_dir,
+            &referenced,
+            0,
+            Duration::ZERO,
+            SystemTime::now(),
+        );
+        assert!(
+            pasted.exists(),
+            "ภาพของงานใน kept/ ถูกกวาด — เปิดงานนั้นแล้วจะเจอแต่ Missing"
+        );
     }
 
     /// เพดานไบต์/อายุใช้ได้กับไฟล์ที่ไม่มีใครอ้างถึงเท่านั้น

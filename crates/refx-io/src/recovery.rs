@@ -3,6 +3,8 @@
 //! ```text
 //! <data_dir>/recovery/<session-id>.refx     ← snapshot · DTO เดียวกับ .refx เป๊ะ
 //! <data_dir>/recovery/<session-id>.asked    ← ★ "ผู้ใช้ **ตอบ** คำถามของไฟล์นี้แล้ว"
+//! <data_dir>/recovery/<session-id>.asks     ← ถามไปแล้วกี่รอบการเปิดโปรแกรม (ยังไม่ตอบ)
+//! <data_dir>/recovery/kept/<session-id>.refx ← ★★ ถามครบ 3 รอบไม่มีใครตอบ → ย้ายมาที่นี่
 //! ```
 //!
 //! ## ทำไมต้องมีทั้งที่ P4-3 ทำ autosave ไปแล้ว
@@ -41,6 +43,16 @@
 //!   และไม่ใช่ "ตัดสินใจแล้ว" — เปิดโปรแกรมแล้วปิดไปก่อนทันอ่าน = snapshot เสียเกราะ
 //!   ทั้งที่ผู้ใช้ไม่เคยตอบ (เจอ 27 ก.ย. 2026)
 //!
+//! ## ★★★ ถามวนไม่จบ → ย้ายไปที่ปลอดภัย ไม่ใช่เลิกป้องกัน (`docs/07 §4`)
+//!
+//! ไฟล์ที่ไม่มีใครตอบอยู่ค้างได้ตลอดกาล — แต่ก็ถูกถามทุกครั้งที่เปิดโปรแกรมตลอดกาลด้วย
+//! · ถามครบ [`ASK_ROUNDS`] รอบการเปิดโปรแกรมแล้วยังไม่มีปุ่มไหนถูกกด →
+//! [`retire_unanswered`] ย้ายไป `kept/` ซึ่ง **ไม่ถูกถามอีก · ไม่ถูก [`prune`] แตะ
+//! · และ spool ยังคุ้มครองภาพของมัน** (`crate::spool::referenced_by_recovery`)
+//!
+//! ★ นับที่ **การเปิดโปรแกรม** ไม่ใช่เวลา — เวลาเดินไปเองตอนผู้ใช้ไม่อยู่
+//! แต่การเปิดโปรแกรมคือจังหวะที่เขามีโอกาสได้เห็นจริง ๆ
+//!
 //! spec: docs/07-file-format.md §4, ROADMAP P4-4
 
 use std::path::{Path, PathBuf};
@@ -60,6 +72,16 @@ pub const SNAPSHOT_EXT: &str = "refx";
 
 /// นามสกุลของไฟล์ประทับ "ผู้ใช้ตอบคำถามของไฟล์นี้แล้ว" (ดูหัวโมดูล)
 pub const ASKED_EXT: &str = "asked";
+
+/// นามสกุลของตัวนับ "ถามไปแล้วกี่รอบการเปิดโปรแกรม" — อยู่ **ข้างไฟล์**
+/// ไม่ใช่ใน settings เพราะมันเป็นสมบัติของไฟล์ (`docs/07 §4`)
+pub const ASKS_EXT: &str = "asks";
+
+/// โฟลเดอร์ย่อยของงานที่ถามครบแล้วไม่มีใครตอบ (`docs/07 §4`)
+pub const KEPT_DIR: &str = "kept";
+
+/// ถามกี่รอบการเปิดโปรแกรมแล้วยังไม่ตอบ จึงย้ายไป [`KEPT_DIR`] (`docs/07 §4`)
+pub const ASK_ROUNDS: u32 = 3;
 
 /// เก็บ snapshot ที่ไม่มีเจ้าของได้กี่ไฟล์ (`docs/07 §4`)
 pub const MAX_KEPT: usize = 10;
@@ -184,11 +206,25 @@ pub fn discard(dir: &Path, session: &SessionId) {
     remove_family(&snapshot_path(dir, session));
 }
 
+/// ★ ทิ้ง snapshot ที่ **ผู้ใช้สั่งทิ้งเอง** พร้อมบริวารทั้งตระกูล
+///
+/// มีไว้ให้ชั้น UI ใช้รายการบริวาร **ชุดเดียวกับ** [`prune`] · เดิมชั้น UI มีรายการ
+/// ของตัวเอง ซึ่งจะตกหล่นทุกครั้งที่ตระกูลนี้มีสมาชิกใหม่ (เช่น `.asks`)
+pub fn discard_file(snapshot: &Path) {
+    remove_family(snapshot);
+}
+
 /// ลบ snapshot กับไฟล์บริวารทั้งหมดของมัน
 fn remove_family(snapshot: &Path) {
     let bak = snapshot.with_extension(crate::save::BAK_SUFFIX);
     let tmp = snapshot.with_extension(crate::save::TMP_SUFFIX);
-    for path in [snapshot, &bak, &tmp, &asked_marker(snapshot)] {
+    for path in [
+        snapshot,
+        &bak,
+        &tmp,
+        &asked_marker(snapshot),
+        &asks_counter(snapshot),
+    ] {
         match std::fs::remove_file(path) {
             Ok(()) => {}
             // ไม่มีไฟล์อยู่แล้วคือผลลัพธ์ที่ต้องการ ไม่ใช่ความล้มเหลว
@@ -219,6 +255,113 @@ pub fn mark_asked(snapshot: &Path) {
 #[must_use]
 pub fn was_asked(snapshot: &Path) -> bool {
     asked_marker(snapshot).exists()
+}
+
+/// ตัวนับรอบการถามที่คู่กับ snapshot นี้ (ดูหัวโมดูล)
+#[must_use]
+pub fn asks_counter(snapshot: &Path) -> PathBuf {
+    snapshot.with_extension(ASKS_EXT)
+}
+
+/// ที่เก็บของงานที่ถามครบแล้วไม่มีใครตอบ
+#[must_use]
+pub fn kept_dir(dir: &Path) -> PathBuf {
+    dir.join(KEPT_DIR)
+}
+
+/// ถามไฟล์นี้ไปแล้วกี่รอบการเปิดโปรแกรม
+///
+/// ★ ไม่มีตัวนับ / อ่านไม่ได้ / เนื้อเป็นขยะ = **0** (I-4) · ทิศที่ผิดพลาดได้
+/// ทิศเดียวคือ "ถามเพิ่มอีกสองสามรอบ" ไม่ใช่ "ย้ายเร็วไป" — และต่อให้ย้ายเร็วไป
+/// ก็แค่ย้ายไปที่ปลอดภัย ไม่มีอะไรหาย
+///
+/// ★ อ่านแบบมีเพดาน — ใครก็วางไฟล์ชื่อนี้ไว้ได้ ไฟล์ขนาด GB ต้องไม่ถูกสูบเข้า RAM
+#[must_use]
+pub fn times_asked(snapshot: &Path) -> u32 {
+    use std::io::Read as _;
+    /// `u32::MAX` มี 10 หลัก · เผื่อช่องว่าง/ขึ้นบรรทัด
+    const MAX_COUNTER_BYTES: u64 = 16;
+
+    let mut text = String::new();
+    let read = std::fs::File::open(asks_counter(snapshot))
+        .and_then(|file| file.take(MAX_COUNTER_BYTES).read_to_string(&mut text));
+    match read {
+        Ok(_) => text.trim().parse().unwrap_or(0),
+        Err(_) => 0,
+    }
+}
+
+/// ★ นับว่าเพิ่งถามไฟล์นี้อีกหนึ่งรอบ — เรียก **ตอนแถบขึ้นจอ** (ครั้งเดียวต่อการเปิดโปรแกรม)
+///
+/// ต่างจาก [`mark_asked`] ซึ่งเรียกตอนผู้ใช้ **ตอบ** · ตัวนับนี้ไม่ถอดเกราะอะไรเลย
+/// ผลเดียวของมันคือการย้ายไปที่ปลอดภัยใน [`retire_unanswered`]
+///
+/// ★★ แตะดิสก์ — ห้ามเรียกบน UI thread (I-2)
+///
+/// เขียนไม่สำเร็จ = นับไม่ขึ้น = ถูกถามเพิ่มอีกรอบ ซึ่งเป็นทางที่ปลอดภัยกว่า
+pub fn count_ask(snapshot: &Path) {
+    let counter = asks_counter(snapshot);
+    let next = times_asked(snapshot).saturating_add(1);
+    if let Err(err) = std::fs::write(&counter, next.to_string()) {
+        tracing::warn!(%err, path = %counter.display(), "cannot count a recovery question");
+    }
+}
+
+/// ★★★ ย้าย snapshot ที่ **ถามครบ `rounds` รอบแล้วไม่เคยถูกตอบ** ไป [`KEPT_DIR`]
+///
+/// คืน path ใหม่ของทุกไฟล์ที่ย้ายสำเร็จ — **ผู้เรียกต้องบอกผู้ใช้** ว่าย้ายไปไหน
+/// (`docs/07 §4`: *"ห้ามเงียบตอนย้าย — การย้ายของผู้ใช้โดยไม่บอก คือการทำให้เขาหาไม่เจอ"*)
+///
+/// | กรณี | ทำอะไร |
+/// |---|---|
+/// | เคยตอบแล้ว (มี `.asked`) | ไม่แตะ — อยู่ใต้ [`prune`] ตามเดิม |
+/// | ถามยังไม่ครบ | ไม่แตะ |
+/// | ที่ปลายทางมีไฟล์ชื่อเดียวกันอยู่แล้ว | **ไม่แตะทั้งคู่** — ห้ามเขียนทับของที่เก็บไว้ |
+/// | ย้ายไม่สำเร็จ | ไฟล์อยู่ที่เดิม · ถูกถามต่อตามปกติ |
+///
+/// ★ ย้ายด้วย `rename` ตัวเดียวกับการบันทึก (ในโฟลเดอร์เดียวกัน = ไดรฟ์เดียวกัน
+/// จึงเป็น rename จริง ไม่ใช่ copy + delete) · ไบต์ของ snapshot ไม่ถูกเขียนใหม่เลย
+///
+/// ★★ แตะดิสก์ — ห้ามเรียกบน UI thread (I-2) · เรียก **ก่อน** [`scan`] ของการเปิด
+/// โปรแกรมรอบนั้น ไฟล์ที่ย้ายไปแล้วจึงไม่ถูกถามอีก
+pub fn retire_unanswered(
+    dir: &Path,
+    live: &[SessionId],
+    rounds: u32,
+    rename: RenameFn,
+) -> Vec<PathBuf> {
+    let mut moved = Vec::new();
+    for orphan in scan(dir, live) {
+        if orphan.asked || times_asked(&orphan.path) < rounds {
+            continue;
+        }
+        let Some(name) = orphan.path.file_name() else {
+            continue;
+        };
+        let kept = kept_dir(dir);
+        let to = kept.join(name);
+        if to.exists() {
+            tracing::warn!(path = %to.display(), "a kept recovery file already has this name — leaving both alone");
+            continue;
+        }
+        if let Err(err) = std::fs::create_dir_all(&kept) {
+            tracing::warn!(%err, path = %kept.display(), "cannot create the kept recovery folder");
+            return moved;
+        }
+        if let Err(err) = rename(&orphan.path, &to) {
+            tracing::warn!(%err, from = %orphan.path.display(), "cannot move an unanswered recovery file");
+            continue;
+        }
+        // ตัวนับหมดหน้าที่แล้ว · ไฟล์บริวารอื่นไม่แตะ (ไม่ลบอะไรอัตโนมัติ)
+        let _ = std::fs::remove_file(asks_counter(&orphan.path));
+        tracing::warn!(
+            to = %to.display(),
+            rounds,
+            "moved a recovery file nobody answered to the kept folder"
+        );
+        moved.push(to);
+    }
+    moved
 }
 
 /// snapshot ที่ค้างอยู่จาก session ที่จบไปแล้ว
@@ -376,7 +519,14 @@ pub fn prune(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    // ★ `fs::read` ถูกแบนเพราะ I-2 กับไฟล์ขนาดไม่รู้จบ · ที่นี่อ่านไฟล์ที่เทสต์เพิ่ง
+    //   เขียนเอง เพื่อพิสูจน์ว่าการย้ายไป `kept/` **ไม่เปลี่ยนไบต์** (เหตุผลเดียวกับ `sidecar`)
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::disallowed_methods
+    )]
 
     use super::*;
     use refx_core::arena::{ArenaKey as _, BoardId};
@@ -776,6 +926,148 @@ mod tests {
             .map(|e| e.file_name())
             .collect();
         assert!(left.is_empty(), "เหลือขยะไว้ในโฟลเดอร์: {left:?}");
+    }
+
+    // ---------- ★★★ ถามครบสามรอบไม่มีใครตอบ → recovery/kept/ (`docs/07 §4`) ----------
+
+    /// เปิดโปรแกรมหนึ่งรอบ: ย้ายของที่ถามครบก่อน แล้วถามที่เหลือ (ลำดับเดียวกับชั้น UI)
+    fn launch(dir: &Path) -> (Vec<PathBuf>, Vec<Orphan>) {
+        let me = [SessionId::new_unique()];
+        let moved = retire_unanswered(dir, &me, ASK_ROUNDS, rename_durable);
+        let asked = scan(dir, &me);
+        for orphan in &asked {
+            count_ask(&orphan.path);
+        }
+        (moved, asked)
+    }
+
+    /// ★★★ **ถามครบ 3 รอบการเปิดโปรแกรม แล้วรอบที่ 4 ย้าย — ไม่ใช่ก่อนนั้น**
+    ///
+    /// และหลังย้าย: ไม่ถูกถามอีก · ไบต์เท่าเดิมทุกไบต์ · ตัวนับไม่ค้างเป็นขยะ
+    #[test]
+    fn three_unanswered_launches_move_it_to_kept_and_not_one_sooner() {
+        let dir = temp_dir("retire");
+        let path = plant(&dir, "unanswered", 4);
+        let bytes = std::fs::read(&path).unwrap();
+
+        for round in 1..=ASK_ROUNDS {
+            let (moved, asked) = launch(&dir);
+            assert!(moved.is_empty(), "รอบ {round}: ย้ายก่อนถามครบ");
+            assert_eq!(asked.len(), 1, "รอบ {round}: ไม่ถูกถาม");
+            assert_eq!(times_asked(&path), round);
+        }
+
+        let (moved, asked) = launch(&dir);
+        assert_eq!(moved.len(), 1, "ถามครบ {ASK_ROUNDS} รอบแล้วยังไม่ย้าย");
+        assert!(asked.is_empty(), "ย้ายแล้วยังถูกถามอีก");
+        let kept = &moved[0];
+        assert_eq!(kept.parent(), Some(kept_dir(&dir).as_path()));
+        assert_eq!(
+            kept.file_name(),
+            path.file_name(),
+            "ชื่อเปลี่ยน — หาไม่เจอจากชื่อ session"
+        );
+        assert_eq!(std::fs::read(kept).unwrap(), bytes, "ย้ายแล้วไบต์ไม่เท่าเดิม");
+        assert!(!path.exists());
+        assert!(!asks_counter(&path).exists(), "ตัวนับค้างเป็นขยะ");
+        assert!(load(kept, board_id()).is_some(), "ไฟล์ที่เก็บไว้เปิดไม่ได้");
+
+        // รอบถัด ๆ ไป: ไม่ถาม ไม่ย้ายซ้ำ
+        let (moved, asked) = launch(&dir);
+        assert!(moved.is_empty() && asked.is_empty());
+        assert!(kept.exists());
+    }
+
+    /// ★★ **เคยตอบแล้ว = ไม่ย้าย** ไม่ว่าตัวนับจะสูงแค่ไหน
+    ///
+    /// ไฟล์ที่ผู้ใช้ตอบ "เก็บไว้ก่อน" อยู่ใต้เพดานตามเดิม — การย้ายมันไป `kept/`
+    /// จะทำให้มัน **พ้นเพดานตลอดกาล** ทั้งที่ผู้ใช้เห็นและตัดสินใจไปแล้ว
+    #[test]
+    fn a_snapshot_the_user_answered_is_never_moved() {
+        let dir = temp_dir("retire-answered");
+        let answered = plant(&dir, "answered", 1);
+        mark_asked(&answered);
+        let unanswered = plant(&dir, "unanswered", 1);
+        for _ in 0..ASK_ROUNDS + 5 {
+            count_ask(&answered);
+            count_ask(&unanswered);
+        }
+
+        let moved = retire_unanswered(&dir, &[SessionId::new_unique()], ASK_ROUNDS, rename_durable);
+
+        assert!(answered.exists(), "ไฟล์ที่ผู้ใช้ตอบแล้วถูกย้าย");
+        // negative control — ตัวที่ไม่เคยตอบต้องถูกย้ายจริงในรอบเดียวกัน
+        assert_eq!(
+            moved,
+            vec![kept_dir(&dir).join(unanswered.file_name().unwrap())]
+        );
+    }
+
+    /// ★★★ **ห้ามเขียนทับของที่เก็บไว้แล้ว** — ชื่อชนกัน = ไม่แตะทั้งคู่
+    #[test]
+    fn moving_never_overwrites_something_already_kept() {
+        let dir = temp_dir("retire-clash");
+        let path = plant(&dir, "clash", 1);
+        for _ in 0..ASK_ROUNDS {
+            count_ask(&path);
+        }
+        std::fs::create_dir_all(kept_dir(&dir)).unwrap();
+        let already = kept_dir(&dir).join(path.file_name().unwrap());
+        std::fs::write(&already, b"kept earlier").unwrap();
+
+        let moved = retire_unanswered(&dir, &[SessionId::new_unique()], ASK_ROUNDS, rename_durable);
+
+        assert!(moved.is_empty());
+        assert_eq!(
+            std::fs::read(&already).unwrap(),
+            b"kept earlier",
+            "ของที่เก็บไว้ถูกเขียนทับ"
+        );
+        assert!(path.exists(), "ไฟล์ต้นทางหายทั้งที่ย้ายไม่ได้");
+    }
+
+    /// ★★★ **`kept/` ไม่ถูกลบอัตโนมัติ ไม่ว่ากรณีใด** — เพดานจำนวน 0 + อายุ 40 วัน
+    #[test]
+    fn the_cap_never_reaches_into_kept() {
+        let dir = temp_dir("retire-prune");
+        let path = plant(&dir, "old", 1);
+        for _ in 0..ASK_ROUNDS {
+            count_ask(&path);
+        }
+        let moved = retire_unanswered(&dir, &[SessionId::new_unique()], ASK_ROUNDS, rename_durable);
+        assert_eq!(moved.len(), 1);
+        // ★ ประทับให้ด้วย — ต่อให้มีใครวาง `.asked` ไว้ข้างมัน ก็ต้องไม่ถูกลบ
+        mark_asked(&moved[0]);
+
+        let in_40_days = SystemTime::now() + Duration::from_secs(40 * 24 * 60 * 60);
+        let pruned = prune(&dir, &[SessionId::new_unique()], 0, MAX_AGE, in_40_days);
+
+        assert_eq!(pruned.removed, 0);
+        assert!(moved[0].exists(), "เพดานลบงานที่ย้ายไปเก็บไว้");
+    }
+
+    /// ตัวนับเป็นขยะ (I-4) = นับเป็น 0 · ทิศที่พลาดได้คือ "ถามเพิ่ม" ไม่ใช่ "ย้ายเร็วไป"
+    #[test]
+    fn a_garbage_counter_reads_as_never_asked() {
+        let dir = temp_dir("retire-garbage");
+        let path = plant(&dir, "garbage", 1);
+        for junk in [&b"\xff\xfe"[..], b"-3", b"99999999999999999999", b""] {
+            std::fs::write(asks_counter(&path), junk).unwrap();
+            assert_eq!(times_asked(&path), 0, "{junk:?}");
+        }
+        count_ask(&path);
+        assert_eq!(times_asked(&path), 1, "นับต่อจากขยะไม่ได้");
+    }
+
+    /// ทิ้งไป = ลบตัวนับไปด้วย ไม่ค้างเป็นขยะกำพร้า
+    #[test]
+    fn discarding_removes_the_counter_too() {
+        let dir = temp_dir("retire-discard");
+        let path = plant(&dir, "gone", 1);
+        count_ask(&path);
+        discard_file(&path);
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+        assert!(left.is_empty(), "เหลือขยะ: {left:?}");
     }
 
     // ---------- ★★★ ฆ่าโปรเซสระหว่างแก้งานที่ยังไม่เคยบันทึก ----------

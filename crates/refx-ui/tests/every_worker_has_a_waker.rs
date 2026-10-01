@@ -146,6 +146,14 @@ const CROSSINGS: &[Crossing] = &[
     },
     Crossing {
         file: "crates/refx-ui/src/app.rs",
+        func: "spawn_ask_count",
+        wake: Wake::NotNeeded(
+            "ไม่มีช่องผลเลย — เขียนตัวนับรอบการถามลงดิสก์อย่างเดียว (`docs/07 §4`) · \
+             ผลของมันถูกอ่านตอนเปิดโปรแกรมรอบหน้า ไม่มีอะไรต้องขึ้นจอรอบนี้",
+        ),
+    },
+    Crossing {
+        file: "crates/refx-ui/src/app.rs",
         func: "sweep_spool_folder",
         wake: Wake::InThread,
     },
