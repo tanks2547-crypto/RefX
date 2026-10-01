@@ -357,6 +357,66 @@ pub enum Key {
     RecoverWhenUnknown,
     /// เขียนไว้ไม่ถึงนาที (`shell::Age::JustNow`)
     AgeJustNow,
+    /// ชื่อเมนูบนแถบ (P5-9c)
+    MenuFile,
+    /// ชื่อเมนูบนแถบ
+    MenuEdit,
+    /// ชื่อเมนูบนแถบ
+    MenuView,
+    /// ชื่อเมนูบนแถบ
+    MenuHelp,
+    /// ★★★ ทางเดินไปหา `recovery/kept/` (`docs/07 §4`)
+    MenuOpenKept,
+    /// คำอธิบายของเมนูข้างบน
+    MenuOpenKeptHint,
+    /// เปิดแผงตั้งค่าที่มีตารางคีย์ลัด
+    MenuShortcuts,
+    /// รายการเมนูของ action (P5-9c · `menu::label_of`)
+    ActUndo,
+    /// รายการเมนูของ action
+    ActRedo,
+    /// รายการเมนูของ action
+    ActPaste,
+    /// รายการเมนูของ action
+    ActDelete,
+    /// รายการเมนูของ action
+    ActSendBackward,
+    /// รายการเมนูของ action
+    ActBringForward,
+    /// รายการเมนูของ action
+    ActSendToBack,
+    /// รายการเมนูของ action
+    ActBringToFront,
+    /// รายการเมนูของ action
+    ActFlipHorizontal,
+    /// รายการเมนูของ action
+    ActGroup,
+    /// รายการเมนูของ action
+    ActUngroup,
+    /// รายการเมนูของ action
+    ActSave,
+    /// รายการเมนูของ action
+    ActSaveAs,
+    /// รายการเมนูของ action
+    ActOpen,
+    /// รายการเมนูของ action
+    ActNewTab,
+    /// รายการเมนูของ action
+    ActCloseTab,
+    /// รายการเมนูของ action
+    ActNextTab,
+    /// รายการเมนูของ action
+    ActToggleMode,
+    /// รายการเมนูของ action
+    ActSelectAll,
+    /// รายการเมนูของ action
+    ActClearSelection,
+    /// รายการเมนูของ action
+    ActZoomActual,
+    /// รายการเมนูของ action
+    ActZoomFitSelection,
+    /// รายการเมนูของ action
+    ActZoomFitBoard,
     /// กู้คืนแล้ว แต่ยังไม่ได้บันทึกลงไฟล์จริง
     RecoveredNotSavedYet,
     /// ★★ หัวข้อของแถบกู้คืนตอนที่**เอกสารที่เพิ่งเปิด**มีของค้าง (P4-3)
@@ -631,6 +691,38 @@ fn en(key: Key) -> &'static str {
         Key::RecoverDiscardHint => "That work is deleted for good",
         Key::RecoverWhenUnknown => "an earlier session",
         Key::AgeJustNow => "just now",
+        Key::MenuFile => "File",
+        Key::MenuEdit => "Edit",
+        Key::MenuView => "View",
+        Key::MenuHelp => "Help",
+        Key::MenuOpenKept => "Open the folder of kept work",
+        Key::MenuOpenKeptHint => {
+            "Unsaved boards nobody answered for 3 launches are moved here - nothing in it is ever deleted"
+        }
+        Key::MenuShortcuts => "Keyboard shortcuts",
+        Key::ActUndo => "Undo",
+        Key::ActRedo => "Redo",
+        Key::ActPaste => "Paste",
+        Key::ActDelete => "Delete",
+        Key::ActSendBackward => "Send backward",
+        Key::ActBringForward => "Bring forward",
+        Key::ActSendToBack => "Send to back",
+        Key::ActBringToFront => "Bring to front",
+        Key::ActFlipHorizontal => "Flip horizontally",
+        Key::ActGroup => "Group",
+        Key::ActUngroup => "Ungroup",
+        Key::ActSave => "Save",
+        Key::ActSaveAs => "Save as...",
+        Key::ActOpen => "Open...",
+        Key::ActNewTab => "New board",
+        Key::ActCloseTab => "Close board",
+        Key::ActNextTab => "Next board",
+        Key::ActToggleMode => "Switch Canvas / Arrange",
+        Key::ActSelectAll => "Select all",
+        Key::ActClearSelection => "Clear selection",
+        Key::ActZoomActual => "Zoom to 100%",
+        Key::ActZoomFitSelection => "Fit the selection",
+        Key::ActZoomFitBoard => "Fit the whole board",
         Key::RecoveredNotSavedYet => {
             "Restored - this board still has no file, press Ctrl+S to keep it"
         }
@@ -906,6 +998,38 @@ fn th(key: Key) -> Option<&'static str> {
         Key::RecoverDiscardHint => "งานชุดนั้นจะถูกลบถาวร",
         Key::RecoverWhenUnknown => "รอบก่อน",
         Key::AgeJustNow => "เมื่อสักครู่",
+        Key::MenuFile => "ไฟล์",
+        Key::MenuEdit => "แก้ไข",
+        Key::MenuView => "มุมมอง",
+        Key::MenuHelp => "ช่วยเหลือ",
+        Key::MenuOpenKept => "เปิดโฟลเดอร์งานที่เก็บไว้",
+        Key::MenuOpenKeptHint => {
+            "งานที่ไม่ได้บันทึกซึ่งถูกถามมา 3 รอบแล้วไม่มีคำตอบถูกย้ายมาที่นี่ - ไม่มีอะไรในนั้นถูกลบ"
+        }
+        Key::MenuShortcuts => "คีย์ลัดทั้งหมด",
+        Key::ActUndo => "ย้อนกลับ",
+        Key::ActRedo => "ทำซ้ำ",
+        Key::ActPaste => "วาง",
+        Key::ActDelete => "ลบ",
+        Key::ActSendBackward => "ถอยลงหนึ่งชั้น",
+        Key::ActBringForward => "ขึ้นหนึ่งชั้น",
+        Key::ActSendToBack => "ไปล่างสุด",
+        Key::ActBringToFront => "มาบนสุด",
+        Key::ActFlipHorizontal => "พลิกแนวนอน",
+        Key::ActGroup => "จัดกลุ่ม",
+        Key::ActUngroup => "แยกกลุ่ม",
+        Key::ActSave => "บันทึก",
+        Key::ActSaveAs => "บันทึกเป็น...",
+        Key::ActOpen => "เปิด...",
+        Key::ActNewTab => "กระดานใหม่",
+        Key::ActCloseTab => "ปิดกระดาน",
+        Key::ActNextTab => "กระดานถัดไป",
+        Key::ActToggleMode => "สลับ Canvas / Arrange",
+        Key::ActSelectAll => "เลือกทั้งหมด",
+        Key::ActClearSelection => "ยกเลิกการเลือก",
+        Key::ActZoomActual => "ซูม 100%",
+        Key::ActZoomFitSelection => "พอดีกับที่เลือก",
+        Key::ActZoomFitBoard => "พอดีทั้งกระดาน",
         Key::RecoveredNotSavedYet => "เอากลับมาแล้ว — กระดานนี้ยังไม่มีไฟล์ กด Ctrl+S เพื่อเก็บไว้",
         Key::RecoverDocTitle => "กระดานนี้มีการแก้ที่ยังไม่เคยถูกเขียนลงไฟล์",
         Key::RecoverKeptTitle => "คุณเก็บงานที่ยังไม่ได้บันทึกของกระดานนี้ไว้",
@@ -1283,6 +1407,8 @@ pub enum Template {
     AgeHours,
     /// `{n}` — กี่วันก่อน
     AgeDays,
+    /// ★ `{dir}` — เปิด file browser ของ OS ไม่ได้ · ต้องบอกว่าไปหาเองได้ที่ไหน (P5-9c)
+    MenuOpenKeptFailed,
 }
 }
 
@@ -1478,6 +1604,9 @@ Drag in a PNG, JPEG, WebP, GIF, BMP, TGA or TIFF instead."
         Template::AgeMinutes => "{n} min ago",
         Template::AgeHours => "{n} h ago",
         Template::AgeDays => "{n} d ago",
+        Template::MenuOpenKeptFailed => {
+            "Could not open the folder of kept work - open it yourself: {dir}"
+        }
     }
 }
 
@@ -1664,6 +1793,7 @@ fn template_th(template: Template) -> Option<&'static str> {
         Template::AgeMinutes => "{n} นาทีที่แล้ว",
         Template::AgeHours => "{n} ชั่วโมงที่แล้ว",
         Template::AgeDays => "{n} วันที่แล้ว",
+        Template::MenuOpenKeptFailed => "เปิดโฟลเดอร์งานที่เก็บไว้ไม่ได้ - เปิดเองได้ที่ {dir}",
     })
 }
 

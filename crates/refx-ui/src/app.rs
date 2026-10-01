@@ -1922,6 +1922,11 @@ pub struct RefxApp {
     recovery_scan: Option<crossbeam_channel::Receiver<RecoveryScan>>,
     /// งานนับรอบการถามล่าสุด (`docs/07 §4`) — แอปไม่รอมัน · เก็บไว้ให้เทสต์รอได้
     recovery_ask_count: Option<std::thread::JoinHandle<()>>,
+    /// `File → เปิดโฟลเดอร์งานที่เก็บไว้` ที่กำลังรอ file browser ของ OS (P5-9c)
+    kept_folder_job: Option<(
+        crossbeam_channel::Receiver<Result<(), String>>,
+        std::path::PathBuf,
+    )>,
     /// ★★ ถามเรื่องงานค้างไปแล้วในการรันครั้งนี้ — **ครั้งเดียวตลอดอายุโปรแกรม**
     ///
     /// `resumed()` ถูกเรียกซ้ำได้ตอนกู้ device (docs/04 §7) · ถ้าใช้ "ไม่มีงานค้าง
@@ -2937,6 +2942,7 @@ impl RefxApp {
             recovery_queue: std::collections::VecDeque::new(),
             recovery_scan: None,
             recovery_ask_count: None,
+            kept_folder_job: None,
             recovery_checked: false,
             job_owner: std::collections::HashMap::new(),
             job_anchor: std::collections::HashMap::new(),
@@ -3176,6 +3182,98 @@ impl RefxApp {
         self.drop.start(1);
         self.batch_from_clipboard = true;
         self.shell.status = text::t(self.shell.lang, Key::ReadingClipboard).to_owned();
+    }
+
+    /// ★★★ **ทางเดียวของทุกคำสั่งในตารางคีย์ลัด** — คีย์ลัดและเมนูเรียกตัวเดียวกัน (P5-9c)
+    ///
+    /// คืน `true` ถ้าต้องวาดเฟรมใหม่ · คำขอส่วนใหญ่ถูกเก็บไว้ทำต้นเฟรมถัดไป
+    /// (อ่าน clipboard/เปิดกล่อง/บันทึกบล็อกได้ — I-2) · ★ ย้ายมาจาก `on_input`
+    /// โดยไม่แก้กิ่งไหนเลย เพื่อให้เมนูไม่ต้องมีทางที่สองที่วันหนึ่งจะทำต่างกัน
+    fn request(&mut self, action: keymap::Action) -> bool {
+        match action {
+            // อ่าน clipboard ที่นี่ไม่ได้ — บล็อกได้ (I-2) ทำที่ต้นเฟรมถัดไป
+            keymap::Action::Paste => {
+                self.pending_paste = true;
+                true
+            }
+            keymap::Action::History(request) => {
+                self.pending_history = Some(request);
+                true
+            }
+            keymap::Action::ZOrder(movement) => {
+                self.pending_zorder = Some(movement);
+                true
+            }
+            keymap::Action::Delete => {
+                self.pending_delete = true;
+                true
+            }
+            keymap::Action::Appearance(what) => {
+                self.pending_appearance = Some(what);
+                true
+            }
+            keymap::Action::Save(request) => {
+                self.pending_save = Some(request);
+                true
+            }
+            keymap::Action::OpenBoard => {
+                self.pending_open = true;
+                true
+            }
+            keymap::Action::Tab(TabKey::New) => {
+                self.pending_new_tab = true;
+                true
+            }
+            keymap::Action::Tab(TabKey::Close) => {
+                self.pending_close_tab = true;
+                true
+            }
+            keymap::Action::Tab(TabKey::Next) => {
+                self.pending_next_tab = true;
+                true
+            }
+            keymap::Action::Group(request) => {
+                self.pending_group = Some(request);
+                true
+            }
+            keymap::Action::ToggleMode => {
+                self.pending_mode_toggle = true;
+                true
+            }
+            keymap::Action::SelectAll => {
+                self.pending_select_all = true;
+                true
+            }
+            keymap::Action::ClearSelection => {
+                self.pending_clear_selection = true;
+                true
+            }
+            keymap::Action::Zoom(request) => {
+                self.pending_zoom = Some(request);
+                true
+            }
+            keymap::Action::Export => {
+                self.pending_export = true;
+                true
+            }
+            // ★★ ตัวเดียวที่ลงมือทันที ไม่ใช่ตั้งคำขอ — และตัวเดียวที่
+            //    **ขอเฟรมใหม่เฉพาะเมื่อมีอะไรเปลี่ยนจริง** (I-1):
+            //    กด `V` ซ้ำตอนอยู่เครื่องมือเลือกอยู่แล้ว ต้องไม่วาดใหม่
+            keymap::Action::Tool(tool) => {
+                let Some(gfx) = self.gfx.as_mut() else {
+                    return false;
+                };
+                let changed = gfx.tool != tool;
+                if changed {
+                    gfx.tool = tool;
+                    // การกดค้างที่ยังอยู่เป็นของเครื่องมือเดิม ใช้ต่อไม่ได้
+                    self.docs.active_mut().select_tool.cancel();
+                    self.docs.active_mut().select_tool.clear_measurement();
+                    self.docs.active_mut().rubber_band = None;
+                }
+                changed
+            }
+        }
     }
 
     /// ตรงที่ผู้ใช้ชี้บนแท็บที่ดูอยู่ — ดู [`Self::pointed_anchor`]
@@ -5771,6 +5869,83 @@ impl RefxApp {
         }
     }
 
+    /// ★★ สิ่งที่ผู้ใช้กดในแถบเมนูเมื่อเฟรมที่แล้ว (P5-9c) — คำสั่งจากตารางเดินทาง
+    /// **เดียวกับคีย์ลัด** ([`Self::request`]) ไม่ใช่ทางที่สอง
+    fn take_menu_pick(&mut self) {
+        match self.shell.menu_pick.take() {
+            Some(crate::menu::Pick::Action(action)) => {
+                let _ = self.request(action);
+            }
+            Some(crate::menu::Pick::OpenKeptFolder) => self.start_open_kept_folder(),
+            None => {}
+        }
+    }
+
+    /// ★★★ `File → เปิดโฟลเดอร์งานที่เก็บไว้` (P5-9c) — **ทางเดินไปหา `recovery/kept/`**
+    ///
+    /// `docs/07 §4`: *"ไฟล์ที่ไม่มีใครบอกว่าอยู่ไหน เท่ากับไฟล์ที่ถูกลบ"* · ข้อความตอนย้าย
+    /// ขึ้นครั้งเดียว · เมนูนี้คือทางที่อยู่ตลอดไป
+    ///
+    /// ★ บนเธรดอื่น (I-2): สร้างโฟลเดอร์ (ยังไม่เคยย้ายอะไร = โฟลเดอร์ว่าง ซึ่งคือคำตอบ
+    ///   ที่ถูก ไม่ใช่ error) แล้วรอ file browser ของ OS · เปิดไม่ได้ = บอก path เต็ม
+    ///   ให้ผู้ใช้ไปเปิดเอง
+    fn start_open_kept_folder(&mut self) {
+        let Some(dir) = self
+            .recovery_dir
+            .as_deref()
+            .map(refx_io::recovery::kept_dir)
+        else {
+            self.shell.status = text::fill(
+                self.shell.lang,
+                Template::MenuOpenKeptFailed,
+                &[("dir", "recovery/kept")],
+            );
+            self.shell.status_warn = true;
+            return;
+        };
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        // ★★ **ต้องปลุก** (ข้อ 18) — ผลที่ล้มต้องขึ้นแถบสถานะทันที ไม่ใช่ตอนขยับเมาส์
+        let wake = self.waker.clone();
+        let path = dir.clone();
+        let spawned = std::thread::Builder::new()
+            .name("refx-open-kept".to_owned())
+            .spawn(move || {
+                let result = std::fs::create_dir_all(&path)
+                    .and_then(|()| refx_platform::reveal::open_folder(&path));
+                let _ = tx.send(result.map_err(|err| err.to_string()));
+                if let Some(wake) = wake {
+                    wake.wake();
+                }
+            });
+        if spawned.is_ok() {
+            self.kept_folder_job = Some((rx, dir));
+        }
+    }
+
+    /// ผลของการเปิดโฟลเดอร์งานที่เก็บไว้ — เรียกต้นเฟรม **ไม่บล็อก**
+    fn poll_open_kept_folder(&mut self) {
+        let Some((rx, _)) = self.kept_folder_job.as_ref() else {
+            return;
+        };
+        let outcome = match rx.try_recv() {
+            Ok(outcome) => outcome,
+            Err(crossbeam_channel::TryRecvError::Empty) => return,
+            Err(crossbeam_channel::TryRecvError::Disconnected) => Err("worker gone".to_owned()),
+        };
+        let Some((_, dir)) = self.kept_folder_job.take() else {
+            return;
+        };
+        if let Err(err) = outcome {
+            tracing::warn!(%err, dir = %dir.display(), "cannot open the kept-work folder");
+            self.shell.status = text::fill(
+                self.shell.lang,
+                Template::MenuOpenKeptFailed,
+                &[("dir", &dir.display().to_string())],
+            );
+            self.shell.status_warn = true;
+        }
+    }
+
     /// ★★★ ผู้ใช้ตอบแถบกู้คืนแล้ว — **สามทาง และมีทางเดียวที่ลบไฟล์**
     ///
     /// แถบเดียวถามได้สามเรื่อง (ดู [`crate::shell::RecoverScope`]) — เรื่องของ
@@ -8311,6 +8486,10 @@ impl AppDelegate for RefxApp {
         //     คนแรก · ทำที่ต้นเฟรมเพื่อให้ทุกอย่างข้างล่างเห็นค่าเดียวกันหมด
         self.mode_follows_active_tab();
 
+        // ★★ สิ่งที่ผู้ใช้กดในแถบเมนูเมื่อเฟรมที่แล้ว (P5-9c) — **ก่อน** คำขอทุกตัว
+        //    ข้างล่าง เพื่อให้คำสั่งจากเมนูถูกทำในเฟรมนี้เหมือนกดคีย์ลัด
+        self.take_menu_pick();
+
         // ไฟล์ที่ลากเข้ามาในรอบ event ที่ผ่านมา — ส่งเป็นชุดเดียวเพื่อจับเวลาได้ถูก
         if !self.pending_drops.is_empty() {
             let batch = std::mem::take(&mut self.pending_drops);
@@ -8379,6 +8558,7 @@ impl AppDelegate for RefxApp {
         // ★ การเปิดไฟล์ + งานค้างจาก session ก่อน (P4-4) — ลำดับเดียวกับข้างบน
         self.poll_open();
         self.poll_recovery_scan();
+        self.poll_open_kept_folder();
         self.poll_spool_sweep();
         self.poll_relink_scan();
         self.poll_relink();
@@ -9349,89 +9529,8 @@ impl AppDelegate for RefxApp {
                     event.repeat,
                     gfx.modifiers,
                 ) {
-                    // ★ `match` ไม่มี `_ =>` โดยตั้งใจ: เพิ่ม action ใหม่เมื่อไหร่
-                    //   คอมไพเลอร์บังคับให้มาต่อสายที่นี่ ไม่ใช่ปล่อยให้เงียบ
-                    needs_redraw |= match action {
-                        // อ่าน clipboard ที่นี่ไม่ได้ — บล็อกได้ (I-2) ทำที่ต้นเฟรมถัดไป
-                        keymap::Action::Paste => {
-                            self.pending_paste = true;
-                            true
-                        }
-                        keymap::Action::History(request) => {
-                            self.pending_history = Some(request);
-                            true
-                        }
-                        keymap::Action::ZOrder(movement) => {
-                            self.pending_zorder = Some(movement);
-                            true
-                        }
-                        keymap::Action::Delete => {
-                            self.pending_delete = true;
-                            true
-                        }
-                        keymap::Action::Appearance(what) => {
-                            self.pending_appearance = Some(what);
-                            true
-                        }
-                        keymap::Action::Save(request) => {
-                            self.pending_save = Some(request);
-                            true
-                        }
-                        keymap::Action::OpenBoard => {
-                            self.pending_open = true;
-                            true
-                        }
-                        keymap::Action::Tab(TabKey::New) => {
-                            self.pending_new_tab = true;
-                            true
-                        }
-                        keymap::Action::Tab(TabKey::Close) => {
-                            self.pending_close_tab = true;
-                            true
-                        }
-                        keymap::Action::Tab(TabKey::Next) => {
-                            self.pending_next_tab = true;
-                            true
-                        }
-                        keymap::Action::Group(request) => {
-                            self.pending_group = Some(request);
-                            true
-                        }
-                        keymap::Action::ToggleMode => {
-                            self.pending_mode_toggle = true;
-                            true
-                        }
-                        keymap::Action::SelectAll => {
-                            self.pending_select_all = true;
-                            true
-                        }
-                        keymap::Action::ClearSelection => {
-                            self.pending_clear_selection = true;
-                            true
-                        }
-                        keymap::Action::Zoom(request) => {
-                            self.pending_zoom = Some(request);
-                            true
-                        }
-                        keymap::Action::Export => {
-                            self.pending_export = true;
-                            true
-                        }
-                        // ★★ ตัวเดียวที่ลงมือทันที ไม่ใช่ตั้งคำขอ — และตัวเดียวที่
-                        //    **ขอเฟรมใหม่เฉพาะเมื่อมีอะไรเปลี่ยนจริง** (I-1):
-                        //    กด `V` ซ้ำตอนอยู่เครื่องมือเลือกอยู่แล้ว ต้องไม่วาดใหม่
-                        keymap::Action::Tool(tool) => {
-                            let changed = gfx.tool != tool;
-                            if changed {
-                                gfx.tool = tool;
-                                // การกดค้างที่ยังอยู่เป็นของเครื่องมือเดิม ใช้ต่อไม่ได้
-                                self.docs.active_mut().select_tool.cancel();
-                                self.docs.active_mut().select_tool.clear_measurement();
-                                self.docs.active_mut().rubber_band = None;
-                            }
-                            changed
-                        }
-                    };
+                    // ★ ทางเดียวกับเมนู (P5-9c) — `match` ที่ไม่มี `_ =>` อยู่ใน `request`
+                    needs_redraw |= self.request(action);
                 }
             }
 
@@ -12892,6 +12991,58 @@ mod tests {
             }
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    /// ★★★ **กดในเมนู = กดคีย์ลัด** — ทุก action ในเมนูตั้งคำขอเดียวกับ `request` (P5-9c)
+    ///
+    /// เทียบสถานะคำขอที่ค้างทั้งชุดของสองแอปที่เหมือนกันทุกอย่าง: แอปหนึ่งได้คำสั่ง
+    /// จากเมนู อีกแอปจาก `request` ตรง ๆ · ★ NC อยู่ในตัว: action ต่างตัวต้องได้
+    /// สถานะต่างกัน ไม่งั้นการเทียบนี้ตอบว่า "เท่ากัน" ให้ทุกอย่าง
+    #[test]
+    fn a_menu_pick_takes_exactly_the_path_of_its_shortcut() {
+        fn pending(app: &RefxApp) -> String {
+            format!(
+                "{} {:?} {:?} {} {:?} {:?} {} {} {} {} {:?} {} {} {} {:?} {}",
+                app.pending_paste,
+                app.pending_history,
+                app.pending_zorder,
+                app.pending_delete,
+                app.pending_appearance,
+                app.pending_save,
+                app.pending_open,
+                app.pending_new_tab,
+                app.pending_close_tab,
+                app.pending_next_tab,
+                app.pending_group,
+                app.pending_mode_toggle,
+                app.pending_select_all,
+                app.pending_clear_selection,
+                app.pending_zoom,
+                app.pending_export,
+            )
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for action in crate::menu::actions() {
+            // เครื่องมือต้องมีหน้าต่าง (`gfx`) — ทั้งสองทางคืน `false` เหมือนกันตรงนี้
+            let mut by_menu = RefxApp::new(AppArgs::default());
+            by_menu.shell.menu_pick = Some(crate::menu::Pick::Action(action));
+            by_menu.take_menu_pick();
+            assert!(by_menu.shell.menu_pick.is_none(), "เมนูถูกอ่านแล้วไม่ถูกล้าง");
+            let mut by_key = RefxApp::new(AppArgs::default());
+            let _ = by_key.request(action);
+            assert_eq!(
+                pending(&by_menu),
+                pending(&by_key),
+                "{}: เมนูกับคีย์ลัดตั้งคำขอต่างกัน",
+                action.name()
+            );
+            seen.insert(pending(&by_menu));
+        }
+        // NC — คำสั่งที่ไม่ใช่เครื่องมือแต่ละตัวต้องทิ้งร่องรอยต่างกัน
+        assert!(
+            seen.len() > 20,
+            "สถานะคำขอแยก action ไม่ออก — การเทียบไม่ได้พิสูจน์อะไร"
+        );
     }
 
     /// ★★ **เปิดโปรแกรมภาษาไทย ข้อความแรกบนแถบสถานะต้องเป็นไทย** (เจอ "Ready" รอบ P5-9)

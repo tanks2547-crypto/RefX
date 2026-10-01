@@ -159,6 +159,12 @@ const CROSSINGS: &[Crossing] = &[
     },
     Crossing {
         file: "crates/refx-ui/src/app.rs",
+        func: "start_open_kept_folder",
+        // ผลที่ล้ม = ข้อความบนแถบสถานะที่บอก path ให้ไปเปิดเอง — ต้องขึ้นทันที
+        wake: Wake::InThread,
+    },
+    Crossing {
+        file: "crates/refx-ui/src/app.rs",
         func: "start_load",
         wake: Wake::InThread,
     },

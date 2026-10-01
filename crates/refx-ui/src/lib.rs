@@ -13,6 +13,7 @@ pub mod fonts; // ฟอนต์ที่ฝังใน binary (docs/03 §0) �
 pub mod inspector;
 pub mod instances; // Board → QuadInstance (ฟังก์ชันบริสุทธิ์ · วัดได้จาก benches/)
 pub mod keymap; // ★ ตาราง data ของคีย์ลัด — ห้าม hard-code `if key == …` (docs/03 §5)
+pub mod menu; // แถบเมนู File/Edit/View/Help — สร้างจากตารางคีย์ลัด (P5-9c)
 pub mod placement; // ภาพที่เพิ่งลากเข้ามาไปลงที่ไหน ใหญ่เท่าไหร่ (P5-9b) — ฟังก์ชันบริสุทธิ์
 pub mod shell; // โครง UI กลาง: tabs, toolbar, library, inspector, status bar
 pub mod sidecar; // .refx-meta ฝั่ง UI — โหลด/เขียน tag ของโฟลเดอร์ (P5-5)

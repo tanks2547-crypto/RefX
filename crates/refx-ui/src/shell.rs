@@ -753,6 +753,10 @@ pub struct ShellState {
     /// ปิดหน้าต่างถามทีละแท็บ — ผู้ใช้ต้องรู้ว่าคำถามนี้ไม่ใช่ข้อสุดท้าย ไม่งั้น
     /// เขาจะเชื่อว่า "บันทึกแล้วปิด" บันทึกทุกอย่างให้แล้ว
     pub close_more_tabs: usize,
+    /// ★★ สิ่งที่ผู้ใช้กดในแถบเมนูเฟรมนี้ (P5-9c) — ชั้น `app` อ่านแล้วล้าง
+    ///
+    /// คำสั่งจากตารางคีย์ลัดเดินทางเดียวกับการกดคีย์ (`RefxApp::request`)
+    pub menu_pick: Option<crate::menu::Pick>,
     /// ★★★ **สภาวะ: ภาพเก็บไว้ที่ไหน** (P4-5) — ดู [`StorageView`]
     ///
     /// **ค่าสำหรับแสดงเท่านั้น** ชั้น `app` เติมทุกเฟรม
@@ -1002,6 +1006,7 @@ impl Default for ShellState {
             close_choice: None,
             close_loss: CloseLoss::Unknown,
             close_more_tabs: 0,
+            menu_pick: None,
             storage: StorageView::default(),
             storage_request: None,
             save_as_prompt: false,
@@ -1320,7 +1325,11 @@ pub fn draw_in_ui(
     // ---- แถวบน: board tabs ----
     egui::Panel::top("refx-tabs").show_inside(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("RefX").strong());
+            // ★★★ แถบเมนูแทนป้าย "RefX" (P5-9c) — ไม่เสียความสูงเพิ่มแม้แต่แถวเดียว
+            //     · รายการสร้างจากตารางคีย์ลัด ดู `crate::menu`
+            if let Some(pick) = crate::menu::bar(ui, lang, &mut state.settings_open) {
+                state.menu_pick = Some(pick);
+            }
             ui.separator();
             // ★★★ **ตัวบ่งชี้ถาวรของสภาวะ "ยังไม่ถูกบันทึก"** (docs/03 §1, P4-4)
             //
@@ -3340,6 +3349,9 @@ mod tests {
             //    เอกสารทั้งฉบับออกจากจอ · `New` เพิ่มเอกสารใหม่เข้ามา · ทั้งคู่
             //    เปลี่ยนว่า "เอกสารที่ผู้ใช้กำลังแก้อยู่คือใบไหน" ซึ่งเป็นสิ่งที่
             //    การสลับ *โหมด* ต้องไม่ทำเด็ดขาด (`docs/03 §4.3`)
+            // ★★ เมนู (P5-9c) — คำสั่งทุกตัวของตารางคีย์ลัดรวม `Delete` · `Paste` ·
+            //    `Undo` ซึ่งแก้เอกสารแน่นอน
+            menu_pick,
             tab_request,
 
             // ---- สถานะของ *มุมมอง* — เปลี่ยนได้ตามใจ ไม่แตะเอกสาร ----
@@ -3432,6 +3444,7 @@ mod tests {
         } = state;
 
         appearance_edit.is_some()
+            || menu_pick.is_some()
             || arrange_request.is_some()
             || note_edit.is_some()
             || meta_request.is_some()
