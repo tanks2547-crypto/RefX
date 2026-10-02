@@ -12,6 +12,7 @@
 //! `JobSource` หรือ cache ใด ๆ ซึ่งเป็นเหตุผลที่มันวัดได้โดยไม่ต้องมี GPU
 
 use glam::Vec2;
+use refx_core::arena::ItemId;
 use refx_core::board::{Board, ItemCanvas, ItemKind};
 use refx_render::atlas::AtlasSlot;
 use refx_render::instance::QuadInstance;
@@ -126,12 +127,17 @@ pub fn quad_for(
 /// ต้องจำให้ได้เอง แล้ววันหนึ่งจะมีตัวที่ลืม (บทเรียนซ้ำของโปรเจกต์นี้)
 ///
 /// `state_of` ตอบว่า item นี้มีสถานะการวาดไหม และถ้ามี ช่อง atlas กับสีเด่นคืออะไร
+///
+/// ★★ `ids[i]` คือ item ของ `out[i]` — ใช้จัดลำดับการวาดตาม `z_order` เมื่อบางใบมีภาพคม
+/// ([`order_draws`]) · สองรายการยาวเท่ากันเสมอ
 pub fn build_instances(
     board: &Board,
     out: &mut Vec<QuadInstance>,
-    state_of: impl Fn(refx_core::arena::ItemId) -> Option<(Option<AtlasSlot>, [f32; 4])>,
+    ids: &mut Vec<ItemId>,
+    state_of: impl Fn(ItemId) -> Option<(Option<AtlasSlot>, [f32; 4])>,
 ) {
     out.clear();
+    ids.clear();
     for (id, item) in board.items_in_z_order() {
         let (slot, tint) = match &item.kind {
             ItemKind::Image(_) => match state_of(id) {
@@ -156,6 +162,66 @@ pub fn build_instances(
         };
         if let Some(quad) = quad_for(&item.canvas, slot, tint) {
             out.push(quad);
+            ids.push(id);
+        }
+    }
+}
+
+/// แหล่ง texture ของช่วงหนึ่งในลำดับการวาด
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrawSource {
+    /// atlas ของภาพย่อ — ใบที่ติดกันรวมเป็น draw call เดียว
+    Atlas,
+    /// ภาพคม (working texture) ตัวที่ `n` ในรายการ `sharp` ที่ส่งเข้า [`order_draws`]
+    Sharp(usize),
+}
+
+/// ★★★ **ลำดับการวาดเดียวตาม `z_order`** — ตัดช่วงใหม่ทุกครั้งที่แหล่ง texture เปลี่ยน
+/// (`docs/04 §4` ชั้น B · ตัดสิน 2 ต.ค. 2026)
+///
+/// ## ทำไม
+///
+/// เดิมวาด **atlas ทั้งก้อนก่อน แล้วค่อยวาดภาพคมทีละใบทับ** → ภาพที่ยังไม่มีภาพคม
+/// จมอยู่ใต้ภาพที่มีเสมอ ไม่ว่า `z_order` จะว่าอย่างไร · และการมีภาพคมขึ้นกับ **ซูมกับ
+/// LRU** → board เดียวกันวาดออกมาคนละลำดับได้ในคนละจังหวะ (ผลที่ทำซ้ำไม่ได้แย่กว่า
+/// ผลที่ผิดสม่ำเสมอ — ตัดสินแล้วตอน P5-4b)
+///
+/// ★★ **ใบที่มีภาพคมถูกวาดด้วยภาพคมแทน ไม่ใช่ทับ** — เดิมวาดสองรอบ (เบลอจาก atlas
+/// แล้วคมทับ) ภาพที่ตั้ง opacity 0.5 จึงทึบเป็น 0.75 ตอนซูมเข้า (`1 − 0.5²`) แต่ 0.5
+/// ตอนซูมออก · ความทึบที่ขึ้นกับซูมคืออีกหน้าหนึ่งของบั๊กเดียวกัน
+///
+/// | | draw call |
+/// |---|---|
+/// | ทุกใบใช้ atlas | **1** — เท่าเดิม (P1-5) |
+/// | มีภาพคม n ใบปน | **≤ 2n + 1** |
+///
+/// `instances`/`ids` มาจาก [`build_instances`] (ยาวเท่ากัน) · `sharp` = ภาพคมที่ **พร้อม
+/// วาดจริง** (มี bind group แล้ว) คู่กับ item ของมัน — ใบที่ไม่อยู่ในนี้ใช้ atlas ต่อ
+/// จึงไม่มีทางหายจากจอเพราะภาพคมยังไม่พร้อม
+///
+/// ผลลัพธ์ลง `ordered` (instance ตามลำดับที่ต้องวาด) และ `runs` (แหล่ง + ช่วงใน
+/// `ordered`) · ★ ผู้เรียกถือสอง `Vec` นี้ข้ามเฟรม — ไม่สร้างบัฟเฟอร์ใหม่ทุกเฟรม
+pub fn order_draws(
+    instances: &[QuadInstance],
+    ids: &[ItemId],
+    sharp: &[(ItemId, QuadInstance)],
+    ordered: &mut Vec<QuadInstance>,
+    runs: &mut Vec<(DrawSource, std::ops::Range<usize>)>,
+) {
+    ordered.clear();
+    runs.clear();
+    for (quad, id) in instances.iter().zip(ids) {
+        let (source, quad) = match sharp.iter().enumerate().find(|(_, (sid, _))| sid == id) {
+            Some((n, (_, crisp))) => (DrawSource::Sharp(n), *crisp),
+            None => (DrawSource::Atlas, *quad),
+        };
+        let at = ordered.len();
+        ordered.push(quad);
+        match runs.last_mut() {
+            // ★ atlas ที่ติดกันรวมช่วงเดียว · ภาพคมแต่ละใบเป็นช่วงของตัวเองเสมอ
+            //   (คนละ texture กัน)
+            Some((DrawSource::Atlas, range)) if source == DrawSource::Atlas => range.end = at + 1,
+            _ => runs.push((source, at..at + 1)),
         }
     }
 }
@@ -225,7 +291,9 @@ mod tests {
     fn an_image_that_cannot_be_opened_still_takes_up_space_on_the_board() {
         let board = board_of(vec![image_item(), missing_item()]);
         let mut out = Vec::new();
-        build_instances(&board, &mut out, |_| Some((Some(slot()), [1.0; 4])));
+        build_instances(&board, &mut out, &mut Vec::new(), |_| {
+            Some((Some(slot()), [1.0; 4]))
+        });
 
         assert_eq!(out.len(), 2, "ใบที่เปิดไม่ได้หายไปจากจอ");
         let missing = out[1];
@@ -246,7 +314,9 @@ mod tests {
         let board = board_of(vec![missing_item()]);
         let mut out = Vec::new();
         // `state_of` ตอบว่ายังมีช่องอยู่ — เหมือนสภาพจริงหลัง undo ของ relink
-        build_instances(&board, &mut out, |_| Some((Some(slot()), [1.0; 4])));
+        build_instances(&board, &mut out, &mut Vec::new(), |_| {
+            Some((Some(slot()), [1.0; 4]))
+        });
 
         assert_eq!(out.len(), 1);
         assert!(
@@ -263,7 +333,9 @@ mod tests {
             text: "x".to_owned(),
         }))]);
         let mut out = Vec::new();
-        build_instances(&board, &mut out, |_| Some((Some(slot()), [1.0; 4])));
+        build_instances(&board, &mut out, &mut Vec::new(), |_| {
+            Some((Some(slot()), [1.0; 4]))
+        });
         assert!(out.is_empty());
     }
 
@@ -273,7 +345,108 @@ mod tests {
     fn an_image_still_loading_is_not_drawn_yet() {
         let board = board_of(vec![image_item()]);
         let mut out = Vec::new();
-        build_instances(&board, &mut out, |_: ItemId| None);
+        build_instances(&board, &mut out, &mut Vec::new(), |_: ItemId| None);
         assert!(out.is_empty());
+    }
+
+    // ---------- ★★★ ลำดับการวาดตาม z_order (docs/04 §4 ชั้น B · 2 ต.ค. 2026) ----------
+
+    /// instance ที่แยกตัวตนได้จาก `reserved` — ไม่ต้องสร้าง board จริง
+    fn tagged(tag: u32) -> QuadInstance {
+        let mut quad = quad_for(&image_item().canvas, Some(slot()), [1.0; 4]).unwrap();
+        quad.reserved = tag;
+        quad
+    }
+
+    fn ids(n: u32) -> Vec<ItemId> {
+        (0..n).map(|i| ItemId::from_parts(i, 0)).collect()
+    }
+
+    /// ★★★ **ประตูของสเปก: A ใต้ B ตาม z_order · A มีภาพคม · B อยู่ atlas**
+    ///
+    /// ลำดับที่วาดต้องเป็น A แล้ว B (ตาม `z_order`) — ไม่ใช่ atlas ก่อนแล้วภาพคมทับ
+    /// ซึ่งคือสิ่งที่โค้ดเดิมทำ แล้ว B จะจมอยู่ใต้ A ทั้งที่ผู้ใช้วางมันไว้บน
+    #[test]
+    fn the_draw_order_follows_z_order_not_the_kind_of_texture() {
+        let (a, b) = (tagged(1), tagged(2));
+        let id = ids(2);
+        let sharp_a = tagged(10);
+        let (mut ordered, mut runs) = (Vec::new(), Vec::new());
+        order_draws(&[a, b], &id, &[(id[0], sharp_a)], &mut ordered, &mut runs);
+
+        let order: Vec<u32> = ordered.iter().map(|q| q.reserved).collect();
+        assert_eq!(order, [10, 2], "B ไม่ได้ถูกวาดหลัง A (หรือ A ไม่ได้ใช้ภาพคม)");
+        assert_eq!(
+            runs,
+            [(DrawSource::Sharp(0), 0..1), (DrawSource::Atlas, 1..2)],
+            "ช่วงการวาดไม่ตามลำดับ z"
+        );
+    }
+
+    /// ★ ไม่มีภาพคมเลย (กรณีปกติ) = **draw call เดียว** เท่าเดิม (P1-5)
+    #[test]
+    fn with_no_sharp_images_everything_is_one_draw_call() {
+        let quads: Vec<QuadInstance> = (0..500).map(tagged).collect();
+        let (mut ordered, mut runs) = (Vec::new(), Vec::new());
+        order_draws(&quads, &ids(500), &[], &mut ordered, &mut runs);
+        assert_eq!(runs, [(DrawSource::Atlas, 0..500)]);
+        assert_eq!(ordered, quads);
+    }
+
+    /// ★★ ภาพคม n ใบปนอยู่ → **ไม่เกิน 2n + 1 ช่วง** และ **ทุกใบถูกวาดครั้งเดียวพอดี**
+    ///
+    /// ครั้งเดียวพอดีคือครึ่งที่สองของการแก้: เดิมใบที่มีภาพคมถูกวาดสองรอบ (เบลอ + คม)
+    /// ภาพ opacity 0.5 จึงทึบเป็น 0.75 ตอนซูมเข้า
+    #[test]
+    fn n_sharp_images_cost_at_most_two_n_plus_one_draw_calls_and_no_double_draws() {
+        let id = ids(1000);
+        let quads: Vec<QuadInstance> = (0..1000).map(tagged).collect();
+        for every in [1usize, 2, 7, 33, 100, 999] {
+            let sharp: Vec<(ItemId, QuadInstance)> = id
+                .iter()
+                .step_by(every)
+                .take(30)
+                .map(|i| (*i, tagged(100_000 + i.index())))
+                .collect();
+            let (mut ordered, mut runs) = (Vec::new(), Vec::new());
+            order_draws(&quads, &id, &sharp, &mut ordered, &mut runs);
+            let n = sharp.len();
+            assert!(
+                runs.len() <= 2 * n + 1,
+                "ทุก {every}: {} ช่วง จากภาพคม {n} ใบ",
+                runs.len()
+            );
+            assert_eq!(
+                ordered.len(),
+                quads.len(),
+                "ทุก {every}: จำนวนที่วาดไม่เท่าจำนวนใบ"
+            );
+            let covered: usize = runs.iter().map(|(_, r)| r.len()).sum();
+            assert_eq!(covered, ordered.len(), "ช่วงไม่ครอบทุกใบพอดี");
+            for (source, range) in &runs {
+                if let DrawSource::Sharp(k) = source {
+                    assert_eq!(range.len(), 1);
+                    assert_eq!(ordered[range.start], sharp[*k].1, "ภาพคมผิดใบ");
+                }
+            }
+        }
+    }
+
+    /// ★ ภาพคมที่ยังไม่พร้อม (ไม่อยู่ในรายการ) → **ใบนั้นยังวาดจาก atlas** ไม่หายจากจอ
+    #[test]
+    fn an_image_whose_sharp_texture_is_not_ready_is_still_drawn_from_the_atlas() {
+        let id = ids(3);
+        let quads = [tagged(1), tagged(2), tagged(3)];
+        let (mut ordered, mut runs) = (Vec::new(), Vec::new());
+        // ภาพคมของ item ที่ไม่อยู่บนกระดานนี้ — ต้องไม่มีผลอะไรเลย
+        order_draws(
+            &quads,
+            &id,
+            &[(ItemId::from_parts(99, 0), tagged(9))],
+            &mut ordered,
+            &mut runs,
+        );
+        assert_eq!(ordered, quads);
+        assert_eq!(runs, [(DrawSource::Atlas, 0..3)]);
     }
 }

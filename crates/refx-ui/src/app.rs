@@ -1106,6 +1106,13 @@ struct Gfx {
     /// [`RefxApp::rebuild_quads`] เท่านั้น ห้ามมีใครแก้ตรง ๆ
     /// (เดิมตำแหน่งภาพถูกคำนวณสด ๆ ตอน ingest แล้วเก็บไว้ที่นี่ที่เดียว)
     quads: Vec<QuadInstance>,
+    /// ★ item ของ `quads[i]` — ยาวเท่ากันเสมอ · ใช้จัดลำดับการวาดตาม `z_order`
+    /// (`instances::order_draws` · `docs/04 §4` ชั้น B)
+    quad_ids: Vec<ItemId>,
+    /// ลำดับการวาดของเฟรมนี้ (ผลของ `order_draws`) — ถือข้ามเฟรม ไม่จองใหม่
+    ordered_quads: Vec<QuadInstance>,
+    /// ช่วงของ `ordered_quads` ต่อแหล่ง texture — ถือข้ามเฟรม ไม่จองใหม่
+    draw_runs: Vec<(instances::DrawSource, std::ops::Range<usize>)>,
     /// เครื่องมือที่ผู้ใช้เลือกอยู่ (`V` เลือก · `C` ครอป — docs/03 §2)
     tool: Tool,
     /// ★ thumbnail ของทุก item บน board เก็บไว้เติม atlas กลับหลังกู้ device
@@ -1122,7 +1129,7 @@ struct Gfx {
     /// ★ ถ้าไม่มีตัวนี้ ทุกเฟรมระหว่างซูมจะสั่งงานเดิมซ้ำจนคิวท่วมและเผา CPU ทิ้ง
     working_pending: std::collections::HashSet<WorkingKey>,
     /// batch ที่จะวาดเฟรมนี้ — เก็บไว้เป็นฟิลด์เพื่อไม่ต้องจองใหม่ทุกเฟรม
-    working_quads: Vec<(WorkingKey, QuadInstance)>,
+    working_quads: Vec<(WorkingKey, ItemId, QuadInstance)>,
     /// instance ของแถบที่ Arrange ต้องวาดเฟรมนี้ — ★ ไม่ใช่ทั้ง board
     ///
     /// ถือเป็นฟิลด์เพื่อไม่จองใหม่ทุกเฟรม (CLAUDE.md: ห้ามสร้าง buffer ใหม่ทุกเฟรม)
@@ -4299,7 +4306,7 @@ impl RefxApp {
                 //   (ทาง atlas) แต่ **ไม่พลิกตอนซูมเข้า** (ทาง working) โดยไม่มี error
                 quad.uv_rect = crop_uv([0.0, 0.0, 1.0, 1.0], &item.canvas);
                 quad.layer = 0;
-                gfx.working_quads.push((key, quad));
+                gfx.working_quads.push((key, id, quad));
             }
         }
 
@@ -8231,7 +8238,7 @@ impl RefxApp {
         // ★★★ กฎ "`Board` เป็นคนบอกว่า item เป็นภาพหรือไม่ ไม่ใช่ `render_state`"
         //   (§4 ข้อ 28) ย้ายไปอยู่ **ข้างใน** `build_instances` แล้วตอน P5-1 —
         //   กฎที่อยู่ในตัวเรียกคือกฎที่วันหนึ่งจะมีตัวเรียกที่ลืม
-        instances::build_instances(&doc.board, &mut gfx.quads, |id| {
+        instances::build_instances(&doc.board, &mut gfx.quads, &mut gfx.quad_ids, |id| {
             doc.render_state
                 .get(&id)
                 .map(|state| (state.slot, state.tint))
@@ -8453,6 +8460,9 @@ impl AppDelegate for RefxApp {
             working,
             working_pending: std::collections::HashSet::new(),
             working_quads: Vec::new(),
+            quad_ids: Vec::new(),
+            ordered_quads: Vec::new(),
+            draw_runs: Vec::new(),
             arrange_quads: Vec::new(),
             canvas: CanvasRect::full(size.width, size.height),
             modifiers: ModifiersState::empty(),
@@ -9258,36 +9268,55 @@ impl AppDelegate for RefxApp {
                         // ★ สวิตช์ `G` ทั้ง board เดินทางมาถึง GPU ผ่านช่องนี้ช่องเดียว
                         .with_grayscale(shell.board_grayscale),
                 );
-                // ★ ภาพที่มี working texture วาดแยกทีละใบ (docs/04 §4 ชั้น B)
-                //   ที่เหลือวาดรวมกันจาก atlas ใน draw call เดียวเหมือนเดิม
+                // ★★★ **ลำดับเดียวตาม `z_order`** (`docs/04 §4` ชั้น B · 2 ต.ค. 2026)
                 //
-                //   วาด atlas ก่อนแล้วค่อยทับด้วยตัวคมกว่า — ระหว่างที่ working texture
-                //   ยังมาไม่ถึง ผู้ใช้จะเห็นภาพเบลอ ไม่ใช่ช่องว่าง (docs/04 §8)
-                let mut batches: Vec<DrawBatch<'_>> = vec![DrawBatch {
-                    bind_group: gfx.atlas.bind_group(),
-                    instances,
-                }];
-                // ★ ชั้น B เป็นของ Canvas เท่านั้น — Arrange ตรึง zoom ไว้ที่ระดับ
-                //   thumbnail จึงไม่มีวันต้องใช้ภาพคมกว่า atlas (ดู `plan_working_textures`)
-                let sharp: Vec<QuadInstance> = if arrange_mode {
-                    Vec::new()
+                //   เดิมวาด atlas ทั้งก้อนก่อน แล้วค่อยวาดภาพคมทีละใบทับ → ภาพที่ยังไม่มี
+                //   ภาพคมจมใต้ภาพที่มีเสมอ ไม่ว่า z จะว่าอย่างไร · และใบที่มีภาพคมถูกวาด
+                //   สองรอบ (ภาพ opacity 0.5 ทึบเป็น 0.75 ตอนซูมเข้า) — ดู `order_draws`
+                let mut batches: Vec<DrawBatch<'_>> = Vec::new();
+                if arrange_mode {
+                    // ★ ชั้น B เป็นของ Canvas เท่านั้น — Arrange ตรึง zoom ไว้ที่ระดับ
+                    //   thumbnail จึงไม่มีวันต้องใช้ภาพคมกว่า atlas (ดู `plan_working_textures`)
+                    batches.push(DrawBatch {
+                        bind_group: gfx.atlas.bind_group(),
+                        instances,
+                    });
                 } else {
-                    gfx.working_quads
-                        .iter()
-                        // uv/layer ถูกตั้งไว้ตั้งแต่ `plan_working_textures` แล้ว (รวมกรอบ crop)
-                        .map(|(_, quad)| *quad)
-                        .collect()
-                };
-                if !arrange_mode {
                     // อัปเดต LRU ก่อน แล้วค่อยเก็บ reference ไปวาด — ยืมคนละแบบ
-                    for (key, _) in &gfx.working_quads {
+                    for (key, _, _) in &gfx.working_quads {
                         gfx.working.touch(*key);
                     }
-                    for (index, (key, _)) in gfx.working_quads.iter().enumerate() {
-                        if let Some(bind_group) = gfx.working.bind_group(*key) {
+                    // ★ เฉพาะภาพคมที่ **พร้อมวาดจริง** (มี bind group) — ใบที่เหลือใช้ atlas
+                    //   ต่อ จึงไม่มีทางหายจากจอเพราะภาพคมยังไม่พร้อม
+                    //   (uv/layer ถูกตั้งไว้ตั้งแต่ `plan_working_textures` แล้ว รวมกรอบ crop)
+                    let ready: Vec<(WorkingKey, ItemId, QuadInstance)> = gfx
+                        .working_quads
+                        .iter()
+                        .copied()
+                        .filter(|(key, _, _)| gfx.working.bind_group(*key).is_some())
+                        .collect();
+                    let sharp: Vec<(ItemId, QuadInstance)> =
+                        ready.iter().map(|(_, id, quad)| (*id, *quad)).collect();
+                    instances::order_draws(
+                        &gfx.quads,
+                        &gfx.quad_ids,
+                        &sharp,
+                        &mut gfx.ordered_quads,
+                        &mut gfx.draw_runs,
+                    );
+                    for (source, range) in &gfx.draw_runs {
+                        let bind_group = match source {
+                            instances::DrawSource::Atlas => Some(gfx.atlas.bind_group()),
+                            instances::DrawSource::Sharp(n) => ready
+                                .get(*n)
+                                .and_then(|(key, _, _)| gfx.working.bind_group(*key)),
+                        };
+                        if let (Some(bind_group), Some(quads)) =
+                            (bind_group, gfx.ordered_quads.get(range.clone()))
+                        {
                             batches.push(DrawBatch {
                                 bind_group,
-                                instances: &sharp[index..=index],
+                                instances: quads,
                             });
                         }
                     }

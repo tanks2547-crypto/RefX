@@ -131,7 +131,8 @@ fn bench_build_instances(c: &mut Criterion) {
 
     // ★ พิมพ์ให้ตรวจได้ว่าไม่ได้วัดกระดานว่าง หรือวัดแต่กิ่งเดียว
     let mut out = Vec::new();
-    build_instances(&board, &mut out, state_of);
+    let mut ids = Vec::new();
+    build_instances(&board, &mut out, &mut ids, state_of);
     println!(
         "build_instances_1000: สร้าง {} instance จาก {N} ใบ (ที่เหลือถูกซ่อนไว้)",
         out.len()
@@ -145,8 +146,9 @@ fn bench_build_instances(c: &mut Criterion) {
     c.bench_function("build_instances_1000", |b| {
         // ใช้บัฟเฟอร์เดิมซ้ำเหมือนเส้นทางจริง (`gfx.quads` ถูก clear แล้วเติมใหม่)
         let mut out: Vec<QuadInstance> = Vec::with_capacity(N);
+        let mut ids = Vec::with_capacity(N);
         b.iter(|| {
-            build_instances(std::hint::black_box(&board), &mut out, state_of);
+            build_instances(std::hint::black_box(&board), &mut out, &mut ids, state_of);
             std::hint::black_box(out.len())
         });
     });
