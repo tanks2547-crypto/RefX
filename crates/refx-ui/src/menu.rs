@@ -49,25 +49,45 @@ impl Menu {
     }
 }
 
-/// action นี้อยู่เมนูไหน และอยู่ **ก้อนที่เท่าไหร่** ในเมนูนั้น (ก้อนต่างกัน = มีเส้นคั่น)
+/// action นี้อยู่ที่ไหนในเมนู: **(เมนู, ก้อน, ลำดับในก้อน)** · ก้อนต่างกัน = มีเส้นคั่น
+///
+/// ★★ **สร้างจากตาราง ไม่ได้แปลว่าเรียงตามตาราง** (ตัดสิน 2 ต.ค. 2026) — ตารางเรียงตาม
+/// ที่คีย์ลัดถูกเพิ่มเข้ามา (`Ctrl+S` มาก่อน `Ctrl+O`) ซึ่งไม่ใช่ลำดับที่คนหาในเมนู
+/// · เมนูมีลำดับของตัวเอง (เปิด → บันทึก → ส่งออก) ส่วน **ความครบยังมาจากตาราง**
+/// และ `match` นี้ไม่มี `_ =>` — action ใหม่ต้องถูกวางก่อนคอมไพล์ผ่าน
 #[must_use]
-pub fn place_of(action: Action) -> (Menu, u8) {
+pub fn place_of(action: Action) -> (Menu, u8, u8) {
     match action {
-        Action::OpenBoard | Action::Save(SaveRequest::Save | SaveRequest::SaveAs) => {
-            (Menu::File, 0)
-        }
-        Action::Export => (Menu::File, 1),
-        Action::Tab(TabKey::New | TabKey::Close | TabKey::Next) => (Menu::File, 2),
-        Action::History(_) => (Menu::Edit, 0),
-        Action::Paste | Action::Delete => (Menu::Edit, 1),
-        Action::SelectAll | Action::ClearSelection => (Menu::Edit, 2),
-        Action::ZOrder(_)
-        | Action::Group(_)
-        | Action::Appearance(AppearanceKey::FlipHorizontal) => (Menu::Edit, 3),
-        Action::Tool(_) => (Menu::Edit, 4),
-        Action::ToggleMode => (Menu::View, 0),
-        Action::Zoom(_) => (Menu::View, 1),
-        Action::Appearance(AppearanceKey::ToggleBoardGrayscale) => (Menu::View, 2),
+        Action::OpenBoard => (Menu::File, 0, 0),
+        Action::Save(SaveRequest::Save) => (Menu::File, 0, 1),
+        Action::Save(SaveRequest::SaveAs) => (Menu::File, 0, 2),
+        Action::Export => (Menu::File, 1, 0),
+        Action::Tab(TabKey::New) => (Menu::File, 2, 0),
+        Action::Tab(TabKey::Close) => (Menu::File, 2, 1),
+        Action::Tab(TabKey::Next) => (Menu::File, 2, 2),
+        Action::History(keymap::HistoryRequest::Undo) => (Menu::Edit, 0, 0),
+        Action::History(keymap::HistoryRequest::Redo) => (Menu::Edit, 0, 1),
+        Action::Paste => (Menu::Edit, 1, 0),
+        Action::Delete => (Menu::Edit, 1, 1),
+        Action::SelectAll => (Menu::Edit, 2, 0),
+        Action::ClearSelection => (Menu::Edit, 2, 1),
+        Action::ZOrder(ZMove::ToFront) => (Menu::Edit, 3, 0),
+        Action::ZOrder(ZMove::Forward) => (Menu::Edit, 3, 1),
+        Action::ZOrder(ZMove::Backward) => (Menu::Edit, 3, 2),
+        Action::ZOrder(ZMove::ToBack) => (Menu::Edit, 3, 3),
+        Action::Group(GroupRequest::Group) => (Menu::Edit, 4, 0),
+        Action::Group(GroupRequest::Ungroup) => (Menu::Edit, 4, 1),
+        Action::Appearance(AppearanceKey::FlipHorizontal) => (Menu::Edit, 5, 0),
+        Action::Tool(Tool::Select) => (Menu::Edit, 6, 0),
+        Action::Tool(Tool::Crop) => (Menu::Edit, 6, 1),
+        Action::Tool(Tool::Picker) => (Menu::Edit, 6, 2),
+        Action::Tool(Tool::Measure) => (Menu::Edit, 6, 3),
+        Action::Tool(Tool::Text) => (Menu::Edit, 6, 4),
+        Action::ToggleMode => (Menu::View, 0, 0),
+        Action::Zoom(ZoomRequest::FitBoard) => (Menu::View, 1, 0),
+        Action::Zoom(ZoomRequest::FitSelection) => (Menu::View, 1, 1),
+        Action::Zoom(ZoomRequest::Actual) => (Menu::View, 1, 2),
+        Action::Appearance(AppearanceKey::ToggleBoardGrayscale) => (Menu::View, 2, 0),
     }
 }
 
@@ -142,26 +162,28 @@ pub struct Entry {
     pub action: Action,
     /// ก้อนที่อยู่ — เปลี่ยนก้อน = เส้นคั่น
     pub group: u8,
+    /// ลำดับในก้อน
+    pub rank: u8,
     /// ข้อความคีย์ลัดที่แสดงทางขวา
     pub shortcut: Option<String>,
 }
 
-/// รายการของเมนูนี้ เรียงตามก้อนแล้วตามลำดับในตาราง
+/// รายการของเมนูนี้ เรียงตาม [`place_of`] (ก้อน แล้วลำดับในก้อน)
 #[must_use]
 pub fn entries(menu: Menu) -> Vec<Entry> {
     let mut out: Vec<Entry> = actions()
         .into_iter()
         .filter_map(|action| {
-            let (at, group) = place_of(action);
+            let (at, group, rank) = place_of(action);
             (at == menu).then(|| Entry {
                 action,
                 group,
+                rank,
                 shortcut: shortcut_of(action),
             })
         })
         .collect();
-    // ★ `sort_by_key` คงลำดับเดิมภายในก้อน (stable) — ลำดับในตารางยังเป็นตัวตัดสิน
-    out.sort_by_key(|entry| entry.group);
+    out.sort_by_key(|entry| (entry.group, entry.rank));
     out
 }
 
@@ -273,6 +295,47 @@ mod tests {
                     entry.action.name()
                 );
             }
+        }
+    }
+
+    /// ★★ **เมนูมีลำดับของตัวเอง** — เปิด → บันทึก → บันทึกเป็น → ส่งออก (ตัดสิน 2 ต.ค. 2026)
+    ///
+    /// ตารางคีย์ลัดมี `Ctrl+S` ก่อน `Ctrl+O` · ถ้าเมนูเรียงตามตาราง "บันทึก" จะมาก่อน
+    /// "เปิด" ซึ่งคือสิ่งที่เกิดในรอบก่อน (เห็นบนภาพจอจริง)
+    #[test]
+    fn the_file_menu_reads_open_then_save_then_export() {
+        let file: Vec<Action> = entries(Menu::File).iter().map(|e| e.action).collect();
+        assert_eq!(
+            file,
+            [
+                Action::OpenBoard,
+                Action::Save(SaveRequest::Save),
+                Action::Save(SaveRequest::SaveAs),
+                Action::Export,
+                Action::Tab(TabKey::New),
+                Action::Tab(TabKey::Close),
+                Action::Tab(TabKey::Next),
+            ]
+        );
+        // NC — ตารางเองเรียงคนละแบบ ไม่งั้นข้อนี้ผ่านเพราะบังเอิญ
+        let table = actions();
+        let pos = |a: Action| table.iter().position(|x| *x == a).unwrap();
+        assert!(
+            pos(Action::Save(SaveRequest::Save)) < pos(Action::OpenBoard),
+            "ตารางเรียงเปิดก่อนบันทึกอยู่แล้ว — ข้อนี้ไม่ได้พิสูจน์ว่าเมนูมีลำดับของตัวเอง"
+        );
+    }
+
+    /// ★ ไม่มีสองรายการไหนในเมนูเดียวกันที่ได้ตำแหน่งเดียวกัน — ลำดับต้องไม่ขึ้นกับตาราง
+    #[test]
+    fn no_two_entries_share_a_place_in_the_same_menu() {
+        for menu in Menu::ALL {
+            let mut places: Vec<(u8, u8)> =
+                entries(menu).iter().map(|e| (e.group, e.rank)).collect();
+            let total = places.len();
+            places.sort_unstable();
+            places.dedup();
+            assert_eq!(places.len(), total, "{menu:?}: มีรายการที่ตำแหน่งซ้ำกัน");
         }
     }
 
