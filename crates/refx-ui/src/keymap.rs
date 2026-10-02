@@ -146,86 +146,72 @@ pub enum Action {
     Export,
 }
 
-impl Action {
-    /// ★★★ ชื่อที่ผู้ใช้เขียนใน `keymap.toml` — **สัญญากับไฟล์ ห้ามเปลี่ยนพร่ำเพรื่อ**
-    ///
-    /// เปลี่ยนชื่อเมื่อไหร่ `keymap.toml` ของผู้ใช้ทุกคนที่ใช้ชื่อเดิมจะกลายเป็น
-    /// "action ไม่รู้จัก" แล้ว**คีย์ลัดหายทั้งไฟล์** (ตามกฎ "พังที่ไหนก็ใช้
-    /// ค่าปริยายทั้งชุด") · `match` ไม่มี `_ =>` โดยตั้งใจ: เพิ่ม action ใหม่
-    /// เมื่อไหร่ คอมไพเลอร์บังคับให้มาตั้งชื่อให้มัน
-    #[must_use]
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::History(HistoryRequest::Undo) => "undo",
-            Self::History(HistoryRequest::Redo) => "redo",
-            Self::Paste => "paste",
-            Self::Delete => "delete",
-            Self::ZOrder(ZMove::Backward) => "send-backward",
-            Self::ZOrder(ZMove::Forward) => "send-forward",
-            Self::ZOrder(ZMove::ToBack) => "send-to-back",
-            Self::ZOrder(ZMove::ToFront) => "send-to-front",
-            Self::Tool(Tool::Select) => "tool-select",
-            Self::Tool(Tool::Crop) => "tool-crop",
-            Self::Tool(Tool::Picker) => "tool-picker",
-            Self::Tool(Tool::Measure) => "tool-measure",
-            Self::Tool(Tool::Text) => "tool-text",
-            Self::Appearance(AppearanceKey::ToggleBoardGrayscale) => "toggle-grayscale",
-            Self::Appearance(AppearanceKey::FlipHorizontal) => "flip-horizontal",
-            Self::Group(GroupRequest::Group) => "group",
-            Self::Group(GroupRequest::Ungroup) => "ungroup",
-            Self::Save(SaveRequest::Save) => "save",
-            Self::Save(SaveRequest::SaveAs) => "save-as",
-            Self::OpenBoard => "open-board",
-            Self::Tab(TabKey::New) => "new-tab",
-            Self::Tab(TabKey::Close) => "close-tab",
-            Self::Tab(TabKey::Next) => "next-tab",
-            Self::ToggleMode => "toggle-mode",
-            Self::SelectAll => "select-all",
-            Self::ClearSelection => "clear-selection",
-            Self::Export => "export",
-            Self::Zoom(ZoomRequest::Actual) => "zoom-100",
-            Self::Zoom(ZoomRequest::FitSelection) => "zoom-fit-selection",
-            Self::Zoom(ZoomRequest::FitBoard) => "zoom-fit",
+/// ★★★ **รายการเดียว** ที่ให้ทั้งชื่อในไฟล์ ([`Action::name`]) และ [`Action::ALL`]
+///
+/// เดิมมีสองรายการพิมพ์มือ — `match` ของ `name()` (คอมไพเลอร์บังคับให้ครบ) กับ
+/// `ALL` 30 ตัว (ไม่มีใครบังคับ) · action ใหม่ที่ลืมเติมใน `ALL` **เขียนใน
+/// `keymap.toml` ไม่ได้** เพราะ `from_name` หาไม่เจอ — บั๊กเงียบที่ผู้ใช้เจอ ไม่ใช่เรา
+/// (ตัดสิน 2 ต.ค. 2026 · รูปเดียวกับ `text::listed!`)
+///
+/// → macro นี้สร้าง `match` ของ `name()` **และ** `ALL` จากรายการเดียวกัน · `match`
+///   ต้องครบทุกคู่ (variant × ค่าข้างใน) ไม่งั้นคอมไพล์ไม่ผ่าน → `ALL` ครบตามไปด้วยเอง
+macro_rules! actions {
+    ($( $variant:ident $( ( $($inner:tt)+ ) )? => $name:literal, )*) => {
+        impl Action {
+            /// ★★★ ชื่อที่ผู้ใช้เขียนใน `keymap.toml` — **สัญญากับไฟล์ ห้ามเปลี่ยนพร่ำเพรื่อ**
+            ///
+            /// เปลี่ยนชื่อเมื่อไหร่ `keymap.toml` ของผู้ใช้ทุกคนที่ใช้ชื่อเดิมจะกลายเป็น
+            /// "action ไม่รู้จัก" แล้ว**คีย์ลัดหายทั้งไฟล์** (ตามกฎ "พังที่ไหนก็ใช้
+            /// ค่าปริยายทั้งชุด") · `match` ไม่มี `_ =>` โดยตั้งใจ
+            #[must_use]
+            pub fn name(self) -> &'static str {
+                match self {
+                    $( Self::$variant $( ( $($inner)+ ) )? => $name, )*
+                }
+            }
+
+            /// ทุก action ที่มี — ★ ใช้ทั้งตอนแปลงชื่อกลับ และตอนแสดงรายการบนแผง
+            ///
+            /// ★★ **สร้างจากรายการเดียวกับ [`Self::name`]** ไม่ใช่รายการชุดที่สอง
+            pub const ALL: &'static [Self] = &[ $( Self::$variant $( ( $($inner)+ ) )?, )* ];
         }
-    }
+    };
+}
 
-    /// ทุก action ที่มี — ★ ใช้ทั้งตอนแปลงชื่อกลับ และตอนแสดงรายการบนแผง
-    ///
-    /// ★★ **ประกอบจาก [`Self::name`] ไม่ใช่ตารางชื่อชุดที่สอง** — สองรายการ
-    /// ที่ต้องตรงกันเองคือรายการที่วันหนึ่งจะไม่ตรงกัน
-    pub const ALL: &'static [Self] = &[
-        Self::History(HistoryRequest::Undo),
-        Self::History(HistoryRequest::Redo),
-        Self::Paste,
-        Self::Delete,
-        Self::ZOrder(ZMove::Backward),
-        Self::ZOrder(ZMove::Forward),
-        Self::ZOrder(ZMove::ToBack),
-        Self::ZOrder(ZMove::ToFront),
-        Self::Tool(Tool::Select),
-        Self::Tool(Tool::Crop),
-        Self::Tool(Tool::Picker),
-        Self::Tool(Tool::Measure),
-        Self::Tool(Tool::Text),
-        Self::Appearance(AppearanceKey::ToggleBoardGrayscale),
-        Self::Appearance(AppearanceKey::FlipHorizontal),
-        Self::Group(GroupRequest::Group),
-        Self::Group(GroupRequest::Ungroup),
-        Self::Save(SaveRequest::Save),
-        Self::Save(SaveRequest::SaveAs),
-        Self::OpenBoard,
-        Self::Tab(TabKey::New),
-        Self::Tab(TabKey::Close),
-        Self::Tab(TabKey::Next),
-        Self::ToggleMode,
-        Self::SelectAll,
-        Self::ClearSelection,
-        Self::Export,
-        Self::Zoom(ZoomRequest::Actual),
-        Self::Zoom(ZoomRequest::FitSelection),
-        Self::Zoom(ZoomRequest::FitBoard),
-    ];
+actions! {
+    History(HistoryRequest::Undo) => "undo",
+    History(HistoryRequest::Redo) => "redo",
+    Paste => "paste",
+    Delete => "delete",
+    ZOrder(ZMove::Backward) => "send-backward",
+    ZOrder(ZMove::Forward) => "send-forward",
+    ZOrder(ZMove::ToBack) => "send-to-back",
+    ZOrder(ZMove::ToFront) => "send-to-front",
+    Tool(Tool::Select) => "tool-select",
+    Tool(Tool::Crop) => "tool-crop",
+    Tool(Tool::Picker) => "tool-picker",
+    Tool(Tool::Measure) => "tool-measure",
+    Tool(Tool::Text) => "tool-text",
+    Appearance(AppearanceKey::ToggleBoardGrayscale) => "toggle-grayscale",
+    Appearance(AppearanceKey::FlipHorizontal) => "flip-horizontal",
+    Group(GroupRequest::Group) => "group",
+    Group(GroupRequest::Ungroup) => "ungroup",
+    Save(SaveRequest::Save) => "save",
+    Save(SaveRequest::SaveAs) => "save-as",
+    OpenBoard => "open-board",
+    Tab(TabKey::New) => "new-tab",
+    Tab(TabKey::Close) => "close-tab",
+    Tab(TabKey::Next) => "next-tab",
+    ToggleMode => "toggle-mode",
+    SelectAll => "select-all",
+    ClearSelection => "clear-selection",
+    Export => "export",
+    Zoom(ZoomRequest::Actual) => "zoom-100",
+    Zoom(ZoomRequest::FitSelection) => "zoom-fit-selection",
+    Zoom(ZoomRequest::FitBoard) => "zoom-fit",
+}
 
+impl Action {
     /// ชื่อจากไฟล์ → action — `None` ถ้าไม่รู้จัก
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
