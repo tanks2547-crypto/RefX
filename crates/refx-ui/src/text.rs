@@ -1415,49 +1415,63 @@ pub enum Template {
 /// เทมเพลตภาษาอังกฤษ — ต้องมีครบทุกตัว
 fn template_en(template: Template) -> &'static str {
     match template {
+        // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
         Template::ShowingFirstOf => "showing the first of {n} selected",
-        Template::ItemCount => "{n} items",
+        Template::ItemCount => "Items: {n}",
         Template::GroupMembers => "{n} in this group",
+        // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
         Template::Saved => "Saved to {name}",
-        Template::RecoverFound => "{items} items from {when}",
+        Template::RecoverFound => "Items: {items} · from {when}",
         Template::Opened => "Opened {name}",
         Template::Zoom => "Zoom {pct}%",
         Template::FramesDrawn => "Frames {n}",
         Template::QuietRedraws => "quiet {n} {who}",
         Template::Ram => "RAM {used} / {limit}",
+        // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
         Template::Vram => "VRAM {used} / {limit}",
-        Template::CacheSummary => "Cache {n} images ({size})",
+        Template::CacheSummary => "Cached images: {n} ({size})",
         Template::DecodeQueued => "Decode queue {n}",
+        // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
         Template::DecodeCancelled => "Cancelled {n}",
-        Template::WorkingTextures => "Sharp {used} / {limit} · {calls} draws · {evicted} evicted",
-        Template::AtlasUploads => "{uploads} uploads",
-        Template::ArrangeDrawn => "drawn {drawn} (in view {view}) of {total} · checked {examined}",
-        Template::Loading => "Loading {done} / {total}",
-        Template::OpeningFiles => "Opening {n} files…",
-        Template::OpenedFiles => "Opened {n} files in {ms} ms",
-        Template::LayoutApplied => "Arranged {n} images on the canvas",
-        Template::FilterShowing => "showing {shown} of {total}",
-        Template::BoardFull => {
-            "This board is full at {capacity} images — {rejected} of the {requested} you opened could not be added. Try splitting them across several boards."
+        // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
+        Template::WorkingTextures => {
+            "Sharp {used} / {limit} · draw calls: {calls} · evicted: {evicted}"
         }
+        Template::AtlasUploads => "Texture uploads: {uploads}",
+        Template::ArrangeDrawn => "drawn {drawn} (in view {view}) of {total} · checked {examined}",
+        // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
+        Template::Loading => "Loading {done} / {total}",
+        // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
+        Template::OpeningFiles => "Opening files: {n}…",
+        // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
+        Template::OpenedFiles => "Files opened: {n} in {ms} ms",
+        Template::LayoutApplied => "Images arranged on the canvas: {n}",
+        Template::FilterShowing => "showing {shown} of {total}",
+        // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
+        Template::BoardFull => {
+            "This board is full (image limit: {capacity}) — not added: {rejected} of the {requested} you opened. Try splitting them across several boards."
+        }
+        // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
         Template::SwitchedMode => "Switched to {mode} mode",
-        Template::SelectedAll => "Selected all {n} images",
+        Template::SelectedAll => "Selected all items: {n}",
         Template::ZoomSet => "Zoom {percent}%",
         Template::NotImplemented => "{what} is not available yet — planned for {when}",
         Template::ErrFileTooLarge => {
             "This file is too large ({mb} MB, the limit is {limit} MB)\n\
              Try shrinking the image before adding it."
         }
+        // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
         Template::ErrImageTooLarge => {
-            "This image is too large ({w}×{h} = {pixels} pixels, the limit is {limit})\n\
+            "This image is too large ({w}×{h}, total pixels: {pixels} - the limit is {limit})\n\
              If you expected a smaller image, the file may be damaged or altered."
         }
         Template::ErrUnknownFormat => {
             "RefX does not recognise this file type\n\
              It can open PNG, JPEG, WebP, GIF, BMP, TGA and TIFF."
         }
+        // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
         Template::ErrFormatNotAllowed => {
-            "RefX cannot open {format} files yet\nTry converting the image to PNG or JPEG."
+            "RefX cannot open this kind of file yet ({format})\nTry converting the image to PNG or JPEG."
         }
         Template::ErrBadHeader => {
             "The file header could not be read — the file is damaged or incomplete\n\
@@ -1478,12 +1492,14 @@ fn template_en(template: Template) -> &'static str {
             "{file} is not an image file
 Drag in a PNG, JPEG, WebP, GIF, BMP, TGA or TIFF instead."
         }
+        // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
         Template::ErrTimeout => {
-            "Opening {file} took longer than {seconds} seconds — it was skipped for now\n\
+            "Opening {file} took longer than the time limit ({seconds} s) — it was skipped for now\n\
              If the file is on a network or cloud drive, copy it to this computer first."
         }
+        // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
         Template::ErrAtlasFull => {
-            "The thumbnail storage is full (all {layers} layers are in use)\n\
+            "The thumbnail storage is full (every layer is in use - layers: {layers})\n\
              Close a board you are not using, or raise the memory limit in Settings."
         }
         Template::ErrOutOfVram => {
@@ -1495,17 +1511,21 @@ Drag in a PNG, JPEG, WebP, GIF, BMP, TGA or TIFF instead."
             "Pasted images are using {mb} MB of space (the limit is {cap} MB), and none of them can be cleared yet\n\
              They belong to work that has not been saved — save your boards, then restart RefX to free the space."
         }
+        // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
         Template::MissingImage => {
             "{file} could not be found ({n} selected)\n\
              The image is still on the board — point RefX at the file and the rest of that folder follows."
         }
-        Template::RelinkFound => "Found {found} of {total} images that had moved",
+        Template::RelinkFound => "Moved images found: {found} of {total}",
+        // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
+        // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
         Template::RelinkMissing => {
-            "{n} images could not be found\n\
+            "Images that could not be found: {n}\n\
              Select one, then use Find the file — the rest of that folder is matched for you."
         }
-        Template::RelinkUnpacked => "Loaded {n} images stored inside this board file",
-        Template::StorageInside => "{inside} of {images} images are inside the board file",
+        // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
+        Template::RelinkUnpacked => "Images loaded from inside this board file: {n}",
+        Template::StorageInside => "Images inside the board file: {inside} of {images}",
         Template::OpenFailedDamagedBackup => {
             "This board file is damaged - part of it could not be read. Try the backup copy {backup} in the same folder."
         }
@@ -1537,15 +1557,17 @@ Drag in a PNG, JPEG, WebP, GIF, BMP, TGA or TIFF instead."
         Template::SettingsNoteClamped => {
             "{field} was set to {asked}, which is outside what RefX accepts - using {used}"
         }
+        // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
         Template::SettingsNoteCappedByRam => {
-            "The largest image was set to {asked} pixels, but this machine has {ram} GB of RAM \
+            "The largest image was set to {asked} (in pixels), but this machine has {ram} GB of RAM \
              and can only decode {used} - using that instead.\n\
              This ceiling only moves if the machine gets more RAM."
         }
+        // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
         Template::SettingsNoteUnknownValue => {
             "{field} was set to \"{given}\", which RefX does not recognise - using the default"
         }
-        Template::SettingsCeiling => "Up to {side}×{side} ({pixels} pixels) on this machine",
+        Template::SettingsCeiling => "Up to {side}×{side} on this machine (pixels: {pixels})",
         Template::SettingsMegabytes => "{mb} MB",
 
         Template::KeymapProblemFile => "keymap.toml could not be read: {detail}",
@@ -1556,22 +1578,25 @@ Drag in a PNG, JPEG, WebP, GIF, BMP, TGA or TIFF instead."
             "keymap.toml row {row}: there is no shortcut called \"{given}\" - \
              the Settings panel lists every name you can use"
         }
+        // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
         Template::KeymapProblemConflict => {
             "keymap.toml row {row} (\"{keys}\") and row {other_row} (\"{other_keys}\") \
              can both be triggered by one keypress, so which one wins would depend on \
              their order in the file"
         }
-        Template::SettingsKeymapCount => "{n} shortcuts",
+        Template::SettingsKeymapCount => "Shortcuts: {n}",
         Template::ExportPixels => "{w} x {h} px",
+        // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
         Template::ExportEstimate => "about {size}",
-        Template::ExportMissingCount => "{n} images cannot be found",
+        Template::ExportMissingCount => "Images that cannot be found: {n}",
         Template::ExportRunning => "Exporting {name} - band {done} of {total}",
         Template::ExportDone => "Exported {name} ({size})",
         Template::ExportFailed => "Could not export {name}: {reason}",
+        // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
         Template::ExportCeiling => {
             "up to {n} px for this board - limited by the resolution of the previews"
         }
-        Template::SidecarRestored => "Brought back tags for {n} pictures",
+        Template::SidecarRestored => "Tags brought back for pictures: {n}",
         // ★ เรียงประโยคให้ **ถูกทุกจำนวน** โดยไม่ต้องมีกลไกพหูพจน์ — เห็นบน
         //   ภาพหน้าจอจริง 12 ก.ย. 2026 ว่ารุ่นแรกออกมาเป็น "1 saved tags"
         //   · ภาษาไทยไม่มีปัญหานี้ ประตู tofu จึงมองไม่เห็น และเทสต์ก็ไม่เห็น
@@ -1590,16 +1615,22 @@ Drag in a PNG, JPEG, WebP, GIF, BMP, TGA or TIFF instead."
         Template::SidecarAskIn => "Images in {dir}",
         Template::DialogFindNamedImage => "Find {name}",
         Template::DataRootInUse => "TEST DATA FOLDER: work is saved under {dir}",
+        // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
         Template::CloseLossNeverSaved => {
-            "This board has never been saved - all {n} items on it would be lost"
+            "This board has never been saved - everything on it would be lost (items: {n})"
         }
+        // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
         Template::CloseLossSince => "Not saved yet: {list}",
-        Template::CloseLossAdded => "{n} added",
-        Template::CloseLossRemoved => "{n} removed",
-        Template::CloseLossEdited => "{n} edits",
-        Template::CloseMoreTabs => "{n} more unsaved tabs will be asked about after this one",
+        // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
+        Template::CloseLossAdded => "added: {n}",
+        // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
+        Template::CloseLossRemoved => "removed: {n}",
+        // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
+        Template::CloseLossEdited => "edit steps: {n}",
+        Template::CloseMoreTabs => "Unsaved tabs still to be asked about after this one: {n}",
+        // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
         Template::RecoveryMovedToKept => {
-            "{n} unsaved board(s) went unanswered for {rounds} launches and were moved to {dir} - open them with Ctrl+O · nothing was deleted"
+            "Unsaved work nobody answered was moved (boards: {n} · launches without an answer: {rounds}) - nothing was deleted - open it with Ctrl+O from {dir}"
         }
         Template::AgeMinutes => "{n} min ago",
         Template::AgeHours => "{n} h ago",
@@ -2194,6 +2225,53 @@ mod tests {
             &[("done", "312"), ("total", "1000")],
         );
         assert_eq!(thai, "กำลังโหลด 312 / 1000");
+    }
+
+    /// ★★ **ไม่มีเทมเพลตอังกฤษตัวไหนที่ให้ "1 \<นามพหูพจน์\>"** (`docs/03 §0` ข้อ 4)
+    ///
+    /// เติมตัวยึดทุกตัวด้วย `1` แล้วหา `1 xxxs` · ★ รายการเทมเพลตมาจาก `Template::ALL`
+    /// (`listed!`) ไม่ใช่พิมพ์มือ — เทมเพลตใหม่ที่เขียน "{n} images" ถูกจับทันที
+    ///
+    /// เจอ "1 items" บนแถบสถานะจริง (รอบ P5-9) · ประตูนี้รันครั้งแรกกับเทมเพลตเดิม
+    /// **แดง 26 ตัว** · ไทยไม่มีพหูพจน์ ปัญหาจึงมองไม่เห็นจากฝั่งที่เราอ่านออกที่สุด
+    ///
+    /// ★ ขีดจำกัดที่รู้อยู่: จับเฉพาะ "ตัวเลข + คำถัดไป" · `"{n} more unsaved tabs"`
+    ///   (มีคำคุณศัพท์คั่น) **หลุด** — แก้ด้วยมือไปพร้อมกัน · ตัวยึดที่ไม่ใช่จำนวน
+    ///   (`{format}`) ก็ถูกเติม 1 เหมือนกัน จึงเขียนให้ถูกทุกค่าแทนการมีรายการยกเว้น
+    #[test]
+    fn no_english_template_says_one_of_a_plural() {
+        // หน่วยและกริยาที่ลงท้าย s แต่ไม่ใช่นามพหูพจน์
+        const NOT_PLURALS: &[&str] = &["ms", "s", "is", "was", "has", "does"];
+        let mut bad = Vec::new();
+        for &tpl in ALL_TEMPLATES {
+            let mut text = template_en(tpl).to_owned();
+            while let (Some(open), Some(close)) = (text.find('{'), text.find('}')) {
+                if close < open {
+                    break;
+                }
+                text.replace_range(open..=close, "1");
+            }
+            // ★ จำนวนกำกับนามที่ตามมา **ห่างด้วยช่องว่างเดียว** เท่านั้น — "boards: 1 · launches"
+            //   ไม่ใช่ "1 launches" (รุ่นแรกตัดคำด้วยเครื่องหมายทุกตัวแล้วจับคู่ข้ามเครื่องหมาย)
+            for (at, _) in text.match_indices("1 ") {
+                let standalone = text[..at]
+                    .chars()
+                    .next_back()
+                    .is_none_or(|c| !c.is_ascii_alphanumeric());
+                let word: String = text[at + 2..]
+                    .chars()
+                    .take_while(char::is_ascii_alphabetic)
+                    .collect();
+                if standalone && word.ends_with('s') && !NOT_PLURALS.contains(&word.as_str()) {
+                    bad.push(format!("{tpl:?}: \"1 {word}\" — {text:?}"));
+                }
+            }
+        }
+        assert!(
+            bad.is_empty(),
+            "เทมเพลตที่ผิดเมื่อจำนวนเป็น 1:\n{}",
+            bad.join("\n")
+        );
     }
 
     /// เทมเพลตทุกตัวต้องถูกเติมจนไม่เหลือตัวยึดตำแหน่ง เมื่อผู้เรียกส่งค่าครบ

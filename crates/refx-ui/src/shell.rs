@@ -4339,7 +4339,7 @@ mod tests {
                 let shown = two_frames(&ctx, &mut state, Vec::new())
                     .into_iter()
                     .map(|(_, text)| text)
-                    .find(|text| text.starts_with("1 "))
+                    .find(|text| text.starts_with("1 ") || text.starts_with("Items: 1 "))
                     .expect("บรรทัดจำนวนชิ้นไม่ถูกวาด");
                 let english = ["ago", "just now", "from", "earlier"]
                     .iter()
