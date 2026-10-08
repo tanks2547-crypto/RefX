@@ -81,7 +81,7 @@ proptest! { fn layout_deterministic(items: Vec<ItemAspect>, p: LayoutParams) {
 | `vram_idle_1000` | 200 MB | ✅ |
 | `binary_size` | 25 MB | ⚠️ warn |
 
-> ### ★ `order_draws_1000` — เพดานตั้ง 3 ต.ค. 2026
+> ### ★ `order_draws_1000` — เพดานตั้ง 8 ต.ค. 2026
 > วัดได้ **12.2 µs** (1,000 ใบ + ภาพคม 30 ใบ → 60 ช่วง) · เพดาน **150 µs ≈ 12 เท่า**
 > — อัตราส่วนเดียวกับ `build_instances_1000` (26.7 µs ต่อเพดาน 300)
 >
