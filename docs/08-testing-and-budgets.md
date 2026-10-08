@@ -73,12 +73,21 @@ proptest! { fn layout_deterministic(items: Vec<ItemAspect>, p: LayoutParams) {
 | `frame_pan_1000_p99` | 16.0 ms | ✅ |
 | `cull_1000` | 200 µs | ✅ |
 | `build_instances_1000` | 300 µs | ✅ |
+| `order_draws_1000` | **150 µs** | ✅ |
 | `layout_justified_1000` | 2 ms | ✅ |
 | `open_board_1000_warm_cache` | 1.5 s | ✅ |
 | `startup_to_window` | 400 ms | ✅ |
 | `rss_idle_1000` | 250 MB | ✅ |
 | `vram_idle_1000` | 200 MB | ✅ |
 | `binary_size` | 25 MB | ⚠️ warn |
+
+> ### ★ `order_draws_1000` — เพดานตั้ง 3 ต.ค. 2026
+> วัดได้ **12.2 µs** (1,000 ใบ + ภาพคม 30 ใบ → 60 ช่วง) · เพดาน **150 µs ≈ 12 เท่า**
+> — อัตราส่วนเดียวกับ `build_instances_1000` (26.7 µs ต่อเพดาน 300)
+>
+> ★ ตั้งไว้ก่อนที่ bench จะถูก commit **เพราะ `check-bench.sh` บังคับว่าแถวใหม่
+> ต้องมีเพดานในเอกสารก่อน** — CC วัดด้วย bench ชั่วคราวที่ไม่ commit แล้วรายงานตัวเลขมา
+> ซึ่งถูกลำดับ: **ตัวเลขมาก่อน เพดานมาจากตัวเลข ไม่ใช่กลับกัน**
 
 > ★ **`rss_idle_1000` / `vram_idle_1000` ไม่ต้องใช้ dataset 4000×3000** (27 ส.ค. 2026)
 > thumbnail เป็น 128 px คงที่เสมอ (64 KB/ใบ) ส่วนบัฟเฟอร์ตอน decode ถูกคืนไปแล้ว
