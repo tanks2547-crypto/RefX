@@ -88,6 +88,12 @@ proptest! { fn layout_deterministic(items: Vec<ItemAspect>, p: LayoutParams) {
 > ★ ตั้งไว้ก่อนที่ bench จะถูก commit **เพราะ `check-bench.sh` บังคับว่าแถวใหม่
 > ต้องมีเพดานในเอกสารก่อน** — CC วัดด้วย bench ชั่วคราวที่ไม่ commit แล้วรายงานตัวเลขมา
 > ซึ่งถูกลำดับ: **ตัวเลขมาก่อน เพดานมาจากตัวเลข ไม่ใช่กลับกัน**
+>
+> **commit แล้ว 9 ต.ค. 2026** — `crates/refx-ui/benches/instances.rs` · `scripts/check-bench.sh`
+> · วัดในเครื่อง **11,977 ns** (headroom 12.5×) · ★ bench ที่ commit วางภาพคมกลางแต่ละช่วง
+> จึงได้ **61 ช่วง = 2n + 1 พอดี** (กรณีแย่สุดที่ `docs/04` สัญญาไว้) ไม่ใช่ 60 ของ bench
+> ชั่วคราว และ assert ไว้ในตัว bench ว่าไม่ต่ำกว่า 2n (ไม่ได้วัดกรณีที่ถูกกว่า)
+> · NC `REFX_BENCH_LIMIT_NS=1` → แดงครบสี่แถว
 
 > ★ **`rss_idle_1000` / `vram_idle_1000` ไม่ต้องใช้ dataset 4000×3000** (27 ส.ค. 2026)
 > thumbnail เป็น 128 px คงที่เสมอ (64 KB/ใบ) ส่วนบัฟเฟอร์ตอน decode ถูกคืนไปแล้ว

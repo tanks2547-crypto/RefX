@@ -1,4 +1,5 @@
 //! benchmark ของ `docs/08 §2` แถว `build_instances_1000` (เพดาน 300 µs)
+//! และ `order_draws_1000` (เพดาน 150 µs — ตั้ง 8 ต.ค. 2026 จากตัวเลขที่วัดได้ 12.2 µs)
 //!
 //! วัด [`refx_ui::instances::build_instances`] — งานที่เกิดขึ้น **ทุกครั้งที่
 //! `Board` เปลี่ยน**: เดิน z-order ทั้งกระดาน · ถามชนิดจาก board · หาสถานะการวาด
@@ -29,7 +30,7 @@ use refx_core::hash::ContentHash;
 use refx_core::layout::{Engine, LayoutParams, layout};
 use refx_render::atlas::AtlasSlot;
 use refx_render::instance::QuadInstance;
-use refx_ui::instances::build_instances;
+use refx_ui::instances::{DrawSource, build_instances, order_draws};
 
 const N: usize = 1000;
 
@@ -154,5 +155,67 @@ fn bench_build_instances(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_build_instances);
+/// ★★ ภาพคมพร้อมกันได้ราว 30 ใบ (ชั้น B · `docs/04`) — กระจายทั่วลำดับ z ไม่ใช่กองท้าย
+///
+/// กองท้ายจะได้ช่วงเดียวยาว ๆ ซึ่งคือกรณีที่ถูกที่สุด · กระจายแบบนี้ทุกใบคมถูกตัดเป็น
+/// ช่วงของตัวเองและแทรกกลางช่วง atlas = กรณีแย่สุด ≤ 2n + 1 ที่ `docs/04` สัญญาไว้
+const SHARP: usize = 30;
+
+fn bench_order_draws(c: &mut Criterion) {
+    let board = mood_board(N);
+    let state_of = |id: ItemId| {
+        let index = id.index() as usize;
+        let slot = (!index.is_multiple_of(10)).then_some(AtlasSlot {
+            layer: (index / 256) as u32,
+            index: (index % 256) as u32,
+        });
+        Some((slot, [0.4, 0.5, 0.6, 1.0]))
+    };
+    let mut quads = Vec::new();
+    let mut ids = Vec::new();
+    build_instances(&board, &mut quads, &mut ids, state_of);
+    let step = ids.len() / SHARP;
+    let sharp: Vec<(ItemId, QuadInstance)> = (0..SHARP)
+        .map(|k| {
+            let at = k * step + step / 2;
+            (ids[at], quads[at])
+        })
+        .collect();
+
+    // ★ พิมพ์ให้ตรวจได้ว่าวัดกรณีที่ตั้งใจ — ไม่ใช่ภาพคม 0 ใบ (ช่วงเดียว ถูกที่สุด)
+    let mut ordered = Vec::new();
+    let mut runs = Vec::new();
+    order_draws(&quads, &ids, &sharp, &mut ordered, &mut runs);
+    let sharp_runs = runs
+        .iter()
+        .filter(|(source, _)| matches!(source, DrawSource::Sharp(_)))
+        .count();
+    println!(
+        "order_draws_1000: {} quad · ภาพคม {SHARP} ใบ → {} ช่วง (เพดานของ docs/04: {})",
+        ordered.len(),
+        runs.len(),
+        2 * SHARP + 1
+    );
+    assert_eq!(sharp_runs, SHARP, "ภาพคมไม่ได้ถูกตัดเป็นช่วงของตัวเองครบ");
+    assert!(runs.len() <= 2 * SHARP + 1, "เกิน 2n + 1 ช่วง");
+    assert!(runs.len() >= 2 * SHARP, "ภาพคมกองติดกัน — ไม่ใช่กรณีที่ตั้งใจวัด");
+
+    c.bench_function("order_draws_1000", |b| {
+        // บัฟเฟอร์เดิมซ้ำเหมือนเส้นทางจริง (`gfx.ordered_quads` · `gfx.draw_runs`)
+        let mut ordered = Vec::with_capacity(N);
+        let mut runs = Vec::with_capacity(2 * SHARP + 1);
+        b.iter(|| {
+            order_draws(
+                std::hint::black_box(&quads),
+                &ids,
+                &sharp,
+                &mut ordered,
+                &mut runs,
+            );
+            std::hint::black_box(runs.len())
+        });
+    });
+}
+
+criterion_group!(benches, bench_build_instances, bench_order_draws);
 criterion_main!(benches);

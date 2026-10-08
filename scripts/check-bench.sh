@@ -66,12 +66,13 @@ limit_of() {
   case "$1" in
     cull_1000)             echo 200000 ;;    # 200 µs
     build_instances_1000)  echo 300000 ;;    # 300 µs
+    order_draws_1000)      echo 150000 ;;    # 150 µs (ตั้ง 8 ต.ค. 2026 · docs/08 §2)
     layout_justified_1000) echo 2000000 ;;   # 2 ms
     *)                     echo "" ;;
   esac
 }
 
-EXPECTED="cull_1000 layout_justified_1000 build_instances_1000"
+EXPECTED="cull_1000 layout_justified_1000 build_instances_1000 order_draws_1000"
 
 OUT=""
 for target in "refx-core --bench core_benches" "refx-ui --bench instances"; do
@@ -89,7 +90,7 @@ done
 
 # บรรทัดตรวจสภาพที่ bench พิมพ์เอง (เช่น "เห็น 27 จาก 1000 ใบ") ต้องอยู่ใน log
 # เสมอ — มันคือสิ่งที่บอกว่าเราวัดของจริง ไม่ใช่วัดกรอบว่าง/กิ่งที่ถูกที่สุด
-echo "$OUT" | grep -E '^(cull_1000|layout|build_instances)' || true
+echo "$OUT" | grep -E '^(cull_1000|layout|build_instances|order_draws)' || true
 
 # `test NAME ... bench:  N ns/iter (+/- M)` → "NAME N" (ดูหัวไฟล์ bench-parse.awk
 # ว่าทำไมมันไม่ใช่ regex บรรทัดเดียว)
