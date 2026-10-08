@@ -28,6 +28,39 @@ const WARN_COLOR_DARK: egui::Color32 = egui::Color32::from_rgb(230, 160, 60);
 /// (เจอตอนถ่ายภาพหน้าจอธีมสว่างของ P5-3 · ไม่มีเทสต์ไหนถามเรื่องคอนทราสต์ได้)
 const WARN_COLOR_LIGHT: egui::Color32 = egui::Color32::from_rgb(150, 85, 0);
 
+/// ★★★ ช่องคำเตือนของกล่องส่งออก — **ข้อความเดียว** ไม่ว่าจะมีกี่เรื่อง (`docs/03 §0`)
+///
+/// คืน (จำนวน, เหตุผล) · `None` = ไม่มีอะไรต้องเตือน · จำนวนต่อกันด้วย " · "
+/// ส่วนเหตุผลเลือก **ประโยคเดียว** ที่ครอบทุกเรื่องที่เกิด
+pub(crate) fn export_warning(
+    lang: Lang,
+    missing: usize,
+    notes: usize,
+) -> Option<(String, &'static str)> {
+    let mut counts = Vec::new();
+    if missing > 0 {
+        counts.push(text::fill(
+            lang,
+            Template::ExportMissingCount,
+            &[("n", &missing.to_string())],
+        ));
+    }
+    if notes > 0 {
+        counts.push(text::fill(
+            lang,
+            Template::ExportNotesCount,
+            &[("n", &notes.to_string())],
+        ));
+    }
+    let why = match (missing > 0, notes > 0) {
+        (false, false) => return None,
+        (true, false) => Key::ExportMissingWarning,
+        (false, true) => Key::ExportNotesWarning,
+        (true, true) => Key::ExportMissingAndNotesWarning,
+    };
+    Some((counts.join(" · "), text::t(lang, why)))
+}
+
 /// สีเตือนที่อ่านออกบนธีมที่ใช้อยู่จริง
 ///
 /// ★ อ่านจาก `ui.visuals()` ไม่ใช่จากค่าที่จำไว้ — ผู้ใช้สลับธีมกลางคันได้
@@ -496,6 +529,9 @@ pub struct ExportView {
     pub items: usize,
     /// ★★★ จำนวนใบที่หาไฟล์ไม่เจอ — **ต้องเตือนก่อนกดจริง** (`docs/07 §6`)
     pub missing: usize,
+    /// ★★★ จำนวนโน้ตข้อความ — ทางส่งออกวาดแต่ภาพ โน้ต **หายจากไฟล์** (`docs/07 §6`
+    /// ตัดสิน 8 ต.ค. 2026 · วาดจริงใน v1.1) · เดิมหายเงียบ ๆ แบบเดียวกับ `Missing`
+    pub notes: usize,
     /// ชื่อไฟล์ปลายทางที่เลือกไว้ — `None` = ยังไม่ได้เลือก
     pub target: Option<String>,
     /// ไฟล์ปลายทางมีอยู่แล้ว → ต้องถามก่อนทับ (`docs/07 §6` ข้อ 4)
@@ -523,6 +559,7 @@ impl Default for ExportView {
             background: [255, 255, 255],
             items: 0,
             missing: 0,
+            notes: 0,
             target: None,
             overwrite: false,
             choosing: false,
@@ -1538,18 +1575,15 @@ pub fn draw_in_ui(
             //
             //   export คือสิ่งที่ผู้ใช้ส่งให้คนอื่น · ถ้าภาพหายไปสามใบแล้วรู้ทีหลัง
             //   คือความเสียหายที่ย้อนไม่ได้ (`docs/07 §6`)
-            if view.missing > 0 {
+            //
+            // ★★★ โน้ตข้อความใช้ **ช่องเดียวกัน** — ผู้ใช้เขียนคำอธิบายแล้วส่งให้ลูกค้า
+            //     คำอธิบายหายโดยเขาไม่รู้ คือรูปเดียวกับ `Missing` (ตัดสิน 8 ต.ค. 2026)
+            //     · มีทั้งคู่ = **ประโยคเดียวบอกทั้งสองอย่าง** ไม่ใช่สองคำเตือนซ้อน
+            //     (`docs/03 §0`) — ดู [`export_warning`]
+            if let Some((counts, why)) = export_warning(lang, view.missing, view.notes) {
                 ui.horizontal_wrapped(|ui| {
-                    ui.label(
-                        egui::RichText::new(text::fill(
-                            lang,
-                            Template::ExportMissingCount,
-                            &[("n", &view.missing.to_string())],
-                        ))
-                        .strong()
-                        .color(warn_color(ui)),
-                    );
-                    ui.label(text::t(lang, Key::ExportMissingWarning));
+                    ui.label(egui::RichText::new(counts).strong().color(warn_color(ui)));
+                    ui.label(why);
                 });
             }
             if let Some(problem) = &view.problem {
@@ -3843,6 +3877,65 @@ mod tests {
         assert!(shown.contains(chord.as_str()), "{chord:?} ไม่ได้ขึ้นจอ");
         assert!(shown.contains(*action), "{action:?} ไม่ได้ขึ้นจอ");
         assert!(shown.contains(text::t(Lang::En, Key::SettingsKeymapFromFile)));
+    }
+
+    /// ★★★ **โน้ตข้อความไม่อยู่ในไฟล์ที่ส่งออก → ต้องบอกก่อนกดจริง** (`docs/07 §6`
+    /// ตัดสิน 8 ต.ค. 2026) · ช่องเดียวกับ `Missing` · มีทั้งคู่ = **ประโยคเดียว**
+    /// ไม่ใช่สองคำเตือนซ้อน (`docs/03 §0`) · วาดจริงทั้งสองภาษา ไม่ใช่แค่เรียกฟังก์ชัน
+    #[test]
+    fn the_export_box_says_text_notes_are_left_out_in_one_warning_with_missing_images() {
+        let ctx = egui::Context::default();
+        for lang in [Lang::En, Lang::Th] {
+            let shown = |missing: usize, notes: usize| {
+                let mut state = ShellState {
+                    lang,
+                    export_prompt: Some(ExportView {
+                        missing,
+                        notes,
+                        ..ExportView::default()
+                    }),
+                    ..ShellState::default()
+                };
+                draw_once(&mut state, &ctx);
+                draw_once(&mut state, &ctx)
+            };
+            let missing_why = text::t(lang, Key::ExportMissingWarning);
+            let notes_why = text::t(lang, Key::ExportNotesWarning);
+            let both_why = text::t(lang, Key::ExportMissingAndNotesWarning);
+            let notes_count = text::fill(lang, Template::ExportNotesCount, &[("n", "2")]);
+            let missing_count = text::fill(lang, Template::ExportMissingCount, &[("n", "3")]);
+
+            let notes_only = shown(0, 2);
+            assert!(notes_only.contains(&notes_count), "{lang:?}: ไม่บอกจำนวนโน้ต");
+            assert!(
+                notes_only.contains(notes_why),
+                "{lang:?}: ไม่บอกว่าโน้ตหายจากไฟล์"
+            );
+            assert!(
+                !notes_only.contains(missing_why),
+                "{lang:?}: เตือน Missing ทั้งที่ไม่มี"
+            );
+
+            let both = shown(3, 2);
+            assert!(both.contains(&missing_count) && both.contains(&notes_count));
+            assert!(both.contains(both_why), "{lang:?}: มีทั้งคู่แต่ไม่มีประโยครวม");
+            for single in [missing_why, notes_why] {
+                assert!(
+                    !both.contains(single),
+                    "{lang:?}: มีทั้งคู่แล้วยังขึ้นคำเตือนแยก {single:?} — สองคำเตือนซ้อน"
+                );
+            }
+
+            // NC — ไม่มีอะไรหาย ต้องไม่มีคำเตือนเลย (คำเตือนที่ขึ้นตลอดไม่บอกอะไรใคร)
+            let clean = shown(0, 0);
+            for why in [missing_why, notes_why, both_why] {
+                assert!(!clean.contains(why), "{lang:?}: เตือนทั้งที่ไม่มีอะไรหาย");
+            }
+            assert!(
+                shown(3, 0).contains(missing_why),
+                "{lang:?}: ทางเดิมของ Missing หาย"
+            );
+        }
     }
 
     /// ★ ค่าที่เปลี่ยนแล้วยังไม่มีผลต้องบอก — ไม่ใช่ปล่อยให้ผู้ใช้เดาว่าปุ่มเสีย

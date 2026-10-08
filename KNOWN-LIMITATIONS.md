@@ -188,7 +188,31 @@ log อาจมีบรรทัด `I-1: ขอวาดเฟรมต่อ
 
 </details>
 
-## 13. สิ่งที่ **ตั้งใจ** ไม่มี / Deliberately absent
+## 13. โน้ตข้อความไม่อยู่ในไฟล์ที่ส่งออก / Text notes are left out of exports
+
+**ภาพที่ส่งออกมีแต่ภาพ — โน้ตข้อความไม่ถูกวาดลงไป** · กล่องส่งออกบอกจำนวนโน้ตที่จะ
+หายไปก่อนคุณกดส่งออกจริง (ช่องเดียวกับคำเตือนภาพที่หาไฟล์ไม่เจอ) · ถ้าคำอธิบาย
+สำคัญกับคนที่จะได้ไฟล์ ให้ส่งไฟล์ `.refx` ไปด้วย หรือจับภาพหน้าจอ
+
+Exported images contain the images only; text notes are not drawn into the file.
+The export box tells you how many notes will be left out before you press
+Export (in the same place as the warning about images that cannot be found).
+
+→ วาดโน้ตลงไฟล์ที่ส่งออกจริง: **v1.1** (`docs/07 §6`)
+
+## 14. โน้ตข้อความอยู่บนภาพเสมอ / Text notes always sit above images
+
+**ตั้งใจ ไม่ใช่ข้อบกพร่อง** — โน้ตคือคำอธิบาย ไม่มีใครเอาคำอธิบายไปซ่อนใต้ภาพ ·
+`[` `]` (และ `Shift+[` `Shift+]`) บนโน้ตจึง **เรียงลำดับระหว่างโน้ตด้วยกัน** ·
+กดหนึ่งครั้งข้ามโน้ตหนึ่งอัน และแถบสถานะบอกว่าโน้ตอยู่อันที่เท่าไหร่นับจากล่าง
+(เช่น *"โน้ตอันที่ 2 จาก 3"*) · ภาพไม่ขยับ
+
+Deliberate: notes are annotations and always sit above every image. On a note,
+`[` `]` (and `Shift+[` `Shift+]`) order notes among themselves — one press
+passes one other note, and the status bar says where the note now is
+(for example *"Note 2 of 3, counted from the back"*). Images do not move.
+
+## 15. สิ่งที่ **ตั้งใจ** ไม่มี / Deliberately absent
 
 ไม่ใช่ข้อจำกัด แต่เขียนไว้กันเข้าใจผิดว่าลืม:
 

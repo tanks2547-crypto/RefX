@@ -81,6 +81,38 @@ pub fn reordered(order: &[ItemId], selected: &[ItemId], movement: ZMove) -> Opti
     (next != order).then_some(next)
 }
 
+/// ★★★ ย้ายชั้น **ภายในชั้นของมันเอง** — ของที่ไม่อยู่ในชั้นนั้นไม่ขยับเลย
+///
+/// ใช้กับโน้ตข้อความ: โน้ตถูกวาด **บนภาพทุกใบเสมอ** (`docs/04` ตัดสิน 8 ต.ค. 2026)
+/// · ถ้าใช้ [`reordered`] ตรง ๆ กด `]` บนโน้ตจะข้ามแค่ภาพที่อยู่ถัดไปในลำดับรวม —
+/// **บนจอไม่มีอะไรเปลี่ยนเลย** แต่ undo มีขั้นเพิ่ม · ที่นี่ "หนึ่งชั้น" แปลว่าข้ามโน้ต
+/// หนึ่งอัน และตำแหน่งของภาพในลำดับรวมคงเดิมทุกใบ
+///
+/// `in_layer` = อยู่ในชั้นนี้ไหม · ที่เลือกไว้แต่ไม่อยู่ในชั้นไม่ถูกนับ
+#[must_use]
+pub fn reordered_within(
+    order: &[ItemId],
+    selected: &[ItemId],
+    movement: ZMove,
+    in_layer: impl Fn(ItemId) -> bool,
+) -> Option<Vec<ItemId>> {
+    let layer: Vec<ItemId> = order.iter().copied().filter(|id| in_layer(*id)).collect();
+    let mut moved = reordered(&layer, selected, movement)?.into_iter();
+    // ช่องของชั้นนี้ในลำดับรวมคงที่ — เติมด้วยลำดับใหม่ของชั้นตามลำดับช่อง
+    Some(
+        order
+            .iter()
+            .map(|id| {
+                if in_layer(*id) {
+                    moved.next().unwrap_or(*id)
+                } else {
+                    *id
+                }
+            })
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -99,6 +131,44 @@ mod tests {
         got.iter()
             .map(|id| all.iter().position(|other| other == id).unwrap())
             .collect()
+    }
+
+    /// ★★★ โน้ต (ชั้นบนเสมอ) ขยับ **ข้ามโน้ตหนึ่งอันต่อหนึ่งครั้ง** · ภาพไม่ขยับเลย
+    #[test]
+    fn a_note_moves_past_one_other_note_and_no_image_moves() {
+        // ลำดับรวม: ภาพ0 โน้ต1 ภาพ2 ภาพ3 โน้ต4 ภาพ5 โน้ต6
+        let all = ids(7);
+        let note = |id: ItemId| [1, 4, 6].iter().any(|&i| all[i] == id);
+        let up = reordered_within(&all, &[all[1]], ZMove::Forward, note).unwrap();
+        assert_eq!(
+            shape(&all, &up),
+            vec![0, 4, 2, 3, 1, 5, 6],
+            "ข้ามโน้ตหนึ่งอันพอดี"
+        );
+        // ภาพทุกใบอยู่ช่องเดิมในลำดับรวม
+        for i in [0, 2, 3, 5] {
+            assert_eq!(up[i], all[i], "ภาพที่ {i} ถูกขยับ");
+        }
+        // NC — `reordered` ตรง ๆ ข้ามแค่ภาพ 2 → ลำดับระหว่างโน้ตไม่เปลี่ยน = บนจอไม่มีอะไรเกิด
+        let plain = reordered(&all, &[all[1]], ZMove::Forward).unwrap();
+        let notes_of = |order: &[ItemId]| -> Vec<ItemId> {
+            order.iter().copied().filter(|id| note(*id)).collect()
+        };
+        assert_eq!(
+            notes_of(&plain),
+            notes_of(&all),
+            "NC: ทางเดิมเปลี่ยนลำดับโน้ตได้จริง?"
+        );
+        assert_ne!(notes_of(&up), notes_of(&all));
+
+        let front = reordered_within(&all, &[all[1]], ZMove::ToFront, note).unwrap();
+        assert_eq!(shape(&all, &front), vec![0, 4, 2, 3, 6, 5, 1]);
+        // โน้ตบนสุดของชั้นแล้ว → `None` (ไม่สร้างคำสั่ง · I-1) แม้จะยังมีภาพอยู่เหนือมันในลำดับรวม
+        let top = vec![all[0], all[1], all[2], all[4], all[3], all[6], all[5]];
+        assert_eq!(
+            reordered_within(&top, &[all[6]], ZMove::Forward, note),
+            None
+        );
     }
 
     #[test]

@@ -317,6 +317,10 @@ pub enum Key {
     ExportBadTarget,
     /// ★★★ เตือนว่ามีภาพที่หาไฟล์ไม่เจอ **ก่อน**กดจริง
     ExportMissingWarning,
+    /// ★★★ เตือนว่าโน้ตข้อความไม่ถูกวาดลงไฟล์ที่ส่งออก (`docs/07 §6` ตัดสิน 8 ต.ค. 2026)
+    ExportNotesWarning,
+    /// ★ มีทั้งสองอย่าง — **ประโยคเดียวบอกทั้งคู่** ไม่ใช่สองคำเตือนซ้อน (`docs/03 §0`)
+    ExportMissingAndNotesWarning,
 
     // ---- P4-2: บันทึกไฟล์ ----
     /// กำลังให้ผู้ใช้เลือกที่เก็บ
@@ -820,6 +824,12 @@ fn en(key: Key) -> &'static str {
         Key::ExportMissingWarning => {
             "Images that could not be found are drawn as empty boxes in the exported file"
         }
+        Key::ExportNotesWarning => {
+            "Text notes are not drawn into the exported file - only the images are"
+        }
+        Key::ExportMissingAndNotesWarning => {
+            "Images that could not be found are drawn as empty boxes, and text notes are left out of the exported file"
+        }
 
         Key::SettingsHint => "Settings",
         Key::SettingsTitle => "Settings",
@@ -1105,6 +1115,10 @@ fn th(key: Key) -> Option<&'static str> {
         Key::ExportNothing => "ไม่มีอะไรให้ส่งออก — กระดานนี้ว่าง",
         Key::ExportBadTarget => "ชื่อนี้เก็บไฟล์ไม่ได้ ลองตั้งชื่อธรรมดาเช่น board.png",
         Key::ExportMissingWarning => "ภาพที่หาไฟล์ไม่เจอจะออกมาเป็นช่องว่างในไฟล์ที่ส่งออก",
+        Key::ExportNotesWarning => "โน้ตข้อความจะไม่อยู่ในไฟล์ที่ส่งออก - มีแต่ภาพ",
+        Key::ExportMissingAndNotesWarning => {
+            "ภาพที่หาไฟล์ไม่เจอจะออกมาเป็นช่องว่าง และโน้ตข้อความจะไม่อยู่ในไฟล์ที่ส่งออก"
+        }
 
         Key::SettingsHint => "ตั้งค่า",
         Key::SettingsTitle => "ตั้งค่า",
@@ -1357,6 +1371,12 @@ pub enum Template {
     ExportEstimate,
     /// ★★★ `{n}` — จำนวนภาพที่หาไฟล์ไม่เจอ **ต้องเห็นก่อนกดจริง**
     ExportMissingCount,
+    /// ★★★ `{n}` — จำนวนโน้ตข้อความที่จะไม่อยู่ในไฟล์ที่ส่งออก
+    ExportNotesCount,
+    /// ★★★ `{pos}` `{count}` — `[` `]` บนโน้ตเปลี่ยน **ลำดับระหว่างโน้ต** เท่านั้น
+    /// (โน้ตอยู่เหนือภาพเสมอ · `docs/04` ตัดสิน 8 ต.ค. 2026) · บอกตำแหน่งให้เห็นว่า
+    /// การกดมีผล — ปุ่มที่กดแล้วดูเหมือนไม่เกิดอะไรแย่กว่าปุ่มที่ไม่มี
+    NoteLayer,
     /// `{name}` `{done}` `{total}` — กำลังเขียนไฟล์ไหน ไปถึงแถบที่เท่าไหร่
     ExportRunning,
     /// `{name}` `{size}` — เขียนเสร็จแล้ว
@@ -1589,6 +1609,11 @@ Drag in a PNG, JPEG, WebP, GIF, BMP, TGA or TIFF instead."
         // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
         Template::ExportEstimate => "about {size}",
         Template::ExportMissingCount => "Images that cannot be found: {n}",
+        // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
+        Template::ExportNotesCount => "Text notes left out: {n}",
+        Template::NoteLayer => {
+            "Note {pos} of {count}, counted from the back - text notes always sit above images"
+        }
         Template::ExportRunning => "Exporting {name} - band {done} of {total}",
         Template::ExportDone => "Exported {name} ({size})",
         Template::ExportFailed => "Could not export {name}: {reason}",
@@ -1792,6 +1817,8 @@ fn template_th(template: Template) -> Option<&'static str> {
         Template::ExportPixels => "{w} x {h} จุด",
         Template::ExportEstimate => "ประมาณ {size}",
         Template::ExportMissingCount => "มีภาพที่หาไฟล์ไม่เจอ {n} ใบ",
+        Template::ExportNotesCount => "มีโน้ตข้อความที่จะไม่ถูกส่งออก {n} อัน",
+        Template::NoteLayer => "โน้ตอันที่ {pos} จาก {count} นับจากล่าง - โน้ตข้อความอยู่เหนือภาพเสมอ",
         Template::ExportRunning => "กำลังส่งออก {name} - แถบที่ {done} จาก {total}",
         Template::ExportDone => "ส่งออก {name} แล้ว ({size})",
         Template::ExportFailed => "ส่งออก {name} ไม่สำเร็จ: {reason}",

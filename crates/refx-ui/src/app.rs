@@ -1545,7 +1545,10 @@ impl RefxApp {
         //   `rebuild_quads` ข้ามมันไปเองเพราะไม่มี `render_state` · ที่นี่จึงเป็น
         //   ที่เดียวที่โน้ตถูกวาด และวาดด้วย egui ซึ่งมี font atlas อยู่แล้ว
         //
-        // ★ วาดตามลำดับ z เหมือนภาพ เพื่อให้โน้ตที่ผู้ใช้ส่งไปหลังสุดอยู่หลังจริง
+        // ★★★ โน้ตเป็น **ชั้นบนสุดเสมอ** — รอบนี้มาหลังรอบวาดภาพทั้งหมด จึงอยู่บนภาพ
+        //     ทุกใบไม่ว่า `z_order` จะเป็นอะไร · **ตั้งใจ** (`docs/04` ตัดสิน 8 ต.ค. 2026:
+        //     ไม่มีใครเอาคำอธิบายไปซ่อนใต้ภาพ) · ลำดับ z มีผลแค่ **ระหว่างโน้ตด้วยกัน** —
+        //     `[` `]` บนโน้ตย้ายภายในชั้นนี้ (`refx_core::zorder::reordered_within`)
         for (id, item) in board.items_in_z_order() {
             let refx_core::board::ItemKind::Text(note) = &item.kind else {
                 continue;
@@ -2523,6 +2526,39 @@ impl refx_core::spool::PastedImageStore for SpoolSink {
 fn probe_board_id() -> refx_core::arena::BoardId {
     use refx_core::arena::ArenaKey as _;
     refx_core::arena::BoardId::from_parts(u32::MAX, 0)
+}
+
+/// เป็นโน้ตข้อความไหม — ชั้นของมันอยู่เหนือภาพเสมอ (`docs/04` ตัดสิน 8 ต.ค. 2026)
+fn is_text_note(board: &refx_core::board::Board, id: ItemId) -> bool {
+    board
+        .item(id)
+        .is_some_and(|item| matches!(item.kind, ItemKind::Text(_)))
+}
+
+/// ★ "โน้ตอันที่ N จาก M นับจากล่าง" ของโน้ตที่เลือกไว้ซึ่งอยู่บนสุด
+fn note_layer_status(
+    lang: text::Lang,
+    board: &refx_core::board::Board,
+    selected: &[ItemId],
+) -> String {
+    let notes: Vec<ItemId> = board
+        .z_order()
+        .iter()
+        .copied()
+        .filter(|id| is_text_note(board, *id))
+        .collect();
+    let pos = notes
+        .iter()
+        .rposition(|id| selected.contains(id))
+        .map_or(0, |i| i + 1);
+    text::fill(
+        lang,
+        Template::NoteLayer,
+        &[
+            ("pos", &pos.to_string()),
+            ("count", &notes.len().to_string()),
+        ],
+    )
 }
 
 /// รายการไฟล์จาก clipboard ที่รอเข้าคิวเป็นชุดใหม่ — พร้อมจุดที่ชี้ตอนกด Ctrl+V
@@ -5125,6 +5161,15 @@ impl RefxApp {
             .items_in_z_order()
             .filter(|(_, item)| matches!(item.kind, refx_core::board::ItemKind::Missing { .. }))
             .count();
+        // ★★★ โน้ตข้อความ **ไม่อยู่ในไฟล์ที่ส่งออก** — ทางส่งออกวาดแต่ quad ของภาพ
+        //     (`docs/07 §6` ตัดสิน 8 ต.ค. 2026: เตือนก่อน rc.2 · วาดจริงใน v1.1)
+        let notes = self
+            .docs
+            .active()
+            .board
+            .items_in_z_order()
+            .filter(|(_, item)| matches!(item.kind, refx_core::board::ItemKind::Text(_)))
+            .count();
         // ★★★ ด้านที่ยาวที่สุดของ item ที่ **มีพิกเซลจริง** — ตัวที่จำกัดเพดาน
         //     `Missing` กับโน้ตข้อความไม่นับ: อันแรกเป็นสี่เหลี่ยมสีล้วน อันหลัง
         //     egui วาดเป็นเวกเตอร์ — ทั้งคู่ขยายแล้วไม่เสียอะไร
@@ -5169,6 +5214,7 @@ impl RefxApp {
         view.height = height;
         view.items = items;
         view.missing = missing;
+        view.notes = notes;
         view.estimate = estimate_file_size(width, height, view.kind, view.quality);
     }
 
@@ -8135,17 +8181,36 @@ impl RefxApp {
 
     /// ย้ายชั้นของสิ่งที่เลือกไว้ (P2-6)
     fn apply_zorder(&mut self, movement: ZMove) {
-        let Some(gfx) = self.gfx.as_mut() else {
-            return;
+        let lang = self.shell.lang;
+        // ★ `gfx` ใช้แค่ตอนท้าย (quad + ขอเฟรม) — ส่วนที่ตัดสินลำดับเทสต์ได้โดยไม่มี GPU
+        let doc = self.docs.active();
+        let selected: Vec<ItemId> = doc.selection.iter().collect();
+        // ★★★ **เลือกแต่โน้ต → ย้ายภายในชั้นของโน้ต** (`docs/04` ตัดสิน 8 ต.ค. 2026)
+        //
+        //   โน้ตถูกวาดบนภาพทุกใบเสมอ · ลำดับรวมเดิมทำให้ `]` บนโน้ตข้ามแค่ภาพถัดไป
+        //   — บนจอไม่มีอะไรเปลี่ยน แต่ undo มีขั้นเพิ่ม · ที่นี่หนึ่งครั้ง = ข้ามโน้ตหนึ่งอัน
+        //   และบอกตำแหน่งบนแถบสถานะเสมอ ให้เห็นว่ามีผลแม้โน้ตจะไม่ได้ทับกัน
+        //   · เลือกปนภาพ → ลำดับรวมตามเดิม (ภาพต้องขยับตามที่ผู้ใช้สั่ง)
+        let notes_only =
+            !selected.is_empty() && selected.iter().all(|id| is_text_note(&doc.board, *id));
+        let order = if notes_only {
+            refx_core::zorder::reordered_within(doc.board.z_order(), &selected, movement, |id| {
+                is_text_note(&doc.board, id)
+            })
+        } else {
+            refx_core::zorder::reordered(doc.board.z_order(), &selected, movement)
         };
-        let selected: Vec<ItemId> = self.docs.active_mut().selection.iter().collect();
-        let Some(order) = refx_core::zorder::reordered(
-            self.docs.active_mut().board.z_order(),
-            &selected,
-            movement,
-        ) else {
-            // ★ อยู่สุดขอบแล้ว / ไม่ได้เลือกอะไร — **ไม่สร้างคำสั่งและไม่ขอเฟรม** (I-1)
+        let Some(order) = order else {
+            // ★ อยู่สุดขอบแล้ว / ไม่ได้เลือกอะไร — **ไม่สร้างคำสั่ง** (I-1)
             //   ถ้าสร้าง undo stack จะเต็มไปด้วยขั้นที่กดแล้วไม่มีอะไรเกิดขึ้น
+            //   · โน้ต: ยังบอกตำแหน่ง ("3 จาก 3") ให้รู้ว่าอยู่บนสุดของโน้ตแล้ว ไม่ใช่ปุ่มเสีย
+            if notes_only {
+                self.shell.status = note_layer_status(lang, &doc.board, &selected);
+                self.shell.status_warn = false;
+                if let Some(gfx) = self.gfx.as_ref() {
+                    gfx.window.request_redraw();
+                }
+            }
             return;
         };
         let Ok(command) = ReorderZ::new(order) else {
@@ -8155,10 +8220,16 @@ impl RefxApp {
             tracing::error!(%err, "cannot reorder the z stack");
             return;
         }
+        if notes_only {
+            self.shell.status = note_layer_status(lang, &self.docs.active().board, &selected);
+            self.shell.status_warn = false;
+        }
         // เรขาคณิตไม่เปลี่ยน → `index` ไม่ต้องแตะ · `affected()` ว่าง → การเลือกอยู่เหมือนเดิม
-        Self::collect_forgotten(gfx, self.docs.active_mut());
-        Self::rebuild_quads(gfx, self.docs.active_mut());
-        gfx.window.request_redraw();
+        if let Some(gfx) = self.gfx.as_mut() {
+            Self::collect_forgotten(gfx, self.docs.active_mut());
+            Self::rebuild_quads(gfx, self.docs.active_mut());
+            gfx.window.request_redraw();
+        }
     }
 
     /// ลบสิ่งที่เลือกไว้ (P2-6)
@@ -14463,6 +14534,58 @@ mod tests {
     }
 
     /// เติมโน้ตหนึ่งใบผ่าน `Command` — ทางเดียวกับที่ของจริงแก้ `Board`
+    /// ★★★ **`]` บนโน้ตต้องมีผลที่เห็นได้** (`docs/04` ตัดสิน 8 ต.ค. 2026)
+    ///
+    /// โน้ตอยู่บนภาพทุกใบเสมอ · เดิม `]` ข้ามแค่ภาพที่อยู่ถัดไปในลำดับรวม — บนจอไม่มี
+    /// อะไรเปลี่ยน แต่ undo มีขั้นเพิ่ม · ตอนนี้: ข้ามโน้ตหนึ่งอัน · ภาพไม่ขยับ · แถบสถานะ
+    /// บอกตำแหน่ง · กดซ้ำตอนอยู่บนสุดของโน้ตแล้ว ไม่สร้างขั้น undo แต่ยังบอกตำแหน่ง
+    #[test]
+    fn bringing_a_note_forward_passes_one_other_note_and_says_where_it_is_now() {
+        let mut app = RefxApp::new(AppArgs::default());
+        let doc = app.docs.active_mut();
+        let image = |i: u8| Item::new(image_kind(i, "E:/refs/x.png"));
+        let note = |text: &str| {
+            Item::new(ItemKind::Text(refx_core::board::TextNote {
+                text: text.to_owned(),
+            }))
+        };
+        // ลำดับรวม (ล่าง → บน): ภาพ · โน้ต A · ภาพ · โน้ต B
+        let items = vec![image(1), note("A"), image(2), note("B")];
+        doc.apply(Box::new(AddItems::new(items).unwrap())).unwrap();
+        let before: Vec<ItemId> = doc.board.z_order().to_vec();
+        let (img1, a, img2, b) = (before[0], before[1], before[2], before[3]);
+        doc.selection.select(a);
+        let depth = doc.history.undo_depth();
+
+        app.apply_zorder(ZMove::Forward);
+        let doc = app.docs.active();
+        assert_eq!(
+            doc.board.z_order(),
+            &[img1, b, img2, a],
+            "โน้ต A ต้องข้ามโน้ต B หนึ่งอัน และภาพทุกใบต้องอยู่ช่องเดิม"
+        );
+        assert_eq!(doc.history.undo_depth(), depth + 1);
+        let where_now = text::fill(
+            app.shell.lang,
+            Template::NoteLayer,
+            &[("pos", "2"), ("count", "2")],
+        );
+        assert_eq!(app.shell.status, where_now, "กดแล้วไม่บอกว่าโน้ตไปอยู่ไหน");
+
+        // บนสุดของโน้ตแล้ว: ไม่มีขั้น undo ใหม่ (I-1) แต่ยังบอกตำแหน่ง — ไม่ใช่ปุ่มเงียบ
+        app.shell.status.clear();
+        app.apply_zorder(ZMove::Forward);
+        assert_eq!(app.docs.active().history.undo_depth(), depth + 1);
+        assert_eq!(app.shell.status, where_now);
+
+        // NC — เลือกภาพ ใช้ลำดับรวมเหมือนเดิม และไม่พูดเรื่องโน้ต
+        app.shell.status.clear();
+        app.docs.active_mut().selection.select(img1);
+        app.apply_zorder(ZMove::Forward);
+        assert_eq!(app.docs.active().board.z_order(), &[b, img1, img2, a]);
+        assert!(app.shell.status.is_empty(), "เลือกภาพแล้วขึ้นข้อความของโน้ต");
+    }
+
     fn add_note(doc: &mut Doc, text: &str) {
         let item = Item::new(ItemKind::Text(refx_core::board::TextNote {
             text: text.to_owned(),
