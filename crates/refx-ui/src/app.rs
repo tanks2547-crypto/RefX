@@ -2525,6 +2525,9 @@ fn probe_board_id() -> refx_core::arena::BoardId {
     refx_core::arena::BoardId::from_parts(u32::MAX, 0)
 }
 
+/// รายการไฟล์จาก clipboard ที่รอเข้าคิวเป็นชุดใหม่ — พร้อมจุดที่ชี้ตอนกด Ctrl+V
+type PastedFiles = Vec<(Option<crate::placement::Anchor>, Vec<std::path::PathBuf>)>;
+
 /// ★★★ คำตอบสุดท้ายของงาน thumbnail หนึ่งงาน — **ทุกชนิดเดินคิวเดียวกัน**
 /// ([`crate::placement::Arrivals`]) เพื่อให้ช่องในผังตามลำดับไฟล์ในชุด
 ///
@@ -3110,7 +3113,14 @@ impl RefxApp {
     ///
     /// **ไม่แตะดิสก์บน UI thread เลย** (I-2) — แค่ส่ง path เข้าคิว
     /// การอ่านไฟล์/hash/decode เกิดบน worker ทั้งหมด
-    fn submit_dropped(&mut self, paths: Vec<std::path::PathBuf>) {
+    ///
+    /// ★ `pointed` = จุดที่ชี้ไว้แล้วตั้งแต่ก่อนรู้ว่าเป็นไฟล์ (Ctrl+V ที่ clipboard มีรายการไฟล์)
+    ///   · `None` = การลากวาง — อ่านจุดปล่อยเมาส์
+    fn submit_dropped(
+        &mut self,
+        paths: Vec<std::path::PathBuf>,
+        pointed: Option<crate::placement::Anchor>,
+    ) {
         if self.assets.is_none() {
             return;
         }
@@ -3134,8 +3144,17 @@ impl RefxApp {
         let owner = self.docs.active().id;
         // ★★★ **ลงที่จุดที่ปล่อยเมาส์** · ไฟล์ทั้งชุดได้จุดเดียวกัน แล้วไหลต่อจากตรงนั้น
         //     · ไม่รู้จุด (`--open-dir` · OS ที่บอกไม่ได้) = กลางจอ
-        let pointer = self.drop_point.take();
-        let anchor = self.anchor_here(pointer);
+        //
+        // ★★ ไฟล์ที่ก๊อปจาก Explorer แล้วกด Ctrl+V ได้จุดของ **ตอนกด** ไม่ใช่จุดปล่อยเมาส์
+        //    (ซึ่งไม่มี) · เดิมทางนี้อ่าน `drop_point` ที่ว่างเสมอ → กลางจอทุกครั้ง แม้
+        //    เคอร์เซอร์จะอยู่เหนือผืนผ้าใบ ขัดกับกติกา "วางที่เคอร์เซอร์" (ตัดสิน 1 ต.ค. 2026)
+        let anchor = match pointed {
+            Some(anchor) => anchor,
+            None => {
+                let pointer = self.drop_point.take();
+                self.anchor_here(pointer)
+            }
+        };
         let mut submitted = Vec::with_capacity(paths.len());
         for (i, path) in paths.into_iter().enumerate() {
             // hash จาก path ไปก่อน — hash เนื้อไฟล์จริงเกิดบน worker (P1-2)
@@ -3452,7 +3471,8 @@ impl RefxApp {
             Box<refx_asset::working::WorkingImage>,
         )> = Vec::new();
         // ไฟล์ที่พบใน clipboard — ส่งต่อเข้าเส้นทาง drag & drop หลังปล่อย borrow
-        let mut pasted_files: Vec<std::path::PathBuf> = Vec::new();
+        // · พร้อมจุดที่ชี้ตอนกด Ctrl+V
+        let mut pasted_files: PastedFiles = Vec::new();
         while let Some(result) = assets.pool.try_recv() {
             // งานวางจบแล้วไม่ว่าผลจะเป็นอะไร — เปิดทางให้กด Ctrl+V ครั้งต่อไปได้
             if self.paste_in_flight == Some(result.hash()) {
@@ -3510,6 +3530,8 @@ impl RefxApp {
                     // ทั้งเส้น (มี cache, มี EXIF, ขอภาพคมตอนซูมได้)
                     tracing::info!(hash = %hash.short(), count = paths.len(), "pasted a file list from the clipboard");
                     self.job_sources.remove(&hash);
+                    // ★ งานจบแล้ว — เดิมลืมคืนคีย์เจ้าของ ตารางโตหนึ่งแถวทุกครั้งที่วางไฟล์ (I-6)
+                    self.job_owner.remove(&hash);
                     // ★ งานวางนี้เป็นชุดหนึ่งใบ — ต้องเดินคิวด้วย ดู `Arrival`
                     arrived.push((hash, Arrival::Pasted(paths)));
                 }
@@ -3791,8 +3813,8 @@ impl RefxApp {
 
         // ★ ไฟล์จาก clipboard เข้าคิวเป็นชุดใหม่ — เส้นทางเดียวกับลากไฟล์เข้ามาเป๊ะ
         //   (ต้องอยู่หลังจากเลิกยืม `assets` แล้วเท่านั้น)
-        if !pasted_files.is_empty() {
-            self.submit_dropped(pasted_files);
+        for (pointed, paths) in pasted_files {
+            self.submit_dropped(paths, pointed);
         }
         finished > 0
     }
@@ -3805,7 +3827,7 @@ impl RefxApp {
         &mut self,
         arrived: Vec<(refx_asset::hash::ContentHash, Arrival)>,
         repairs: &mut Vec<(refx_core::arena::BoardId, ItemId, ItemKind)>,
-        pasted_files: &mut Vec<std::path::PathBuf>,
+        pasted_files: &mut PastedFiles,
     ) -> bool {
         // ★★★ เดินคิวของชุด → ได้ **ลำดับของไฟล์ในชุด** ไม่ใช่ลำดับที่ worker ทำเสร็จ
         //     (ตัดสิน 8 ต.ค. 2026 · `crate::placement::Arrivals`) · งานที่ไม่ใช่ของชุดไหน
@@ -3844,7 +3866,7 @@ impl RefxApp {
             let (hash, owner, source, reason) = match arrival {
                 Arrival::Skipped => continue,
                 Arrival::Pasted(paths) => {
-                    pasted_files.extend(paths);
+                    pasted_files.push((anchor, paths));
                     continue;
                 }
                 Arrival::Damaged {
@@ -8591,7 +8613,7 @@ impl AppDelegate for RefxApp {
         // ไฟล์ที่ลากเข้ามาในรอบ event ที่ผ่านมา — ส่งเป็นชุดเดียวเพื่อจับเวลาได้ถูก
         if !self.pending_drops.is_empty() {
             let batch = std::mem::take(&mut self.pending_drops);
-            self.submit_dropped(batch);
+            self.submit_dropped(batch, None);
         }
 
         // ★ Ctrl+V ที่กดไปเมื่อกี้ — งานอ่าน clipboard เกิดบน worker ทั้งหมด (I-2)
@@ -12084,6 +12106,76 @@ mod tests {
             ),
             ctrl
         ));
+    }
+
+    /// ★★★ ไฟล์ที่ก๊อปจาก Explorer แล้วกด Ctrl+V **ลงที่เคอร์เซอร์ตอนกด** (ตัดสิน 1 ต.ค. 2026)
+    ///
+    /// งานวางไม่รู้ว่า clipboard มีภาพหรือรายการไฟล์จนกว่า worker จะอ่าน · เดิมรายการไฟล์
+    /// เข้าเส้นทางลากวางที่อ่าน `drop_point` (ว่างเสมอสำหรับการวาง) → กลางจอทุกครั้ง
+    #[test]
+    fn files_pasted_from_explorer_land_where_the_cursor_was_when_ctrl_v_was_pressed() {
+        let dir = std::env::temp_dir().join(format!("refx-paste-files-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = RefxApp::new(AppArgs::default());
+        app.start_assets(&dir.join("cache.sqlite"));
+        let owner = app.docs.active().id;
+        let view = RefxApp::view_of(app.docs.active(), Some(Vec2::new(1280.0, 800.0)));
+        let pointed = view.min + view.size() * 0.2;
+        assert!(view.center().distance(pointed) > 100.0, "จุดที่ชี้ต้องไม่ใช่กลางจอ");
+        let paste = refx_asset::hash::hash_bytes(b"clipboard:test");
+        app.submit_thumbnail_jobs(
+            owner,
+            Some(crate::placement::Anchor::new(pointed, view)),
+            vec![refx_asset::pool::Job {
+                hash: paste,
+                source: refx_asset::pool::JobSource::Clipboard,
+                priority: 0.0,
+                cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                target: refx_asset::pool::JobTarget::Thumbnail,
+            }],
+        );
+        let file = std::path::PathBuf::from("/work/copied-in-explorer.png");
+        let (mut repairs, mut pasted) = (Vec::new(), Vec::new());
+        app.place_arrivals(
+            vec![(paste, Arrival::Pasted(vec![file.clone()]))],
+            &mut repairs,
+            &mut pasted,
+        );
+
+        // ทางเดียวกับท้าย `drain_decode_results` · แล้วไฟล์นั้นเปิดไม่ได้ → `Missing` ใบแรก
+        // ของชุด ซึ่งกึ่งกลางอยู่ตรงจุดของชุดพอดี (`placement` ใบแรก)
+        let center_of_first = |app: &mut RefxApp, pointed_at| {
+            app.submit_dropped(vec![file.clone()], pointed_at);
+            let key = job_key_for(owner, &file);
+            let arrival = Arrival::Damaged {
+                hash: key,
+                owner: app.job_owner.remove(&key),
+                source: app.job_sources.remove(&key),
+                reason: refx_core::board::MissingReason::FileNotFound,
+            };
+            app.place_arrivals(vec![(key, arrival)], &mut Vec::new(), &mut Vec::new());
+            let board = &app.docs.active().board;
+            board
+                .item(*board.z_order().last().unwrap())
+                .unwrap()
+                .canvas
+                .pos
+        };
+        assert_eq!(pasted.len(), 1);
+        let (anchor, _) = pasted.remove(0);
+        assert_eq!(anchor.map(|a| a.point()), Some(pointed));
+        assert_eq!(
+            center_of_first(&mut app, anchor),
+            pointed,
+            "ไฟล์ที่วางไม่ได้ลงที่เคอร์เซอร์"
+        );
+        // NC — ทางเดิม (ไม่ส่งจุดต่อ) ต้องลงกลางจอ ไม่งั้นประตูนี้ล้มไม่เป็น
+        assert_eq!(
+            center_of_first(&mut app, None),
+            view.center(),
+            "NC: ทางเดิมไม่ได้ลงกลางจอ"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// ★ กด `Ctrl+V` รัว ๆ ต้องส่งงานทีละใบ
