@@ -930,6 +930,17 @@ impl Doc {
         self.history.apply(&mut self.board, command)
     }
 
+    /// ★★ ของที่เพิ่งวางด้วยเครื่องมือ (โน้ต · P2-11) — **เลือก และให้คลิกโดนได้**
+    ///
+    /// เดิมแค่เลือก · index ถูกเติมเฉพาะของที่ถูกลาก (`moved`) โน้ตที่เพิ่งวางจึง
+    /// **คลิกไม่โดนจนกว่าจะ undo/redo** (ที่เดียวที่ rebuild ทั้งก้อน): คลิกด้วยเครื่องมือ
+    /// เลือก = โดนที่ว่าง → ล้างการเลือก · คลิกด้วยเครื่องมือโน้ต = ได้โน้ตใหม่ซ้อนทับ ·
+    /// เจอ 9 ต.ค. 2026 ตอนขับแอปจริงเพื่อกด `]` บนโน้ตที่เพิ่งวาง
+    fn select_placed(&mut self, id: ItemId) {
+        self.selection.restore(vec![id], Some(id));
+        self.reindex(id);
+    }
+
     /// เอา item ใบหนึ่งเข้า `SpatialIndex` ให้ตรงกับ `board` ตอนนี้
     fn reindex(&mut self, id: ItemId) {
         let Some(item) = self.board.item(id) else {
@@ -4598,7 +4609,7 @@ impl RefxApp {
         if outcome.select_added
             && let Some(id) = doc.board.z_order().last().copied()
         {
-            doc.selection.restore(vec![id], Some(id));
+            doc.select_placed(id);
             *changed = true;
         }
 
@@ -14584,6 +14595,67 @@ mod tests {
         app.apply_zorder(ZMove::Forward);
         assert_eq!(app.docs.active().board.z_order(), &[b, img1, img2, a]);
         assert!(app.shell.status.is_empty(), "เลือกภาพแล้วขึ้นข้อความของโน้ต");
+    }
+
+    /// ★★★ **โน้ตที่เพิ่งวางต้องคลิกโดนได้ทันที** (P2-11 · เจอ 9 ต.ค. 2026)
+    ///
+    /// เดินเส้นเดียวกับ `canvas_input`: เครื่องมือโน้ตกด/ปล่อยที่ที่ว่าง → apply คำสั่ง →
+    /// `select_placed` → แล้วสลับเป็นเครื่องมือเลือก ล้างการเลือก และคลิกกลางโน้ต
+    /// ต้องได้โน้ตนั้น · NC: ทางเดิม (เลือกอย่างเดียว ไม่เติม index) คลิกแล้วไม่ได้อะไร
+    #[test]
+    fn a_note_that_was_just_placed_can_be_clicked_right_away() {
+        use refx_core::interact::{CanvasButton, CanvasContext, CanvasEvent, Modifiers, Tool};
+        let click = |doc: &mut Doc, tool: Tool, world: Vec2| {
+            for event in [
+                CanvasEvent::Press {
+                    button: CanvasButton::Primary,
+                    world,
+                    modifiers: Modifiers::default(),
+                },
+                CanvasEvent::Release {
+                    button: CanvasButton::Primary,
+                    world,
+                },
+            ] {
+                let ctx = CanvasContext {
+                    board: &doc.board,
+                    index: &doc.index,
+                    drag_threshold: 4.0,
+                    handle_reach: 8.0,
+                    rotate_reach: 16.0,
+                    tool,
+                    snap_reach: 0.0,
+                    viewport: WorldRect::from_center_size(Vec2::ZERO, Vec2::splat(4000.0)),
+                };
+                let outcome = doc.select_tool.handle(ctx, &mut doc.selection, event);
+                for command in outcome.commands {
+                    doc.history.apply(&mut doc.board, command).unwrap();
+                }
+                if outcome.select_added {
+                    return doc.board.z_order().last().copied();
+                }
+            }
+            None
+        };
+        for fixed in [true, false] {
+            let mut doc = Doc::empty(Docs::default().mint());
+            let at = Vec2::new(100.0, 100.0);
+            let placed = click(&mut doc, Tool::Text, at).expect("วางโน้ตไม่ได้");
+            if fixed {
+                doc.select_placed(placed);
+            } else {
+                doc.selection.restore(vec![placed], Some(placed));
+            }
+            doc.selection.clear();
+            let middle = doc.board.item(placed).unwrap().canvas.pos;
+            let _ = click(&mut doc, Tool::Select, middle);
+            let picked: Vec<ItemId> = doc.selection.iter().collect();
+            if fixed {
+                assert_eq!(picked, vec![placed], "คลิกกลางโน้ตที่เพิ่งวางแล้วไม่ได้โน้ตนั้น");
+            } else {
+                assert!(picked.is_empty(), "NC: ทางเดิมคลิกโดนได้ — ประตูนี้ไม่ได้ตรวจอะไร");
+            }
+        }
     }
 
     fn add_note(doc: &mut Doc, text: &str) {
