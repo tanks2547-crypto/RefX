@@ -241,6 +241,152 @@ pub fn flow_for(flows: &mut Vec<Flow>, anchor: Anchor, start: impl FnOnce() -> F
     &mut flows[index]
 }
 
+/// ★ ใบที่ถือรอใบก่อนหน้าได้มากสุดเท่านี้ต่อหนึ่งชุด (I-6) — ดู [`Arrivals`]
+///
+/// thumbnail ใบละ 64 KB → 1,024 ใบ = 64 MB · ตัวเลขเดียวกับงบ thumbnail ของ 1,000 ภาพ
+/// (`ItemRender::thumb`) ซึ่งใบพวกนี้จะไปอยู่ตรงนั้นอยู่แล้วทันทีที่ถูกวาง
+pub const MAX_HELD: usize = 1024;
+
+/// ★★★ **ช่องในผังมาจากลำดับของไฟล์ในชุด ไม่ใช่ลำดับที่ decode เสร็จ** (ตัดสิน 8 ต.ค. 2026)
+///
+/// # ทำไม
+///
+/// [`Flow`] ให้ช่องตามลำดับที่ถูกเรียก และช่องถัดไปขึ้นกับขนาดของ **ทุกใบก่อนหน้า** ·
+/// worker หลายตัว decode พร้อมกันแล้วเสร็จไม่เรียงกัน → เดิมลากชุดเดิมสองครั้งได้ผัง
+/// ต่างกัน (เห็นบนภาพจอของรอบ z-order: ภาพเล็กอยู่คนละช่องในสองรอบ) · ชนชั้นเดียวกับ
+/// z-order ที่ขึ้นกับ texture (`docs/04`) — **ผลที่ทำซ้ำไม่ได้แย่กว่าผลที่ผิดสม่ำเสมอ**
+///
+/// # กติกา
+///
+/// ผลที่กลับมาก่อนใบก่อนหน้า **ถูกถือไว้** แล้วปล่อยเมื่อทุกใบก่อนหน้ามีคำตอบแล้ว
+/// (สำเร็จ · เปิดไม่ได้ · ถูกยกเลิก — ทุกงานได้คำตอบหนึ่งครั้งเสมอ ซึ่งเป็นสิ่งเดียวกับที่
+/// `DropBatch::settled` พึ่งพาอยู่แล้ว) · ราคาคือภาพใบหลังขึ้นจอช้าลงได้เท่ากับเวลาที่
+/// ใบก่อนหน้ายัง decode อยู่ — pool หยิบงานตามลำดับไฟล์ (`priority = i`) จึงมักแค่ไม่กี่ ms
+///
+/// ★ เกิน [`MAX_HELD`] ใบที่ถือรอ = ใบที่ยังไม่มาถูก **ข้ามไปก่อน** แล้วลงท้ายเมื่อมันมา
+///   (I-6 ชนะลำดับ — ต้องมีใบหนึ่งช้ากว่าอีกพันใบ) · ข้ามแล้วไม่ทิ้ง: ไม่มีใบไหนหาย
+///
+/// ★ ไม่รู้จักคีย์ (งานที่ไม่สร้างใบใหม่ เช่น ภาพของเอกสารที่เปิดจากไฟล์) → คืนกลับให้
+///   ผู้เรียกทำทันที · คีย์เดียวกันอยู่ในสองชุดได้ (ลากไฟล์เดิมซ้ำระหว่างที่ชุดแรกยังโหลด)
+///   → ชุดที่เก่ากว่าได้ก่อน · เนื้อไฟล์เดียวกันจึงไม่สำคัญว่าผลไหนตกชุดไหน
+#[derive(Debug)]
+pub struct Arrivals<K, T> {
+    batches: Vec<Batch<K, T>>,
+    ready: Vec<(Anchor, T)>,
+}
+
+#[derive(Debug)]
+struct Batch<K, T> {
+    anchor: Anchor,
+    /// หนึ่งช่องต่อหนึ่งไฟล์ ตามลำดับในชุด
+    slots: Vec<(K, Slot<T>)>,
+    /// ช่องแรกที่ยังไม่ถูกปล่อย
+    next: usize,
+    /// จำนวนช่อง `Held` — เทียบกับ [`MAX_HELD`]
+    held: usize,
+}
+
+#[derive(Debug)]
+enum Slot<T> {
+    Waiting,
+    Held(T),
+    Released,
+    /// ถูกข้ามเพราะถือรอเกินเพดาน — มาเมื่อไหร่ปล่อยทันที
+    Late,
+}
+
+impl<K, T> Default for Arrivals<K, T> {
+    fn default() -> Self {
+        Self {
+            batches: Vec::new(),
+            ready: Vec::new(),
+        }
+    }
+}
+
+impl<K: PartialEq, T> Arrivals<K, T> {
+    /// ชุดใหม่จากการชี้หนึ่งครั้ง — `keys` ตามลำดับไฟล์ในชุด
+    pub fn open(&mut self, anchor: Anchor, keys: impl IntoIterator<Item = K>) {
+        let slots: Vec<(K, Slot<T>)> = keys.into_iter().map(|k| (k, Slot::Waiting)).collect();
+        if !slots.is_empty() {
+            self.batches.push(Batch {
+                anchor,
+                slots,
+                next: 0,
+                held: 0,
+            });
+        }
+    }
+
+    /// ผลของงาน `key` กลับมาแล้ว · `Err` = ไม่ใช่งานของชุดไหน → ผู้เรียกทำเองทันที
+    ///
+    /// # Errors
+    /// คืน `value` กลับเมื่อไม่มีชุดไหนรอคีย์นี้อยู่
+    pub fn arrive(&mut self, key: &K, value: T) -> Result<(), T> {
+        let found = self.batches.iter().enumerate().find_map(|(b, batch)| {
+            batch
+                .slots
+                .iter()
+                .position(|(k, slot)| k == key && matches!(slot, Slot::Waiting | Slot::Late))
+                .map(|s| (b, s))
+        });
+        let Some((b, s)) = found else {
+            return Err(value);
+        };
+        let batch = &mut self.batches[b];
+        if matches!(batch.slots[s].1, Slot::Late) {
+            batch.slots[s].1 = Slot::Released;
+            self.ready.push((batch.anchor, value));
+        } else {
+            batch.slots[s].1 = Slot::Held(value);
+            batch.held += 1;
+        }
+        self.advance(b);
+        Ok(())
+    }
+
+    /// ปล่อยทุกช่องที่ใบก่อนหน้าครบแล้ว · ถือเกินเพดานเมื่อไหร่ข้ามช่องที่ยังรอ
+    fn advance(&mut self, b: usize) {
+        let batch = &mut self.batches[b];
+        while batch.next < batch.slots.len() {
+            let slot = &mut batch.slots[batch.next].1;
+            match std::mem::replace(slot, Slot::Released) {
+                Slot::Held(value) => {
+                    batch.held -= 1;
+                    self.ready.push((batch.anchor, value));
+                }
+                Slot::Waiting if batch.held > MAX_HELD => *slot = Slot::Late,
+                Slot::Waiting => {
+                    *slot = Slot::Waiting;
+                    break;
+                }
+                done @ (Slot::Released | Slot::Late) => *slot = done,
+            }
+            batch.next += 1;
+        }
+        // ★ ชุดที่ทุกช่องได้คำตอบแล้วต้องหายไป ไม่งั้นรายการโตตลอดอายุโปรแกรม (I-6)
+        if batch.next == batch.slots.len()
+            && batch
+                .slots
+                .iter()
+                .all(|(_, slot)| matches!(slot, Slot::Released))
+        {
+            self.batches.remove(b);
+        }
+    }
+
+    /// ผลที่ถึงคิวแล้ว **ตามลำดับไฟล์** — พร้อมจุดชี้ของชุดมัน
+    pub fn take_ready(&mut self) -> Vec<(Anchor, T)> {
+        std::mem::take(&mut self.ready)
+    }
+
+    /// ชุดที่ยังมีช่องรออยู่ — เทสต์และแถบสถานะใช้
+    #[must_use]
+    pub fn open_batches(&self) -> usize {
+        self.batches.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::float_cmp)]
@@ -423,5 +569,150 @@ mod tests {
         assert!(!flow.fits());
         // ค่าปริยาย: ไม่ fit (มีของอยู่แล้ว = ห้ามขยับกล้อง)
         assert!(!Flow::new(key, Anchor::center_of(rect)).fits());
+    }
+
+    /// ไฟล์ทดสอบห้าใบ ขนาดต่างกันมากพอให้ช่องของใบหลังขยับตามใบก่อน
+    const SIZES: [(u32, u32); 5] = [
+        (2400, 1600),
+        (300, 300),
+        (1200, 3000),
+        (5000, 400),
+        (800, 800),
+    ];
+
+    /// ทุกลำดับที่ห้าใบเสร็จได้ (120 แบบ)
+    fn every_order(n: usize) -> Vec<Vec<usize>> {
+        if n == 0 {
+            return vec![Vec::new()];
+        }
+        let mut out = Vec::new();
+        for rest in every_order(n - 1) {
+            for at in 0..=rest.len() {
+                let mut order = rest.clone();
+                order.insert(at, n - 1);
+                out.push(order);
+            }
+        }
+        out
+    }
+
+    /// จำลองการลากหนึ่งชุด: ผลกลับมาตาม `order` · `frame` ใบต่อเฟรม · คืนกรอบตามดัชนีไฟล์
+    fn drop_batch(order: &[usize], frame: usize, sequenced: bool) -> Vec<Rect> {
+        let (key, rect) = view(Vec2::ZERO, 0.25);
+        let anchor = Anchor::new(Vec2::new(-1000.0, -500.0), rect);
+        let mut arrivals: Arrivals<usize, usize> = Arrivals::default();
+        arrivals.open(anchor, 0..SIZES.len());
+        let mut flows = Vec::new();
+        let mut placed = vec![Rect::from_center_size(Vec2::ZERO, Vec2::ZERO); SIZES.len()];
+        for chunk in order.chunks(frame) {
+            let released: Vec<(Anchor, usize)> = if sequenced {
+                for &file in chunk {
+                    arrivals.arrive(&file, file).unwrap();
+                }
+                arrivals.take_ready()
+            } else {
+                chunk.iter().map(|&file| (anchor, file)).collect()
+            };
+            for (anchor, file) in released {
+                let flow = flow_for(&mut flows, anchor, || Flow::new(key, anchor));
+                let (w, h) = SIZES[file];
+                let (pos, size) = flow.place_image(w, h);
+                placed[file] = Rect::from_center_size(pos, size);
+            }
+        }
+        placed
+    }
+
+    /// ★★★ **ประตูของเจ้าของโปรเจกต์:** ลากชุดเดิมโดยบังคับให้ decode เสร็จคนละลำดับ
+    /// → **ผังต้องเท่ากัน** · ทุกลำดับ 120 แบบ × ผลมาทีละ 1/2/5 ใบต่อเฟรม
+    #[test]
+    fn the_layout_of_a_batch_does_not_depend_on_which_file_finished_decoding_first() {
+        let want = drop_batch(&[0, 1, 2, 3, 4], 1, true);
+        for order in every_order(SIZES.len()) {
+            for frame in [1, 2, 5] {
+                assert_eq!(
+                    drop_batch(&order, frame, true),
+                    want,
+                    "เสร็จตามลำดับ {order:?} ({frame} ใบ/เฟรม) ได้ผังต่างจากลำดับไฟล์"
+                );
+            }
+        }
+        // NC — วางตามลำดับที่เสร็จ (ของเดิม) ต้องได้ผังต่างกัน ไม่งั้นประตูนี้ล้มไม่เป็น
+        let mut layouts: Vec<Vec<Rect>> = Vec::new();
+        for order in every_order(SIZES.len()) {
+            let layout = drop_batch(&order, 1, false);
+            if !layouts.contains(&layout) {
+                layouts.push(layout);
+            }
+        }
+        assert!(
+            layouts.len() > 100,
+            "NC: ลำดับที่เสร็จให้ผังเดียว ({})",
+            layouts.len()
+        );
+    }
+
+    /// ★★ ใบที่ไม่สร้างภาพ (ถูกยกเลิก) ก็นับเป็นคำตอบ — ใบหลังมันต้องไม่ค้าง
+    ///    และชุดที่ทุกใบตอบแล้วต้องหายไป (I-6)
+    #[test]
+    fn every_answer_moves_the_queue_and_a_finished_batch_is_forgotten() {
+        let (_, rect) = view(Vec2::ZERO, 1.0);
+        let anchor = Anchor::center_of(rect);
+        let mut arrivals: Arrivals<u8, &str> = Arrivals::default();
+        arrivals.open(anchor, [1, 2, 3]);
+        arrivals.arrive(&3, "three").unwrap();
+        arrivals.arrive(&2, "cancelled").unwrap();
+        assert!(arrivals.take_ready().is_empty(), "ปล่อยก่อนใบแรกมา");
+        arrivals.arrive(&1, "one").unwrap();
+        let out: Vec<&str> = arrivals.take_ready().into_iter().map(|(_, v)| v).collect();
+        assert_eq!(out, ["one", "cancelled", "three"]);
+        assert_eq!(arrivals.open_batches(), 0, "ชุดที่จบแล้วยังค้างอยู่");
+        // คีย์ที่ไม่มีชุดไหนรอ → คืนให้ผู้เรียกทำเอง (ภาพของเอกสารที่เปิดจากไฟล์)
+        assert_eq!(arrivals.arrive(&9, "relink"), Err("relink"));
+    }
+
+    /// ★★ สองชุดสลับกัน + **ไฟล์เดียวกันอยู่ทั้งสองชุด** — ไม่มีชุดไหนรอคำตอบของอีกชุด
+    #[test]
+    fn two_batches_wait_only_for_their_own_files() {
+        let (_, rect) = view(Vec2::ZERO, 1.0);
+        let left = Anchor::new(Vec2::new(-400.0, 0.0), rect);
+        let right = Anchor::new(Vec2::new(400.0, 0.0), rect);
+        let mut arrivals: Arrivals<&str, &str> = Arrivals::default();
+        arrivals.open(left, ["a", "same"]);
+        arrivals.open(right, ["same", "b"]);
+        arrivals.arrive(&"b", "b").unwrap();
+        arrivals.arrive(&"same", "same#1").unwrap();
+        // ชุดซ้ายเก่ากว่า ได้ `same` ไปก่อน · ยังรอ `a` อยู่ · ชุดขวายังรอ `same` ของมัน
+        assert!(arrivals.take_ready().is_empty());
+        arrivals.arrive(&"same", "same#2").unwrap();
+        assert_eq!(arrivals.take_ready(), [(right, "same#2"), (right, "b")]);
+        arrivals.arrive(&"a", "a").unwrap();
+        assert_eq!(arrivals.take_ready(), [(left, "a"), (left, "same#1")]);
+        assert_eq!(arrivals.open_batches(), 0);
+    }
+
+    /// ★ ถือเกินเพดาน → ข้ามใบที่ช้า **แต่ไม่ทิ้ง** · ทุกใบออกมาครั้งเดียวพอดี (I-6 · I-3)
+    #[test]
+    fn a_very_slow_file_is_skipped_past_the_cap_but_never_lost() {
+        let (_, rect) = view(Vec2::ZERO, 1.0);
+        let anchor = Anchor::center_of(rect);
+        let n = MAX_HELD + 10;
+        let mut arrivals: Arrivals<usize, usize> = Arrivals::default();
+        arrivals.open(anchor, 0..n);
+        let mut out = Vec::new();
+        for file in 1..n {
+            arrivals.arrive(&file, file).unwrap();
+            out.extend(arrivals.take_ready().into_iter().map(|(_, v)| v));
+        }
+        assert!(!out.is_empty(), "ถือเกินเพดานแล้วยังไม่ปล่อย — RAM โตไม่มีที่สิ้นสุด");
+        assert!(
+            out.windows(2).all(|w| w[0] < w[1]),
+            "ที่ปล่อยออกมาไม่เรียงตามไฟล์"
+        );
+        arrivals.arrive(&0, 0).unwrap();
+        out.extend(arrivals.take_ready().into_iter().map(|(_, v)| v));
+        out.sort_unstable();
+        assert_eq!(out, (0..n).collect::<Vec<_>>(), "มีใบหายหรือซ้ำ");
+        assert_eq!(arrivals.open_batches(), 0);
     }
 }

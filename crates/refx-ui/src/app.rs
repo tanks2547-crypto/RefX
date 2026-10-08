@@ -1948,11 +1948,16 @@ pub struct RefxApp {
     ///
     /// ★ ล้างเมื่อผลกลับมาถึง หรือเมื่อแท็บถูกปิด — ดู [`RefxApp::forget_jobs_of`]
     job_owner: std::collections::HashMap<refx_asset::hash::ContentHash, refx_core::arena::BoardId>,
-    /// ★★★ **ตรงที่ผู้ใช้ชี้ตอนสั่งงานใบนี้** — ลากวาง / วาง (ROADMAP ตัดสิน 1 ต.ค. 2026)
+    /// ★★★ **ชุดที่ลาก/วาง ตามลำดับไฟล์ + ตรงที่ผู้ใช้ชี้** (ROADMAP ตัดสิน 1 ต.ค. ·
+    /// ลำดับ ตัดสิน 8 ต.ค. 2026)
     ///
     /// ผลกลับมาทีละใบไม่เรียงกัน และปนกับชุดที่ลากทีหลังได้ · การจำ "จุดล่าสุด" ไว้ที่
-    /// แท็บจะส่งใบที่เหลือของชุดแรกไปต่อท้ายชุดที่สอง · ล้างพร้อม `job_owner` เสมอ
-    job_anchor: std::collections::HashMap<refx_asset::hash::ContentHash, crate::placement::Anchor>,
+    /// แท็บจะส่งใบที่เหลือของชุดแรกไปต่อท้ายชุดที่สอง · และการวางตามลำดับที่ decode
+    /// เสร็จทำให้ลากชุดเดิมสองครั้งได้ผังต่างกัน — ดู [`crate::placement::Arrivals`]
+    ///
+    /// ★ แทน `job_anchor` (ตารางคีย์ → จุดชี้) ซึ่ง **ไฟล์เดียวกันในสองชุดเขียนทับกัน**:
+    ///   ลากไฟล์เดิมซ้ำไปอีกที่ระหว่างที่ชุดแรกยังโหลด แล้วใบของชุดแรกไปลงที่ของชุดหลัง
+    arrivals: crate::placement::Arrivals<refx_asset::hash::ContentHash, Arrival>,
     /// ★ จุดที่ปล่อยเมาส์ของการลากวางที่กำลังรวมชุด (physical pixel บนหน้าต่าง)
     ///
     /// winit 0.30 รับจุดปล่อยจาก OS แล้วทิ้ง (`drop_handler.rs` — `_pt`) · อ่านจาก
@@ -2520,15 +2525,32 @@ fn probe_board_id() -> refx_core::arena::BoardId {
     refx_core::arena::BoardId::from_parts(u32::MAX, 0)
 }
 
-/// ภาพที่เปิดไม่ได้ซึ่งรอกลายเป็น `Missing` บนกระดาน:
-/// (คีย์งาน · แท็บเจ้าของ · ที่มา · ตรงที่ผู้ใช้ชี้ · เหตุผล)
-type DamagedJob = (
-    refx_asset::hash::ContentHash,
-    Option<refx_core::arena::BoardId>,
-    Option<refx_asset::pool::JobSource>,
-    Option<crate::placement::Anchor>,
-    refx_core::board::MissingReason,
-);
+/// ★★★ คำตอบสุดท้ายของงาน thumbnail หนึ่งงาน — **ทุกชนิดเดินคิวเดียวกัน**
+/// ([`crate::placement::Arrivals`]) เพื่อให้ช่องในผังตามลำดับไฟล์ในชุด
+///
+/// ★ ใบที่ถูกยกเลิกและรายการไฟล์จาก clipboard ไม่สร้างภาพ แต่ต้องเดินคิวด้วย —
+///   ไม่งั้นใบหลังมันในชุดเดียวกันจะรอคำตอบที่มาแล้วไปตลอดกาล
+enum Arrival {
+    /// เปิดได้ — อัดขึ้น atlas แล้ววาง
+    Done {
+        hash: refx_asset::hash::ContentHash,
+        source: refx_asset::pool::JobSource,
+        thumb: Box<refx_asset::thumb::Thumbnail>,
+        meta: refx_asset::pool::SourceMeta,
+        origin: Option<refx_asset::pool::ContentOrigin>,
+    },
+    /// เปิดไม่ได้ → `Missing` บนกระดาน (ROADMAP P3-3)
+    Damaged {
+        hash: refx_asset::hash::ContentHash,
+        owner: Option<refx_core::arena::BoardId>,
+        source: Option<refx_asset::pool::JobSource>,
+        reason: refx_core::board::MissingReason,
+    },
+    /// clipboard มีรายการไฟล์ ไม่ใช่ภาพ — ไฟล์พวกนั้นเริ่มชุดใหม่ของมันเอง
+    Pasted(Vec<std::path::PathBuf>),
+    /// ถูกยกเลิก — นับไปแล้วตอนมาถึง ไม่มีอะไรให้วาง
+    Skipped,
+}
 
 /// งานค้างจาก session ก่อนที่กำลังรอให้ผู้ใช้ตัดสิน (P4-4)
 #[derive(Debug, Clone)]
@@ -2952,7 +2974,7 @@ impl RefxApp {
             kept_folder_job: None,
             recovery_checked: false,
             job_owner: std::collections::HashMap::new(),
-            job_anchor: std::collections::HashMap::new(),
+            arrivals: crate::placement::Arrivals::default(),
             drop_point: None,
             // ผู้เรียก (`run`) เสียบให้ — ที่นี่ไม่รู้จัก `AppPaths`
             recovery_dir: None,
@@ -3315,6 +3337,10 @@ impl RefxApp {
         anchor: Option<crate::placement::Anchor>,
         jobs: Vec<refx_asset::pool::Job>,
     ) {
+        // ★★★ ชุดนี้วางตามลำดับของ `jobs` ไม่ใช่ลำดับที่ worker ทำเสร็จ (ตัดสิน 8 ต.ค. 2026)
+        if let Some(anchor) = anchor {
+            self.arrivals.open(anchor, jobs.iter().map(|job| job.hash));
+        }
         for job in jobs {
             debug_assert!(
                 matches!(job.target, refx_asset::pool::JobTarget::Thumbnail),
@@ -3322,9 +3348,6 @@ impl RefxApp {
             );
             self.job_sources.insert(job.hash, job.source.clone());
             self.job_owner.insert(job.hash, owner);
-            if let Some(anchor) = anchor {
-                self.job_anchor.insert(job.hash, anchor);
-            }
             if let Some(assets) = self.assets.as_ref() {
                 assets.pool.submit(job);
             }
@@ -3421,15 +3444,15 @@ impl RefxApp {
         };
 
         let mut finished = 0u32;
-        let mut done = Vec::new();
+        // ★ คำตอบสุดท้ายของงาน thumbnail ตามลำดับที่ **มาถึง** — เดินผ่าน `arrivals`
+        //   หลังจบลูปเพื่อให้ได้ลำดับของ **ไฟล์ในชุด** (ตัดสิน 8 ต.ค. 2026)
+        let mut arrived: Vec<(refx_asset::hash::ContentHash, Arrival)> = Vec::new();
         let mut ready: Vec<(
             refx_asset::hash::ContentHash,
             Box<refx_asset::working::WorkingImage>,
         )> = Vec::new();
         // ไฟล์ที่พบใน clipboard — ส่งต่อเข้าเส้นทาง drag & drop หลังปล่อย borrow
         let mut pasted_files: Vec<std::path::PathBuf> = Vec::new();
-        // ★ ใบที่เปิดไม่ได้ — กลายเป็น `Missing` หลังจบลูป (ดูกิ่ง `Failed`)
-        let mut damaged: Vec<DamagedJob> = Vec::new();
         while let Some(result) = assets.pool.try_recv() {
             // งานวางจบแล้วไม่ว่าผลจะเป็นอะไร — เปิดทางให้กด Ctrl+V ครั้งต่อไปได้
             if self.paste_in_flight == Some(result.hash()) {
@@ -3451,7 +3474,16 @@ impl RefxApp {
                         .get(&hash)
                         .cloned()
                         .unwrap_or(refx_asset::pool::JobSource::Clipboard);
-                    done.push((hash, source, thumb, meta, origin));
+                    arrived.push((
+                        hash,
+                        Arrival::Done {
+                            hash,
+                            source,
+                            thumb,
+                            meta,
+                            origin,
+                        },
+                    ));
                 }
                 // ★★★ ภาพที่วางลงดิสก์แล้ว → **ปลดล็อกการขอภาพคมของใบนั้น**
                 //
@@ -3478,7 +3510,8 @@ impl RefxApp {
                     // ทั้งเส้น (มี cache, มี EXIF, ขอภาพคมตอนซูมได้)
                     tracing::info!(hash = %hash.short(), count = paths.len(), "pasted a file list from the clipboard");
                     self.job_sources.remove(&hash);
-                    pasted_files.extend(paths);
+                    // ★ งานวางนี้เป็นชุดหนึ่งใบ — ต้องเดินคิวด้วย ดู `Arrival`
+                    arrived.push((hash, Arrival::Pasted(paths)));
                 }
                 refx_asset::pool::JobResult::Working {
                     hash,
@@ -3529,7 +3562,7 @@ impl RefxApp {
                             //   ไม่เก็บกวาด = ตารางโตตลอดอายุโปรแกรม (I-6)
                             self.job_owner.remove(&hash);
                             self.job_sources.remove(&hash);
-                            self.job_anchor.remove(&hash);
+                            arrived.push((hash, Arrival::Skipped));
                         }
                         // ★ ต้องปลดคีย์ออกจาก `working_pending` ด้วย ไม่งั้นภาพใบนั้น
                         //   จะ **ไม่มีวันถูกขอภาพคมอีกเลย** ตลอดอายุโปรแกรม —
@@ -3577,12 +3610,14 @@ impl RefxApp {
                             //
                             //   ★ เก็บไว้ทำหลังปล่อยการยืม `assets` เพราะการสร้าง
                             //     item ต้องแตะ `docs` และต้องผ่าน `Command`
-                            damaged.push((
+                            arrived.push((
                                 hash,
-                                self.job_owner.remove(&hash),
-                                self.job_sources.remove(&hash),
-                                self.job_anchor.remove(&hash),
-                                refx_core::board::MissingReason::from(&reason),
+                                Arrival::Damaged {
+                                    hash,
+                                    owner: self.job_owner.remove(&hash),
+                                    source: self.job_sources.remove(&hash),
+                                    reason: refx_core::board::MissingReason::from(&reason),
+                                },
                             ));
                         }
                         refx_asset::pool::JobTarget::Working { size } => {
@@ -3629,297 +3664,7 @@ impl RefxApp {
         // ★★★ พก `BoardId` มาด้วย — `ItemId` ไม่ผูกกับ board (`docs/02 §1`)
         let mut repairs: Vec<(refx_core::arena::BoardId, ItemId, ItemKind)> = Vec::new();
 
-        // ★★★ ใบที่เปิดไม่ได้ → `Missing` บน board (ROADMAP P3-3)
-        //
-        // ★ อยู่ **ก่อน** บล็อกของ `done` และ **ไม่ต้องมี `gfx`** โดยตั้งใจ:
-        //   ช่องว่างไม่มีพิกเซลให้อัปขึ้น atlas · ถ้าไปผูกกับ `gfx.as_mut()`
-        //   เหมือนบล็อกข้างล่าง การ return ตอนไม่มี GPU จะทำให้ใบพวกนี้ไม่ถูกนับ
-        //   แล้ว `DropBatch::settled()` จะไม่มีวันเป็นจริง = แถบ "กำลังโหลด" ค้างถาวร
-        for (hash, owner, source, anchor, reason) in damaged {
-            let Some(index) = owner.and_then(|id| self.docs.list.iter().position(|d| d.id == id))
-            else {
-                // แท็บถูกปิดไประหว่างที่งานเดินอยู่ — ไม่มีที่ให้ผลลง
-                self.drop.cancelled += 1;
-                continue;
-            };
-            let original_path = source
-                .as_ref()
-                .and_then(|s| s.file())
-                .map(std::path::Path::to_path_buf)
-                .unwrap_or_default();
-            let board_id = self.docs.list[index].id;
-            let canvas = self.gfx.as_ref().map(|gfx| gfx.canvas.size);
-            let doc = &mut self.docs.list[index];
-
-            // ★★★ **เอกสารที่เปิดมาจากไฟล์: item มีอยู่แล้ว ห้ามสร้างใบใหม่**
-            //
-            //   เส้นทางเดียวกับกิ่ง `Done` เป๊ะ (ดู `relink_targets` ที่นั่น) ·
-            //   รุ่นแรกของโค้ดนี้สร้างใบใหม่ทุกครั้ง ผลคือเปิดไฟล์ที่มีภาพเสีย
-            //   หนึ่งใบแล้วได้ **ห้า item จากเอกสารที่มีสี่** — ใบผีที่ไม่มีอยู่
-            //   ในไฟล์ · เห็นเพราะรันแอปจริงแล้วนับตัวเลขบนแถบสถานะ
-            if let Some(id) = doc.relink_targets.remove(&hash) {
-                if doc.board.item(id).is_some() {
-                    repairs.push((
-                        board_id,
-                        id,
-                        ItemKind::Missing {
-                            original_path,
-                            reason,
-                        },
-                    ));
-                    self.drop.added += 1;
-                    self.drop.damaged += 1;
-                } else {
-                    // ใบนั้นถูกลบไประหว่างที่งานเดินอยู่ (undo / เปิดไฟล์อื่นทับ)
-                    self.drop.cancelled += 1;
-                }
-                continue;
-            }
-
-            // ★ ไหลลงบริเวณที่เห็นเดียวกับภาพที่เปิดได้ (P5-9b) — ใบที่เสียต้องอยู่ใน
-            //   ลำดับที่ผู้ใช้ลากเข้ามา ไม่ใช่กองรวมกันที่มุมใดมุมหนึ่ง · ไม่รู้สัดส่วนจริง
-            //   เพราะอ่านหัวไฟล์ไม่ผ่าน → กรอบ 4:3 ตามขนาดของบริเวณที่เห็น
-            let anchor = Self::anchor_or_latest(doc, anchor, canvas);
-            let (center, size) = Self::drop_flow(doc, anchor).place_missing();
-            let item = Item::new(ItemKind::Missing {
-                original_path,
-                reason,
-            })
-            .at(center, size);
-            let item = Item {
-                meta: ItemMeta {
-                    added_at: now_ms(),
-                    ..item.meta
-                },
-                ..item
-            };
-
-            // ★ ผ่าน `AddItems` เหมือนภาพปกติ — ลากไฟล์เสียเข้ามาแล้ว `Ctrl+Z` ได้
-            let Ok(command) = AddItems::new(vec![item]) else {
-                self.drop.failed += 1;
-                continue;
-            };
-            if let Err(err) = doc.history.apply(&mut doc.board, Box::new(command)) {
-                tracing::error!(%err, "cannot add the damaged image to the board");
-                self.drop.failed += 1;
-                continue;
-            }
-            if let Some(id) = doc.board.z_order().last().copied()
-                && let Some(item) = doc.board.item(id)
-            {
-                let canvas = item.canvas;
-                doc.index.insert(id, &canvas);
-            }
-            // ★ ใบที่เสียก็เป็นส่วนหนึ่งของชุด — กล้องต้องเห็นมันด้วย (P5-9b)
-            Self::follow_new_items(doc, anchor, canvas);
-            // ★ นับเป็น `added` เพราะ **ผู้ใช้เห็นมันบนกระดานจริง ๆ** ·
-            //   `damaged` เป็นตัวนับแยกสำหรับข้อความสรุป — ถ้านับทั้งสองช่อง
-            //   ลง `answered()` งวดจะจบเร็วไปหนึ่งเท่าตัว
-            self.drop.added += 1;
-            self.drop.damaged += 1;
-            tracing::debug!(hash = %hash.short(), ?reason, "damaged image became a placeholder");
-        }
-
-        // อัดขึ้น atlas แล้ววาง quad ให้เห็นบน canvas
-        let had_results = !done.is_empty();
-        if had_results {
-            // ★ แยกการยืมทีละฟิลด์ — ลูปข้างล่างต้องแตะทั้ง `gfx` และ `docs`
-            let Self {
-                gfx,
-                docs,
-                drop,
-                shell,
-                spool_dir,
-                job_owner,
-                job_anchor,
-                ..
-            } = self;
-            let Some(gfx) = gfx.as_mut() else {
-                return finished > 0;
-            };
-            for (hash, source, thumb, meta, origin) in done {
-                // ★★★ คีย์และที่อยู่ของภาพใบนี้ — ดู `asset_location`
-                let (asset_hash, spooled_path) = asset_location(spool_dir.as_deref(), hash, origin);
-                // ★★★ **ผลนี้เป็นของแท็บไหน** (P4-7c) — อ่าน "แท็บที่ดูอยู่" ตรงนี้
-                //     เมื่อไหร่ ภาพที่แท็บ A สั่งโหลดจะไปตกที่แท็บที่ผู้ใช้บังเอิญ
-                //     สลับไปดูตอนงานเสร็จ · คีย์งานถูกผูกกับ board ตั้งแต่ตอนส่ง
-                //     (ดู `job_key_for`) ตารางนี้จึงตอบได้เสมอ
-                let owner = job_owner.remove(&hash);
-                let anchor = job_anchor.remove(&hash);
-                let Some(index) = owner.and_then(|id| docs.list.iter().position(|d| d.id == id))
-                else {
-                    // แท็บถูกปิดไประหว่างที่งานเดินอยู่ = ไม่มีที่ให้ผลลง
-                    drop.cancelled += 1;
-                    continue;
-                };
-                let board_id = docs.list[index].id;
-                // ★ อัดขึ้น atlas **ก่อน** ยืมแท็บ — การขยาย atlas ต้องแตะทุกแท็บ
-                let uploaded = Self::upload_thumb(gfx, docs, &thumb.pixels);
-                let doc = &mut docs.list[index];
-                match uploaded {
-                    Ok(slot) => {
-                        // ★★★ ภาพของ board ที่ **เปิดมาจากไฟล์** — item มีอยู่แล้ว
-                        //
-                        //   ที่ขาดคือพิกเซลอย่างเดียว ตำแหน่ง/ขนาด/หมุน/ครอป/ฟิลเตอร์
-                        //   /แท็ก/ดาว/กลุ่ม/โน้ต มาจากไฟล์ครบแล้ว · สร้างใบใหม่ตรงนี้
-                        //   = ผู้ใช้เห็นภาพซ้ำสองชุด ชุดหนึ่งอยู่ผิดที่ทั้งหมด
-                        if let Some(id) = doc.relink_targets.remove(&hash) {
-                            let Some(item) = doc.board.item(id) else {
-                                // item ถูกลบไประหว่างที่งานเดินอยู่ (undo/เปิดไฟล์อื่นทับ)
-                                drop.cancelled += 1;
-                                continue;
-                            };
-                            // ★★★ ที่มาที่ *ถูกต้อง* ของใบนี้หลังจากเพิ่งอ่านไฟล์จริง
-                            //     — ดู `relinked_kind` ว่าอะไรเปลี่ยนได้บ้างและอะไรห้าม
-                            let desired = relinked_kind(
-                                &item.kind,
-                                source.file(),
-                                origin.map(|o| o.hash()),
-                                spool_dir.as_deref(),
-                                &thumb,
-                                meta,
-                            );
-                            let Some(desired) = desired else {
-                                drop.cancelled += 1;
-                                continue;
-                            };
-                            // ★ คีย์ที่ `render_state` ใช้ = คีย์ที่ `Board` จะถืออยู่
-                            //   หลังคำสั่งนี้ · สองฝั่งชี้คนละ asset ไม่ได้เด็ดขาด
-                            let render_hash = match &desired {
-                                ItemKind::Image(asset) => asset.hash,
-                                _ => asset_hash,
-                            };
-                            if desired != item.kind {
-                                repairs.push((board_id, id, desired));
-                            }
-                            doc.render_state.insert(
-                                id,
-                                ItemRender {
-                                    source,
-                                    hash: render_hash,
-                                    tint: dominant_rgba(thumb.dominant),
-                                    thumb: *thumb,
-                                    slot: Some(slot),
-                                },
-                            );
-                            drop.added += 1;
-                            continue;
-                        }
-                        // ★★★ **ขนาดจริง ในบริเวณที่เห็น** (P5-9b) — ดู `crate::placement`
-                        //
-                        //   เดิมที่นี่ย่อทุกใบให้ด้านยาว 128 แล้ววางเป็นตาราง 16 ช่องที่ (2000,
-                        //   2000) ตายตัว · ภาพ 4000×6641 ของเจ้าของโปรเจกต์กลายเป็น 77×128
-                        //   ≈ 30 px บนจอที่ซูม 25% · ตอนนี้ 1 หน่วย world = 1 พิกเซลตอนวาง
-                        //   และไหลลงบริเวณที่ผู้ใช้กำลังดูอยู่ โดย **ไม่แตะกล้อง**
-                        let (sw, sh) = (thumb.source_width, thumb.source_height);
-                        let anchor = Self::anchor_or_latest(doc, anchor, Some(gfx.canvas.size));
-                        let (center, size) = Self::drop_flow(doc, anchor).place_image(sw, sh);
-
-                        let item = Item::new(ItemKind::Image(AssetRef {
-                            hash: asset_hash,
-                            // ★★ ภาพที่วางได้ที่อยู่ของมันใน spool · ภาพจากไฟล์ได้ path
-                            //    ของผู้ใช้ · **ไม่มีใบไหนที่ path ว่างอีกแล้ว** ซึ่งเป็น
-                            //    เงื่อนไขที่ `request_thumbnails_for_board` ใช้ตัดสินว่า
-                            //    ภาพใบนั้นกู้กลับมาได้หรือไม่ (`docs/07 §2` — I-3)
-                            path: spooled_path.clone().unwrap_or_else(|| {
-                                source
-                                    .file()
-                                    .map(std::path::Path::to_path_buf)
-                                    .unwrap_or_default()
-                            }),
-                            px_size: glam::UVec2::new(sw, sh),
-                            // ★ ยังไม่รู้ format จริงตรงนี้ — cache hit ไม่ได้แตะไบต์ของไฟล์เลย
-                            //   เขียน `Unknown` ตรง ๆ ดีกว่าเดาจากนามสกุล (docs/02 §2.2.5 ข้อ 2)
-                            //   งานที่จะร้อย format จริงผ่าน decode → Thumbnail → ThumbEntry
-                            //   ถูกแยกไว้เป็นงานของตัวเอง (HANDOFF §6)
-                            format: ImageFormat::Unknown,
-                            embedded: false,
-                            // ★ มาจาก `stat` บน worker ตอน ingest — ปลดล็อกการเรียง
-                            //   ตามวันที่แก้ไข/ขนาดไฟล์ (P3-4) โดยไม่อ่านดิสก์เพิ่มบน UI thread
-                            mtime: meta.mtime_ms,
-                            file_size: meta.bytes,
-                        }))
-                        .at(center, size);
-                        // ★ `added_at` **ไม่เคยมีใครเซ็ตมาก่อน** (เป็น 0 ทุกใบ) ทำให้
-                        //   การเรียงตามเวลาที่เพิ่มตกไปที่ตัวตัดสินท้ายเสมอ · ที่นี่คือ
-                        //   จุดเดียวที่ item ถูกสร้างจากไฟล์จริง จึงเป็นที่ของมัน
-                        let item = Item {
-                            meta: ItemMeta {
-                                added_at: now_ms(),
-                                ..item.meta
-                            },
-                            ..item
-                        };
-
-                        // ★ ทุกการเพิ่มภาพผ่าน `AddItems` เข้า `History` → ลากไฟล์เข้ามาแล้ว undo ได้
-                        let Ok(command) = AddItems::new(vec![item]) else {
-                            continue;
-                        };
-                        if let Err(err) = doc.history.apply(&mut doc.board, Box::new(command)) {
-                            tracing::error!(%err, "cannot add the dropped image to the board");
-                            continue;
-                        }
-                        // `insert_item` ต่อท้าย z-order เสมอ ตัวที่เพิ่งเพิ่มจึงอยู่ท้ายสุด
-                        let Some(id) = doc.board.z_order().last().copied() else {
-                            continue;
-                        };
-
-                        if let Some(item) = doc.board.item(id) {
-                            let canvas = item.canvas;
-                            doc.index.insert(id, &canvas);
-                        }
-                        // ★ กระดานที่ว่างก่อนชุดนี้ = กล้องตามภาพไปให้เห็นทั้งหมด (P5-9b)
-                        Self::follow_new_items(doc, anchor, Some(gfx.canvas.size));
-                        doc.render_state.insert(
-                            id,
-                            ItemRender {
-                                source,
-                                // ★ คีย์เดียวกับ `AssetRef::hash` เสมอ — มันคือคีย์ของ
-                                //   working texture ด้วย ภาพเดิมที่วางสองครั้งจึงใช้
-                                //   texture ใบเดียวกัน
-                                hash: asset_hash,
-                                // สีเด่นเก็บไว้ตลอดชีวิตของ item ไม่ใช่เฉพาะตอนเป็น
-                                // placeholder — ช่อง atlas หลุดเมื่อไหร่ก็หยิบมาใช้ได้ทันที
-                                tint: dominant_rgba(thumb.dominant),
-                                thumb: *thumb,
-                                slot: Some(slot),
-                            },
-                        );
-                        drop.added += 1;
-                    }
-                    // ★★ board เต็ม = **นับไว้แล้วรายงานทีเดียวตอนจบงวด**
-                    //
-                    //   ห้ามเขียน status ตรงนี้: ลาก 10,000 ไฟล์เข้ามาแล้ว board เต็ม
-                    //   จะเขียนทับข้อความเดิม 6,928 ครั้งด้วยข้อความที่พูดถึง "layer"
-                    //   ซึ่งผู้ใช้ทำอะไรกับมันไม่ได้ · สิ่งที่เขาต้องรู้คือ **กี่ใบ
-                    //   ที่ไม่ได้เข้าและทำอะไรต่อ** ซึ่งรู้ได้ก็ต่อเมื่อจบงวดแล้ว
-                    //
-                    //   ★ log ก็เช่นกัน — ของเดิมพิมพ์บรรทัดละใบ วัดจริงได้ 37,606
-                    //   บรรทัดจากการลากครั้งเดียว ซึ่งดัน crash log ที่มีค่าออกจาก
-                    //   ไฟล์ที่หมุนตามขนาด (เหตุผลเดียวกับ HANDOFF §4 ข้อ 9)
-                    Err(AtlasError::Full { layers } | AtlasError::NeedsResize { layers }) => {
-                        if drop.rejected == 0 {
-                            tracing::warn!(
-                                layers,
-                                "the board is full — the rest of this batch cannot be added"
-                            );
-                        }
-                        drop.rejected += 1;
-                    }
-                    // VRAM ไม่พอเป็นคนละปัญหากับ board เต็ม (ข้อความบอกตัวเลขจริง)
-                    Err(err) => {
-                        tracing::warn!(%err, "cannot store the thumbnail in the atlas");
-                        drop.failed += 1;
-                        shell.status = text::atlas_error(shell.lang, &err);
-                        shell.status_warn = true;
-                    }
-                }
-            }
-            // ★ instance ที่ส่งให้ GPU สร้างใหม่จาก board **หลังจบชุด** ไม่ใช่ทีละใบ
-            //   (ลากเข้ามา 100 ไฟล์ = สร้างครั้งเดียว ไม่ใช่ 100 ครั้ง)
-            //   ★ เฉพาะแท็บที่อยู่บนจอ — `quads` มีชุดเดียวต่อหน้าต่าง
-            Self::rebuild_quads(gfx, docs.active_mut());
-        }
+        let had_results = self.place_arrivals(arrived, &mut repairs, &mut pasted_files);
 
         // ★ เวลาจริงที่ผู้ใช้รู้สึก: ลากเข้ามา → ภาพขึ้นจอ
         //   ★ เงื่อนไขเดิมทุกประการ: รายงานเฉพาะเฟรมที่มีผล decode กลับมาจริง
@@ -4013,15 +3758,16 @@ impl RefxApp {
             }
         }
 
-        if finished > 0 {
-            // cache เพิ่งเปลี่ยน — ขอสถิติรอบใหม่ (event-driven ไม่ใช่ polling
-            // ถ้าขอเป็นระยะจะปลุก event loop ตลอดแล้วพัง I-1)
-            if let Some(tx) = assets.io_tx.as_ref() {
-                let (reply, rx) = crossbeam_channel::bounded(4);
-                let wake = assets.pool.wake_handle();
-                if tx.send(IoRequest::Stats { reply, wake }).is_ok() {
-                    self.cache_stats_rx = Some(rx);
-                }
+        // cache เพิ่งเปลี่ยน — ขอสถิติรอบใหม่ (event-driven ไม่ใช่ polling
+        // ถ้าขอเป็นระยะจะปลุก event loop ตลอดแล้วพัง I-1)
+        if finished > 0
+            && let Some(assets) = self.assets.as_ref()
+            && let Some(tx) = assets.io_tx.as_ref()
+        {
+            let (reply, rx) = crossbeam_channel::bounded(4);
+            let wake = assets.pool.wake_handle();
+            if tx.send(IoRequest::Stats { reply, wake }).is_ok() {
+                self.cache_stats_rx = Some(rx);
             }
         }
 
@@ -4049,6 +3795,349 @@ impl RefxApp {
             self.submit_dropped(pasted_files);
         }
         finished > 0
+    }
+
+    /// ★★★ คำตอบของงาน thumbnail → ภาพ/`Missing` บนกระดาน **ตามลำดับไฟล์ในชุด**
+    ///
+    /// แยกจาก [`Self::drain_decode_results`] เพื่อให้เทสต์ป้อนคำตอบในลำดับที่เลือกเองได้
+    /// โดยไม่ต้องมี pool · คืน `true` ถ้ามีภาพที่เปิดได้ถูกปล่อยออกมา
+    fn place_arrivals(
+        &mut self,
+        arrived: Vec<(refx_asset::hash::ContentHash, Arrival)>,
+        repairs: &mut Vec<(refx_core::arena::BoardId, ItemId, ItemKind)>,
+        pasted_files: &mut Vec<std::path::PathBuf>,
+    ) -> bool {
+        // ★★★ เดินคิวของชุด → ได้ **ลำดับของไฟล์ในชุด** ไม่ใช่ลำดับที่ worker ทำเสร็จ
+        //     (ตัดสิน 8 ต.ค. 2026 · `crate::placement::Arrivals`) · งานที่ไม่ใช่ของชุดไหน
+        //     (ภาพของเอกสารที่เปิดจากไฟล์ — ตำแหน่งมาจากไฟล์แล้ว) ทำได้ทันที
+        let mut released: Vec<(Option<crate::placement::Anchor>, Arrival)> = Vec::new();
+        for (hash, arrival) in arrived {
+            if let Err(arrival) = self.arrivals.arrive(&hash, arrival) {
+                released.push((None, arrival));
+            }
+        }
+        released.extend(
+            self.arrivals
+                .take_ready()
+                .into_iter()
+                .map(|(anchor, arrival)| (Some(anchor), arrival)),
+        );
+        let had_results = released
+            .iter()
+            .any(|(_, arrival)| matches!(arrival, Arrival::Done { .. }));
+
+        // ★★★ **ลูปเดียว ตามลำดับที่ปล่อยออกมา** — ใบที่เปิดไม่ได้กับใบที่เปิดได้หยิบช่อง
+        //     จากสายเดียวกันตามลำดับไฟล์ · เดิมเป็นสองลูป (`Missing` ทั้งเฟรมก่อน) ใบเสีย
+        //     จึงแย่งช่องไปตามจังหวะที่มันบังเอิญเสร็จในเฟรมเดียวกับใบอื่น
+        //
+        // ★ แยกการยืมทีละฟิลด์ — ลูปข้างล่างต้องแตะทั้ง `gfx` และ `docs`
+        let Self {
+            gfx,
+            docs,
+            drop,
+            shell,
+            spool_dir,
+            job_owner,
+            ..
+        } = self;
+        for (anchor, arrival) in released {
+            let (hash, owner, source, reason) = match arrival {
+                Arrival::Skipped => continue,
+                Arrival::Pasted(paths) => {
+                    pasted_files.extend(paths);
+                    continue;
+                }
+                Arrival::Damaged {
+                    hash,
+                    owner,
+                    source,
+                    reason,
+                } => (hash, owner, source, reason),
+                // อัดขึ้น atlas แล้ววาง quad ให้เห็นบน canvas
+                Arrival::Done {
+                    hash,
+                    source,
+                    thumb,
+                    meta,
+                    origin,
+                } => {
+                    let Some(gfx) = gfx.as_mut() else {
+                        continue;
+                    };
+                    // ★★★ คีย์และที่อยู่ของภาพใบนี้ — ดู `asset_location`
+                    let (asset_hash, spooled_path) =
+                        asset_location(spool_dir.as_deref(), hash, origin);
+                    // ★★★ **ผลนี้เป็นของแท็บไหน** (P4-7c) — อ่าน "แท็บที่ดูอยู่" ตรงนี้
+                    //     เมื่อไหร่ ภาพที่แท็บ A สั่งโหลดจะไปตกที่แท็บที่ผู้ใช้บังเอิญ
+                    //     สลับไปดูตอนงานเสร็จ · คีย์งานถูกผูกกับ board ตั้งแต่ตอนส่ง
+                    //     (ดู `job_key_for`) ตารางนี้จึงตอบได้เสมอ
+                    let owner = job_owner.remove(&hash);
+                    let Some(index) =
+                        owner.and_then(|id| docs.list.iter().position(|d| d.id == id))
+                    else {
+                        // แท็บถูกปิดไประหว่างที่งานเดินอยู่ = ไม่มีที่ให้ผลลง
+                        drop.cancelled += 1;
+                        continue;
+                    };
+                    let board_id = docs.list[index].id;
+                    // ★ อัดขึ้น atlas **ก่อน** ยืมแท็บ — การขยาย atlas ต้องแตะทุกแท็บ
+                    let uploaded = Self::upload_thumb(gfx, docs, &thumb.pixels);
+                    let doc = &mut docs.list[index];
+                    match uploaded {
+                        Ok(slot) => {
+                            // ★★★ ภาพของ board ที่ **เปิดมาจากไฟล์** — item มีอยู่แล้ว
+                            //
+                            //   ที่ขาดคือพิกเซลอย่างเดียว ตำแหน่ง/ขนาด/หมุน/ครอป/ฟิลเตอร์
+                            //   /แท็ก/ดาว/กลุ่ม/โน้ต มาจากไฟล์ครบแล้ว · สร้างใบใหม่ตรงนี้
+                            //   = ผู้ใช้เห็นภาพซ้ำสองชุด ชุดหนึ่งอยู่ผิดที่ทั้งหมด
+                            if let Some(id) = doc.relink_targets.remove(&hash) {
+                                let Some(item) = doc.board.item(id) else {
+                                    // item ถูกลบไประหว่างที่งานเดินอยู่ (undo/เปิดไฟล์อื่นทับ)
+                                    drop.cancelled += 1;
+                                    continue;
+                                };
+                                // ★★★ ที่มาที่ *ถูกต้อง* ของใบนี้หลังจากเพิ่งอ่านไฟล์จริง
+                                //     — ดู `relinked_kind` ว่าอะไรเปลี่ยนได้บ้างและอะไรห้าม
+                                let desired = relinked_kind(
+                                    &item.kind,
+                                    source.file(),
+                                    origin.map(|o| o.hash()),
+                                    spool_dir.as_deref(),
+                                    &thumb,
+                                    meta,
+                                );
+                                let Some(desired) = desired else {
+                                    drop.cancelled += 1;
+                                    continue;
+                                };
+                                // ★ คีย์ที่ `render_state` ใช้ = คีย์ที่ `Board` จะถืออยู่
+                                //   หลังคำสั่งนี้ · สองฝั่งชี้คนละ asset ไม่ได้เด็ดขาด
+                                let render_hash = match &desired {
+                                    ItemKind::Image(asset) => asset.hash,
+                                    _ => asset_hash,
+                                };
+                                if desired != item.kind {
+                                    repairs.push((board_id, id, desired));
+                                }
+                                doc.render_state.insert(
+                                    id,
+                                    ItemRender {
+                                        source,
+                                        hash: render_hash,
+                                        tint: dominant_rgba(thumb.dominant),
+                                        thumb: *thumb,
+                                        slot: Some(slot),
+                                    },
+                                );
+                                drop.added += 1;
+                                continue;
+                            }
+                            // ★★★ **ขนาดจริง ในบริเวณที่เห็น** (P5-9b) — ดู `crate::placement`
+                            //
+                            //   เดิมที่นี่ย่อทุกใบให้ด้านยาว 128 แล้ววางเป็นตาราง 16 ช่องที่ (2000,
+                            //   2000) ตายตัว · ภาพ 4000×6641 ของเจ้าของโปรเจกต์กลายเป็น 77×128
+                            //   ≈ 30 px บนจอที่ซูม 25% · ตอนนี้ 1 หน่วย world = 1 พิกเซลตอนวาง
+                            //   และไหลลงบริเวณที่ผู้ใช้กำลังดูอยู่ โดย **ไม่แตะกล้อง**
+                            let (sw, sh) = (thumb.source_width, thumb.source_height);
+                            let anchor = Self::anchor_or_latest(doc, anchor, Some(gfx.canvas.size));
+                            let (center, size) = Self::drop_flow(doc, anchor).place_image(sw, sh);
+
+                            let item = Item::new(ItemKind::Image(AssetRef {
+                                hash: asset_hash,
+                                // ★★ ภาพที่วางได้ที่อยู่ของมันใน spool · ภาพจากไฟล์ได้ path
+                                //    ของผู้ใช้ · **ไม่มีใบไหนที่ path ว่างอีกแล้ว** ซึ่งเป็น
+                                //    เงื่อนไขที่ `request_thumbnails_for_board` ใช้ตัดสินว่า
+                                //    ภาพใบนั้นกู้กลับมาได้หรือไม่ (`docs/07 §2` — I-3)
+                                path: spooled_path.clone().unwrap_or_else(|| {
+                                    source
+                                        .file()
+                                        .map(std::path::Path::to_path_buf)
+                                        .unwrap_or_default()
+                                }),
+                                px_size: glam::UVec2::new(sw, sh),
+                                // ★ ยังไม่รู้ format จริงตรงนี้ — cache hit ไม่ได้แตะไบต์ของไฟล์เลย
+                                //   เขียน `Unknown` ตรง ๆ ดีกว่าเดาจากนามสกุล (docs/02 §2.2.5 ข้อ 2)
+                                //   งานที่จะร้อย format จริงผ่าน decode → Thumbnail → ThumbEntry
+                                //   ถูกแยกไว้เป็นงานของตัวเอง (HANDOFF §6)
+                                format: ImageFormat::Unknown,
+                                embedded: false,
+                                // ★ มาจาก `stat` บน worker ตอน ingest — ปลดล็อกการเรียง
+                                //   ตามวันที่แก้ไข/ขนาดไฟล์ (P3-4) โดยไม่อ่านดิสก์เพิ่มบน UI thread
+                                mtime: meta.mtime_ms,
+                                file_size: meta.bytes,
+                            }))
+                            .at(center, size);
+                            // ★ `added_at` **ไม่เคยมีใครเซ็ตมาก่อน** (เป็น 0 ทุกใบ) ทำให้
+                            //   การเรียงตามเวลาที่เพิ่มตกไปที่ตัวตัดสินท้ายเสมอ · ที่นี่คือ
+                            //   จุดเดียวที่ item ถูกสร้างจากไฟล์จริง จึงเป็นที่ของมัน
+                            let item = Item {
+                                meta: ItemMeta {
+                                    added_at: now_ms(),
+                                    ..item.meta
+                                },
+                                ..item
+                            };
+
+                            // ★ ทุกการเพิ่มภาพผ่าน `AddItems` เข้า `History` → ลากไฟล์เข้ามาแล้ว undo ได้
+                            let Ok(command) = AddItems::new(vec![item]) else {
+                                continue;
+                            };
+                            if let Err(err) = doc.history.apply(&mut doc.board, Box::new(command)) {
+                                tracing::error!(%err, "cannot add the dropped image to the board");
+                                continue;
+                            }
+                            // `insert_item` ต่อท้าย z-order เสมอ ตัวที่เพิ่งเพิ่มจึงอยู่ท้ายสุด
+                            let Some(id) = doc.board.z_order().last().copied() else {
+                                continue;
+                            };
+
+                            if let Some(item) = doc.board.item(id) {
+                                let canvas = item.canvas;
+                                doc.index.insert(id, &canvas);
+                            }
+                            // ★ กระดานที่ว่างก่อนชุดนี้ = กล้องตามภาพไปให้เห็นทั้งหมด (P5-9b)
+                            Self::follow_new_items(doc, anchor, Some(gfx.canvas.size));
+                            doc.render_state.insert(
+                                id,
+                                ItemRender {
+                                    source,
+                                    // ★ คีย์เดียวกับ `AssetRef::hash` เสมอ — มันคือคีย์ของ
+                                    //   working texture ด้วย ภาพเดิมที่วางสองครั้งจึงใช้
+                                    //   texture ใบเดียวกัน
+                                    hash: asset_hash,
+                                    // สีเด่นเก็บไว้ตลอดชีวิตของ item ไม่ใช่เฉพาะตอนเป็น
+                                    // placeholder — ช่อง atlas หลุดเมื่อไหร่ก็หยิบมาใช้ได้ทันที
+                                    tint: dominant_rgba(thumb.dominant),
+                                    thumb: *thumb,
+                                    slot: Some(slot),
+                                },
+                            );
+                            drop.added += 1;
+                        }
+                        // ★★ board เต็ม = **นับไว้แล้วรายงานทีเดียวตอนจบงวด**
+                        //
+                        //   ห้ามเขียน status ตรงนี้: ลาก 10,000 ไฟล์เข้ามาแล้ว board เต็ม
+                        //   จะเขียนทับข้อความเดิม 6,928 ครั้งด้วยข้อความที่พูดถึง "layer"
+                        //   ซึ่งผู้ใช้ทำอะไรกับมันไม่ได้ · สิ่งที่เขาต้องรู้คือ **กี่ใบ
+                        //   ที่ไม่ได้เข้าและทำอะไรต่อ** ซึ่งรู้ได้ก็ต่อเมื่อจบงวดแล้ว
+                        //
+                        //   ★ log ก็เช่นกัน — ของเดิมพิมพ์บรรทัดละใบ วัดจริงได้ 37,606
+                        //   บรรทัดจากการลากครั้งเดียว ซึ่งดัน crash log ที่มีค่าออกจาก
+                        //   ไฟล์ที่หมุนตามขนาด (เหตุผลเดียวกับ HANDOFF §4 ข้อ 9)
+                        Err(AtlasError::Full { layers } | AtlasError::NeedsResize { layers }) => {
+                            if drop.rejected == 0 {
+                                tracing::warn!(
+                                    layers,
+                                    "the board is full — the rest of this batch cannot be added"
+                                );
+                            }
+                            drop.rejected += 1;
+                        }
+                        // VRAM ไม่พอเป็นคนละปัญหากับ board เต็ม (ข้อความบอกตัวเลขจริง)
+                        Err(err) => {
+                            tracing::warn!(%err, "cannot store the thumbnail in the atlas");
+                            drop.failed += 1;
+                            shell.status = text::atlas_error(shell.lang, &err);
+                            shell.status_warn = true;
+                        }
+                    }
+                    continue;
+                }
+            };
+            // ★★★ ใบที่เปิดไม่ได้ → `Missing` บน board (ROADMAP P3-3)
+            //
+            // ★ **ไม่ต้องมี `gfx`** โดยตั้งใจ: ช่องว่างไม่มีพิกเซลให้อัปขึ้น atlas · ถ้าไปผูก
+            //   กับ `gfx.as_mut()` เหมือนกิ่งข้างบน การข้ามตอนไม่มี GPU จะทำให้ใบพวกนี้
+            //   ไม่ถูกนับ แล้ว `DropBatch::settled()` จะไม่มีวันเป็นจริง = แถบ "กำลังโหลด" ค้างถาวร
+            let Some(index) = owner.and_then(|id| docs.list.iter().position(|d| d.id == id)) else {
+                // แท็บถูกปิดไประหว่างที่งานเดินอยู่ — ไม่มีที่ให้ผลลง
+                drop.cancelled += 1;
+                continue;
+            };
+            let original_path = source
+                .as_ref()
+                .and_then(|s| s.file())
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_default();
+            let board_id = docs.list[index].id;
+            let canvas = gfx.as_ref().map(|gfx| gfx.canvas.size);
+            let doc = &mut docs.list[index];
+
+            // ★★★ **เอกสารที่เปิดมาจากไฟล์: item มีอยู่แล้ว ห้ามสร้างใบใหม่**
+            //
+            //   เส้นทางเดียวกับกิ่ง `Done` เป๊ะ (ดู `relink_targets` ที่นั่น) ·
+            //   รุ่นแรกของโค้ดนี้สร้างใบใหม่ทุกครั้ง ผลคือเปิดไฟล์ที่มีภาพเสีย
+            //   หนึ่งใบแล้วได้ **ห้า item จากเอกสารที่มีสี่** — ใบผีที่ไม่มีอยู่
+            //   ในไฟล์ · เห็นเพราะรันแอปจริงแล้วนับตัวเลขบนแถบสถานะ
+            if let Some(id) = doc.relink_targets.remove(&hash) {
+                if doc.board.item(id).is_some() {
+                    repairs.push((
+                        board_id,
+                        id,
+                        ItemKind::Missing {
+                            original_path,
+                            reason,
+                        },
+                    ));
+                    drop.added += 1;
+                    drop.damaged += 1;
+                } else {
+                    // ใบนั้นถูกลบไประหว่างที่งานเดินอยู่ (undo / เปิดไฟล์อื่นทับ)
+                    drop.cancelled += 1;
+                }
+                continue;
+            }
+
+            // ★ ไหลลงบริเวณที่เห็นเดียวกับภาพที่เปิดได้ (P5-9b) — ใบที่เสียต้องอยู่ใน
+            //   ลำดับที่ผู้ใช้ลากเข้ามา ไม่ใช่กองรวมกันที่มุมใดมุมหนึ่ง · ไม่รู้สัดส่วนจริง
+            //   เพราะอ่านหัวไฟล์ไม่ผ่าน → กรอบ 4:3 ตามขนาดของบริเวณที่เห็น
+            let anchor = Self::anchor_or_latest(doc, anchor, canvas);
+            let (center, size) = Self::drop_flow(doc, anchor).place_missing();
+            let item = Item::new(ItemKind::Missing {
+                original_path,
+                reason,
+            })
+            .at(center, size);
+            let item = Item {
+                meta: ItemMeta {
+                    added_at: now_ms(),
+                    ..item.meta
+                },
+                ..item
+            };
+
+            // ★ ผ่าน `AddItems` เหมือนภาพปกติ — ลากไฟล์เสียเข้ามาแล้ว `Ctrl+Z` ได้
+            let Ok(command) = AddItems::new(vec![item]) else {
+                drop.failed += 1;
+                continue;
+            };
+            if let Err(err) = doc.history.apply(&mut doc.board, Box::new(command)) {
+                tracing::error!(%err, "cannot add the damaged image to the board");
+                drop.failed += 1;
+                continue;
+            }
+            if let Some(id) = doc.board.z_order().last().copied()
+                && let Some(item) = doc.board.item(id)
+            {
+                let canvas = item.canvas;
+                doc.index.insert(id, &canvas);
+            }
+            // ★ ใบที่เสียก็เป็นส่วนหนึ่งของชุด — กล้องต้องเห็นมันด้วย (P5-9b)
+            Self::follow_new_items(doc, anchor, canvas);
+            // ★ นับเป็น `added` เพราะ **ผู้ใช้เห็นมันบนกระดานจริง ๆ** ·
+            //   `damaged` เป็นตัวนับแยกสำหรับข้อความสรุป — ถ้านับทั้งสองช่อง
+            //   ลง `answered()` งวดจะจบเร็วไปหนึ่งเท่าตัว
+            drop.added += 1;
+            drop.damaged += 1;
+            tracing::debug!(hash = %hash.short(), ?reason, "damaged image became a placeholder");
+        }
+        // ★ instance ที่ส่งให้ GPU สร้างใหม่จาก board **หลังจบชุด** ไม่ใช่ทีละใบ
+        //   (ลากเข้ามา 100 ไฟล์ = สร้างครั้งเดียว ไม่ใช่ 100 ครั้ง)
+        //   ★ เฉพาะแท็บที่อยู่บนจอ — `quads` มีชุดเดียวต่อหน้าต่าง
+        if had_results && let Some(gfx) = gfx.as_mut() {
+            Self::rebuild_quads(gfx, docs.active_mut());
+        }
+        had_results
     }
 
     /// อยู่ในโหมด benchmark และยังไม่ครบเวลาหรือไม่
@@ -6752,7 +6841,6 @@ impl RefxApp {
         for key in orphans {
             self.job_owner.remove(&key);
             self.job_sources.remove(&key);
-            self.job_anchor.remove(&key);
         }
     }
 
@@ -12792,6 +12880,94 @@ mod tests {
                 && b.max.x <= view.max.x + 0.5
                 && b.max.y <= view.max.y + 0.5
         })
+    }
+
+    /// ลากห้าไฟล์ไปที่กลางจอ แล้วป้อนคำตอบตาม `order` ทีละ `per_frame` ใบต่อเฟรม ·
+    /// ไฟล์ที่ 2 ถูกยกเลิก ที่เหลือเปิดไม่ได้ · คืน (ชื่อไฟล์, จุดกึ่งกลาง) **ตาม z-order**
+    fn drop_five_and_answer(order: &[usize], per_frame: usize) -> Vec<(String, Vec2)> {
+        let mut app = RefxApp::new(AppArgs::default());
+        let owner = app.docs.active().id;
+        let anchor = dropped_here(app.docs.active(), Vec2::new(1280.0, 800.0));
+        let paths: Vec<std::path::PathBuf> = (0..5)
+            .map(|i| std::path::PathBuf::from(format!("/work/{i}.png")))
+            .collect();
+        let keys: Vec<_> = paths.iter().map(|p| job_key_for(owner, p)).collect();
+        let jobs = keys
+            .iter()
+            .zip(&paths)
+            .map(|(key, path)| refx_asset::pool::Job {
+                hash: *key,
+                source: refx_asset::pool::JobSource::File(path.clone()),
+                priority: 0.0,
+                cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                target: refx_asset::pool::JobTarget::Thumbnail,
+            })
+            .collect();
+        app.submit_thumbnail_jobs(owner, Some(anchor), jobs);
+        for frame in order.chunks(per_frame) {
+            let arrived = frame
+                .iter()
+                .map(|&i| {
+                    let key = keys[i];
+                    let arrival = if i == 2 {
+                        Arrival::Skipped
+                    } else {
+                        Arrival::Damaged {
+                            hash: key,
+                            owner: app.job_owner.remove(&key),
+                            source: app.job_sources.remove(&key),
+                            reason: refx_core::board::MissingReason::Damaged,
+                        }
+                    };
+                    (key, arrival)
+                })
+                .collect();
+            let (mut repairs, mut pasted) = (Vec::new(), Vec::new());
+            app.place_arrivals(arrived, &mut repairs, &mut pasted);
+        }
+        let board = &app.docs.active().board;
+        board
+            .z_order()
+            .iter()
+            .map(|id| {
+                let item = board.item(*id).unwrap();
+                let ItemKind::Missing { original_path, .. } = &item.kind else {
+                    panic!("ได้ item ชนิดอื่นที่ไม่ได้ลากเข้ามา");
+                };
+                (original_path.display().to_string(), item.canvas.pos)
+            })
+            .collect()
+    }
+
+    /// ★★★ **ประตูของเจ้าของโปรเจกต์ ทางแอป:** ลากชุดเดิมซ้ำโดยบังคับให้คำตอบมาคนละลำดับ
+    /// และคนละเฟรม → **ผังเท่ากัน และ z-order เท่ากัน** (ตัดสิน 8 ต.ค. 2026)
+    ///
+    /// เดินเส้นทางจริง `submit_thumbnail_jobs` → `place_arrivals` → `drop_flow` → `AddItems`
+    /// · ใช้ใบที่เปิดไม่ได้เพราะไม่ต้องมี GPU · ใบที่เปิดได้เดินลูปเดียวกันในลำดับเดียวกัน
+    /// · ใบที่ถูกยกเลิกอยู่กลางชุด — ใบหลังมันต้องไม่ค้าง
+    #[test]
+    fn dropping_the_same_files_twice_gives_the_same_layout_whatever_order_they_finish_in() {
+        let want = drop_five_and_answer(&[0, 1, 2, 3, 4], 5);
+        let names: Vec<&str> = want.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names.len(), 4, "ใบที่ถูกยกเลิกไม่ควรเป็น item · ใบอื่นต้องขึ้นครบ");
+        assert!(
+            names.windows(2).all(|w| w[0] < w[1]),
+            "z-order ของชุดไม่ตามลำดับไฟล์: {names:?}"
+        );
+        for order in [
+            [4, 3, 2, 1, 0],
+            [3, 0, 4, 2, 1],
+            [2, 4, 1, 3, 0],
+            [1, 0, 3, 2, 4],
+        ] {
+            for per_frame in [1, 2, 5] {
+                assert_eq!(
+                    drop_five_and_answer(&order, per_frame),
+                    want,
+                    "คำตอบมาตามลำดับ {order:?} ({per_frame} ใบ/เฟรม) ได้ผังต่างกัน"
+                );
+            }
+        }
     }
 
     /// ★★★ **กระดานว่าง → กล้อง fit ทันที** · ภาพแนวตั้งใหญ่ที่ล้นจอต้องเห็นทั้งใบ (P5-9b)
