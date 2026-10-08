@@ -13404,6 +13404,12 @@ mod tests {
     /// ไม่ใช่แค่คำว่า "ย้ายแล้ว"
     ///
     /// ★ negative control: ถามแค่ 2 รอบ → ไม่ย้าย ไม่มีข้อความ และยังถูกถามตามปกติ
+    ///
+    /// ★★ **หนึ่งกรณี = หนึ่งโฟลเดอร์ใหม่** (แก้ 9 ต.ค. 2026) — รุ่นแรกใช้โฟลเดอร์เดียว
+    /// ให้สองภาษา ซึ่งคือ **การเปิดโปรแกรมสองครั้งติดกัน** · ครั้งแรกถามแล้วนับเป็นรอบที่ 3
+    /// บนเธรดอื่น (`spawn_ask_count` · I-2) ครั้งที่สองจึงย้ายถูกต้องแล้ว · เทสต์เขียวในเครื่อง
+    /// เพราะเธรดนับแพ้ในการแข่ง และแดงบน windows CI (run 37811153557) เพราะมันชนะ ·
+    /// พิสูจน์: รอเธรดนับให้จบก่อนรอบถัดไป → แดงในเครื่องที่บรรทัดเดียวกับ CI
     #[test]
     fn the_launch_that_moves_work_to_kept_says_where_it_went() {
         use refx_platform::fsops::rename_durable;
@@ -13411,24 +13417,26 @@ mod tests {
             (refx_io::recovery::ASK_ROUNDS - 1, false),
             (refx_io::recovery::ASK_ROUNDS, true),
         ] {
-            let dir =
-                std::env::temp_dir().join(format!("refx-kept-says-{asks}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&dir);
-            std::fs::create_dir_all(&dir).unwrap();
-            let session = refx_io::recovery::SessionId::new_unique();
-            refx_io::recovery::write_snapshot(
-                &dir,
-                &session,
-                &refx_core::board::Board::default(),
-                rename_durable,
-            )
-            .unwrap();
-            let path = refx_io::recovery::snapshot_path(&dir, &session);
-            for _ in 0..asks {
-                refx_io::recovery::count_ask(&path);
-            }
-
             for lang in [Lang::En, Lang::Th] {
+                let dir = std::env::temp_dir().join(format!(
+                    "refx-kept-says-{asks}-{lang:?}-{}",
+                    std::process::id()
+                ));
+                let _ = std::fs::remove_dir_all(&dir);
+                std::fs::create_dir_all(&dir).unwrap();
+                let session = refx_io::recovery::SessionId::new_unique();
+                refx_io::recovery::write_snapshot(
+                    &dir,
+                    &session,
+                    &refx_core::board::Board::default(),
+                    rename_durable,
+                )
+                .unwrap();
+                let path = refx_io::recovery::snapshot_path(&dir, &session);
+                for _ in 0..asks {
+                    refx_io::recovery::count_ask(&path);
+                }
+
                 let mut app = RefxApp::new(AppArgs::default());
                 app.shell.lang = lang;
                 app.recovery_dir = Some(dir.clone());
@@ -13441,26 +13449,32 @@ mod tests {
                 .unwrap();
                 app.recovery_scan = Some(rx);
                 app.poll_recovery_scan();
+                // ★ เธรดนับรอบต้องจบก่อนตรวจ/ลบโฟลเดอร์ — ไม่งั้นผลขึ้นกับการแข่ง
+                if let Some(counting) = app.recovery_ask_count.take() {
+                    counting.join().unwrap();
+                }
 
                 let kept = refx_io::recovery::kept_dir(&dir).display().to_string();
-                if should_move && lang == Lang::En {
+                if should_move {
                     assert!(
                         app.shell.status.contains(&kept),
-                        "ย้ายแล้วไม่บอกว่าไปไหน: {:?}",
+                        "{lang:?}: ย้ายแล้วไม่บอกว่าไปไหน: {:?}",
                         app.shell.status
                     );
                     assert!(app.shell.status_warn, "ข้อความย้ายต้องเด่น ไม่ใช่ข้อความปกติ");
                     assert!(app.shell.recover_prompt.is_none(), "ย้ายแล้วยังถามอีก");
-                } else if should_move {
-                    // รอบที่สอง (ไทย) ไฟล์ย้ายไปแล้วตั้งแต่รอบแรก → ไม่มีอะไรต้องบอกซ้ำ
-                    assert!(!app.shell.status.contains(&kept), "บอกซ้ำทุกครั้งที่เปิด");
                 } else {
-                    assert!(!app.shell.status.contains(&kept), "ยังไม่ครบรอบแต่บอกว่าย้าย");
+                    assert!(
+                        !app.shell.status.contains(&kept),
+                        "{lang:?}: ยังไม่ครบรอบแต่บอกว่าย้าย"
+                    );
                     assert!(app.shell.recover_prompt.is_some(), "ยังไม่ครบรอบต้องถามตามปกติ");
+                    // การเปิดครั้งนี้ถามแล้ว → นับเป็นอีกหนึ่งรอบ (ครั้งหน้าจะครบแล้วย้าย)
+                    assert_eq!(refx_io::recovery::times_asked(&path), asks + 1);
                 }
+                assert_eq!(path.exists(), !should_move);
+                let _ = std::fs::remove_dir_all(&dir);
             }
-            assert_eq!(path.exists(), !should_move);
-            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 
