@@ -696,7 +696,7 @@ Export ภาพขนาดใหญ่ต้องทำเป็น tile (ren
 > — ต้องมีทางแรสเตอร์ข้อความในทางส่งออก ซึ่งใหญ่เกินกว่าจะใส่ก่อน rc.2
 > **แต่การเงียบไม่ใช่ทางเลือก** · เตือนคือราคาที่ถูกที่สุดที่ซื่อสัตย์
 >
-> **เตือนแล้ว 8 ต.ค. 2026** — `ExportView::notes` · ช่องเดียวกับ `Missing` ผ่าน
+> **เตือนแล้ว 9 ต.ค. 2026** — `ExportView::notes` · ช่องเดียวกับ `Missing` ผ่าน
 > `shell::export_warning` · มีทั้งคู่ = ประโยคเดียว (`Key::ExportMissingAndNotesWarning`)
 > · ประตู `the_export_box_says_text_notes_are_left_out_in_one_warning_with_missing_images`
 > · คู่มือ: `KNOWN-LIMITATIONS.md` §13
