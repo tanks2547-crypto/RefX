@@ -267,6 +267,23 @@ mod tests {
 
     use super::*;
 
+    /// ★★ เทสต์ที่จอง/คืนบล็อก 64 MB **ห้ามรันพร้อมกันในโปรเซสเดียว** (เจอ 8 ต.ค. 2026)
+    ///
+    /// มาตรทุกตัวอ่านทั้งโปรเซส · `cargo test` รันเทสต์เป็นเธรดในโปรเซสเดียว (nextest
+    /// แยกโปรเซสต่อเทสต์ จึงไม่เคยเห็น) → เทสต์หนึ่งคืนบล็อกของมันระหว่างที่อีกเทสต์
+    /// วัดอยู่ แล้ว `private` "ลดจาก 129 MB เหลือ 65 MB" — ลดเท่าบล็อกเดียวพอดี ·
+    /// พิสูจน์แล้ว: `cargo test -p refx-platform --lib memory::` แดง 3/3 ·
+    /// `--test-threads=1` เขียว 3/3 · คือเหตุที่ sweep รายสัปดาห์ (`xtask mutation`)
+    /// รายงาน "ฐานยังไม่เขียว" บน windows 6 ต.ค. 2026 (run 37436388977)
+    static ONE_BLOCK_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn one_block_at_a_time() -> std::sync::MutexGuard<'static, ()> {
+        // เทสต์ที่ถือล็อกแล้ว panic ไม่ทำให้ตัวถัดไปวัดผิด — ใช้ต่อได้
+        ONE_BLOCK_AT_A_TIME
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// ค่าที่ได้ต้องสมเหตุสมผล ไม่ใช่ 0 หรือเลขบ้า ๆ
     ///
     /// ถ้าเลย์เอาต์ของ `MEMORYSTATUSEX` ผิด ค่าจะเพี้ยนไปคนละโลก แล้วเทสต์นี้จับได้
@@ -328,6 +345,7 @@ mod tests {
     /// — และเราจะรู้ตัววันที่ผู้ใช้ export แล้วเครื่องหมดแรม ซึ่งสายไปแล้ว
     #[test]
     fn the_rss_meter_actually_moves_when_memory_is_used() {
+        let _alone = one_block_at_a_time();
         let Some(before) = process_memory() else {
             println!("ข้าม: แพลตฟอร์มนี้ยังตอบ RSS ไม่ได้");
             return;
@@ -389,6 +407,7 @@ mod tests {
             fn SetProcessWorkingSetSize(process: isize, min: usize, max: usize) -> i32;
         }
 
+        let _alone = one_block_at_a_time();
         const BLOCK: usize = 64 << 20;
         let mut hog = vec![0u8; BLOCK];
         for page in hog.chunks_mut(4096) {

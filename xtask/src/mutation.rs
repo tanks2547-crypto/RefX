@@ -140,10 +140,19 @@ pub fn run() -> anyhow::Result<()> {
 
     // ★ ฐานต้องเขียวก่อน ไม่งั้นทุกตัวจะ "แดง" ด้วยเหตุผลที่ไม่เกี่ยวกับ mutation
     let started = std::time::Instant::now();
-    anyhow::ensure!(
-        run_tests(&root, &krate, &target)?,
-        "ฐานยังไม่เขียว — หยุดก่อนที่จะรายงานตัวเลขที่ไม่มีความหมาย"
-    );
+    // ★★ ฐานแดงต้องบอก **เทสต์ตัวไหน** — เดิมทิ้งผลทั้งหมดแล้วพิมพ์แค่ "ยังไม่เขียว"
+    //    run 37436388977 (6 ต.ค. 2026) จึงไม่มีอะไรให้อ่านเลยนอกจาก exit code 1
+    //    (`docs/08 §3.9` ข้อ 9 · ห้ามตัดหลักฐานทิ้ง)
+    let (green, report) = test_once(&root, &krate, &target)?;
+    if !green {
+        for line in report
+            .lines()
+            .filter(|l| l.contains("FAILED") || l.contains("panicked") || l.contains("test result"))
+        {
+            println!("  {line}");
+        }
+        anyhow::bail!("ฐานยังไม่เขียว — หยุดก่อนที่จะรายงานตัวเลขที่ไม่มีความหมาย");
+    }
     let baseline = started.elapsed();
     println!("ฐานเขียวใน {:.1} วินาที", baseline.as_secs_f64());
 
@@ -328,6 +337,11 @@ fn root() -> anyhow::Result<PathBuf> {
 ///
 /// ★ target dir แยกเพื่อไม่ให้ชนล็อกกับ build ที่คนกำลังทำอยู่
 fn run_tests(root: &Path, krate: &str, target: &Path) -> anyhow::Result<bool> {
+    Ok(test_once(root, krate, target)?.0)
+}
+
+/// [`run_tests`] พร้อม stdout ของรอบนั้น — ชื่อเทสต์ที่แดงอยู่ในนั้น ไม่ใช่ใน stderr
+fn test_once(root: &Path, krate: &str, target: &Path) -> anyhow::Result<(bool, String)> {
     let out = std::process::Command::new("cargo")
         .args(["test", "-p", krate, "--lib", "--", "--quiet"])
         .current_dir(root)
@@ -338,7 +352,10 @@ fn run_tests(root: &Path, krate: &str, target: &Path) -> anyhow::Result<bool> {
     if text.contains("error[") || text.contains("could not compile") {
         anyhow::bail!("คอมไพล์ไม่ผ่าน");
     }
-    Ok(out.status.success())
+    Ok((
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+    ))
 }
 
 /// ★★★ ค้นหาด่านเองจากซอร์ส — **ไม่มีรายชื่อไฟล์ที่เขียนด้วยมือ**
