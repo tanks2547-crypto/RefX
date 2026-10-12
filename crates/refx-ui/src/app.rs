@@ -1972,6 +1972,8 @@ pub struct RefxApp {
     /// ★ แทน `job_anchor` (ตารางคีย์ → จุดชี้) ซึ่ง **ไฟล์เดียวกันในสองชุดเขียนทับกัน**:
     ///   ลากไฟล์เดิมซ้ำไปอีกที่ระหว่างที่ชุดแรกยังโหลด แล้วใบของชุดแรกไปลงที่ของชุดหลัง
     arrivals: crate::placement::Arrivals<refx_asset::hash::ContentHash, Arrival>,
+    /// เลขชุดล่าสุดที่แจกไป — ดู [`crate::placement::Anchor::for_batch`] (เดินหน้าอย่างเดียว)
+    batches_started: u64,
     /// ★ จุดที่ปล่อยเมาส์ของการลากวางที่กำลังรวมชุด (physical pixel บนหน้าต่าง)
     ///
     /// winit 0.30 รับจุดปล่อยจาก OS แล้วทิ้ง (`drop_handler.rs` — `_pt`) · อ่านจาก
@@ -3025,6 +3027,7 @@ impl RefxApp {
             recovery_checked: false,
             job_owner: std::collections::HashMap::new(),
             arrivals: crate::placement::Arrivals::default(),
+            batches_started: 0,
             drop_point: None,
             // ผู้เรียก (`run`) เสียบให้ — ที่นี่ไม่รู้จัก `AppPaths`
             recovery_dir: None,
@@ -3404,7 +3407,14 @@ impl RefxApp {
         jobs: Vec<refx_asset::pool::Job>,
     ) {
         // ★★★ ชุดนี้วางตามลำดับของ `jobs` ไม่ใช่ลำดับที่ worker ทำเสร็จ (ตัดสิน 8 ต.ค. 2026)
+        //     · และเป็นตาราง ⌈√N⌉ คอลัมน์ของ N ไฟล์ — ที่นี่คือที่เดียวที่รู้ N
+        //     (ROADMAP P5-9b แก้ 12 ต.ค. 2026)
+        //     · เลขชุดไม่ซ้ำ — ชี้จุดเดิมซ้ำต้องได้สายใหม่ ไม่ใช่ต่อแถวของชุดเก่า
         if let Some(anchor) = anchor {
+            self.batches_started += 1;
+            let anchor = anchor
+                .with_count(jobs.len())
+                .for_batch(self.batches_started);
             self.arrivals.open(anchor, jobs.iter().map(|job| job.hash));
         }
         for job in jobs {
@@ -4006,7 +4016,8 @@ impl RefxApp {
                             //   เดิมที่นี่ย่อทุกใบให้ด้านยาว 128 แล้ววางเป็นตาราง 16 ช่องที่ (2000,
                             //   2000) ตายตัว · ภาพ 4000×6641 ของเจ้าของโปรเจกต์กลายเป็น 77×128
                             //   ≈ 30 px บนจอที่ซูม 25% · ตอนนี้ 1 หน่วย world = 1 พิกเซลตอนวาง
-                            //   และไหลลงบริเวณที่ผู้ใช้กำลังดูอยู่ โดย **ไม่แตะกล้อง**
+                            //   เป็นตาราง ⌈√N⌉ คอลัมน์จากจุดที่ชี้ (ไม่ขึ้นกับซูม — แก้ 12 ต.ค.
+                            //   2026) โดย **ไม่แตะกล้อง** ถ้ากระดานมีของอยู่แล้ว
                             let (sw, sh) = (thumb.source_width, thumb.source_height);
                             let anchor = Self::anchor_or_latest(doc, anchor, Some(gfx.canvas.size));
                             let (center, size) = Self::drop_flow(doc, anchor).place_image(sw, sh);
@@ -4157,9 +4168,9 @@ impl RefxApp {
                 continue;
             }
 
-            // ★ ไหลลงบริเวณที่เห็นเดียวกับภาพที่เปิดได้ (P5-9b) — ใบที่เสียต้องอยู่ใน
+            // ★ หยิบช่องจากตารางเดียวกับภาพที่เปิดได้ (P5-9b) — ใบที่เสียต้องอยู่ใน
             //   ลำดับที่ผู้ใช้ลากเข้ามา ไม่ใช่กองรวมกันที่มุมใดมุมหนึ่ง · ไม่รู้สัดส่วนจริง
-            //   เพราะอ่านหัวไฟล์ไม่ผ่าน → กรอบ 4:3 ตามขนาดของบริเวณที่เห็น
+            //   เพราะอ่านหัวไฟล์ไม่ผ่าน → กรอบ 1200 × 900 ตายตัว (ไม่ขึ้นกับซูม — แก้ 12 ต.ค. 2026)
             let anchor = Self::anchor_or_latest(doc, anchor, canvas);
             let (center, size) = Self::drop_flow(doc, anchor).place_missing();
             let item = Item::new(ItemKind::Missing {
@@ -4737,7 +4748,7 @@ impl RefxApp {
             .filter(|p| p.x >= 0.0 && p.y >= 0.0 && p.x <= canvas.size.x && p.y <= canvas.size.y);
         match local {
             Some(local) => {
-                crate::placement::Anchor::new(doc.camera.screen_to_world(local, canvas.size), view)
+                crate::placement::Anchor::at(doc.camera.screen_to_world(local, canvas.size))
             }
             None => crate::placement::Anchor::center_of(view),
         }
@@ -12207,7 +12218,7 @@ mod tests {
         let paste = refx_asset::hash::hash_bytes(b"clipboard:test");
         app.submit_thumbnail_jobs(
             owner,
-            Some(crate::placement::Anchor::new(pointed, view)),
+            Some(crate::placement::Anchor::at(pointed)),
             vec![refx_asset::pool::Job {
                 hash: paste,
                 source: refx_asset::pool::JobSource::Clipboard,
@@ -13059,7 +13070,19 @@ mod tests {
     /// ลากห้าไฟล์ไปที่กลางจอ แล้วป้อนคำตอบตาม `order` ทีละ `per_frame` ใบต่อเฟรม ·
     /// ไฟล์ที่ 2 ถูกยกเลิก ที่เหลือเปิดไม่ได้ · คืน (ชื่อไฟล์, จุดกึ่งกลาง) **ตาม z-order**
     fn drop_five_and_answer(order: &[usize], per_frame: usize) -> Vec<(String, Vec2)> {
+        drop_five_at_zoom(order, per_frame, None)
+    }
+
+    /// เหมือน [`drop_five_and_answer`] แต่ตั้งซูมของกล้องก่อนลาก (จุดกลางจอคงเดิม)
+    fn drop_five_at_zoom(
+        order: &[usize],
+        per_frame: usize,
+        zoom: Option<f32>,
+    ) -> Vec<(String, Vec2)> {
         let mut app = RefxApp::new(AppArgs::default());
+        if let Some(zoom) = zoom {
+            app.docs.active_mut().camera.set_zoom(zoom);
+        }
         let owner = app.docs.active().id;
         let anchor = dropped_here(app.docs.active(), Vec2::new(1280.0, 800.0));
         let paths: Vec<std::path::PathBuf> = (0..5)
@@ -13144,6 +13167,68 @@ mod tests {
         }
     }
 
+    /// ★★ **ชี้จุดเดิมซ้ำ = ชุดใหม่ที่ลงตรงจุดนั้น** ไม่ใช่ต่อแถวของชุดก่อน (เจอ 12 ต.ค. 2026)
+    ///
+    /// Ctrl+V สองครั้งตอนเคอร์เซอร์อยู่นอกผืนผ้าใบ = กลางจอทั้งคู่ · สายถูกหาด้วยความเท่ากัน
+    /// ของ `Anchor` และค้างอยู่หลังชุดจบ → ไม่มีเลขชุด ครั้งที่สองไปต่อแถวของครั้งแรก
+    #[test]
+    fn two_drops_at_the_same_spot_each_land_on_the_spot() {
+        let mut app = RefxApp::new(AppArgs::default());
+        let owner = app.docs.active().id;
+        let anchor = dropped_here(app.docs.active(), Vec2::new(1280.0, 800.0));
+        for name in ["first", "second"] {
+            let path = std::path::PathBuf::from(format!("/work/{name}.png"));
+            let key = job_key_for(owner, &path);
+            app.submit_thumbnail_jobs(
+                owner,
+                Some(anchor),
+                vec![refx_asset::pool::Job {
+                    hash: key,
+                    source: refx_asset::pool::JobSource::File(path),
+                    priority: 0.0,
+                    cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    target: refx_asset::pool::JobTarget::Thumbnail,
+                }],
+            );
+            let arrival = Arrival::Damaged {
+                hash: key,
+                owner: app.job_owner.remove(&key),
+                source: app.job_sources.remove(&key),
+                reason: refx_core::board::MissingReason::FileNotFound,
+            };
+            app.place_arrivals(vec![(key, arrival)], &mut Vec::new(), &mut Vec::new());
+            let board = &app.docs.active().board;
+            let placed = board.item(*board.z_order().last().unwrap()).unwrap();
+            assert_eq!(
+                placed.canvas.pos,
+                anchor.point(),
+                "ชุด {name}: ไม่ได้ลงตรงที่ชี้ (ไปต่อแถวของชุดก่อน?)"
+            );
+        }
+    }
+
+    /// ★★★ **ประตูของเจ้าของโปรเจกต์ ทางแอป:** ลากชุดเดิมที่ **ซูมสองค่าต่างกัน** →
+    /// พิกัดทุกใบเท่ากัน (ROADMAP P5-9b แก้ 12 ต.ค. 2026)
+    ///
+    /// เส้นทางจริง `submit_thumbnail_jobs` (ที่ตั้งจำนวนของชุด) → `place_arrivals` →
+    /// `drop_flow` · ใบที่เปิดไม่ได้คือใบที่รุ่นก่อนขึ้นกับซูมโดยตรง (กรอบ 20% ของจอ)
+    /// · และสี่ใบที่ขึ้นจอต้องเป็นตาราง 3 คอลัมน์ (ชุดห้าไฟล์ → ⌈√5⌉ = 3)
+    #[test]
+    fn dropping_the_same_files_at_two_zooms_gives_the_same_coordinates() {
+        let near = drop_five_at_zoom(&[0, 1, 2, 3, 4], 5, Some(1.0));
+        for zoom in [0.02, 0.25, 4.0] {
+            assert_eq!(
+                drop_five_at_zoom(&[0, 1, 2, 3, 4], 5, Some(zoom)),
+                near,
+                "ซูม {zoom}: ผังต่างจากซูม 1.0"
+            );
+        }
+        let mut columns: Vec<f32> = near.iter().map(|(_, pos)| pos.x).collect();
+        columns.sort_by(f32::total_cmp);
+        columns.dedup();
+        assert_eq!(columns.len(), 3, "ชุดห้าไฟล์ต้องเป็นตาราง 3 คอลัมน์: {near:?}");
+    }
+
     /// ★★★ **กระดานว่าง → กล้อง fit ทันที** · ภาพแนวตั้งใหญ่ที่ล้นจอต้องเห็นทั้งใบ (P5-9b)
     #[test]
     fn an_empty_board_fits_the_camera_to_what_was_dropped() {
@@ -13185,8 +13270,15 @@ mod tests {
             "ภาพใบเดิมไม่อยู่ในจอ — ข้อนี้ไม่ได้ทดสอบการปล่อยทับ"
         );
 
-        for pointer in [Vec2::new(300.0, 94.0), Vec2::new(1000.0, 700.0), on_old] {
-            let anchor = RefxApp::pointed_anchor(&doc, canvas, Some(pointer));
+        // ★ ทุกการปล่อยเป็นชุดของตัวเอง เหมือน `submit_thumbnail_jobs` แจกเลขชุด ·
+        //   การปล่อยครั้งสุดท้ายตรงกับจุดของชุดแรกเป๊ะ (ใบเดิมกึ่งกลางตรงที่ชุดแรกชี้)
+        //   — ไม่มีเลขชุดมันจะไปต่อแถวของชุดแรกแทนที่จะลงใต้เคอร์เซอร์
+        for (batch, pointer) in [Vec2::new(300.0, 94.0), Vec2::new(1000.0, 700.0), on_old]
+            .into_iter()
+            .enumerate()
+        {
+            let anchor =
+                RefxApp::pointed_anchor(&doc, canvas, Some(pointer)).for_batch(batch as u64 + 1);
             drop_one(&mut doc, anchor, 2400, 1600, canvas.size);
             let placed = doc
                 .board

@@ -13,7 +13,8 @@
 //! | | |
 //! |---|---|
 //! | ขนาด | **1 หน่วย world = 1 พิกเซลของภาพ ตอนวาง** — 2400 px ที่ซูม 25% = 600 px บนจอ |
-//! | ที่วาง | **ตรงที่ผู้ใช้ชี้** ([`Anchor`]) — ใบแรกกึ่งกลางอยู่ที่จุดนั้น · ใบต่อไปไหลไปทางขวา ขึ้นแถวใหม่ที่ขอบขวาของบริเวณที่เห็นตอนวาง |
+//! | ที่วาง | **ตรงที่ผู้ใช้ชี้** ([`Anchor`]) — ใบแรกกึ่งกลางอยู่ที่จุดนั้น · ชุด N ใบเป็นตาราง **⌈√N⌉ คอลัมน์** ตามลำดับไฟล์ |
+//! | ★ ซูม/หน้าต่าง | **ไม่มีผลกับผังเลย** — `Anchor` ไม่ถือบริเวณที่เห็นด้วยซ้ำ (ROADMAP P5-9b แก้ 12 ต.ค. 2026) |
 //! | กล้อง | **ไม่แตะ** — "การขยับมุมมองที่ผู้ใช้ไม่ได้ขอ คือการแย่งงานเขา" (`docs/02 §2.9`) |
 //!
 //! ★★★ **ตรงที่ชี้** (ROADMAP — ตัดสิน 1 ต.ค. 2026): ลากวาง = จุดที่ปล่อยเมาส์ ·
@@ -42,15 +43,18 @@ use refx_core::geom::Rect;
 use refx_core::glam::Vec2;
 use refx_core::layout::MAX_SIDE;
 
-/// สัดส่วนของขอบรอบบริเวณที่เห็น — ภาพไม่ชิดขอบจอตอนขึ้นแถวใหม่
-const MARGIN: f32 = 0.05;
-/// ช่องว่างระหว่างภาพ เทียบกับความกว้างของบริเวณที่เห็น
-const GAP: f32 = 0.02;
-/// กรอบของภาพที่เปิดไม่ได้ (`Missing`) กว้างเท่านี้ของบริเวณที่เห็น
+/// ช่องว่างระหว่างภาพ เทียบกับด้านยาวของ **ใบแรกของชุด**
 ///
-/// ★ ไม่รู้ขนาดจริงเพราะอ่านหัวไฟล์ไม่ผ่าน · ขนาดตายตัวในหน่วย world จะเล็กจนอ่านป้าย
-///   ไม่ออกตอนซูมออก และใหญ่จนบังทั้งจอตอนซูมเข้า → ผูกกับสิ่งที่ผู้ใช้เห็นอยู่
-const MISSING_WIDTH: f32 = 0.2;
+/// ★ เดิมเทียบกับความกว้างของบริเวณที่เห็น = ผังขึ้นกับซูม · ใบแรกของชุดเป็นค่าเดียวกัน
+///   ทุกครั้งที่ลากชุดเดิม (ลำดับไฟล์ — [`Arrivals`])
+const GAP_OF_FIRST: f32 = 0.04;
+/// กรอบของภาพที่เปิดไม่ได้ (`Missing`) ในหน่วย world — ★ **ไม่ผูกกับบริเวณที่เห็น** แล้ว
+///
+/// ไม่รู้ขนาดจริงเพราะอ่านหัวไฟล์ไม่ผ่าน · เดิมกว้าง 20% ของจอเพื่อให้อ่านป้ายออกทุกซูม
+/// แต่กรอบที่ขึ้นกับซูมทำให้ **ทุกใบหลังมันในชุด** ขยับตามซูมไปด้วย (แก้ 12 ต.ค. 2026)
+/// · ตอนนี้มันทำตัวเหมือนภาพ 1200 × 900 ที่ 1:1 — ซูมเข้าก็ใหญ่ ซูมออกก็เล็ก **เท่ากับภาพ
+///   จริงข้าง ๆ มัน** ซึ่งคือสิ่งที่ผู้ใช้เทียบด้วยตาอยู่แล้ว
+const MISSING_SIZE: Vec2 = Vec2::new(1200.0, 900.0);
 /// ★ แท็บหนึ่งถือการไหลค้างได้กี่สาย (I-6) — เกินแล้วทิ้งสายเก่าสุด
 ///
 /// สายที่ถูกทิ้งแปลว่าชุดนั้นถูกลากมานานแล้วและยังมีใบค้าง decode อยู่ · ใบที่เหลือ
@@ -73,33 +77,75 @@ impl ViewKey {
     }
 }
 
-/// ★★★ **ตรงที่ผู้ใช้ชี้** — จุดใน world และบริเวณที่เขาเห็นอยู่ตอนนั้น
+/// ★★★ **ตรงที่ผู้ใช้ชี้** — จุดใน world และจำนวนไฟล์ของชุดนั้น
 ///
-/// บริเวณที่เห็นถูกจดไว้ด้วยเพราะขนาดช่องว่าง/ขอบขึ้นแถวใหม่/กรอบ `Missing`
-/// ต้องผูกกับสิ่งที่ผู้ใช้เห็น **ตอนวาง** ไม่ใช่ตอนที่ภาพใบนั้นบังเอิญ decode เสร็จ
+/// ★★ **ไม่ถือบริเวณที่เห็น** โดยตั้งใจ (แก้ 12 ต.ค. 2026) · รุ่นก่อนจดไว้แล้วใช้ตัดสิน
+/// ช่องว่าง ขอบขึ้นแถวใหม่ และกรอบ `Missing` → ลาก 20 ภาพ 2400 px ได้ **คอลัมน์เดียว
+/// ที่ซูม 2%** และลากชุดเดิมที่ซูมอื่นได้ผังอื่น · ไม่มีช่องให้ถือ = ไม่มีทางกลับไปขึ้นกับซูม
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Anchor {
     point: Vec2,
-    view: Rect,
+    /// จำนวนไฟล์ในชุด — กำหนดจำนวนคอลัมน์ ([`Anchor::columns`])
+    count: usize,
+    /// ★★ ชุดไหน — หนึ่งการชี้ = หนึ่งสาย **แม้จะชี้จุดเดิมซ้ำ** ([`Anchor::for_batch`])
+    batch: u64,
 }
 
 impl Anchor {
-    /// ชี้ที่ `point` ขณะเห็น `view`
+    /// ชี้ที่ `point` (ชุดหนึ่งใบ จนกว่าจะบอก [`Anchor::with_count`])
     #[must_use]
-    pub fn new(point: Vec2, view: Rect) -> Self {
-        Self { point, view }
+    pub fn at(point: Vec2) -> Self {
+        Self {
+            point,
+            count: 1,
+            batch: 0,
+        }
+    }
+
+    /// ★★ ชุดที่เท่าไหร่ — ผู้เรียกแจกเลขไม่ซ้ำตอนส่งงาน (`submit_thumbnail_jobs`)
+    ///
+    /// สายถูกหาด้วยความเท่ากันของ `Anchor` และค้างอยู่หลังชุดจบ (เพดาน [`MAX_FLOWS`])
+    /// · ไม่มีเลขชุด = วางสองครั้งที่จุดเดิมเป๊ะ (Ctrl+V สองครั้งตอนเคอร์เซอร์อยู่นอก
+    /// ผืนผ้าใบ = กลางจอทั้งคู่) แล้ว **ครั้งที่สองไปต่อแถวของครั้งแรก** แทนที่จะลงตรงที่ชี้
+    /// (เจอ 12 ต.ค. 2026 ตอนเอาบริเวณที่เห็นออกจาก `Anchor` — เดิมเกิดได้เมื่อกล้องไม่ขยับ)
+    #[must_use]
+    pub fn for_batch(self, batch: u64) -> Self {
+        Self { batch, ..self }
     }
 
     /// ไม่มีจุดชี้ (เคอร์เซอร์ไม่อยู่เหนือผืนผ้าใบ · เปิดจากบรรทัดคำสั่ง) → **กลางจอ**
     #[must_use]
     pub fn center_of(view: Rect) -> Self {
-        Self::new(view.center(), view)
+        Self::at(view.center())
+    }
+
+    /// ชุดนี้มีกี่ไฟล์ — ผู้เรียกรู้ตอนส่งงาน (`submit_thumbnail_jobs`)
+    #[must_use]
+    pub fn with_count(self, count: usize) -> Self {
+        Self {
+            count: count.max(1),
+            ..self
+        }
     }
 
     /// จุดที่ชี้
     #[must_use]
     pub fn point(&self) -> Vec2 {
         self.point
+    }
+
+    /// ★★★ **⌈√N⌉ คอลัมน์** — ตารางกำหนดด้วยจำนวน ไม่ใช่ด้วยจอ (ROADMAP P5-9b)
+    ///
+    /// 1 → 1 · 3 → 2 (2×2) · 20 → 5 (5×4) · ★ จำนวนเต็มล้วน ไม่มี `sqrt` ของ float
+    /// ให้ปัดผิดที่กำลังสองพอดี
+    #[must_use]
+    pub fn columns(&self) -> usize {
+        let root = self.count.isqrt();
+        if root * root < self.count {
+            root + 1
+        } else {
+            root
+        }
     }
 }
 
@@ -115,6 +161,10 @@ pub struct Flow {
     row_left: f32,
     /// ขอบล่างของแถวปัจจุบัน — แถวถัดไปเริ่มใต้ตรงนี้
     row_bottom: f32,
+    /// วางไปแล้วกี่ใบในแถวนี้ — ครบ [`Anchor::columns`] แล้วขึ้นแถวใหม่
+    in_row: usize,
+    /// ช่องว่างระหว่างภาพ — ตั้งครั้งเดียวจากใบแรก ([`GAP_OF_FIRST`])
+    gap: f32,
     /// ★ การไหลนี้เริ่มบน **กระดานว่าง** — กล้อง fit ตามได้ (P5-9b ส่วนที่ 2)
     fits: bool,
 }
@@ -129,6 +179,8 @@ impl Flow {
             next: None,
             row_left: anchor.point.x,
             row_bottom: anchor.point.y,
+            in_row: 0,
+            gap: 0.0,
             fits: false,
         }
     }
@@ -194,31 +246,33 @@ impl Flow {
         self.take(size)
     }
 
-    /// ที่วางของภาพที่เปิดไม่ได้ — ไม่รู้ขนาดจริง ใช้กรอบ 4:3 ตามสัดส่วนของบริเวณที่เห็น
+    /// ที่วางของภาพที่เปิดไม่ได้ — ไม่รู้ขนาดจริง ใช้กรอบ [`MISSING_SIZE`] (ไม่ขึ้นกับซูม)
     pub fn place_missing(&mut self) -> (Vec2, Vec2) {
-        let width = (self.anchor.view.size().x * MISSING_WIDTH).max(1.0);
-        self.take(Vec2::new(width, width * 0.75))
+        self.take(MISSING_SIZE)
     }
 
     fn take(&mut self, size: Vec2) -> (Vec2, Vec2) {
-        let view = self.anchor.view.size();
-        let gap = view.x * GAP;
         let Some(next) = self.next else {
             // ★★★ ใบแรก: **กึ่งกลางอยู่ตรงที่ชี้พอดี** — สิ่งที่ผู้ใช้คาดจากการปล่อยเมาส์
+            //     ทั้งชุดหนึ่งใบและหลายใบ (ตารางเริ่มจากใบนี้ ไหลไปขวาแล้วลงล่าง)
             let top_left = self.anchor.point - size * 0.5;
+            self.gap = size.max_element() * GAP_OF_FIRST;
             self.row_left = top_left.x;
             self.row_bottom = top_left.y + size.y;
-            self.next = Some(Vec2::new(top_left.x + size.x + gap, top_left.y));
+            self.in_row = 1;
+            self.next = Some(Vec2::new(top_left.x + size.x + self.gap, top_left.y));
             return (self.anchor.point, size);
         };
-        // ขึ้นแถวใหม่ถ้าล้นขอบขวาของบริเวณที่เห็นตอนวาง · แถวใหม่เริ่มที่ขอบซ้ายของใบแรก
-        let right = self.anchor.view.max.x - view.x.min(view.y) * MARGIN;
-        let top_left = if next.x + size.x > right {
-            Vec2::new(self.row_left, self.row_bottom + gap)
+        // ★★★ ขึ้นแถวใหม่เมื่อแถวนี้ครบ ⌈√N⌉ ใบ — **ไม่ใช่เมื่อชนขอบจอ** (แก้ 12 ต.ค. 2026)
+        //     แถวใหม่เริ่มที่ขอบซ้ายของใบแรก ใต้ใบที่สูงที่สุดของแถวก่อน
+        let top_left = if self.in_row >= self.anchor.columns() {
+            self.in_row = 0;
+            Vec2::new(self.row_left, self.row_bottom + self.gap)
         } else {
             next
         };
-        self.next = Some(Vec2::new(top_left.x + size.x + gap, top_left.y));
+        self.in_row += 1;
+        self.next = Some(Vec2::new(top_left.x + size.x + self.gap, top_left.y));
         self.row_bottom = self.row_bottom.max(top_left.y + size.y);
         (top_left + size * 0.5, size)
     }
@@ -434,11 +488,11 @@ mod tests {
             ),
             (Vec2::ZERO, 4.0, Vec2::new(10.0, -20.0)),
         ] {
-            let (key, rect) = view(center, zoom);
-            let mut flow = Flow::new(key, Anchor::new(point, rect));
+            let (key, _) = view(center, zoom);
+            let mut flow = Flow::new(key, Anchor::at(point));
             let (pos, _) = flow.place_image(100, 80);
             assert_eq!(pos, point, "ภาพใบแรกไม่ได้อยู่ตรงที่ชี้");
-            let mut missing = Flow::new(key, Anchor::new(point, rect));
+            let mut missing = Flow::new(key, Anchor::at(point));
             assert_eq!(missing.place_missing().0, point, "ใบที่เปิดไม่ได้ไม่ได้อยู่ตรงที่ชี้");
         }
     }
@@ -461,8 +515,8 @@ mod tests {
             Vec2::new(2000.0, 0.0),
             Vec2::new(-2400.0, 1500.0),
         ] {
-            let (key, rect) = view(Vec2::ZERO, 0.25);
-            let mut flow = Flow::new(key, Anchor::new(point, rect));
+            let (key, _) = view(Vec2::ZERO, 0.25);
+            let mut flow = Flow::new(key, Anchor::at(point).with_count(6));
             let placed: Vec<Rect> = [
                 (2400, 1600),
                 (1200, 3000),
@@ -488,8 +542,8 @@ mod tests {
     /// ★★ ใบต่อไปไหลไปทางขวาของใบแรก — ไม่กระโดดกลับไปที่มุมจอ
     #[test]
     fn the_rest_of_the_batch_flows_on_from_the_pointed_spot() {
-        let (key, rect) = view(Vec2::ZERO, 1.0);
-        let mut flow = Flow::new(key, Anchor::new(Vec2::new(-300.0, -200.0), rect));
+        let (key, _) = view(Vec2::ZERO, 1.0);
+        let mut flow = Flow::new(key, Anchor::at(Vec2::new(-300.0, -200.0)).with_count(2));
         let (a, sa) = flow.place_image(100, 100);
         let (b, _) = flow.place_image(100, 100);
         assert!(b.x > a.x + sa.x * 0.5, "ใบที่สองไม่ได้อยู่ทางขวาของใบแรก");
@@ -503,9 +557,9 @@ mod tests {
     /// ใบที่สองของ A จะไปต่อท้าย B
     #[test]
     fn two_drops_at_two_places_keep_their_own_flows_while_results_interleave() {
-        let (key, rect) = view(Vec2::ZERO, 1.0);
-        let left = Anchor::new(Vec2::new(-400.0, 0.0), rect);
-        let right = Anchor::new(Vec2::new(400.0, 0.0), rect);
+        let (key, _) = view(Vec2::ZERO, 1.0);
+        let left = Anchor::at(Vec2::new(-400.0, 0.0)).with_count(5);
+        let right = Anchor::at(Vec2::new(400.0, 0.0)).with_count(5);
         let mut flows = Vec::new();
         let mut placed = Vec::new();
         for anchor in [left, right, left, right, left] {
@@ -513,43 +567,102 @@ mod tests {
             placed.push((anchor, flow.place_image(50, 50).0));
         }
         assert_eq!(flows.len(), 2);
-        for (anchor, pos) in placed {
+        for &(anchor, pos) in &placed {
             if anchor == left {
                 assert!(pos.x < 0.0, "ใบของชุดซ้ายไปตกฝั่งขวา: {pos}");
             } else {
                 assert!(pos.x > 0.0, "ใบของชุดขวาไปตกฝั่งซ้าย: {pos}");
             }
         }
-        // NC — ใช้สายเดียวสำหรับทุกใบ แล้วใบของชุดซ้ายต้องไหลไปต่อท้ายจนข้ามฝั่ง
+        // NC — ใช้สายเดียวสำหรับทุกใบ (ของเดิมก่อน P5-9b) → ใบของชุดขวาไปตกฝั่งซ้าย
         let mut one = Flow::new(key, left);
         let xs: Vec<f32> = (0..5).map(|_| one.place_image(50, 50).0.x).collect();
-        assert!(xs.iter().any(|x| *x > -300.0), "NC ไม่แสดงความต่าง: {xs:?}");
+        assert_eq!(
+            xs.iter().filter(|x| **x < 0.0).count(),
+            5,
+            "NC ไม่แสดงความต่าง: {xs:?}"
+        );
     }
 
     /// ★ เก็บสายไม่เกินเพดาน (I-6) — สายเก่าสุดถูกทิ้ง
     #[test]
     fn a_tab_never_holds_more_than_the_cap_of_flows() {
-        let (key, rect) = view(Vec2::ZERO, 1.0);
+        let (key, _) = view(Vec2::ZERO, 1.0);
         let mut flows = Vec::new();
         for i in 0..MAX_FLOWS * 3 {
             #[expect(clippy::cast_precision_loss, reason = "ตัวเลขเล็ก")]
-            let anchor = Anchor::new(Vec2::new(i as f32 * 10.0, 0.0), rect);
+            let anchor = Anchor::at(Vec2::new(i as f32 * 10.0, 0.0));
             let _ = flow_for(&mut flows, anchor, || Flow::new(key, anchor));
         }
         assert_eq!(flows.len(), MAX_FLOWS);
     }
 
-    /// ★ `Missing` ผูกกับบริเวณที่เห็น — อ่านป้ายออกได้ทุกระดับซูม
+    /// ★★★ **N ใบ = ตาราง ⌈√N⌉ คอลัมน์ ตามลำดับไฟล์** (ROADMAP P5-9b แก้ 12 ต.ค. 2026)
+    ///
+    /// ภาพจริงของรอบ rc.2 (2400 × 1800 ยี่สิบใบ) ได้คอลัมน์เดียวที่ซูม 2% · ตอนนี้ต้องเป็น 5 × 4
     #[test]
-    fn a_missing_image_frame_scales_with_the_view() {
-        for zoom in [0.05, 1.0, 16.0] {
-            let (key, rect) = view(Vec2::ZERO, zoom);
-            let mut flow = Flow::new(key, Anchor::center_of(rect));
-            let (_, size) = flow.place_missing();
-            let on_screen = size.x * zoom;
-            assert!(
-                (on_screen - 1280.0 * MISSING_WIDTH).abs() < 0.5,
-                "ซูม {zoom}: กรอบ Missing กว้าง {on_screen} px บนจอ"
+    fn a_batch_is_a_grid_of_ceil_sqrt_n_columns_in_file_order() {
+        for (n, cols, rows) in [
+            (1, 1, 1),
+            (2, 2, 1),
+            (3, 2, 2),
+            (4, 2, 2),
+            (5, 3, 2),
+            (20, 5, 4),
+        ] {
+            let (key, rect) = view(Vec2::splat(2000.0), 0.25);
+            let anchor = Anchor::center_of(rect).with_count(n);
+            assert_eq!(anchor.columns(), cols, "{n} ใบ");
+            let mut flow = Flow::new(key, anchor);
+            let placed: Vec<Vec2> = (0..n).map(|_| flow.place_image(2400, 1800).0).collect();
+            let distinct = |pick: fn(&Vec2) -> f32| {
+                let mut v: Vec<f32> = placed.iter().map(pick).collect();
+                v.sort_by(f32::total_cmp);
+                v.dedup();
+                v.len()
+            };
+            assert_eq!(distinct(|p| p.x), cols, "{n} ใบ: จำนวนคอลัมน์");
+            assert_eq!(distinct(|p| p.y), rows, "{n} ใบ: จำนวนแถว");
+            assert_eq!(placed[0], rect.center(), "{n} ใบ: ใบแรกไม่ได้อยู่ตรงที่ชี้");
+            // ลำดับไฟล์ = อ่านแบบหนังสือ: ซ้ายไปขวา แล้วบนลงล่าง
+            for w in placed.windows(2) {
+                assert!(
+                    w[1].y > w[0].y || (w[1].y == w[0].y && w[1].x > w[0].x),
+                    "{n} ใบ: ลำดับไม่ใช่ซ้าย→ขวา บน→ล่าง {w:?}"
+                );
+            }
+        }
+    }
+
+    /// ★★★ **ประตูของเจ้าของโปรเจกต์:** ลากชุดเดิมที่ **ซูมต่างกัน** → พิกัดทุกใบเท่ากัน
+    ///
+    /// ชุดผสมขนาด + ใบที่เปิดไม่ได้กลางชุด (เดิมกรอบของมันกว้าง 20% ของจอ → ทุกใบหลังมัน
+    /// ขยับตามซูม) · จุดชี้เดียวกันใน world · หน้าต่างคนละขนาดด้วย
+    #[test]
+    fn the_same_batch_lands_on_the_same_spots_at_any_zoom() {
+        let point = Vec2::new(700.0, -300.0);
+        let land = |zoom: f32, window: Vec2| -> Vec<(Vec2, Vec2)> {
+            let key = ViewKey::new(point, zoom);
+            let rect = Rect::from_center_size(point, window / zoom);
+            let mut flow = Flow::new(key, Anchor::center_of(rect).with_count(SIZES.len() + 1));
+            let mut out: Vec<(Vec2, Vec2)> = SIZES[..2]
+                .iter()
+                .map(|&(w, h)| flow.place_image(w, h))
+                .collect();
+            out.push(flow.place_missing());
+            out.extend(SIZES[2..].iter().map(|&(w, h)| flow.place_image(w, h)));
+            out
+        };
+        let want = land(0.25, Vec2::new(1280.0, 800.0));
+        for (zoom, window) in [
+            (0.02, Vec2::new(1280.0, 800.0)),
+            (1.0, Vec2::new(640.0, 1000.0)),
+            (4.0, Vec2::new(2560.0, 1440.0)),
+        ] {
+            assert_eq!(
+                land(zoom, window),
+                want,
+                "ซูม {zoom} หน้าต่าง {window}: ผังต่างกัน"
             );
         }
     }
@@ -598,8 +711,8 @@ mod tests {
 
     /// จำลองการลากหนึ่งชุด: ผลกลับมาตาม `order` · `frame` ใบต่อเฟรม · คืนกรอบตามดัชนีไฟล์
     fn drop_batch(order: &[usize], frame: usize, sequenced: bool) -> Vec<Rect> {
-        let (key, rect) = view(Vec2::ZERO, 0.25);
-        let anchor = Anchor::new(Vec2::new(-1000.0, -500.0), rect);
+        let (key, _) = view(Vec2::ZERO, 0.25);
+        let anchor = Anchor::at(Vec2::new(-1000.0, -500.0)).with_count(SIZES.len());
         let mut arrivals: Arrivals<usize, usize> = Arrivals::default();
         arrivals.open(anchor, 0..SIZES.len());
         let mut flows = Vec::new();
@@ -674,9 +787,8 @@ mod tests {
     /// ★★ สองชุดสลับกัน + **ไฟล์เดียวกันอยู่ทั้งสองชุด** — ไม่มีชุดไหนรอคำตอบของอีกชุด
     #[test]
     fn two_batches_wait_only_for_their_own_files() {
-        let (_, rect) = view(Vec2::ZERO, 1.0);
-        let left = Anchor::new(Vec2::new(-400.0, 0.0), rect);
-        let right = Anchor::new(Vec2::new(400.0, 0.0), rect);
+        let left = Anchor::at(Vec2::new(-400.0, 0.0));
+        let right = Anchor::at(Vec2::new(400.0, 0.0));
         let mut arrivals: Arrivals<&str, &str> = Arrivals::default();
         arrivals.open(left, ["a", "same"]);
         arrivals.open(right, ["same", "b"]);
