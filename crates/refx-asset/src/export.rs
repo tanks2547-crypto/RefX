@@ -72,6 +72,77 @@ impl ExportFormat {
     }
 }
 
+/// ★ ส่วนหัว/chunk/marker ของไฟล์ที่ไม่ขึ้นกับจำนวนพิกเซล — วัดได้ ~600 ไบต์ (JPEG 64²)
+const FIXED_OVERHEAD: u64 = 4096;
+
+/// ★★ ไบต์ต่อพิกเซล ×1000 ของ **สัญญาณรบกวนสุ่ม** ที่ JPEG แต่ละคุณภาพ — วัดจริง 12 ต.ค. 2026
+///
+/// ภาพ 2048 × 40 (ตัวที่สูงกว่าระหว่าง 512 × 384 กับ 2048 × 40 · ต่างกันไม่ถึง 1%) ·
+/// สัญญาณรบกวนคือเนื้อที่บีบได้น้อยที่สุด จึงเป็นเพดานของภาพจริงทุกชนิด · ★ ที่ 100
+/// **ใหญ่กว่า RGB ดิบ** (4.10 > 3 ไบต์ต่อพิกเซล) — เพดาน "ขนาดดิบ" จึงใช้กับ JPEG ไม่ได้
+const JPEG_NOISE_MILLI_BPP: [(u8, u64); 17] = [
+    (1, 100),
+    (10, 195),
+    (25, 461),
+    (40, 728),
+    (50, 856),
+    (60, 983),
+    (70, 1155),
+    (75, 1260),
+    (80, 1402),
+    (85, 1587),
+    (90, 1874),
+    (92, 2031),
+    (95, 2423),
+    (97, 2871),
+    (98, 3172),
+    (99, 3679),
+    (100, 4099),
+];
+
+/// ★★★ **เพดาน** ของขนาดไฟล์ที่จะได้ — ไม่ใช่คำทำนาย (`docs/07 §6` · 12 ต.ค. 2026)
+///
+/// ขนาดจริงขึ้นกับ **เนื้อภาพ** ล้วน ๆ (ลายเส้นบีบได้มหาศาล) · สูตรเฉลี่ยไหนก็คลาด
+/// (rc.2: บอก 825 KB ได้ 433 KB) · ที่ให้คำสัญญาได้คือ **"ไม่เกิน"** · ประมาณเกินปลอดภัย
+/// ประมาณขาดทำร้ายผู้ใช้ (เขาวางแผนว่าจะส่งเมลแล้วส่งไม่ได้)
+///
+/// | | เพดาน | วัดจริงบนสัญญาณรบกวน |
+/// |---|---|---|
+/// | PNG | RGBA ดิบ × 1.01 + ไบต์ filter ต่อแถว + ส่วนหัว | 4.015 B/px (โปร่งใส) · 3.448 (ทึบ) |
+/// | JPEG | ตาราง [`JPEG_NOISE_MILLI_BPP`] × 1.10 + ส่วนหัว | ตามตาราง |
+///
+/// ★ ประตู `the_size_ceiling_is_never_below_the_real_file` เข้ารหัสสัญญาณรบกวนจริงทุกคุณภาพ
+#[must_use]
+pub fn size_ceiling(format: ExportFormat, width: u32, height: u32) -> u64 {
+    let pixels = u64::from(width) * u64::from(height);
+    let body = match format {
+        // deflate เก็บดิบได้แย่สุด ~5 ไบต์ต่อ 64 KB · chunk ละ 12 ไบต์ — 1% ครอบทั้งคู่
+        ExportFormat::Png { .. } => pixels * 4 * 101 / 100 + u64::from(height),
+        ExportFormat::Jpeg { quality } => pixels * jpeg_noise_milli_bpp(quality) * 11 / 10_000,
+    };
+    body + FIXED_OVERHEAD
+}
+
+/// เส้นตรงระหว่างจุดที่วัด · คุณภาพนอก 1..=100 ถูกบีบเข้าขอบ (เหมือนตัวเข้ารหัส)
+fn jpeg_noise_milli_bpp(quality: u8) -> u64 {
+    let q = quality.clamp(1, 100);
+    let mut below = JPEG_NOISE_MILLI_BPP[0];
+    for &(at, milli) in &JPEG_NOISE_MILLI_BPP {
+        if at == q {
+            return milli;
+        }
+        if at > q {
+            let (lo_q, lo) = below;
+            let span = u64::from(at - lo_q);
+            let step = u64::from(q - lo_q);
+            // ปัดขึ้น — เพดานต้องไม่ต่ำกว่าเส้นแม้แต่ไบต์เดียว
+            return lo + ((milli - lo) * step).div_ceil(span);
+        }
+        below = (at, milli);
+    }
+    below.1
+}
+
 /// อ่านพิกเซลของแถบไม่สำเร็จ (ฝั่ง GPU ล้ม / device lost)
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -634,6 +705,67 @@ mod tests {
     ///
     /// PNG ไม่สูญเสีย → เทียบได้เป๊ะ · ถ้าแถบไหนเขียนสลับที่หรือเหลื่อมไปแถวเดียว
     /// ข้อนี้จับได้ทันที ซึ่งเป็นความผิดพลาดที่ตาคนดูภาพเองแทบไม่เห็น
+    /// ★ สัญญาณรบกวนสุ่ม (xorshift · seed ตายตัว) — **กรณีที่บีบได้น้อยที่สุด** ของทั้งสองตัว
+    ///   เข้ารหัส · ใช้หาว่าไฟล์ใหญ่ได้แค่ไหนจริง ไม่ใช่โดยเฉลี่ย
+    struct Noise(u64);
+
+    impl BandSource for Noise {
+        fn fill(&mut self, _y0: u32, _rows: u32, out: &mut [u8]) -> Result<(), BandError> {
+            for byte in out.iter_mut() {
+                self.0 ^= self.0 << 13;
+                self.0 ^= self.0 >> 7;
+                self.0 ^= self.0 << 17;
+                *byte = (self.0 >> 24) as u8;
+            }
+            Ok(())
+        }
+    }
+
+    /// วัดขนาดจริงของภาพสัญญาณรบกวน `w × h` ในรูปแบบนั้น
+    fn noise_bytes(tag: &str, format: ExportFormat, w: u32, h: u32) -> u64 {
+        let dir = temp_dir(tag);
+        let path = dir.join(format!("noise.{}", format.extension()));
+        let stats = export_to_file(
+            &path,
+            format,
+            BandPlan::new(w, h).unwrap(),
+            &mut Noise(0x9E37_79B9_7F4A_7C15),
+            &never_cancel(),
+            plain_rename,
+        )
+        .unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        stats.bytes
+    }
+
+    /// ★★★ **เพดานต้องไม่ต่ำกว่าไฟล์จริงเลย** — แม้ในเนื้อที่บีบได้น้อยที่สุด (`docs/07 §6`)
+    ///
+    /// เข้ารหัสสัญญาณรบกวนจริงด้วยตัวเข้ารหัสตัวจริง · ทุกคุณภาพ 1–100 · PNG ทั้งสองแบบ ·
+    /// สามขนาด (ส่วนหัวเด่นที่ 64² · แถบเดียวยาวที่ 2048 × 40) · และเพดานต้องยังมีประโยชน์
+    /// (ไม่เกินกรณีแย่สุดเกิน 25% + ส่วนหัว) — เพดานที่สูงลอยคือตัวเลขที่ไม่มีใครเชื่อ
+    #[test]
+    fn the_size_ceiling_is_never_below_the_real_file() {
+        for (w, h) in [(512, 384), (2048, 40), (64, 64)] {
+            let mut formats = vec![
+                ExportFormat::Png { transparent: true },
+                ExportFormat::Png { transparent: false },
+            ];
+            formats.extend((1..=100).map(|quality| ExportFormat::Jpeg { quality }));
+            for format in formats {
+                let real = noise_bytes("ceiling", format, w, h);
+                let ceiling = size_ceiling(format, w, h);
+                assert!(
+                    real <= ceiling,
+                    "{w}×{h} {format:?}: ไฟล์จริง {real} ไบต์ เกินเพดาน {ceiling}"
+                );
+                assert!(
+                    ceiling <= real * 5 / 4 + 2 * FIXED_OVERHEAD,
+                    "{w}×{h} {format:?}: เพดาน {ceiling} สูงลอยจากกรณีแย่สุด {real}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_png_written_band_by_band_is_pixel_identical_to_its_source() {
         let dir = temp_dir("png-exact");

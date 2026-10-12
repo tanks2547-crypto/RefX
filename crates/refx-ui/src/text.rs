@@ -1367,7 +1367,7 @@ pub enum Template {
     // ---- P5-4: ส่งออกภาพ ----
     /// `{w}` `{h}` — ขนาดพิกเซลที่จะได้
     ExportPixels,
-    /// `{size}` — ประมาณขนาดไฟล์
+    /// `{size}` — ★ **เพดาน** ของขนาดไฟล์ ไม่ใช่คำทำนาย (`docs/07 §6` · 12 ต.ค. 2026)
     ExportEstimate,
     /// ★★★ `{n}` — จำนวนภาพที่หาไฟล์ไม่เจอ **ต้องเห็นก่อนกดจริง**
     ExportMissingCount,
@@ -1607,7 +1607,7 @@ Drag in a PNG, JPEG, WebP, GIF, BMP, TGA or TIFF instead."
         Template::SettingsKeymapCount => "Shortcuts: {n}",
         Template::ExportPixels => "{w} x {h} px",
         // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
-        Template::ExportEstimate => "about {size}",
+        Template::ExportEstimate => "at most ~{size}",
         Template::ExportMissingCount => "Images that cannot be found: {n}",
         // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
         Template::ExportNotesCount => "Text notes left out: {n}",
@@ -1815,7 +1815,7 @@ fn template_th(template: Template) -> Option<&'static str> {
         }
         Template::SettingsKeymapCount => "คีย์ลัด {n} ปุ่ม",
         Template::ExportPixels => "{w} x {h} จุด",
-        Template::ExportEstimate => "ประมาณ {size}",
+        Template::ExportEstimate => "ไม่เกิน ~{size}",
         Template::ExportMissingCount => "มีภาพที่หาไฟล์ไม่เจอ {n} ใบ",
         Template::ExportNotesCount => "มีโน้ตข้อความที่จะไม่ถูกส่งออก {n} อัน",
         Template::NoteLayer => "โน้ตอันที่ {pos} จาก {count} นับจากล่าง - โน้ตข้อความอยู่เหนือภาพเสมอ",
