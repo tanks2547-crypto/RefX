@@ -252,6 +252,17 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// ★★★ `ItemMeta::added_at` ของใบใหม่ — **เวลาที่ชุดของมันถูกลาก/วาง** (`docs/02 §2.9`)
+///
+/// ชุดถูกประทับครั้งเดียวตอนส่งงาน (`submit_thumbnail_jobs`) ทุกใบในชุดจึงได้เวลา
+/// เดียวกัน และชุดที่ลากก่อนได้เวลาก่อนเสมอ ไม่ว่า decode ของใครจะเสร็จก่อน ·
+/// ไม่มีชุด (ไม่ควรเกิดกับใบใหม่) = ตอนนี้ ซึ่งเป็นพฤติกรรมเดิม
+fn added_at_of(anchor: Option<crate::placement::Anchor>) -> i64 {
+    anchor
+        .and_then(|anchor| anchor.added_at())
+        .unwrap_or_else(now_ms)
+}
+
 /// สถิติ frame time สำหรับโหมด benchmark
 #[derive(Debug, Default)]
 struct FrameStats {
@@ -3558,9 +3569,12 @@ impl RefxApp {
         //     · เลขชุดไม่ซ้ำ — ชี้จุดเดิมซ้ำต้องได้สายใหม่ ไม่ใช่ต่อแถวของชุดเก่า
         if let Some(anchor) = anchor {
             self.batches_started += 1;
+            // ★★★ ประทับเวลาที่ผู้ใช้ลงมือ **ตรงนี้** — ทุกทางเข้า (ลาก · วาง · ไฟล์จาก
+            //     Explorer) ผ่านจุดนี้ในเฟรมของเหตุการณ์นั้นเอง (`docs/02 §2.9` 13 ต.ค. 2026)
             let anchor = anchor
                 .with_count(jobs.len())
-                .for_batch(self.batches_started);
+                .for_batch(self.batches_started)
+                .stamped(now_ms());
             self.arrivals.open(anchor, jobs.iter().map(|job| job.hash));
         }
         for job in jobs {
@@ -4165,6 +4179,7 @@ impl RefxApp {
                             //   เป็นตาราง ⌈√N⌉ คอลัมน์จากจุดที่ชี้ (ไม่ขึ้นกับซูม — แก้ 12 ต.ค.
                             //   2026) โดย **ไม่แตะกล้อง** ถ้ากระดานมีของอยู่แล้ว
                             let (sw, sh) = (thumb.source_width, thumb.source_height);
+                            let added_at = added_at_of(anchor);
                             let anchor = Self::anchor_or_latest(doc, anchor, Some(gfx.canvas.size));
                             let (center, size) = Self::drop_flow(doc, anchor).place_image(sw, sh);
 
@@ -4193,12 +4208,11 @@ impl RefxApp {
                                 file_size: meta.bytes,
                             }))
                             .at(center, size);
-                            // ★ `added_at` **ไม่เคยมีใครเซ็ตมาก่อน** (เป็น 0 ทุกใบ) ทำให้
-                            //   การเรียงตามเวลาที่เพิ่มตกไปที่ตัวตัดสินท้ายเสมอ · ที่นี่คือ
-                            //   จุดเดียวที่ item ถูกสร้างจากไฟล์จริง จึงเป็นที่ของมัน
+                            // ★★★ `added_at` = **เวลาที่ผู้ใช้ลาก/วาง** ซึ่งชุดพกมากับ `Anchor` ไม่ใช่
+                            //     เวลาที่ใบนี้ decode เสร็จ (`docs/02 §2.9` 13 ต.ค. 2026 · ดู `added_at_of`)
                             let item = Item {
                                 meta: ItemMeta {
-                                    added_at: now_ms(),
+                                    added_at,
                                     ..item.meta
                                 },
                                 ..item
@@ -4317,6 +4331,7 @@ impl RefxApp {
             // ★ หยิบช่องจากตารางเดียวกับภาพที่เปิดได้ (P5-9b) — ใบที่เสียต้องอยู่ใน
             //   ลำดับที่ผู้ใช้ลากเข้ามา ไม่ใช่กองรวมกันที่มุมใดมุมหนึ่ง · ไม่รู้สัดส่วนจริง
             //   เพราะอ่านหัวไฟล์ไม่ผ่าน → กรอบ 1200 × 900 ตายตัว (ไม่ขึ้นกับซูม — แก้ 12 ต.ค. 2026)
+            let added_at = added_at_of(anchor);
             let anchor = Self::anchor_or_latest(doc, anchor, canvas);
             let (center, size) = Self::drop_flow(doc, anchor).place_missing();
             let item = Item::new(ItemKind::Missing {
@@ -4326,7 +4341,7 @@ impl RefxApp {
             .at(center, size);
             let item = Item {
                 meta: ItemMeta {
-                    added_at: now_ms(),
+                    added_at,
                     ..item.meta
                 },
                 ..item
@@ -13334,6 +13349,88 @@ mod tests {
                 (original_path.display().to_string(), item.canvas.pos)
             })
             .collect()
+    }
+
+    /// ★★★ **เวลาที่เพิ่ม = ตอนที่ผู้ใช้ลงมือ ไม่ใช่ตอนที่ decode เสร็จ** (`docs/02 §2.9` 13 ต.ค. 2026)
+    ///
+    /// ลากชุด A (สองไฟล์) แล้วตามด้วยชุด B · **B เสร็จก่อน** (ไฟล์แรกของ A ช้า) ·
+    /// "เรียงตามเวลาที่เพิ่ม" ต้องได้ A ก่อน B และทุกใบในชุดเดียวกันได้เวลาเดียวกัน
+    /// — ผู้ใช้ลากทีเดียว · ค่านี้ถูกเขียนลงไฟล์ จึงเป็นเรื่องของ I-3 ไม่ใช่ความสะดวก
+    ///
+    /// เดินเส้นทางจริง `submit_thumbnail_jobs` → `place_arrivals` ด้วยนาฬิกาจริง ·
+    /// ★ หน่วงระหว่างขั้นห้ามิลลิวินาทีให้นาฬิกาเดินจริง — ไม่งั้นทุกอย่างตกในมิลลิวินาที
+    ///   เดียวกันแล้วเทสต์จะเขียวทั้งที่ลำดับผิด
+    #[test]
+    fn a_batch_is_stamped_when_it_was_dropped_not_when_it_finished_decoding() {
+        let mut app = RefxApp::new(AppArgs::default());
+        let owner = app.docs.active().id;
+        let submit = |app: &mut RefxApp, names: &[&str]| {
+            let keys: Vec<_> = names
+                .iter()
+                .map(|name| job_key_for(owner, std::path::Path::new(name)))
+                .collect();
+            let jobs = keys
+                .iter()
+                .zip(names)
+                .map(|(key, name)| refx_asset::pool::Job {
+                    hash: *key,
+                    source: refx_asset::pool::JobSource::File(std::path::PathBuf::from(name)),
+                    priority: 0.0,
+                    cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    target: refx_asset::pool::JobTarget::Thumbnail,
+                })
+                .collect();
+            app.submit_thumbnail_jobs(owner, Some(crate::placement::Anchor::at(Vec2::ZERO)), jobs);
+            keys
+        };
+        let answer = |app: &mut RefxApp, keys: &[refx_asset::hash::ContentHash]| {
+            let arrived = keys
+                .iter()
+                .map(|key| {
+                    let arrival = Arrival::Damaged {
+                        hash: *key,
+                        owner: app.job_owner.remove(key),
+                        source: app.job_sources.remove(key),
+                        reason: refx_core::board::MissingReason::Damaged,
+                    };
+                    (*key, arrival)
+                })
+                .collect();
+            let (mut repairs, mut pasted) = (Vec::new(), Vec::new());
+            app.place_arrivals(arrived, &mut repairs, &mut pasted);
+        };
+        let tick = || std::thread::sleep(std::time::Duration::from_millis(5));
+
+        let a = submit(&mut app, &["/work/a0.png", "/work/a1.png"]);
+        tick();
+        let b = submit(&mut app, &["/work/b0.png"]);
+        tick();
+        answer(&mut app, &b);
+        tick();
+        answer(&mut app, &a[1..]);
+        tick();
+        answer(&mut app, &a[..1]);
+
+        let board = &app.docs.active().board;
+        let added = |name: &str| {
+            board
+                .z_order()
+                .iter()
+                .filter_map(|id| board.item(*id))
+                .find(|item| {
+                    matches!(&item.kind, ItemKind::Missing { original_path, .. }
+                        if original_path == std::path::Path::new(name))
+                })
+                .map(|item| item.meta.added_at)
+                .unwrap_or_else(|| panic!("{name} ไม่ขึ้นบนกระดาน"))
+        };
+        let (a0, a1, b0) = (
+            added("/work/a0.png"),
+            added("/work/a1.png"),
+            added("/work/b0.png"),
+        );
+        assert_eq!(a0, a1, "ลากทีเดียวแต่ได้สองเวลา");
+        assert!(a0 < b0, "ชุดที่ลากก่อนได้เวลาหลัง: A {a0} · B {b0}");
     }
 
     /// ★★★ **ประตูของเจ้าของโปรเจกต์ ทางแอป:** ลากชุดเดิมซ้ำโดยบังคับให้คำตอบมาคนละลำดับ

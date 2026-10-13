@@ -82,6 +82,9 @@ impl ViewKey {
 /// ★★ **ไม่ถือบริเวณที่เห็น** โดยตั้งใจ (แก้ 12 ต.ค. 2026) · รุ่นก่อนจดไว้แล้วใช้ตัดสิน
 /// ช่องว่าง ขอบขึ้นแถวใหม่ และกรอบ `Missing` → ลาก 20 ภาพ 2400 px ได้ **คอลัมน์เดียว
 /// ที่ซูม 2%** และลากชุดเดิมที่ซูมอื่นได้ผังอื่น · ไม่มีช่องให้ถือ = ไม่มีทางกลับไปขึ้นกับซูม
+///
+/// ★★ และถือ **เวลาที่ผู้ใช้ลงมือ** ([`Anchor::stamped`]) — ชุดคือเหตุการณ์หนึ่งครั้ง
+/// ทั้ง "ที่ไหน" และ "เมื่อไหร่" ต้องมาจากเหตุการณ์นั้น ไม่ใช่จากจังหวะที่ worker ทำเสร็จ
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Anchor {
     point: Vec2,
@@ -89,6 +92,8 @@ pub struct Anchor {
     count: usize,
     /// ★★ ชุดไหน — หนึ่งการชี้ = หนึ่งสาย **แม้จะชี้จุดเดิมซ้ำ** ([`Anchor::for_batch`])
     batch: u64,
+    /// ★★★ เวลาที่ผู้ใช้ลาก/วาง (unix millis) — `0` = ยังไม่ประทับ
+    added_at: i64,
 }
 
 impl Anchor {
@@ -99,7 +104,35 @@ impl Anchor {
             point,
             count: 1,
             batch: 0,
+            added_at: 0,
         }
+    }
+
+    /// ★★★ ประทับเวลาที่ผู้ใช้ลงมือ — **ครั้งแรกครั้งเดียว** (`docs/02 §2.9` 13 ต.ค. 2026)
+    ///
+    /// เดิม `added_at` ได้ `now_ms()` ตอนวางลงกระดาน → ลากชุด A ที่ไฟล์แรก decode ช้า
+    /// แล้วตามด้วยชุด B · **B ได้เวลาเร็วกว่า A** และค่านั้นถูกเขียนลงไฟล์ ·
+    /// "เรียงตามเวลาที่เพิ่ม" จึงขึ้นกับความเร็วของ decode ซึ่งผู้ใช้มองไม่เห็น
+    ///
+    /// ★ ประทับแล้วไม่ทับ — ไฟล์ที่ก๊อปจาก Explorer แล้วกด Ctrl+V ผ่านสองชุด (อ่าน
+    ///   clipboard ก่อน แล้วค่อยเป็นชุดของไฟล์) ต้องได้เวลาของ **ตอนกด** ไม่ใช่ตอนที่
+    ///   รายการไฟล์อ่านเสร็จ
+    #[must_use]
+    pub fn stamped(self, now_ms: i64) -> Self {
+        if self.added_at == 0 {
+            Self {
+                added_at: now_ms,
+                ..self
+            }
+        } else {
+            self
+        }
+    }
+
+    /// เวลาที่ผู้ใช้ลงมือ — `None` = ไม่เคยถูกประทับ
+    #[must_use]
+    pub fn added_at(&self) -> Option<i64> {
+        (self.added_at != 0).then_some(self.added_at)
     }
 
     /// ★★ ชุดที่เท่าไหร่ — ผู้เรียกแจกเลขไม่ซ้ำตอนส่งงาน (`submit_thumbnail_jobs`)
@@ -595,6 +628,20 @@ mod tests {
             let _ = flow_for(&mut flows, anchor, || Flow::new(key, anchor));
         }
         assert_eq!(flows.len(), MAX_FLOWS);
+    }
+
+    /// ★★ เวลาที่ประทับแล้ว **ไม่ถูกทับ** (`docs/02 §2.9` 13 ต.ค. 2026)
+    ///
+    /// ไฟล์ที่ก๊อปจาก Explorer แล้วกด Ctrl+V เดินสองชุด: ชุดอ่าน clipboard (ประทับตอนกด)
+    /// แล้วต่อด้วยชุดของไฟล์ที่ส่ง `Anchor` เดิมเข้าไปอีกรอบ · ต้องได้เวลาของ **ตอนกด**
+    #[test]
+    fn a_stamp_is_kept_when_the_same_drop_goes_through_a_second_batch() {
+        let fresh = Anchor::at(Vec2::ZERO);
+        assert_eq!(fresh.added_at(), None);
+        let pressed = fresh.for_batch(1).stamped(1_000);
+        assert_eq!(pressed.added_at(), Some(1_000));
+        let files = pressed.with_count(3).for_batch(2).stamped(9_000);
+        assert_eq!(files.added_at(), Some(1_000), "ชุดที่สองทับเวลาของตอนกด");
     }
 
     /// ★★★ **N ใบ = ตาราง ⌈√N⌉ คอลัมน์ ตามลำดับไฟล์** (ROADMAP P5-9b แก้ 12 ต.ค. 2026)
