@@ -467,6 +467,14 @@ pub enum Key {
     SaveModePacked,
     /// คำอธิบายของ packed
     SaveModePackedHint,
+    /// ★★★ หัวข้อกล่องถาม "packed ที่ฝังไม่ครบ" (`docs/07 §2` 13 ต.ค. 2026)
+    PackGapsTitle,
+    /// วิธีทำให้ภาพเหล่านั้นอยู่ในไฟล์ — ★ เอ่ยถึง relink (P4-6) ตามกติกาข้อ 3
+    PackGapsHint,
+    /// ปุ่มทำลาย: บันทึกทั้งที่ขาดภาพ
+    PackGapsSaveWithout,
+    /// ปุ่มปลอดภัย (ค่าตั้งต้น): ยังไม่เขียนอะไร
+    PackGapsBack,
     /// ★★★ ตัวบ่งชี้ถาวร: ภาพอยู่นอกไฟล์ (`docs/07 §2`)
     StorageLinked,
     /// ตัวบ่งชี้ถาวร: ภาพทุกใบอยู่ในไฟล์
@@ -772,6 +780,14 @@ fn en(key: Key) -> &'static str {
             "Big file, but it carries every image with it - use this to send the board \
              to someone else, back it up, or move it to another computer"
         }
+        Key::PackGapsTitle => "Some images can't go inside this board file",
+        Key::PackGapsHint => {
+            "To put them inside, move the files back to where they were and save again. \
+             Or open this board again later: each one shows as a missing image, and \
+             Find the file… points RefX at it."
+        }
+        Key::PackGapsSaveWithout => "Save without them",
+        Key::PackGapsBack => "Don't save yet",
         Key::StorageLinked => "Linked",
         Key::StoragePacked => "Packed",
         Key::StorageLinkedHint => {
@@ -1075,6 +1091,14 @@ fn th(key: Key) -> Option<&'static str> {
         Key::SaveModePackedHint => {
             "ไฟล์ใหญ่ แต่พกภาพไปด้วยทุกใบ — ใช้ตอนส่งกระดานให้คนอื่น สำรองไว้ หรือย้ายเครื่อง"
         }
+        Key::PackGapsTitle => "ภาพบางใบใส่ลงในไฟล์กระดานนี้ไม่ได้",
+        Key::PackGapsHint => {
+            "ถ้าจะให้ภาพเหล่านี้อยู่ในไฟล์ ให้ย้ายไฟล์กลับไปที่เดิมแล้วบันทึกใหม่ \
+             · หรือเปิดกระดานนี้ใหม่ภายหลัง ภาพแต่ละใบจะขึ้นเป็นภาพที่หาย \
+             แล้วใช้ปุ่ม หาไฟล์เอง… ชี้ให้ RefX ไปหา"
+        }
+        Key::PackGapsSaveWithout => "บันทึกโดยไม่มีภาพเหล่านี้",
+        Key::PackGapsBack => "ยังไม่บันทึก",
         Key::StorageLinked => "ลิงก์ภาพ",
         Key::StoragePacked => "ภาพอยู่ในไฟล์",
         Key::StorageLinkedHint => "ภาพที่เหลือเป็นไฟล์บนเครื่องนี้ · กดเพื่อเก็บภาพทุกใบไว้ในไฟล์กระดานแทน",
@@ -1328,6 +1352,12 @@ pub enum Template {
     RelinkUnpacked,
     /// `{inside}` `{images}` — กี่ใบที่อยู่ในไฟล์งานแล้ว (ตัวบ่งชี้โหมด)
     StorageInside,
+    /// ★★★ `{n}` `{file}` — กล่องถาม "packed ที่ฝังไม่ครบ": จำนวน + ไฟล์ที่จะเขียน
+    PackGapsBody,
+    /// `{n}` — ชื่อที่ไม่ได้แสดงในกล่อง (รายชื่อยาวเกินจอ)
+    PackGapsMore,
+    /// ★★★ `{name}` `{n}` `{files}` — บันทึกแล้วแต่ภาพบางใบไม่อยู่ข้างใน (กติกาข้อ 4)
+    SavedWithGaps,
     /// ★★★ `{backup}` — ไฟล์เสียหาย **และมีไฟล์สำรองอยู่จริง** ให้ลอง
     ///
     /// ★ ผู้เรียกต้องยืนยันว่าไฟล์นั้น**มีอยู่จริง**ก่อนใช้เทมเพลตนี้ — การชี้ไป
@@ -1546,6 +1576,13 @@ Drag in a PNG, JPEG, WebP, GIF, BMP, TGA or TIFF instead."
         // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
         Template::RelinkUnpacked => "Images loaded from inside this board file: {n}",
         Template::StorageInside => "Images inside the board file: {inside} of {images}",
+        // ★ เลี่ยงพหูพจน์ — จุดที่พหูพจน์จะโผล่วันรับภาษาที่สาม (docs/03 §0 ข้อ 4)
+        Template::PackGapsBody => {
+            "Images whose file can't be found on this computer: {n}\n\
+             Anyone who opens {file} will see these as missing images:"
+        }
+        Template::PackGapsMore => "…and {n} more",
+        Template::SavedWithGaps => "Saved to {name} - NOT inside it: {n} ({files})",
         Template::OpenFailedDamagedBackup => {
             "This board file is damaged - part of it could not be read. Try the backup copy {backup} in the same folder."
         }
@@ -1761,6 +1798,12 @@ fn template_th(template: Template) -> Option<&'static str> {
         }
         Template::RelinkUnpacked => "ใช้ภาพ {n} ใบที่เก็บอยู่ในไฟล์กระดานนี้",
         Template::StorageInside => "ภาพอยู่ในไฟล์กระดานแล้ว {inside} จาก {images} ใบ",
+        Template::PackGapsBody => {
+            "ภาพที่หาไฟล์บนเครื่องนี้ไม่เจอ {n} ใบ\n\
+             ใครก็ตามที่เปิด {file} จะเห็นภาพเหล่านี้เป็นภาพที่หาย:"
+        }
+        Template::PackGapsMore => "…และอีก {n} ใบ",
+        Template::SavedWithGaps => "บันทึกลง {name} แล้ว — ภาพที่ไม่ได้อยู่ในไฟล์ {n} ใบ ({files})",
         Template::OpenFailedDamagedBackup => {
             "ไฟล์กระดานนี้เสียหาย — อ่านเนื้อในบางส่วนไม่ได้ ลองไฟล์สำรอง {backup} ที่อยู่ในโฟลเดอร์เดียวกัน"
         }

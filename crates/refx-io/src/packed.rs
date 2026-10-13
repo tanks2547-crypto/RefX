@@ -148,13 +148,43 @@ pub fn plan_embeds(
     mode: SaveMode,
     locate: impl Fn(&refx_core::board::AssetRef) -> AssetBytes,
 ) -> Vec<PackSource> {
-    let mut plan = Vec::new();
+    plan(board, mode, locate).sources
+}
+
+/// แผนการฝังของการบันทึกหนึ่งครั้ง — ของที่จะฝัง **และของที่สัญญาไว้แต่ฝังไม่ได้**
+#[derive(Debug, Clone, Default)]
+pub struct EmbedPlan {
+    /// ไฟล์ที่จะถูกฝัง — ส่งต่อให้ [`crate::save::save_document`]
+    pub sources: Vec<PackSource>,
+    /// ★★★ ใบที่ **packed สัญญาว่าจะพกไปด้วยแต่หาไบต์ไม่เจอ** (`docs/07 §2` ตัดสิน 13 ต.ค. 2026)
+    ///
+    /// รุ่นก่อนข้ามใบพวกนี้ไปเงียบ ๆ → ผู้ใช้ส่งไฟล์ "packed" ให้คนอื่นโดยไม่มีภาพนั้น
+    /// อยู่ข้างใน ทั้งที่บนกระดานของเขาภาพยังขึ้นครบ (thumbnail อยู่ใน RAM)
+    /// · ★ ว่างเสมอใน linked — ที่นั่นไฟล์ของผู้ใช้ที่หายไปเป็นแค่ลิงก์ที่รอ relink
+    ///   ไฟล์ที่เขียนออกมาไม่ต่างจากตอนที่ไฟล์ยังอยู่ (`path` เดิม)
+    /// · เรียงตาม z-order ไม่ซ้ำ hash — ข้อความที่ผู้ใช้เห็นต้องเหมือนเดิมทุกครั้ง
+    pub unreachable: Vec<PathBuf>,
+}
+
+/// [`plan_embeds`] ที่บอกด้วยว่าฝังอะไรไม่ได้ — ตัวที่ชั้น UI ใช้ถามผู้ใช้ก่อนเขียน
+///
+/// ★ **ถาม `locate` ใบละครั้งเดียว** แล้วตอบทั้งสองคำถามจากคำตอบนั้น · แยกเป็นสอง
+/// ฟังก์ชันที่ต่างคนต่างถามดิสก์ = ไฟล์ที่หายไประหว่างสองคำถามทำให้กล่องเตือน
+/// กับไฟล์ที่เขียนออกมาพูดไม่ตรงกัน
+#[must_use]
+pub fn plan(
+    board: &Board,
+    mode: SaveMode,
+    locate: impl Fn(&refx_core::board::AssetRef) -> AssetBytes,
+) -> EmbedPlan {
+    let mut plan = EmbedPlan::default();
+    let mut seen = std::collections::BTreeSet::new();
     for (_, item) in board.items_in_z_order() {
         let refx_core::board::ItemKind::Image(asset) = &item.kind else {
             continue;
         };
         // ★ ภาพเดียวกันวางหลายใบบน board = ฝังครั้งเดียว (คีย์คือเนื้อไฟล์)
-        if plan.iter().any(|s: &PackSource| s.hash == asset.hash) {
+        if !seen.insert(asset.hash) {
             continue;
         }
         let path = match (locate(asset), mode) {
@@ -162,9 +192,13 @@ pub fn plan_embeds(
             (AssetBytes::Ours(path), _) => path,
             // ไฟล์ของผู้ใช้ → ฝังเฉพาะตอน packed
             (AssetBytes::UserFile(path), SaveMode::Packed) => path,
-            (AssetBytes::UserFile(_), SaveMode::Linked) | (AssetBytes::Missing, _) => continue,
+            (AssetBytes::Missing, SaveMode::Packed) => {
+                plan.unreachable.push(asset.path.clone());
+                continue;
+            }
+            (AssetBytes::UserFile(_) | AssetBytes::Missing, SaveMode::Linked) => continue,
         };
-        plan.push(PackSource {
+        plan.sources.push(PackSource {
             hash: asset.hash,
             path,
         });
@@ -954,6 +988,41 @@ mod tests {
         crate::save::save_document(&doc, &board, &plan, refx_platform::fsops::rename_durable)
             .unwrap();
         assert_eq!(dto::decode(&read_all(&doc), board_id()).unwrap(), board);
+    }
+
+    /// ★★★ **packed ต้องบอกได้ว่าใบไหนที่สัญญาไว้แต่ฝังไม่ได้** (`docs/07 §2` 13 ต.ค. 2026)
+    ///
+    /// ชั้นนี้ยังบันทึกได้ (เทสต์ข้างบน) — แต่ต้องคืนรายชื่อให้ชั้น UI ถามผู้ใช้
+    /// ก่อนเขียน · รุ่นก่อนข้ามไปเงียบ ๆ แล้วไฟล์ที่ผู้ใช้ส่งให้คนอื่นขาดภาพ
+    #[test]
+    fn a_packed_plan_names_every_image_it_cannot_embed() {
+        let dir = temp_dir("unreachable");
+        let here = plant_image(&dir, 31, 256);
+        let gone = PathBuf::from("E:/ไดรฟ์ที่หลุด/b.png");
+        let also_gone = PathBuf::from("E:/ไดรฟ์ที่หลุด/c.png");
+        // ใบที่หายวางสองครั้ง → ต้องถูกเอ่ยชื่อครั้งเดียว
+        let board = board_of(&[(31, &here), (32, &gone), (32, &gone), (33, &also_gone)]);
+        let locate = |asset: &refx_core::board::AssetRef| {
+            if asset.path == here {
+                AssetBytes::UserFile(here.clone())
+            } else {
+                AssetBytes::Missing
+            }
+        };
+
+        let packed = plan(&board, SaveMode::Packed, locate);
+        assert_eq!(packed.sources.len(), 1);
+        assert_eq!(packed.unreachable, vec![gone, also_gone]);
+
+        // ★ linked ไม่ได้สัญญาว่าจะพกไฟล์ของผู้ใช้ไป — ไม่มีอะไรให้เตือน
+        let linked = plan(&board, SaveMode::Linked, locate);
+        assert!(linked.sources.is_empty());
+        assert!(linked.unreachable.is_empty(), "{:?}", linked.unreachable);
+        // ★ ตัวเดิมต้องให้แผนเดียวกันเป๊ะ — มันกลายเป็นแค่ทางลัดของตัวนี้
+        assert_eq!(
+            plan_embeds(&board, SaveMode::Packed, locate).len(),
+            packed.sources.len()
+        );
     }
 
     // ---------- ★★★ I-4: ทุกตัวเลขในไฟล์โกหกได้ ----------

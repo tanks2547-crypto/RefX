@@ -182,6 +182,26 @@ pub enum TabRequest {
     New,
 }
 
+/// ★★★ packed ที่ฝังไม่ครบ — ค่าสำหรับแสดงในกล่องถาม (`docs/07 §2` ตัดสิน 13 ต.ค. 2026)
+///
+/// ชั้น `app` เติมเมื่อเธรดบันทึกตอบว่ามีภาพที่หาไฟล์ไม่เจอ **โดยยังไม่ได้เขียนอะไร**
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PackGapsView {
+    /// ชื่อไฟล์กระดานที่กำลังจะเขียน
+    pub file: String,
+    /// ชื่อไฟล์ของภาพที่จะไม่อยู่ข้างใน — เรียงตาม z-order ไม่ซ้ำ
+    pub names: Vec<String>,
+}
+
+/// ผู้ใช้ตอบอะไรกับกล่อง "ภาพบางใบใส่ลงในไฟล์นี้ไม่ได้"
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackGapsChoice {
+    /// ★ ปุ่มทำลาย — เขียนไฟล์ที่ขาดภาพ (แล้วยังขึ้นข้อความหลังบันทึกด้วย)
+    SaveWithout,
+    /// ค่าตั้งต้น · `Enter` · `Esc` · คลิกนอกกล่อง — ไม่เขียนอะไร
+    Back,
+}
+
 /// ผู้ใช้ตอบอะไรกับ "จะบันทึกเป็นแบบไหน" (P4-5)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaveAsChoice {
@@ -214,6 +234,8 @@ pub enum Question {
     CloseUnsaved,
     /// บันทึกเป็นแบบไหน (linked / packed)
     SaveAs,
+    /// ★★★ packed ที่ฝังไม่ครบ — **dialog** เพราะคำตอบหนึ่งส่งไฟล์ที่ขาดภาพให้คนอื่น
+    PackGaps,
     /// ขอเขียน `.refx-meta` ลงโฟลเดอร์ของผู้ใช้
     Sidecar,
     /// เจองานกู้คืน — แถบ เพราะเป็นข้อมูลที่รอได้
@@ -224,10 +246,12 @@ impl Question {
     /// ลำดับความสำคัญ — ข้อแรกที่ค้างอยู่คือข้อเดียวที่ขึ้นจอ
     ///
     /// ปิดโปรแกรมมาก่อน (ผู้ใช้เพิ่งขอเดี๋ยวนี้ และมันบล็อกทุกอย่างอยู่แล้ว) ·
-    /// บันทึกเป็น ตามมา (ผู้ใช้เพิ่งกด) · กู้งานเก่าอยู่ท้ายสุด เพราะมันรอได้
-    pub const QUEUE: [Self; 4] = [
+    /// บันทึกเป็น ตามมา (ผู้ใช้เพิ่งกด) · ฝังไม่ครบต่อจากนั้น (เกิดจากการบันทึกที่
+    /// เพิ่งสั่ง) · กู้งานเก่าอยู่ท้ายสุด เพราะมันรอได้
+    pub const QUEUE: [Self; 5] = [
         Self::CloseUnsaved,
         Self::SaveAs,
+        Self::PackGaps,
         Self::Sidecar,
         Self::Recover,
     ];
@@ -236,6 +260,7 @@ impl Question {
         match self {
             Self::CloseUnsaved => state.close_prompt,
             Self::SaveAs => state.save_as_prompt,
+            Self::PackGaps => state.pack_gaps.is_some(),
             Self::Sidecar => state.sidecar_prompt.is_some(),
             Self::Recover => state.recover_prompt.is_some(),
         }
@@ -807,6 +832,10 @@ pub struct ShellState {
     pub save_as_prompt: bool,
     /// ผู้ใช้ตอบแล้วในเฟรมนี้ — `None` = ยังไม่ตอบ
     pub save_as_choice: Option<SaveAsChoice>,
+    /// ★★★ กำลังถามว่าจะบันทึก packed ที่ขาดภาพไหม (`docs/07 §2` 13 ต.ค. 2026) — `None` = ไม่ได้ถาม
+    pub pack_gaps: Option<PackGapsView>,
+    /// ผู้ใช้ตอบกล่องนั้นแล้วในเฟรมนี้ — `None` = ยังไม่ตอบ
+    pub pack_gaps_choice: Option<PackGapsChoice>,
     /// ★★ กล่อง export เปิดอยู่ไหม (P5-4) — `None` = ปิด
     pub export_prompt: Option<ExportView>,
     /// ผู้ใช้กดอะไรในกล่อง export เฟรมนี้ — `None` = ไม่ได้แตะ
@@ -1048,6 +1077,8 @@ impl Default for ShellState {
             storage_request: None,
             save_as_prompt: false,
             save_as_choice: None,
+            pack_gaps: None,
+            pack_gaps_choice: None,
             export_prompt: None,
             export_request: None,
             export_progress: None,
@@ -1200,6 +1231,93 @@ fn close_dialog(ui: &mut egui::Ui, state: &mut ShellState, lang: Lang) {
     } else if modal.should_close() {
         // ★★★ `Esc` หรือคลิกนอกกล่อง = **ยกเลิกการปิด** ไม่ใช่ทิ้งงาน (`docs/03 §0` ข้อ 2)
         state.close_choice = Some(CloseChoice::Cancel);
+    }
+}
+
+/// ★ ชื่อที่กล่อง "ฝังไม่ครบ" แสดงได้ก่อนจะยุบเป็น "…และอีก N ใบ" — กล่องต้องไม่ดันเกินจอ
+const PACK_GAPS_LISTED: usize = 8;
+
+/// ★★★ **dialog** "ภาพบางใบใส่ลงในไฟล์กระดานนี้ไม่ได้" (`docs/07 §2` ตัดสิน 13 ต.ค. 2026)
+///
+/// ผู้ใช้เลือก packed เพราะตั้งใจจะ **ส่งให้คนอื่น** — ไฟล์ที่ขาดภาพจะถูกพบก็ต่อเมื่อ
+/// ปลายทางบ่น ซึ่งตอนนั้นย้อนไม่ได้แล้ว · คำถามนี้จึงเป็น modal ตามกติกาเดียวกับ
+/// [`close_dialog`] (`docs/03 §0`): ปุ่มปลอดภัยเป็นค่าตั้งต้น · `Enter`/`Esc`/คลิกนอกกล่อง
+/// = **ยังไม่บันทึก** · ปุ่มทำลายสีแดงซ้ายสุด · บอก **จำนวนและชื่อไฟล์** เป็นรูปธรรม
+fn pack_gaps_dialog(ui: &mut egui::Ui, state: &mut ShellState, lang: Lang) {
+    let Some(view) = state.pack_gaps.clone() else {
+        return;
+    };
+    let modal = egui::Modal::new(egui::Id::new("refx-pack-gaps")).show(ui.ctx(), |ui| {
+        ui.set_max_width(480.0);
+        ui.label(
+            egui::RichText::new(text::t(lang, Key::PackGapsTitle))
+                .strong()
+                .size(16.0),
+        );
+        ui.add_space(6.0);
+        ui.label(text::fill(
+            lang,
+            Template::PackGapsBody,
+            &[("n", &view.names.len().to_string()), ("file", &view.file)],
+        ));
+        ui.indent("refx-pack-gaps-names", |ui| {
+            for name in view.names.iter().take(PACK_GAPS_LISTED) {
+                ui.label(egui::RichText::new(name).strong());
+            }
+            if view.names.len() > PACK_GAPS_LISTED {
+                ui.label(
+                    egui::RichText::new(text::fill(
+                        lang,
+                        Template::PackGapsMore,
+                        &[("n", &(view.names.len() - PACK_GAPS_LISTED).to_string())],
+                    ))
+                    .weak(),
+                );
+            }
+        });
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new(text::t(lang, Key::PackGapsHint)).weak());
+        ui.add_space(14.0);
+
+        let mut choice = None;
+        ui.horizontal(|ui| {
+            // ★★ ปุ่มทำลาย: **ซ้ายสุด สีแดง** — ไม่ติดกับปุ่มที่รักษางาน
+            let without = ui.add(
+                egui::Button::new(
+                    egui::RichText::new(text::t(lang, Key::PackGapsSaveWithout))
+                        .color(egui::Color32::WHITE),
+                )
+                .fill(danger_color(ui)),
+            );
+            if without.clicked() {
+                choice = Some(PackGapsChoice::SaveWithout);
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let back = ui.add(
+                    egui::Button::new(
+                        egui::RichText::new(text::t(lang, Key::PackGapsBack)).strong(),
+                    )
+                    .fill(ui.visuals().selection.bg_fill),
+                );
+                // ★★ `Enter` = ยังไม่บันทึก เพราะ focus อยู่ที่ปุ่มนี้ — เว้นแต่ผู้ใช้ย้าย
+                //    focus เองด้วย Tab (ห้ามดึงกลับทุกเฟรม — เหมือน `close_dialog`)
+                let ours = [back.id, without.id];
+                if !ui.memory(|m| m.focused().is_some_and(|f| ours.contains(&f))) {
+                    back.request_focus();
+                }
+                if back.clicked() {
+                    choice = Some(PackGapsChoice::Back);
+                }
+            });
+        });
+        choice
+    });
+
+    if let Some(choice) = modal.inner {
+        state.pack_gaps_choice = Some(choice);
+    } else if modal.should_close() {
+        // ★★★ `Esc` หรือคลิกนอกกล่อง = **ยังไม่บันทึก** ไม่ใช่บันทึกทั้งที่ขาดภาพ
+        state.pack_gaps_choice = Some(PackGapsChoice::Back);
     }
 }
 
@@ -1437,6 +1555,7 @@ pub fn draw_in_ui(
     match question_on_screen(state) {
         Some(Question::CloseUnsaved) => close_dialog(ui, state, lang),
         Some(Question::SaveAs) => save_as_bar(ui, state, lang),
+        Some(Question::PackGaps) => pack_gaps_dialog(ui, state, lang),
         Some(Question::Sidecar) => sidecar_bar(ui, state, lang),
         Some(Question::Recover) => recover_bar(ui, state, lang),
         None => {}
@@ -3378,6 +3497,9 @@ mod tests {
             //    — ทั้งคู่นำไปสู่การ **เขียนไฟล์จริง** แล้ว `mark_saved` ตามมา
             //    (แตะธง `dirty` ของ `Board`) เหมือน `close_choice` เป๊ะ
             save_as_choice,
+            // ★★★ ปุ่มตอบกล่อง "ฝังไม่ครบ" — "บันทึกโดยไม่มีภาพเหล่านี้" **เขียนไฟล์จริง**
+            //     แล้ว `mark_saved` ตามมา เหมือน `save_as_choice` เป๊ะ
+            pack_gaps_choice,
             storage_request,
             // ★★★ ปุ่มบนแถบแท็บ (P4-7c) — **แรงที่สุดในรายการนี้**: `Close` เอา
             //    เอกสารทั้งฉบับออกจากจอ · `New` เพิ่มเอกสารใหม่เข้ามา · ทั้งคู่
@@ -3404,6 +3526,7 @@ mod tests {
             //   โฟลเดอร์ภาพหรือไม่ ซึ่งอยู่คนละที่กับ `Board` ทั้งก้อน
             sidecar_choice: _,
             save_as_prompt: _, // แถบถามโหมดโผล่อยู่ไหม — ไม่ใช่คำขอแก้อะไร
+            pack_gaps: _,      // ค่าสำหรับแสดงในกล่องถาม — คำตอบอยู่ที่ `pack_gaps_choice`
             // ★★ กล่อง export (P5-4) — **ไม่แตะเอกสารเลยแม้แต่ทางเดียว**
             //    มันผลิต *ไฟล์ภาพใบใหม่* ไม่ได้แก้ `Board` ไม่แตะธง `dirty`
             //    และไม่ผ่าน `Command` · ★ ถ้าวันหนึ่งมีคนเพิ่ม "export แล้วจำ
@@ -3486,6 +3609,7 @@ mod tests {
             || close_choice.is_some()
             || recover_choice.is_some()
             || save_as_choice.is_some()
+            || pack_gaps_choice.is_some()
             || storage_request.is_some()
             || *arrange_apply
             || *relink_request
@@ -4266,7 +4390,7 @@ mod tests {
         }
     }
 
-    fn all_four_questions(lang: Lang) -> ShellState {
+    fn every_question(lang: Lang) -> ShellState {
         ShellState {
             lang,
             close_prompt: true,
@@ -4278,6 +4402,10 @@ mod tests {
             }),
             close_more_tabs: 2,
             save_as_prompt: true,
+            pack_gaps: Some(PackGapsView {
+                file: "ส่งเพื่อน.refx".to_owned(),
+                names: vec!["มังกร-อ้างอิง.png".to_owned(), "b.png".to_owned()],
+            }),
             sidecar_prompt: Some("E:/ภาพอ้างอิง/มังกร".to_owned()),
             recover_prompt: Some(RecoverView {
                 when: Some(Age::Hours(2)),
@@ -4288,7 +4416,7 @@ mod tests {
         }
     }
 
-    /// ★★★ **สี่คำถามค้างพร้อมกัน ก็ยังเห็นข้อเดียว** — และทุกตัวอักษรของมันมี glyph (P5-9a)
+    /// ★★★ **ทุกคำถามค้างพร้อมกัน ก็ยังเห็นข้อเดียว** — และทุกตัวอักษรของมันมี glyph (P5-9a)
     ///
     /// rc.1: แถบกู้งานเก่ากับแถบงานยังไม่บันทึกซ้อนกันบนจอ (`docs/03 §0` ข้อ 4)
     /// · ตอบทีละข้อแล้วข้อถัดไปต้องขึ้นตามลำดับใน [`Question::QUEUE`]
@@ -4300,10 +4428,11 @@ mod tests {
         let ctx = egui::Context::default();
         crate::fonts::install(&ctx);
         for lang in [Lang::En, Lang::Th] {
-            let mut state = all_four_questions(lang);
+            let mut state = every_question(lang);
             let marker = |q: Question| match q {
                 Question::CloseUnsaved => text::t(lang, Key::CloseUnsavedTitle),
                 Question::SaveAs => text::t(lang, Key::SaveModeTitle),
+                Question::PackGaps => text::t(lang, Key::PackGapsTitle),
                 Question::Sidecar => text::t(lang, Key::SidecarAskTitle),
                 Question::Recover => text::t(lang, Key::RecoverTitle),
             };
@@ -4356,6 +4485,7 @@ mod tests {
                 match expected {
                     Question::CloseUnsaved => state.close_prompt = false,
                     Question::SaveAs => state.save_as_prompt = false,
+                    Question::PackGaps => state.pack_gaps = None,
                     Question::Sidecar => state.sidecar_prompt = None,
                     Question::Recover => state.recover_prompt = None,
                 }
@@ -4370,7 +4500,7 @@ mod tests {
         let ctx = egui::Context::default();
         crate::fonts::install(&ctx);
 
-        let mut state = all_four_questions(Lang::Th);
+        let mut state = every_question(Lang::Th);
         let _ = two_frames(&ctx, &mut state, vec![key(egui::Key::Escape)]);
         assert_eq!(
             state.close_choice,
@@ -4380,7 +4510,7 @@ mod tests {
 
         let ctx = egui::Context::default();
         crate::fonts::install(&ctx);
-        let mut state = all_four_questions(Lang::Th);
+        let mut state = every_question(Lang::Th);
         // เฟรมแรก ๆ ให้ focus ไปอยู่ที่ "บันทึกแล้วปิด" ก่อน แล้วค่อยกด Enter
         let _ = two_frames(&ctx, &mut state, Vec::new());
         assert_eq!(state.close_choice, None, "ยังไม่ได้กดอะไรแต่ได้คำตอบแล้ว");
@@ -4390,6 +4520,67 @@ mod tests {
             Some(CloseChoice::SaveThenClose),
             "Enter ไม่ได้เลือกปุ่มปลอดภัย"
         );
+    }
+
+    /// ★★★ กล่อง "ฝังไม่ครบ" **เอ่ยชื่อไฟล์จริง** และ `Enter`/`Esc` = **ยังไม่บันทึก**
+    /// (`docs/07 §2` ตัดสิน 13 ต.ค. 2026 · กติกา modal ของ `docs/03 §0`)
+    ///
+    /// สิบชื่อ → แปดชื่อแรกขึ้นจอ ที่เหลือยุบเป็น "…และอีก 2 ใบ" · ★ NC อยู่ในตัว:
+    /// ชื่อที่เก้าต้อง **ไม่** ขึ้น — ไม่งั้นข้อนี้อาจผ่านเพราะวาดทุกอย่างลงไปโดยไม่ยุบ
+    #[test]
+    fn the_pack_gaps_dialog_names_the_files_and_defaults_to_not_saving() {
+        let names: Vec<String> = (1..=10).map(|n| format!("ภาพที่-{n:02}.png")).collect();
+        let only_gaps = |lang| ShellState {
+            lang,
+            pack_gaps: Some(PackGapsView {
+                file: "ส่งเพื่อน.refx".to_owned(),
+                names: names.clone(),
+            }),
+            ..ShellState::default()
+        };
+        for lang in [Lang::En, Lang::Th] {
+            let ctx = egui::Context::default();
+            crate::fonts::install(&ctx);
+            let mut state = only_gaps(lang);
+            assert_eq!(question_on_screen(&state), Some(Question::PackGaps));
+            let drawn = two_frames(&ctx, &mut state, Vec::new());
+            let shown = |needle: &str| drawn.iter().any(|(_, t)| t.contains(needle));
+            let body = text::fill(
+                lang,
+                Template::PackGapsBody,
+                &[("n", "10"), ("file", "ส่งเพื่อน.refx")],
+            );
+            let more = text::fill(lang, Template::PackGapsMore, &[("n", "2")]);
+            for needed in [
+                body.as_str(),
+                more.as_str(),
+                text::t(lang, Key::PackGapsHint),
+            ] {
+                assert!(shown(needed), "{lang:?}: {needed:?} ไม่ได้ถูกวาด");
+            }
+            for name in &names[..PACK_GAPS_LISTED] {
+                assert!(shown(name), "{lang:?}: ชื่อ {name} ไม่ขึ้นในกล่อง");
+            }
+            assert!(!shown(&names[PACK_GAPS_LISTED]), "{lang:?}: ไม่ได้ยุบรายชื่อ");
+            assert_eq!(state.pack_gaps_choice, None, "ยังไม่ได้กดอะไรแต่ได้คำตอบแล้ว");
+
+            let _ = two_frames(&ctx, &mut state, vec![key(egui::Key::Enter)]);
+            assert_eq!(
+                state.pack_gaps_choice,
+                Some(PackGapsChoice::Back),
+                "{lang:?}: Enter ไม่ได้เลือก 'ยังไม่บันทึก'"
+            );
+
+            let ctx = egui::Context::default();
+            crate::fonts::install(&ctx);
+            let mut state = only_gaps(lang);
+            let _ = two_frames(&ctx, &mut state, vec![key(egui::Key::Escape)]);
+            assert_eq!(
+                state.pack_gaps_choice,
+                Some(PackGapsChoice::Back),
+                "{lang:?}: Esc ไม่ได้เลือก 'ยังไม่บันทึก'"
+            );
+        }
     }
 
     /// ★★ **อายุของงานค้างต้องพูดภาษาเดียวกับจอ** (เจอ "1 ชิ้น จากjust now" รอบ P5-9)

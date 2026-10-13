@@ -822,6 +822,9 @@ struct Doc {
     ///
     /// เปลี่ยนได้จากสองทางเท่านั้น: อนุมานจากตารางตอน**เปิด** กับ สิ่งที่ผู้ใช้
     /// สั่งตอน**บันทึกสำเร็จ** — ห้ามอนุมานใหม่ทุกครั้งที่บันทึก (§4 ข้อ 29)
+    ///
+    /// ★★ ข้อยกเว้นเดียว (`docs/07 §2` 13 ต.ค. 2026): สั่ง packed แต่ไฟล์ออกมา **ไม่ครบ**
+    /// = linked — ลดลงได้ทางเดียว ไม่ยกขึ้นเอง (ดู [`written_mode`])
     save_mode: refx_io::packed::SaveMode,
     /// ★★ asset table ของเอกสารนี้ — ว่าง = ไม่มีภาพฝังอยู่
     assets: refx_io::packed::Index,
@@ -1031,6 +1034,11 @@ impl Docs {
     /// แท็บที่มี id นี้ — `None` = ถูกปิดไปแล้วระหว่างที่งานเดินอยู่
     fn by_id_mut(&mut self, id: refx_core::arena::BoardId) -> Option<&mut Doc> {
         self.list.iter_mut().find(|doc| doc.id == id)
+    }
+
+    /// [`Self::by_id_mut`] แบบอ่านอย่างเดียว
+    fn by_id(&self, id: refx_core::arena::BoardId) -> Option<&Doc> {
+        self.list.iter().find(|doc| doc.id == id)
     }
 
     fn iter(&self) -> std::slice::Iter<'_, Doc> {
@@ -2014,7 +2022,16 @@ pub struct RefxApp {
     /// บันทึกจะดูสะอาด แล้วผู้ใช้จะปิดโปรแกรมทิ้งโดยเชื่อว่างานอยู่ในไฟล์แล้ว
     save_job: Option<(
         refx_core::arena::BoardId,
-        crossbeam_channel::Receiver<Result<SavedDoc, String>>,
+        crossbeam_channel::Receiver<Result<SaveOutcome, String>>,
+    )>,
+    /// ★★★ งานบันทึก packed ที่ **ยังไม่ได้เขียน** เพราะรอผู้ใช้ตอบกล่อง "ฝังไม่ครบ"
+    ///
+    /// (แท็บที่สั่ง · ไฟล์ · โหมด) — `docs/07 §2` ตัดสิน 13 ต.ค. 2026 · ★ พก `BoardId`
+    /// ด้วยเหตุผลเดียวกับ `save_job`: คำตอบมาถึงหลังจากที่ผู้ใช้อาจสลับแท็บไปแล้ว
+    pack_gaps_for: Option<(
+        refx_core::arena::BoardId,
+        std::path::PathBuf,
+        refx_io::packed::SaveMode,
     )>,
     /// ★ ทำอะไรต่อหลังบันทึกเสร็จ — ใช้ตอนผู้ใช้เลือก "บันทึกแล้วปิด"
     after_save: AfterSave,
@@ -2186,16 +2203,107 @@ struct LoadedDoc {
 /// ★★ `assets` อ่านจาก **ไฟล์ที่เพิ่งเขียนจริง** ไม่ใช่จากแผนที่ส่งเข้าไป —
 /// ตัวเลข "กี่ใบอยู่ข้างใน" บนแถบสถานะจึงมาจากดิสก์เสมอ
 ///
-/// ★★★ ส่วน `mode` คือ **สิ่งที่ผู้ใช้สั่ง** ไม่ใช่สิ่งที่อนุมานจากไฟล์ —
-/// ดูเหตุผลที่ [`RefxApp::save_mode`]
+/// ★★★ ส่วน `mode` คือ **สิ่งที่ผู้ใช้สั่ง** — เว้นแต่ packed ที่ไฟล์ออกมาไม่ครบ
+/// (ดู [`written_mode`] และเหตุผลที่ [`RefxApp::save_mode`])
 #[derive(Debug)]
 struct SavedDoc {
     /// ไฟล์ที่เขียนไป
     path: std::path::PathBuf,
     /// asset table ของไฟล์นั้นหลังเขียนเสร็จ (ว่าง = ไม่มีอะไรฝังอยู่)
     assets: refx_io::packed::Index,
-    /// โหมดที่ผู้ใช้สั่งให้บันทึกครั้งนี้
+    /// โหมดของไฟล์ที่เพิ่งเขียน — ป้ายบนแถบสถานะและ `Ctrl+S` ครั้งถัดไปใช้ค่านี้
     mode: refx_io::packed::SaveMode,
+    /// ★★★ ชื่อไฟล์ของภาพที่ packed **ควรพกไปแต่ไม่ได้อยู่ในไฟล์** — ว่าง = ครบ
+    ///
+    /// ผู้ใช้ยืนยันในกล่องถามแล้วก็จริง แต่เขาอาจกดผ่านโดยไม่อ่าน (`docs/07 §2` ข้อ 4)
+    /// → ข้อความหลังบันทึกต้องเอ่ยชื่อซ้ำอีกครั้ง
+    not_inside: Vec<String>,
+}
+
+/// ผลของเธรดบันทึก — ★ `Gaps` = **ยังไม่ได้เขียนอะไรเลย** รอผู้ใช้ตอบก่อน
+#[derive(Debug)]
+enum SaveOutcome {
+    /// ไฟล์ลงดิสก์แล้ว
+    Saved(SavedDoc),
+    /// ★★★ packed ที่ฝังไม่ครบ — **ถามก่อนเขียน** (`docs/07 §2` ตัดสิน 13 ต.ค. 2026)
+    Gaps {
+        /// ไฟล์ที่จะเขียนถ้าผู้ใช้ยืนยัน
+        path: std::path::PathBuf,
+        /// โหมดที่สั่ง (packed เสมอ — linked ไม่มีอะไรให้ถาม)
+        mode: refx_io::packed::SaveMode,
+        /// ชื่อไฟล์ของภาพที่จะไม่อยู่ข้างใน
+        names: Vec<String>,
+    },
+}
+
+/// ★★ โหมดของไฟล์ที่เพิ่งเขียน — **packed ที่ไม่ครบคือ linked** (`docs/07 §2` 13 ต.ค. 2026)
+///
+/// เดิมคืนโหมดที่สั่งเสมอ → ป้ายขึ้น **Packed** ทั้งที่ไฟล์ขาดภาพ แล้วพอเปิดใหม่
+/// [`mode_of_document`] อ่านจากไฟล์จริงได้ **Linked** · ไฟล์เดียวกัน ป้ายสองค่า
+///
+/// ★★★ **ลดลงได้ทางเดียว ไม่ยกขึ้นเอง** — linked ที่บังเอิญฝังครบ (ภาพวางล้วน)
+/// ยังเป็น linked ตามที่สั่ง · ยกขึ้นเป็น packed เองเมื่อไหร่ `Ctrl+S` ครั้งถัดไป
+/// จะเริ่มฝังไฟล์ของผู้ใช้เข้าไปทั้งที่เขาไม่เคยสั่ง (HANDOFF §4 ข้อ 29) · การลดลง
+/// ไม่มีปัญหานั้น: ภาพที่หายไม่มีไบต์ให้ฝังอยู่แล้ว ส่วนใบที่ยังอยู่ก็ลิงก์ได้
+fn written_mode(
+    requested: refx_io::packed::SaveMode,
+    board: &Board,
+    written: &refx_io::packed::Index,
+) -> refx_io::packed::SaveMode {
+    use refx_io::packed::SaveMode;
+
+    match requested {
+        SaveMode::Packed => mode_of_document(board, written),
+        SaveMode::Linked => SaveMode::Linked,
+    }
+}
+
+/// ★★★ งานทั้งหมดของเธรดบันทึก — แยกเป็นฟังก์ชันเพื่อให้เทสต์ได้โดยไม่มีหน้าต่าง
+///
+/// `accept_gaps = false` + packed ที่ฝังไม่ครบ → คืน [`SaveOutcome::Gaps`] **โดยไม่แตะ
+/// ไฟล์เลย** · ไฟล์เดิม (ถ้ามี) ยังเป็นของเดิมทุกไบต์จนกว่าผู้ใช้จะตอบ
+fn write_for_save(
+    board: &Board,
+    path: &std::path::Path,
+    mode: refx_io::packed::SaveMode,
+    spool_dir: Option<&std::path::Path>,
+    accept_gaps: bool,
+) -> Result<SaveOutcome, String> {
+    // ★★ กฎว่าอะไรต้องถูกฝังอยู่ที่ `refx-io` ที่เดียว — ที่นี่ตอบแค่ว่า
+    //    ไบต์ของแต่ละใบอยู่ที่ไหน (§4 ข้อ 23 · ดู `locate_bytes`)
+    let plan = refx_io::packed::plan(board, mode, |asset| locate_bytes(spool_dir, asset));
+    let names: Vec<String> = plan
+        .unreachable
+        .iter()
+        .map(|path| refx_asset::decode::file_label(path))
+        .collect();
+    if !names.is_empty() && !accept_gaps {
+        return Ok(SaveOutcome::Gaps {
+            path: path.to_path_buf(),
+            mode,
+            names,
+        });
+    }
+    // ★★ ส่ง `rename_durable` ของชั้น platform เข้าไป — ตัวที่ทำให้
+    //    การสลับไฟล์เองทนไฟดับ (`MOVEFILE_WRITE_THROUGH` / fsync dir)
+    //    `refx-io` เรียกเองไม่ได้เพราะพึ่ง `refx-platform` ไม่ได้
+    refx_io::save::save_document(
+        path,
+        board,
+        &plan.sources,
+        refx_platform::fsops::rename_durable,
+    )
+    .map_err(|err| err.to_string())?;
+    // ★ อ่านตารางของไฟล์ที่ **เพิ่งเขียนจริง** กลับมา ไม่ใช่เชื่อแผนที่เราส่งเข้าไป
+    //   — สองอย่างนี้ต่างกันได้ (board ที่ไม่มีภาพเลยได้ v1 ที่ไม่มีตาราง
+    //   ทั้งที่ผู้ใช้สั่ง packed)
+    let assets = read_asset_table(path);
+    Ok(SaveOutcome::Saved(SavedDoc {
+        mode: written_mode(mode, board, &assets),
+        assets,
+        path: path.to_path_buf(),
+        not_inside: names,
+    }))
 }
 
 /// ผลการตามหาไฟล์ของ item หนึ่งใบ — `None` = ยังหาไม่เจอ (ขั้นที่ 4)
@@ -2708,6 +2816,44 @@ fn file_label_of(path: &std::path::Path) -> String {
         .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
 }
 
+/// ★ ชื่อไฟล์ที่ข้อความบนแถบสถานะเอ่ยได้ก่อนยุบเป็น "…" — แถบสถานะมีบรรทัดเดียว
+const SAVED_GAPS_NAMED: usize = 3;
+
+/// ข้อความบนแถบสถานะหลังบันทึกสำเร็จ — `(ข้อความ, เป็นคำเตือนไหม)`
+///
+/// ★★★ `not_inside` ไม่ว่าง = **ต้องเอ่ยชื่อซ้ำ** แม้ผู้ใช้เพิ่งยืนยันในกล่องถาม
+/// (`docs/07 §2` ข้อ 4 — เขาอาจกดผ่านโดยไม่อ่าน) · และเป็นคำเตือน ไม่ใช่ข่าวดี
+fn saved_status(lang: Lang, path: &std::path::Path, not_inside: &[String]) -> (String, bool) {
+    let name = file_label_of(path);
+    if not_inside.is_empty() {
+        return (
+            text::fill(lang, text::Template::Saved, &[("name", &name)]),
+            false,
+        );
+    }
+    let mut files = not_inside
+        .iter()
+        .take(SAVED_GAPS_NAMED)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if not_inside.len() > SAVED_GAPS_NAMED {
+        files.push_str(", …");
+    }
+    (
+        text::fill(
+            lang,
+            text::Template::SavedWithGaps,
+            &[
+                ("name", &name),
+                ("n", &not_inside.len().to_string()),
+                ("files", &files),
+            ],
+        ),
+        true,
+    )
+}
+
 /// เวลาที่ไฟล์ถูกเขียน → อายุของมัน (แปลเป็นข้อความตอนวาด — `shell::age_text`)
 ///
 /// ★ ไม่มี dependency สำหรับจัดรูปแบบวันที่ใน `docs/09` (และการเพิ่มต้องขอก่อน)
@@ -3040,6 +3186,7 @@ impl RefxApp {
             relink_report: None,
             save_dialog: None,
             save_job: None,
+            pack_gaps_for: None,
             after_save: AfterSave::Stay,
             close_confirm: false,
             closing: false,
@@ -6882,6 +7029,15 @@ impl RefxApp {
         {
             self.save_job = None;
         }
+        // ★ กล่อง "ฝังไม่ครบ" ของแท็บที่เพิ่งปิด — ไม่มีเอกสารให้บันทึกแล้ว คำถามต้องหายไปด้วย
+        if self
+            .pack_gaps_for
+            .as_ref()
+            .is_some_and(|(id, _, _)| *id == closed.id)
+        {
+            self.pack_gaps_for = None;
+            self.shell.pack_gaps = None;
+        }
         if self
             .load_job
             .as_ref()
@@ -7543,6 +7699,31 @@ impl RefxApp {
         }
     }
 
+    /// ★★★ ผู้ใช้ตอบกล่อง "ภาพบางใบใส่ลงในไฟล์นี้ไม่ได้" (`docs/07 §2` 13 ต.ค. 2026)
+    ///
+    /// ★ "บันทึกโดยไม่มีภาพเหล่านี้" **ส่งงานใหม่ไปเธรด** ไม่ใช่เขียนตามแผนเดิม —
+    /// ดิสก์อาจเปลี่ยนไประหว่างที่กล่องเปิดอยู่ (ผู้ใช้เสียบไดรฟ์กลับแล้วค่อยกด)
+    /// แผนใหม่จึงฝังได้มากกว่าเดิมเสมอ และข้อความหลังบันทึกเอ่ยชื่อจากแผนใหม่นั้น
+    fn apply_pack_gaps_choice(&mut self, choice: crate::shell::PackGapsChoice) {
+        self.shell.pack_gaps = None;
+        let Some((owner, path, mode)) = self.pack_gaps_for.take() else {
+            return;
+        };
+        match choice {
+            crate::shell::PackGapsChoice::SaveWithout => {
+                self.start_save_for(owner, &path, mode, true);
+            }
+            crate::shell::PackGapsChoice::Back => {
+                // ★ ยกเลิกตรงนี้ต้อง **ยกเลิกการปิดด้วย** — เหตุผลเดียวกับ
+                //   `apply_save_as_choice`: ผู้ใช้ที่กด "บันทึกแล้วปิด" แล้วเลือก
+                //   ยังไม่บันทึก ต้องไม่โดนปิดหน้าต่างทิ้งพร้อมงานที่ยังไม่ได้เขียน
+                self.after_save = AfterSave::Stay;
+                self.shell.status = text::t(self.shell.lang, Key::SaveCancelled).to_owned();
+                self.shell.status_warn = false;
+            }
+        }
+    }
+
     /// ผู้ใช้ตอบแถบ "บันทึกเป็นแบบไหน" แล้ว → ถามที่เก็บต่อ
     fn apply_save_as_choice(&mut self, choice: crate::shell::SaveAsChoice) {
         use crate::shell::SaveAsChoice;
@@ -7612,50 +7793,52 @@ impl RefxApp {
     /// `plan_embeds` ถาม `locate_bytes` ซึ่งแตะดิสก์ทุกใบ (`is_file`) · board
     /// 3,000 ใบบนไดรฟ์เครือข่ายที่หลุด = หน้าต่างค้างเป็นสิบวินาทีถ้าทำบน UI (I-2)
     fn start_save(&mut self, path: &std::path::Path, mode: refx_io::packed::SaveMode) {
+        let owner = self.docs.active().id;
+        self.start_save_for(owner, path, mode, false);
+    }
+
+    /// [`Self::start_save`] ของแท็บที่ระบุ — `accept_gaps` = ผู้ใช้ตอบกล่องถามแล้ว
+    ///
+    /// ★★ รับ `owner` แทนการอ่านแท็บที่ดูอยู่ เพราะคำตอบของกล่องถามมาถึง **หลัง**
+    /// เธรดรอบแรกกลับมาแล้ว · แท็บที่ดูอยู่ ณ ตอนนั้นอาจไม่ใช่แท็บที่สั่งบันทึก
+    fn start_save_for(
+        &mut self,
+        owner: refx_core::arena::BoardId,
+        path: &std::path::Path,
+        mode: refx_io::packed::SaveMode,
+        accept_gaps: bool,
+    ) {
         // ★ ต้องมีหน้าต่างแล้วเท่านั้น (เงื่อนไขเดิม) — เอกสารอยู่คนละที่กับ `Gfx` แล้ว
         if self.gfx.is_none() {
+            return;
+        }
+        // ★ งานบันทึกซ้อนกันไม่ได้ (ไฟล์เดียวเขียนสองที่พร้อมกันคือหายนะ) — และระหว่างที่
+        //   กล่อง "ฝังไม่ครบ" รอคำตอบ คำสั่งบันทึกใหม่ต้องรอด้วย ไม่งั้นมันเขียนข้ามหัวคำถาม
+        if self.save_job.is_some() || self.pack_gaps_for.is_some() {
             return;
         }
         // ★ โคลน ณ จังหวะที่ผู้ใช้สั่ง (ดูเหตุผลใน `apply_save_request`)
         // ★★★ จำไว้ด้วยว่าเป็นของแท็บไหน — ผู้ใช้กด `Ctrl+Tab` ระหว่างที่ไฟล์
         //     กำลังเขียนได้ · `mark_saved` ที่ลงผิดใบทำให้แท็บที่ยังไม่ถูกบันทึก
         //     ดูสะอาด แล้วผู้ใช้จะปิดโปรแกรมทิ้งโดยเชื่อว่างานอยู่ในไฟล์แล้ว
-        let owner = self.docs.active().id;
-        let board = self.docs.active().board.clone();
+        let Some(doc) = self.docs.by_id(owner) else {
+            return;
+        };
+        let board = doc.board.clone();
         let path = path.to_path_buf();
         let spool_dir = self.spool_dir.clone();
         // ★★★ **ต้องปลุก UI ตอนเขียนเสร็จ** — แอปหลับสนิทระหว่างรอดิสก์ (I-1)
         //   ถ้าไม่ปลุก `poll_save` จะไม่ถูกเรียกจนกว่าผู้ใช้จะบังเอิญขยับเมาส์
         //   แล้วจอจะค้างที่คำว่า "กำลังบันทึก" ทั้งที่ไฟล์ลงดิสก์ไปแล้ว —
         //   ผู้ใช้ที่เห็นแบบนั้นจะไม่กล้าปิดโปรแกรม (เห็นจริงตอนยืนยัน P4-5)
+        //   ★ กล่องถาม "ฝังไม่ครบ" ก็ต้องการคนปลุกเหมือนกัน — คำถามที่ไม่ขึ้นจอ
+        //     จนกว่าเมาส์จะขยับคือ `docs/08 §3.9 ข้อ 18` อีกรอบ
         let waker = self.waker.clone();
         let (tx, rx) = crossbeam_channel::bounded(1);
         let spawned = std::thread::Builder::new()
             .name("refx-save".to_owned())
             .spawn(move || {
-                // ★★ กฎว่าอะไรต้องถูกฝังอยู่ที่ `refx-io` ที่เดียว — ที่นี่ตอบแค่ว่า
-                //    ไบต์ของแต่ละใบอยู่ที่ไหน (§4 ข้อ 23 · ดู `locate_bytes`)
-                let embeds = refx_io::packed::plan_embeds(&board, mode, |asset| {
-                    locate_bytes(spool_dir.as_deref(), asset)
-                });
-                // ★★ ส่ง `rename_durable` ของชั้น platform เข้าไป — ตัวที่ทำให้
-                //    การสลับไฟล์เองทนไฟดับ (`MOVEFILE_WRITE_THROUGH` / fsync dir)
-                //    `refx-io` เรียกเองไม่ได้เพราะพึ่ง `refx-platform` ไม่ได้
-                let result = refx_io::save::save_document(
-                    &path,
-                    &board,
-                    &embeds,
-                    refx_platform::fsops::rename_durable,
-                )
-                .map_err(|err| err.to_string())
-                .map(|()| SavedDoc {
-                    // ★ อ่านตารางของไฟล์ที่ **เพิ่งเขียนจริง** กลับมา ไม่ใช่เชื่อ
-                    //   แผนที่เราส่งเข้าไป — สองอย่างนี้ต่างกันได้ (board ที่ไม่มี
-                    //   ภาพเลยได้ v1 ที่ไม่มีตาราง ทั้งที่ผู้ใช้สั่ง packed)
-                    assets: read_asset_table(&path),
-                    path,
-                    mode,
-                });
+                let result = write_for_save(&board, &path, mode, spool_dir.as_deref(), accept_gaps);
                 let _ = tx.send(result);
                 if let Some(waker) = waker {
                     waker.wake();
@@ -7712,18 +7895,33 @@ impl RefxApp {
         };
         self.save_job = None;
         match done {
-            Ok(SavedDoc { path, assets, mode }) => {
+            Ok(SaveOutcome::Gaps { path, mode, names }) => {
+                // ★★★ ยังไม่ได้เขียนอะไรเลย — ถามก่อน (`docs/07 §2` 13 ต.ค. 2026)
+                //     `after_save` ค้างไว้ตามเดิม: "บันทึกแล้วปิด" ยังรอคำตอบนี้อยู่
+                self.shell.pack_gaps = Some(crate::shell::PackGapsView {
+                    file: file_label_of(&path),
+                    names,
+                });
+                self.pack_gaps_for = Some((owner, path, mode));
+                self.shell.status = text::t(lang, Key::PackGapsTitle).to_owned();
+                self.shell.status_warn = true;
+            }
+            Ok(SaveOutcome::Saved(SavedDoc {
+                path,
+                assets,
+                mode,
+                not_inside,
+            })) => {
+                // ★★★ ข้อความหลังบันทึก — **เอ่ยชื่อซ้ำ** ถ้ามีใบที่ไม่อยู่ข้างใน
+                //     ผู้ใช้ยืนยันแล้วก็จริง แต่อาจกดผ่านโดยไม่อ่าน (`docs/07 §2` ข้อ 4)
+                let (saved_text, saved_warn) = saved_status(lang, &path, &not_inside);
                 // ★★★ ทุกอย่างข้างล่างนี้ลงที่ **แท็บที่สั่งบันทึก** ไม่ใช่แท็บที่
                 //     ผู้ใช้บังเอิญดูอยู่ตอนไฟล์เขียนเสร็จ
                 let Some(doc) = self.docs.by_id_mut(owner) else {
                     // แท็บถูกปิดไประหว่างที่ไฟล์กำลังเขียน — ไฟล์ลงดิสก์ครบแล้ว
                     // ซึ่งคือสิ่งที่ผู้ใช้สั่ง · ไม่มีอะไรให้ทำต่อนอกจากบอกเขา
-                    self.shell.status = text::fill(
-                        lang,
-                        text::Template::Saved,
-                        &[("name", &file_label_of(&path))],
-                    );
-                    self.shell.status_warn = false;
+                    self.shell.status = saved_text;
+                    self.shell.status_warn = saved_warn;
                     return;
                 };
                 // ★★ `mark_saved` คือสิ่งที่ทำให้ `dirty` กลับเป็น false — และมันต้อง
@@ -7749,9 +7947,8 @@ impl RefxApp {
                 //     ห้ามลบไฟล์เดิมทิ้ง)
                 doc.sidecar.disown();
                 self.shell.sidecar_prompt = None;
-                let name = file_label_of(&path);
-                self.shell.status = text::fill(lang, text::Template::Saved, &[("name", &name)]);
-                self.shell.status_warn = false;
+                self.shell.status = saved_text;
+                self.shell.status_warn = saved_warn;
                 // ★★ ทิ้ง snapshot **เมื่อบันทึกสำเร็จเท่านั้น** (docs/07 §4)
                 //    และรีเซ็ตนาฬิกาเพื่อให้การแก้ครั้งถัดไปถูกเก็บทันที
                 refx_io::autosave::discard(&path);
@@ -8818,6 +9015,10 @@ impl AppDelegate for RefxApp {
         // ★ ผู้ใช้ตอบแถบ "บันทึกเป็นแบบไหน" เมื่อเฟรมที่แล้ว (P4-5)
         if let Some(choice) = self.shell.save_as_choice.take() {
             self.apply_save_as_choice(choice);
+        }
+        // ★★★ ผู้ใช้ตอบกล่อง "ฝังไม่ครบ" เมื่อเฟรมที่แล้ว (`docs/07 §2` 13 ต.ค. 2026)
+        if let Some(choice) = self.shell.pack_gaps_choice.take() {
+            self.apply_pack_gaps_choice(choice);
         }
         // ★ ผู้ใช้กดสลับโหมดบนแถบสถานะเมื่อเฟรมที่แล้ว (P4-5)
         if let Some(packed) = self.shell.storage_request.take() {
@@ -15055,6 +15256,211 @@ two"
 
         let _ = std::fs::remove_dir_all(&dir_one);
         let _ = std::fs::remove_dir_all(&dir_all);
+    }
+
+    /// board สองใบที่ชี้ไปไฟล์จริงสองไฟล์ (hash 5 · 9)
+    fn two_photo_board(a: &std::path::Path, b: &std::path::Path) -> Board {
+        use refx_core::board::{BoardParts, ItemParts};
+        let image = |n: u8, path: &std::path::Path| ItemParts {
+            item: Item::new(ItemKind::Image(AssetRef {
+                hash: content_hash(n),
+                path: path.to_path_buf(),
+                px_size: glam::UVec2::new(8, 8),
+                format: ImageFormat::Unknown,
+                embedded: false,
+                mtime: 0,
+                file_size: 0,
+            })),
+            group: None,
+        };
+        Board::load(
+            probe_board_id(),
+            BoardParts {
+                name: "send".to_owned(),
+                items: vec![image(5, a), image(9, b)],
+                ..BoardParts::default()
+            },
+        )
+    }
+
+    /// ★★★ **packed ที่ไฟล์ต้นฉบับหายไปหนึ่งใบ ต้องถามก่อนเขียน** (`docs/07 §2` 13 ต.ค. 2026)
+    ///
+    /// ยืนยันบนแอปจริงก่อนแก้ (rc.2 build `4a68cb3`): ลบ `b.png` แล้ว Save As → packed
+    /// → แถบสถานะขึ้น "Saved to sent.refx" · ป้าย **Packed** · tooltip "2 of 3" ·
+    /// เปิดใหม่ขึ้น **Linked** และ `b.png` เป็นภาพที่หาย — ไฟล์เดียวกัน ป้ายสองค่า
+    ///
+    /// เทสต์เดินฟังก์ชันที่เธรดบันทึกเรียกจริง (`write_for_save`) กับดิสก์จริง:
+    /// 1. ไม่ยืนยัน → **ไม่แตะไฟล์เลย** (ไฟล์เดิมยังเป็นไบต์เดิม) + ได้ชื่อ `b.png`
+    /// 2. ยืนยัน → เขียน + ชื่อ `b.png` ติดมาให้ข้อความหลังบันทึก + โหมด = linked
+    /// 3. ★ โหมดหลังบันทึก **ตรงกับที่เปิดใหม่แล้วอ่านได้** — ปิดคดี "ป้ายสองค่า"
+    /// 4. ครบทุกใบ → ไม่ถาม · linked → ไม่ถาม (มันไม่ได้สัญญาว่าจะพกไฟล์ไป)
+    #[test]
+    fn a_packed_save_with_a_vanished_file_asks_before_writing_anything() {
+        use refx_io::packed::SaveMode;
+
+        let root = spool_temp_dir("pack-gaps");
+        let photos = root.join("photos");
+        std::fs::create_dir_all(&photos).unwrap();
+        let spool = root.join("pasted");
+        let a = plant_file(&photos, "a.png", 5);
+        let b = plant_file(&photos, "b.png", 9);
+        let board = two_photo_board(&a, &b);
+        let doc = root.join("sent.refx");
+
+        // ---- 4. ครบทุกใบ → เขียนเลย ไม่ถาม · ป้าย packed ----
+        let Ok(SaveOutcome::Saved(full)) =
+            write_for_save(&board, &doc, SaveMode::Packed, Some(&spool), false)
+        else {
+            panic!("ไฟล์ครบทุกใบแต่ไม่ได้บันทึก");
+        };
+        assert_eq!(full.mode, SaveMode::Packed);
+        assert!(full.not_inside.is_empty(), "{:?}", full.not_inside);
+        assert_eq!(full.assets.len(), 2);
+        let bytes_of = |path: &std::path::Path| {
+            use std::io::Read as _;
+            let mut bytes = Vec::new();
+            std::fs::File::open(path)
+                .unwrap()
+                .read_to_end(&mut bytes)
+                .unwrap();
+            bytes
+        };
+        let before = bytes_of(&doc);
+
+        // ---- ไฟล์ต้นฉบับหายไปหนึ่งใบ (ไดรฟ์หลุด / ย้ายใน Explorer) ----
+        std::fs::remove_file(&b).unwrap();
+
+        // ---- 1. ไม่ยืนยัน → ถาม + **ไม่แตะไฟล์** ----
+        match write_for_save(&board, &doc, SaveMode::Packed, Some(&spool), false) {
+            Ok(SaveOutcome::Gaps { path, mode, names }) => {
+                assert_eq!(path, doc);
+                assert_eq!(mode, SaveMode::Packed);
+                assert_eq!(names, vec!["b.png".to_owned()]);
+            }
+            other => panic!("ต้องถามก่อนเขียน แต่ได้ {other:?}"),
+        }
+        assert_eq!(bytes_of(&doc), before, "ไฟล์ถูกเขียนทับก่อนผู้ใช้ตอบ");
+
+        // ---- 2. ยืนยัน → เขียน · ชื่อติดมา · ป้าย linked ----
+        let Ok(SaveOutcome::Saved(partial)) =
+            write_for_save(&board, &doc, SaveMode::Packed, Some(&spool), true)
+        else {
+            panic!("ผู้ใช้ยืนยันแล้วแต่ไม่ได้บันทึก");
+        };
+        assert_eq!(partial.not_inside, vec!["b.png".to_owned()]);
+        assert_eq!(partial.assets.len(), 1);
+        assert_eq!(partial.mode, SaveMode::Linked, "ป้ายยังขึ้น packed ทั้งที่ไฟล์ไม่ครบ");
+
+        // ---- 3. ★ เปิดใหม่ต้องได้ป้ายเดียวกับตอนเพิ่งบันทึก ----
+        let back = read_document(&doc, probe_board_id()).expect("เปิดไฟล์ที่เพิ่งเขียนไม่ได้");
+        assert_eq!(
+            mode_of_document(&back, &read_asset_table(&doc)),
+            partial.mode,
+            "ไฟล์เดียวกัน ป้ายสองค่า"
+        );
+
+        // ---- 4. linked ไม่ได้สัญญาว่าจะพกไฟล์ของผู้ใช้ไป → ไม่มีอะไรให้ถาม ----
+        let Ok(SaveOutcome::Saved(linked)) =
+            write_for_save(&board, &doc, SaveMode::Linked, Some(&spool), false)
+        else {
+            panic!("linked ถูกถามทั้งที่ไม่มีอะไรหาย");
+        };
+        assert!(linked.not_inside.is_empty());
+        assert_eq!(linked.mode, SaveMode::Linked);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// ★★★ คำตอบของกล่อง "ฝังไม่ครบ" — ทางเดินในแอปตั้งแต่ผลของเธรดจนถึงแถบสถานะ
+    ///
+    /// * ผลแบบ `Gaps` → กล่องขึ้นพร้อมชื่อ · "บันทึกแล้วปิด" ยังค้างรอคำตอบ
+    /// * "ยังไม่บันทึก" → กล่องหาย · **ยกเลิกการปิดด้วย** · ไม่มีงานเขียนค้าง
+    /// * บันทึกที่ขาดภาพ → แถบสถานะ **เอ่ยชื่อซ้ำเป็นคำเตือน** (`docs/07 §2` ข้อ 4)
+    ///   และป้ายโหมดมาจากสิ่งที่เขียนจริง
+    #[test]
+    fn the_pack_gaps_question_holds_the_save_until_it_is_answered() {
+        use refx_io::packed::SaveMode;
+
+        let mut app = RefxApp::new(AppArgs::default());
+        let owner = app.docs.active().id;
+        let doc = std::path::PathBuf::from("E:/ส่งเพื่อน/sent.refx");
+        let finish = |app: &mut RefxApp, outcome: SaveOutcome| {
+            let (tx, rx) = crossbeam_channel::bounded(1);
+            tx.send(Ok(outcome)).unwrap();
+            app.save_job = Some((owner, rx));
+            app.poll_save();
+        };
+
+        app.after_save = AfterSave::Close;
+        finish(
+            &mut app,
+            SaveOutcome::Gaps {
+                path: doc.clone(),
+                mode: SaveMode::Packed,
+                names: vec!["b.png".to_owned()],
+            },
+        );
+        assert_eq!(
+            app.shell.pack_gaps,
+            Some(crate::shell::PackGapsView {
+                file: "sent.refx".to_owned(),
+                names: vec!["b.png".to_owned()],
+            })
+        );
+        assert_eq!(
+            crate::shell::question_on_screen(&app.shell),
+            Some(crate::shell::Question::PackGaps)
+        );
+        assert_eq!(app.after_save, AfterSave::Close, "ยังไม่ตอบแต่ทิ้งคำขอปิดไปแล้ว");
+        assert!(
+            app.docs.active().path.is_none(),
+            "ยังไม่ได้เขียนแต่เอกสารมีที่อยู่แล้ว"
+        );
+
+        app.apply_pack_gaps_choice(crate::shell::PackGapsChoice::Back);
+        assert_eq!(app.shell.pack_gaps, None);
+        assert!(app.pack_gaps_for.is_none());
+        assert!(app.save_job.is_none());
+        assert_eq!(app.after_save, AfterSave::Stay, "ยังไม่บันทึกแต่ยังจะปิดหน้าต่าง");
+        assert_eq!(
+            app.shell.status,
+            text::t(app.shell.lang, Key::SaveCancelled)
+        );
+
+        finish(
+            &mut app,
+            SaveOutcome::Saved(SavedDoc {
+                path: doc.clone(),
+                assets: refx_io::packed::Index::default(),
+                mode: SaveMode::Linked,
+                not_inside: vec!["b.png".to_owned()],
+            }),
+        );
+        assert!(app.shell.status.contains("b.png"), "{}", app.shell.status);
+        assert!(app.shell.status_warn, "ขาดภาพแต่ขึ้นเป็นข่าวดี");
+        assert_eq!(app.docs.active().save_mode, SaveMode::Linked);
+        assert_eq!(app.docs.active().path.as_deref(), Some(doc.as_path()));
+    }
+
+    /// ข้อความหลังบันทึกเอ่ยได้สามชื่อแล้วยุบ — ★ ครบทุกใบ = ข้อความเดิมไม่ใช่คำเตือน
+    #[test]
+    fn the_saved_message_names_what_is_not_inside() {
+        let path = std::path::Path::new("E:/x/sent.refx");
+        let (ok, warn) = saved_status(Lang::En, path, &[]);
+        assert_eq!(
+            ok,
+            text::fill(Lang::En, Template::Saved, &[("name", "sent.refx")])
+        );
+        assert!(!warn);
+
+        let names: Vec<String> = ["a.png", "b.png", "c.png", "d.png"]
+            .map(str::to_owned)
+            .to_vec();
+        let (text, warn) = saved_status(Lang::Th, path, &names);
+        assert!(warn);
+        assert!(text.contains("4"), "{text}");
+        assert!(text.contains("a.png, b.png, c.png, …"), "{text}");
+        assert!(!text.contains("d.png"), "{text}");
     }
 
     /// ★★★ **ลบโฟลเดอร์ต้นฉบับทั้งโฟลเดอร์ → เปิดแล้วภาพยังครบ**
