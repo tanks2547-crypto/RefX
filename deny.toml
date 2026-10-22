@@ -9,6 +9,13 @@ yanked  = "deny"
 # -> ตรวจเฉพาะ crate ที่ workspace เรา depend โดยตรง
 # ทบทวนใหม่ทุกครั้งที่อัป egui
 unmaintained = "workspace"
+# ★★★ ignore = **การเลื่อน ไม่ใช่การยกเลิก** (docs/09 · ตัดสิน 22 ต.ค. 2026)
+#   ทุกตัวต้องมี "review by YYYY-MM-DD" ใน reason · cargo-deny 0.20 ไม่มี `expires`
+#   (ลองแล้ว: "expected: [id, reason]") จึงมีประตูแยกที่แดงเมื่อเลยวันนั้น —
+#   `xtask/tests/deny_ignores_expire.rs`
+ignore = [
+    { id = "RUSTSEC-2026-0374", reason = "basic-toml unmaintained (repo archived) - not a vulnerability, no upgrade exists; move to `toml` in v1.1 (docs/09) - review by 2027-01-31" },
+]
 
 [licenses]
 allow = [
