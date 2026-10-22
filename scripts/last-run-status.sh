@@ -57,7 +57,7 @@ branch="${GITHUB_DEFAULT_BRANCH:-main}"
 #   · `gh` มี jq อยู่ข้างในอยู่แล้ว จึงไม่ต้องพึ่งของนอกเลย
 #
 # รูปแบบที่ส่งกลับมา: `<conclusion> <runId> <sha> <updatedAt>` บรรทัดเดียว
-one_line='.[0] | "\(.conclusion) \(.databaseId) \(.headSha) \(.updatedAt)"'
+one_line='.[] | "\(.conclusion) \(.databaseId) \(.headSha) \(.updatedAt)"'
 
 # ★★★ **ถาม GitHub ไม่สำเร็จ ≠ "job ถูกข้าม" ≠ "เก่าเกินไป"** (30 ก.ย. 2026)
 #
@@ -90,8 +90,35 @@ ask() {
   return 1
 }
 
+# ★★★ **รายการว่างจาก `gh run list` ≠ "ไม่มีรอบ"** (22 ต.ค. 2026)
+#
+#   run 39815575227 แดงสองบรรทัดพร้อมกันโดยไม่มีงานไหนพังจริง:
+#   * `fuzz`: `gh run list` ตอบ **รายการว่าง** ด้วย exit 0 · `--jq '.[0] | …'` แปลง
+#     ความว่างนั้นเป็นสตริง `"null null null null"` → `date: invalid date 'null'`
+#     → `age: unbound variable` · สคริปต์ตายกลางทางแทนที่จะบอกว่าเกิดอะไร
+#   * `Windows`: ลิสต์ 30 รอบของ `ci.yml` ว่างเหมือนกัน → อ่านเป็น "ไม่มีรอบไหนที่
+#     job นี้รันจริง — กด Run workflow ก่อน" ทั้งที่ Windows เขียวในทุก push
+#   ถามซ้ำทันทีด้วยคำสั่งเดียวกัน: ครั้งหนึ่งได้ `[]` อีกครั้งได้ห้ารอบ = GitHub ตอบ
+#   ไม่คงที่ · workflow ที่ถูกตั้งตารางไว้ **ต้องมีรอบเสมอ** ความว่างจึงเป็นคำตอบที่เชื่อไม่ได้
+#
+#   → `ask_list` : ว่าง = ลองใหม่อีกสองครั้ง แล้วถ้ายังว่าง **แดงว่า "ถามไม่สำเร็จ"**
+#     ไม่ใช่ "ไม่มีรอบ" · และ jq ทุกตัวใช้ `.[]` ไม่ใช่ `.[0]` ความว่างจะได้เป็นความว่าง
+ask_list() {
+  local out
+  for attempt in 1 2 3; do
+    out=$(ask "$@") || return 1
+    if [ -n "$out" ]; then
+      printf '%s' "$out"
+      return 0
+    fi
+    [ "$attempt" -lt 3 ] && sleep 5
+  done
+  echo "::error title=$LABEL: GitHub ตอบรายการว่างสามครั้ง (ถามไม่สำเร็จ ไม่ใช่ไม่มีรอบ)::'$1 $2 $3' ของ $WORKFLOW บน $branch" >&2
+  return 1
+}
+
 if [ -z "$JOB" ]; then
-  line=$(ask gh run list --repo "$GITHUB_REPOSITORY" \
+  line=$(ask_list gh run list --repo "$GITHUB_REPOSITORY" \
            --workflow "$WORKFLOW" --branch "$branch" \
            --status completed --limit 1 \
            --json conclusion,databaseId,updatedAt,headSha \
@@ -99,7 +126,7 @@ if [ -z "$JOB" ]; then
 else
   # ★ ไล่จากใหม่ไปเก่า หยุดที่รอบแรกที่ job นั้น **ไม่ถูกข้าม**
   #   จำกัด 30 รอบเพื่อไม่ให้ประตูนี้กลายเป็นงานหนักของมันเอง
-  runs=$(ask gh run list --repo "$GITHUB_REPOSITORY" \
+  runs=$(ask_list gh run list --repo "$GITHUB_REPOSITORY" \
            --workflow "$WORKFLOW" --branch "$branch" \
            --status completed --limit 30 \
            --json databaseId,updatedAt,headSha \
@@ -133,7 +160,13 @@ $line
 EOF
 sha=$(echo "$full_sha" | cut -c1-7)
 url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run_id"
-age=$(( ( $(date -u +%s) - $(date -u -d "$when" +%s) ) / 86400 ))
+# ★ เวลาที่อ่านไม่ออก = **ถามไม่สำเร็จ** พร้อมค่าที่ได้มา · เดิมตายด้วย `unbound variable`
+#   ซึ่งไม่บอกว่ารอบไหน ค่าอะไร (ดูกล่อง `ask_list`)
+if ! then_s=$(date -u -d "$when" +%s) || [ -z "$when" ] || [ "$when" = "null" ]; then
+  echo "::error title=$LABEL: GitHub ตอบเวลาที่อ่านไม่ออก (ถามไม่สำเร็จ ไม่ใช่ผลของงาน)::run $run_id updatedAt='$when'"
+  exit 1
+fi
+age=$(( ( $(date -u +%s) - then_s ) / 86400 ))
 
 # ★ พิมพ์เสมอ ทั้งตอนผ่านและไม่ผ่าน — ขอบที่มองเห็นทุกรอบคือสิ่งที่ทำให้
 #   "เหลืออีกวันเดียวจะเกินเพดาน" ไม่กลายเป็นเซอร์ไพรส์
