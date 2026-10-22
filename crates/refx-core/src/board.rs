@@ -1260,14 +1260,20 @@ impl Board {
     // ---- เขียน: `pub(crate)` เท่านั้น — ทางเข้าคือ `Command` ----
 
     /// ใส่ item ใหม่ วางไว้ **บนสุด** ของ z-order
-    pub(crate) fn insert_item(&mut self, mut item: Item) -> ItemId {
+    pub(crate) fn insert_item(&mut self, item: Item) -> ItemId {
+        self.insert_item_at(item, usize::MAX)
+    }
+
+    /// ใส่ item ใหม่ที่ชั้น `z_index` (เกินจำนวน = บนสุด) — ชุดที่ลากมาก่อนแต่ decode
+    /// เสร็จทีหลังต้องลงใต้ชุดที่ลากทีหลัง (`docs/02 §2.9` 22 ต.ค. 2026)
+    pub(crate) fn insert_item_at(&mut self, mut item: Item, z_index: usize) -> ItemId {
         item.canvas = item.canvas.sanitized();
         item.meta = item.meta.sanitized();
         let id = self.items.insert(item);
         if let Some(slot) = self.items.get_mut(id) {
             slot.id = id;
         }
-        self.z_order.push(id);
+        self.z_order.insert(z_index.min(self.z_order.len()), id);
         self.touch();
         id
     }

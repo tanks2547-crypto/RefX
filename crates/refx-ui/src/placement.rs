@@ -129,6 +129,12 @@ impl Anchor {
         }
     }
 
+    /// เลขชุด — `0` = ไม่ได้มาจากชุดไหน
+    #[must_use]
+    pub fn batch(&self) -> u64 {
+        self.batch
+    }
+
     /// เวลาที่ผู้ใช้ลงมือ — `None` = ไม่เคยถูกประทับ
     #[must_use]
     pub fn added_at(&self) -> Option<i64> {

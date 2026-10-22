@@ -880,6 +880,12 @@ struct Doc {
     ///
     /// สถานะของมุมมอง ไม่ใช่ของเอกสาร — ไม่ถูกบันทึก
     drop_flows: Vec<crate::placement::Flow>,
+    /// ★★★ ใบที่มาจากชุดไหน — **ตัดสินชั้นของใบที่มาถึงทีหลัง** (`docs/02 §2.9` 22 ต.ค. 2026)
+    ///
+    /// ชุดที่ลากก่อนแต่ decode เสร็จทีหลังต้องลง **ใต้** ชุดที่ลากทีหลัง · ล้างเมื่อไม่มีชุด
+    /// ค้างแล้ว (I-6) และ **เมื่อผู้ใช้สั่งจัดชั้นเอง** — คำสั่งของเขาใหม่กว่าการลาก ใบที่มา
+    /// หลังจากนั้นจึงขึ้นบนสุด ไม่ใช่แทรกกลับลงใต้ของที่เขาเพิ่งจัด · ไม่ถูกบันทึก
+    batch_layers: Vec<(ItemId, u64)>,
     /// ★★★ คีย์งาน decode → `ItemId` **ของแท็บนี้** ที่ผลลัพธ์ต้องไปเกาะ
     ///
     /// ★★ ต้องอยู่ต่อแท็บเพราะค่าคือ `ItemId` ซึ่งไม่ผูกกับ board — เก็บรวมกัน
@@ -896,6 +902,59 @@ struct Doc {
 }
 
 impl Doc {
+    /// ★★★ ใบใหม่ของชุด `batch` ต้องลงชั้นไหน — `None` = บนสุด (`docs/02 §2.9` 22 ต.ค. 2026)
+    ///
+    /// ไล่ลงจากบนสุด **ข้ามใบของชุดที่ลากทีหลัง** แล้วหยุดที่ใบแรกที่ไม่ใช่ · ใบที่ไม่มีบันทึก
+    /// (ของเดิมบนกระดาน · สิ่งที่ผู้ใช้เพิ่งจัด/ทำซ้ำ) เป็นกำแพง — ไม่มีอะไรลงไปใต้มัน
+    /// · ภายในชุดเดียวกัน `Arrivals` ปล่อยตามลำดับไฟล์อยู่แล้ว ใบหลังจึงขึ้นทับใบก่อน
+    ///   ตำแหน่งจึงเท่ากับ (เลขชุด, ดัชนีในชุด) ตามสเปก
+    fn layer_for_batch(&self, batch: u64) -> Option<usize> {
+        if batch == 0 {
+            return None;
+        }
+        let order = self.board.z_order();
+        let mut at = order.len();
+        while let Some(&below) = at.checked_sub(1).and_then(|i| order.get(i)) {
+            let later = self
+                .batch_layers
+                .iter()
+                .any(|&(id, other)| id == below && other > batch);
+            if !later {
+                break;
+            }
+            at -= 1;
+        }
+        (at < order.len()).then_some(at)
+    }
+
+    /// ★★★ เพิ่มใบใหม่ของชุด `batch` ผ่าน `AddItems` **ลงชั้นที่ถูก** แล้วคืน id ของมัน
+    ///
+    /// ทางเดียวของใบที่ลาก/วางเข้ามา ทั้งใบที่เปิดได้และใบที่เสีย — สองกิ่งของ
+    /// `place_arrivals` เคยหา id ด้วย "ตัวท้ายสุดของ z-order" ซึ่งไม่จริงอีกแล้วเมื่อแทรกได้
+    fn add_from_batch(
+        &mut self,
+        item: Item,
+        batch: u64,
+    ) -> Result<ItemId, refx_core::command::CmdError> {
+        let layer = self.layer_for_batch(batch);
+        let command = AddItems::new(vec![item])?;
+        let command = match layer {
+            Some(z) => command.at_layer(z),
+            None => command,
+        };
+        self.history.apply(&mut self.board, Box::new(command))?;
+        let order = self.board.z_order();
+        let id = layer
+            .and_then(|z| order.get(z))
+            .or_else(|| order.last())
+            .copied()
+            .ok_or(refx_core::command::CmdError::Empty)?;
+        if batch != 0 {
+            self.batch_layers.push((id, batch));
+        }
+        Ok(id)
+    }
+
     /// เอกสารเปล่าใบใหม่ที่มี id และ recovery slot ของตัวเอง
     fn empty(id: refx_core::arena::BoardId) -> Self {
         Self {
@@ -923,6 +982,7 @@ impl Doc {
             pending_snapshot: None,
             pending_kept: None,
             drop_flows: Vec::new(),
+            batch_layers: Vec::new(),
             relink_targets: std::collections::HashMap::new(),
             sidecar: crate::sidecar::Folders::default(),
         }
@@ -4069,6 +4129,8 @@ impl RefxApp {
         //     จากสายเดียวกันตามลำดับไฟล์ · เดิมเป็นสองลูป (`Missing` ทั้งเฟรมก่อน) ใบเสีย
         //     จึงแย่งช่องไปตามจังหวะที่มันบังเอิญเสร็จในเฟรมเดียวกับใบอื่น
         //
+        // ★ ไม่มีชุดค้างแล้ว = ไม่มีใบไหนจะมาแทรกอีก · บันทึกชั้นของชุดหมดหน้าที่ (I-6)
+        let no_batch_left = self.arrivals.open_batches() == 0;
         // ★ แยกการยืมทีละฟิลด์ — ลูปข้างล่างต้องแตะทั้ง `gfx` และ `docs`
         let Self {
             gfx,
@@ -4180,6 +4242,7 @@ impl RefxApp {
                             //   2026) โดย **ไม่แตะกล้อง** ถ้ากระดานมีของอยู่แล้ว
                             let (sw, sh) = (thumb.source_width, thumb.source_height);
                             let added_at = added_at_of(anchor);
+                            let batch = anchor.map_or(0, |anchor| anchor.batch());
                             let anchor = Self::anchor_or_latest(doc, anchor, Some(gfx.canvas.size));
                             let (center, size) = Self::drop_flow(doc, anchor).place_image(sw, sh);
 
@@ -4219,16 +4282,13 @@ impl RefxApp {
                             };
 
                             // ★ ทุกการเพิ่มภาพผ่าน `AddItems` เข้า `History` → ลากไฟล์เข้ามาแล้ว undo ได้
-                            let Ok(command) = AddItems::new(vec![item]) else {
-                                continue;
-                            };
-                            if let Err(err) = doc.history.apply(&mut doc.board, Box::new(command)) {
-                                tracing::error!(%err, "cannot add the dropped image to the board");
-                                continue;
-                            }
-                            // `insert_item` ต่อท้าย z-order เสมอ ตัวที่เพิ่งเพิ่มจึงอยู่ท้ายสุด
-                            let Some(id) = doc.board.z_order().last().copied() else {
-                                continue;
+                            //   ★★★ ลงชั้นตามลำดับที่ลาก ไม่ใช่ลำดับที่ decode เสร็จ (`docs/02 §2.9`)
+                            let id = match doc.add_from_batch(item, batch) {
+                                Ok(id) => id,
+                                Err(err) => {
+                                    tracing::error!(%err, "cannot add the dropped image to the board");
+                                    continue;
+                                }
                             };
 
                             if let Some(item) = doc.board.item(id) {
@@ -4332,6 +4392,7 @@ impl RefxApp {
             //   ลำดับที่ผู้ใช้ลากเข้ามา ไม่ใช่กองรวมกันที่มุมใดมุมหนึ่ง · ไม่รู้สัดส่วนจริง
             //   เพราะอ่านหัวไฟล์ไม่ผ่าน → กรอบ 1200 × 900 ตายตัว (ไม่ขึ้นกับซูม — แก้ 12 ต.ค. 2026)
             let added_at = added_at_of(anchor);
+            let batch = anchor.map_or(0, |anchor| anchor.batch());
             let anchor = Self::anchor_or_latest(doc, anchor, canvas);
             let (center, size) = Self::drop_flow(doc, anchor).place_missing();
             let item = Item::new(ItemKind::Missing {
@@ -4348,18 +4409,16 @@ impl RefxApp {
             };
 
             // ★ ผ่าน `AddItems` เหมือนภาพปกติ — ลากไฟล์เสียเข้ามาแล้ว `Ctrl+Z` ได้
-            let Ok(command) = AddItems::new(vec![item]) else {
-                drop.failed += 1;
-                continue;
+            //   · ลงชั้นตามลำดับที่ลากเหมือนกัน (`docs/02 §2.9`)
+            let id = match doc.add_from_batch(item, batch) {
+                Ok(id) => id,
+                Err(err) => {
+                    tracing::error!(%err, "cannot add the damaged image to the board");
+                    drop.failed += 1;
+                    continue;
+                }
             };
-            if let Err(err) = doc.history.apply(&mut doc.board, Box::new(command)) {
-                tracing::error!(%err, "cannot add the damaged image to the board");
-                drop.failed += 1;
-                continue;
-            }
-            if let Some(id) = doc.board.z_order().last().copied()
-                && let Some(item) = doc.board.item(id)
-            {
+            if let Some(item) = doc.board.item(id) {
                 let canvas = item.canvas;
                 doc.index.insert(id, &canvas);
             }
@@ -4375,6 +4434,11 @@ impl RefxApp {
         // ★ instance ที่ส่งให้ GPU สร้างใหม่จาก board **หลังจบชุด** ไม่ใช่ทีละใบ
         //   (ลากเข้ามา 100 ไฟล์ = สร้างครั้งเดียว ไม่ใช่ 100 ครั้ง)
         //   ★ เฉพาะแท็บที่อยู่บนจอ — `quads` มีชุดเดียวต่อหน้าต่าง
+        if no_batch_left {
+            for doc in docs.iter_mut() {
+                doc.batch_layers.clear();
+            }
+        }
         if had_results && let Some(gfx) = gfx.as_mut() {
             Self::rebuild_quads(gfx, docs.active_mut());
         }
@@ -8453,6 +8517,9 @@ impl RefxApp {
             tracing::error!(%err, "cannot reorder the z stack");
             return;
         }
+        // ★★★ ผู้ใช้จัดชั้นเอง = คำสั่งของเขาใหม่กว่าการลาก (`docs/02 §2.9` 22 ต.ค. 2026)
+        //     ใบของชุดที่ยังมาไม่ครบจะขึ้นบนสุด ไม่ใช่แทรกกลับลงใต้ของที่เขาเพิ่งจัด
+        self.docs.active_mut().batch_layers.clear();
         if notes_only {
             self.shell.status = note_layer_status(lang, &self.docs.active().board, &selected);
             self.shell.status_warn = false;
@@ -13431,6 +13498,101 @@ mod tests {
         );
         assert_eq!(a0, a1, "ลากทีเดียวแต่ได้สองเวลา");
         assert!(a0 < b0, "ชุดที่ลากก่อนได้เวลาหลัง: A {a0} · B {b0}");
+    }
+
+    /// ส่งชุดหนึ่งเข้าทางจริง (`submit_thumbnail_jobs`) — คืนคีย์งานตามลำดับไฟล์
+    fn submit_named_batch(app: &mut RefxApp, names: &[&str]) -> Vec<refx_asset::hash::ContentHash> {
+        let owner = app.docs.active().id;
+        let keys: Vec<_> = names
+            .iter()
+            .map(|name| job_key_for(owner, std::path::Path::new(name)))
+            .collect();
+        let jobs = keys
+            .iter()
+            .zip(names)
+            .map(|(key, name)| refx_asset::pool::Job {
+                hash: *key,
+                source: refx_asset::pool::JobSource::File(std::path::PathBuf::from(name)),
+                priority: 0.0,
+                cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                target: refx_asset::pool::JobTarget::Thumbnail,
+            })
+            .collect();
+        app.submit_thumbnail_jobs(owner, Some(crate::placement::Anchor::at(Vec2::ZERO)), jobs);
+        keys
+    }
+
+    /// ให้งานเหล่านี้จบเป็นภาพเสียในเฟรมเดียว (ไม่ต้องมี GPU) — ผ่าน `place_arrivals` จริง
+    fn answer_as_damaged(app: &mut RefxApp, keys: &[refx_asset::hash::ContentHash]) {
+        let arrived = keys
+            .iter()
+            .map(|key| {
+                let arrival = Arrival::Damaged {
+                    hash: *key,
+                    owner: app.job_owner.remove(key),
+                    source: app.job_sources.remove(key),
+                    reason: refx_core::board::MissingReason::Damaged,
+                };
+                (*key, arrival)
+            })
+            .collect();
+        let (mut repairs, mut pasted) = (Vec::new(), Vec::new());
+        app.place_arrivals(arrived, &mut repairs, &mut pasted);
+    }
+
+    /// ชื่อไฟล์ของทุกใบ เรียงจากชั้นล่างขึ้นบน
+    fn names_bottom_up(app: &RefxApp) -> Vec<String> {
+        let board = &app.docs.active().board;
+        board
+            .z_order()
+            .iter()
+            .filter_map(|id| board.item(*id))
+            .map(|item| match &item.kind {
+                ItemKind::Missing { original_path, .. } => original_path.display().to_string(),
+                _ => "(ของเดิม)".to_owned(),
+            })
+            .collect()
+    }
+
+    /// ★★★ **ชั้นมาจากลำดับที่ลาก ไม่ใช่ลำดับที่ decode เสร็จ** (`docs/02 §2.9` 22 ต.ค. 2026)
+    ///
+    /// ยืนยันก่อนแก้ 14 ต.ค.: ลาก A (สองไฟล์) แล้ว B · B เสร็จก่อน → `z(b0)=0` A ขึ้นทับ
+    /// · ตอนนี้ต้องได้ A ใต้ B ไม่ว่าใครเสร็จก่อน และภายในชุดตามลำดับไฟล์
+    ///
+    /// ★ ครึ่งหลัง: **ผู้ใช้จัดชั้นเองระหว่างที่ A ยังมาไม่ครบ → ใบของ A ที่มาหลังจากนั้น
+    ///   ขึ้นบนสุด** ไม่ใช่แทรกกลับลงใต้ของที่เขาเพิ่งจัด (คำสั่งของเขาใหม่กว่าการลาก)
+    #[test]
+    fn a_batch_dropped_first_stays_below_a_later_batch_whatever_finishes_first() {
+        // ---- B เสร็จก่อน A ----
+        let mut app = RefxApp::new(AppArgs::default());
+        let a = submit_named_batch(&mut app, &["/work/a0.png", "/work/a1.png"]);
+        let b = submit_named_batch(&mut app, &["/work/b0.png"]);
+        answer_as_damaged(&mut app, &b);
+        answer_as_damaged(&mut app, &a[1..]);
+        answer_as_damaged(&mut app, &a[..1]);
+        assert_eq!(
+            names_bottom_up(&app),
+            ["/work/a0.png", "/work/a1.png", "/work/b0.png"],
+            "ชุดที่ลากก่อนขึ้นทับชุดที่ลากทีหลัง"
+        );
+        // ★ ชุดจบหมดแล้ว = บันทึกชั้นต้องถูกล้าง (I-6)
+        assert!(app.docs.active().batch_layers.is_empty());
+
+        // ---- ผู้ใช้จัดชั้นเองระหว่างที่ A ยังมาไม่ครบ ----
+        let mut app = RefxApp::new(AppArgs::default());
+        let a = submit_named_batch(&mut app, &["/work/a0.png"]);
+        let b = submit_named_batch(&mut app, &["/work/b0.png", "/work/b1.png"]);
+        answer_as_damaged(&mut app, &b);
+        let b0 = app.docs.active().board.z_order()[0];
+        app.docs.active_mut().selection.select(b0);
+        app.apply_zorder(ZMove::ToFront);
+        assert_eq!(names_bottom_up(&app), ["/work/b1.png", "/work/b0.png"]);
+        answer_as_damaged(&mut app, &a);
+        assert_eq!(
+            names_bottom_up(&app),
+            ["/work/b1.png", "/work/b0.png", "/work/a0.png"],
+            "ใบที่มาหลังผู้ใช้จัดชั้น ถูกแทรกกลับลงใต้ของที่เขาเพิ่งจัด"
+        );
     }
 
     /// ★★★ **ประตูของเจ้าของโปรเจกต์ ทางแอป:** ลากชุดเดิมซ้ำโดยบังคับให้คำตอบมาคนละลำดับ

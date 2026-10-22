@@ -150,6 +150,8 @@ pub struct AddItems {
     pending: Vec<Item>,
     /// id + ชั้น z ที่ได้ตอน apply ครั้งแรก — เรียงจากชั้นล่างขึ้นบน
     placed: Vec<(ItemId, usize)>,
+    /// ★ ชั้นที่ใบแรกจะลง — `None` = บนสุด (ใบที่เหลือเรียงต่อขึ้นไป)
+    layer: Option<usize>,
 }
 
 impl AddItems {
@@ -164,7 +166,20 @@ impl AddItems {
         Ok(Self {
             pending: items,
             placed: Vec::new(),
+            layer: None,
         })
+    }
+
+    /// ★★ ลงที่ชั้น `z` แทนบนสุด (`docs/02 §2.9` 22 ต.ค. 2026)
+    ///
+    /// ชุดที่ลากมาก่อนแต่ decode เสร็จทีหลังต้องลง **ใต้** ชุดที่ลากทีหลัง ไม่ใช่ทับมัน
+    /// · ชั้นที่ได้จริงถูกจดใน `placed` เหมือนเดิม undo/redo จึงคืนที่เดิมเป๊ะ
+    #[must_use]
+    pub fn at_layer(self, z: usize) -> Self {
+        Self {
+            layer: Some(z),
+            ..self
+        }
     }
 
     /// id ของ item ที่เพิ่มเข้าไป — ใช้ได้หลัง `apply` แล้วเท่านั้น
@@ -183,10 +198,13 @@ impl Command for AddItems {
 
         if self.placed.is_empty() {
             // ครั้งแรก — ให้ board แจก id
+            let mut at = self.layer.unwrap_or(usize::MAX);
             for item in items {
-                let id = board.insert_item(item);
-                let z = board.z_order().len() - 1;
+                // ★ ชั้นที่ได้จริง = ที่ขอ ถ้าไม่เกินจำนวน · เกิน = บนสุด (ตามที่ `insert_item_at` ทำ)
+                let z = at.min(board.z_order().len());
+                let id = board.insert_item_at(item, z);
                 self.placed.push((id, z));
+                at = z + 1;
             }
             return Ok(());
         }
@@ -2734,6 +2752,31 @@ mod tests {
 
         assert!(history.undo(&mut board).unwrap().is_some());
         assert_eq!(board, before, "undo ต้องคืนสภาพเป๊ะ รวมถึงธง dirty");
+        assert!(board.z_order_is_consistent());
+    }
+
+    /// ★★★ `at_layer` ลงชั้นที่ขอ เรียงต่อขึ้นไปตามลำดับ และ undo/redo คืนชั้นเดิมเป๊ะ
+    /// (`docs/02 §2.9` 22 ต.ค. 2026 — ชุดที่ลากก่อนลงใต้ชุดที่ลากทีหลัง)
+    #[test]
+    fn adding_at_a_layer_lands_there_and_undo_redo_keep_it() {
+        let (mut board, ids) = board_with(2);
+        let mut command = AddItems::new(vec![image_item(7), image_item(8)])
+            .unwrap()
+            .at_layer(1);
+        command.apply(&mut board).unwrap();
+        let added = command.ids();
+        let want = vec![ids[0], added[0], added[1], ids[1]];
+        assert_eq!(board.z_order(), want.as_slice());
+
+        command.undo(&mut board).unwrap();
+        assert_eq!(board.z_order(), ids.as_slice());
+        command.apply(&mut board).unwrap();
+        assert_eq!(board.z_order(), want.as_slice(), "redo ไม่ได้คืนชั้นเดิม");
+
+        // ★ ชั้นที่เกินจำนวน = บนสุด ไม่ใช่ panic
+        let mut beyond = AddItems::new(vec![image_item(9)]).unwrap().at_layer(99);
+        beyond.apply(&mut board).unwrap();
+        assert_eq!(board.z_order().last(), beyond.ids().first());
         assert!(board.z_order_is_consistent());
     }
 
